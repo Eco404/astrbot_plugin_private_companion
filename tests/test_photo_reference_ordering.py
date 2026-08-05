@@ -126,6 +126,7 @@ class _SelectionHarness(ProactiveMessageMixin):
         self._llm_reply = llm_reply
         self._persona_path = persona_path
         self.llm_prompts: list[str] = []
+        self.llm_kwargs: list[dict[str, object]] = []
 
     async def _photo_reference_candidates_async(
         self,
@@ -143,6 +144,7 @@ class _SelectionHarness(ProactiveMessageMixin):
 
     async def _llm_call(self, prompt: str, **_kwargs):
         self.llm_prompts.append(prompt)
+        self.llm_kwargs.append(dict(_kwargs))
         return self._llm_reply
 
     async def _photo_persona_reference_image_path_async(self) -> str:
@@ -210,6 +212,58 @@ class _ToolEvent:
 
 
 class PhotoReferenceOrderingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_trial_candidate_overrides_return_structured_model_selection(self) -> None:
+        sleepwear = _candidate(
+            "sleepwear-bedroom",
+            outfit_category="sleepwear",
+            scene_categories=("home", "bedroom"),
+            note="卧室睡衣",
+        )
+        school = _candidate(
+            "school-uniform",
+            outfit_category="school_uniform",
+            scene_categories=("school",),
+            note="学校校服",
+        )
+        harness = _SelectionHarness([], llm_reply="1")
+
+        result = await harness._select_photo_reference_candidate_async(
+            "selfie",
+            request_text="晚上在卧室穿睡衣拍一张",
+            candidate_overrides=[sleepwear, school],
+            selection_provider_id="webui-main-provider",
+            selection_strict_provider=True,
+            return_selection_result=True,
+        )
+
+        self.assertEqual(result.selection_source, "model")
+        self.assertTrue(result.model_attempted)
+        self.assertEqual(result.model_selected_id, "sleepwear-bedroom")
+        self.assertEqual(result.selected["id"], "sleepwear-bedroom")
+        self.assertEqual(harness.llm_kwargs[0]["provider_id"], "webui-main-provider")
+        self.assertIs(harness.llm_kwargs[0]["strict_provider"], True)
+
+    async def test_text2img_trial_candidate_overrides_do_not_require_a_user_scope(self) -> None:
+        harness = _SelectionHarness([], llm_reply="1")
+        candidate = _candidate(
+            "draft-identity",
+            outfit_category="",
+            scene_categories=(),
+            note="未保存的人设草稿",
+        )
+
+        result = await harness._select_photo_reference_candidate_async(
+            "text2img",
+            request_text="生成一张人物照片",
+            candidate_overrides=[candidate],
+            selection_provider_id="webui-main-provider",
+            selection_strict_provider=True,
+            return_selection_result=True,
+        )
+
+        self.assertNotEqual(result.selection_reason, "workflow_does_not_use_reference")
+        self.assertEqual(result.selected["id"], "draft-identity")
+
     async def test_llm_selfie_request_completes_generation_and_delivery(self) -> None:
         user_message = "来张自拍"
         llm_tool_call = {
@@ -263,6 +317,125 @@ class PhotoReferenceOrderingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(harness.llm_prompts), 1)
         self.assertIn("场景类别=bedroom,home", harness.llm_prompts[0])
         self.assertNotIn("preferred_preset", harness.llm_prompts[0])
+
+    async def test_formal_selection_filters_guided_exclusions_and_disabled_candidates(self) -> None:
+        blocked = _candidate(
+            "blocked-school",
+            outfit_category="",
+            scene_categories=("school",),
+            note="学校场景但明确禁用",
+        )
+        blocked.update(
+            metadata_source="guided_editor",
+            selection_eligibility="fallback_allowed",
+            excluded_scene_categories=["school"],
+        )
+        disabled = _candidate(
+            "disabled-school",
+            outfit_category="",
+            scene_categories=("school",),
+            note="暂时停用",
+        )
+        disabled.update(
+            metadata_source="guided_editor",
+            selection_eligibility="disabled",
+        )
+        available = _candidate(
+            "available-school",
+            outfit_category="",
+            scene_categories=("school",),
+            note="学校可用",
+        )
+        available.update(
+            metadata_source="guided_editor",
+            selection_eligibility="matching_only",
+        )
+        harness = _SelectionHarness([blocked, disabled, available], llm_reply="1")
+
+        selected = await harness._select_photo_reference_candidate_async(
+            "selfie",
+            request_text="在学校教室拍一张照片",
+        )
+
+        self.assertEqual(selected["id"], "available-school")
+        self.assertEqual(len(harness.llm_prompts), 1)
+        self.assertNotIn("blocked-school", harness.llm_prompts[0])
+        self.assertNotIn("disabled-school", harness.llm_prompts[0])
+
+    async def test_formal_policy_ignores_conflicting_ambient_and_historical_scenes(self) -> None:
+        bedroom = _candidate(
+            "bedroom-current",
+            outfit_category="",
+            scene_categories=("bedroom",),
+            note="卧室场景",
+        )
+        bedroom.update(
+            metadata_source="guided_editor",
+            selection_eligibility="fallback_allowed",
+            excluded_scene_categories=["school"],
+        )
+        harness = _SelectionHarness([bedroom], llm_reply="1")
+
+        selected = await harness._select_photo_reference_candidate_async(
+            "selfie",
+            request_text="请在卧室拍一张照片",
+            ambient_context="当前位置：学校教室",
+            schedule_history_context="08:00-12:00｜已完成｜在学校上课",
+        )
+
+        self.assertEqual(selected["id"], "bedroom-current")
+
+    async def test_formal_policy_treats_negated_scene_as_an_exclusion(self) -> None:
+        bedroom = _candidate(
+            "bedroom-current",
+            outfit_category="",
+            scene_categories=("bedroom",),
+            note="卧室场景",
+        )
+        bedroom.update(
+            metadata_source="guided_editor",
+            selection_eligibility="matching_only",
+            excluded_scene_categories=["school"],
+        )
+        school = _candidate(
+            "school-blocked",
+            outfit_category="",
+            scene_categories=("school",),
+            note="学校场景",
+        )
+        school.update(
+            metadata_source="guided_editor",
+            selection_eligibility="matching_only",
+        )
+        harness = _SelectionHarness([bedroom, school], llm_reply="1")
+
+        selected = await harness._select_photo_reference_candidate_async(
+            "selfie",
+            request_text="不要在学校，在卧室拍一张",
+        )
+
+        self.assertEqual(selected["id"], "bedroom-current")
+        self.assertNotIn("school-blocked", harness.llm_prompts[0])
+
+    async def test_formal_matching_only_outfit_requires_an_outfit_match(self) -> None:
+        sleepwear = _candidate(
+            "sleepwear-only",
+            outfit_category="sleepwear",
+            scene_categories=(),
+            note="睡衣参考",
+        )
+        sleepwear.update(
+            metadata_source="guided_editor",
+            selection_eligibility="matching_only",
+        )
+        harness = _SelectionHarness([sleepwear], llm_reply="1")
+
+        selected = await harness._select_photo_reference_candidate_async(
+            "selfie",
+            request_text="请穿校服拍一张照片",
+        )
+
+        self.assertEqual(selected, {})
 
     def test_selection_interface_accepts_only_the_normalized_scene_suggestion(self) -> None:
         parameters = inspect.signature(

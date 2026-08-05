@@ -73,9 +73,11 @@ const state = {
   featureDetailParamDraft: {},
   featureDetailSubpage: "",
   photoReferenceManagerDraft: null,
+  photoReferenceEditingIndex: -1,
   photoReferenceLibraryStatus: null,
   photoReferenceLibraryLoading: false,
   photoReferenceLibraryError: "",
+  photoReferenceAddDialogOpen: false,
   relationshipRoleReferenceAssets: {},
   relationshipRoleReferenceAssetsLoaded: false,
   relationshipRoleReferenceAssetsLoading: false,
@@ -24858,6 +24860,519 @@ function photoReferenceMetadataFromObject(rawItem) {
   return metadata;
 }
 
+function guidedPhotoReferenceSavedMetadata() {
+  const editingIndex = Number(state.photoReferenceEditingIndex);
+  const item = editingIndex === -2
+    ? currentPhotoPersonaReference()
+    : (Number.isInteger(editingIndex) && editingIndex >= 0 ? photoReferenceManagerItems()[editingIndex] : null);
+  return item?.metadata && typeof item.metadata === "object"
+    ? JSON.parse(JSON.stringify(item.metadata))
+    : null;
+}
+
+function guidedPhotoReferenceApprovalPayload(root) {
+  return {
+    questionnaire: guidedPhotoReferenceQuestionnaire(root),
+    manual_override: guidedPhotoReferenceManualOverride(root),
+    saved: guidedPhotoReferenceSavedMetadata(),
+  };
+}
+
+async function reviewGuidedPhotoReference(root, { useModel = true } = {}) {
+  if (!root) throw new Error("参考图配置表单不可用");
+  const payload = guidedPhotoReferenceApprovalPayload(root);
+  const signature = JSON.stringify(payload);
+  if (useModel && root._photoReferenceApprovalSignature === signature && root._photoReferenceApprovalResult) {
+    return root._photoReferenceApprovalResult;
+  }
+  const result = await postJson("/photo_reference/metadata/review", {
+    ...payload,
+    use_model: useModel,
+  });
+  if (useModel) {
+    root._photoReferenceApprovalSignature = signature;
+    root._photoReferenceApprovalResult = result;
+  }
+  return result;
+}
+
+function guidedPhotoReferencePersonaMetadata(metadata) {
+  return {
+    ...(metadata && typeof metadata === "object" ? metadata : {}),
+    reference_roles: ["identity"],
+    outfit_category: "",
+    outfit_lock_default: false,
+    scene_categories: [],
+    excluded_scene_categories: [],
+    time_categories: [],
+    excluded_time_categories: [],
+  };
+}
+
+function guidedPhotoReferenceVisibleQuestionIds(root) {
+  const coreQuestionIds = new Set([
+    "core_anchor",
+    "priority_conditions",
+    "exclusion_conditions",
+    "fallback_policy",
+  ]);
+  if (!root) return coreQuestionIds;
+  if (root.dataset.photoGuidedMode === "persona") {
+    return new Set(["core_anchor", "wardrobe_change", "fallback_policy"]);
+  }
+  const checkedValues = (name) => new Set(
+    Array.from(root.querySelectorAll(`[name="${name}"]:checked`)).map((input) => input.value),
+  );
+  const anchors = checkedValues("core_anchor");
+  const visibleQuestionIds = new Set(coreQuestionIds);
+  if (["identity", "outfit", "continuity"].some((role) => anchors.has(role))) {
+    visibleQuestionIds.add("wardrobe_change");
+  }
+  if (
+    ["scene", "continuity"].some((role) => anchors.has(role))
+    || checkedValues("prefer_scenes").size
+    || checkedValues("avoid_scenes").size
+  ) {
+    visibleQuestionIds.add("location_change");
+  }
+  if (["pose", "continuity"].some((role) => anchors.has(role))) {
+    visibleQuestionIds.add("pose_change");
+  }
+  const wardrobeAnswer = Array.from(checkedValues("wardrobe_change"))[0] || "";
+  if (
+    ["outfit", "continuity"].some((role) => anchors.has(role))
+    || ["conditional", "no_outfit_core"].includes(wardrobeAnswer)
+  ) {
+    visibleQuestionIds.add("outfit_rule");
+  }
+  return visibleQuestionIds;
+}
+
+function updateGuidedPhotoReferenceQuestionVisibility(root) {
+  const visibleQuestionIds = guidedPhotoReferenceVisibleQuestionIds(root);
+  let visibleIndex = 0;
+  root?.querySelectorAll("[data-photo-guided-question]").forEach((questionRow) => {
+    const questionId = String(questionRow.dataset.photoGuidedQuestion || "");
+    questionRow.hidden = !visibleQuestionIds.has(questionId);
+    if (questionRow.hidden) return;
+    visibleIndex += 1;
+    const legend = questionRow.querySelector("legend");
+    if (legend) legend.textContent = legend.textContent.replace(/^\d+\./, `${visibleIndex}.`);
+  });
+  return visibleQuestionIds;
+}
+
+function guidedPhotoReferenceQuestionnaire(root = document.querySelector("[data-photo-reference-guided-editor]")) {
+  if (!root) return { version: 2, answers: [] };
+  const questions = [
+    { id: "core_anchor", question: "这张图最不能丢的特点是什么？", fields: ["core_anchor"] },
+    { id: "wardrobe_change", question: "换一身衣服后，这张图还适合用吗？", fields: ["wardrobe_change"] },
+    { id: "location_change", question: "换到其他地点后，这张图还适合用吗？", fields: ["location_change"] },
+    { id: "pose_change", question: "动作改变后，这张图还适合用吗？", fields: ["pose_change"] },
+    { id: "priority_conditions", question: "哪些情况应该优先用这张图？", fields: ["prefer_none", "prefer_scenes", "prefer_times", "preferred_preset"] },
+    { id: "exclusion_conditions", question: "哪些情况容易用错这张图？", fields: ["avoid_none", "avoid_scenes", "avoid_times"] },
+    { id: "fallback_policy", question: "没有完全匹配的图片时，应该怎么处理？", fields: ["fallback_policy"] },
+    { id: "outfit_rule", question: "图中的穿搭应该怎么处理？", fields: ["outfit_behavior", "outfit_category"] },
+  ];
+  const visibleQuestionIds = guidedPhotoReferenceVisibleQuestionIds(root);
+  return {
+    version: 2,
+    answers: questions.filter((question) => visibleQuestionIds.has(question.id)).map((question) => ({
+      id: question.id,
+      question: question.question,
+      selections: question.fields.flatMap((field) => Array.from(root.querySelectorAll(`[name="${field}"]:checked`)).map((input) => ({
+        field,
+        value: String(input.value || "").trim(),
+        label: String(input.dataset.photoGuidedAnswerLabel || input.value || "").trim(),
+      })).filter((item) => item.value)),
+    })),
+  };
+}
+
+function guidedPhotoReferenceManualOverride(root) {
+  if (!root?.querySelector('[name="manual_override_enabled"]')?.checked) return null;
+  const raw = String(root.querySelector('[name="manual_override_json"]')?.value || "").trim();
+  if (!raw) return {};
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("专家覆盖必须是 JSON 对象");
+  return parsed;
+}
+
+function guidedPhotoReferenceTrialCandidates(root, reviewedMetadata) {
+  const managerItems = photoReferenceManagerItems();
+  const current = [
+    currentPhotoPersonaReference(),
+    ...managerItems,
+  ]
+    .filter((item) => item && normalizePhotoReferenceSource(item.source))
+    .map((item) => canonicalPhotoReference(item, item.kind));
+  const source = String(root?.closest("form")?.elements?.source?.value || "").trim();
+  if (!source) return current;
+  if (!reviewedMetadata || typeof reviewedMetadata !== "object") return current;
+  const editingIndex = Number(state.photoReferenceEditingIndex);
+  const editingItem = Number.isInteger(editingIndex) && editingIndex >= 0 ? managerItems[editingIndex] : null;
+  const editingExisting = Boolean(editingItem);
+  const existingIndex = editingExisting
+    ? current.findIndex((item) => item.id === editingItem.id)
+    : current.findIndex((item) => item.source === source);
+  const draft = canonicalPhotoReference({
+      id: editingExisting ? editingItem.id : (existingIndex >= 0 ? current[existingIndex].id : "draft_reference"),
+      kind: "library",
+      source,
+      note: String(root?.closest("form")?.elements?.note?.value || "").trim(),
+      metadata: {
+        ...reviewedMetadata,
+        metadata_source: "guided_editor_draft",
+      },
+    }, "library");
+  if (existingIndex >= 0) current[existingIndex] = draft;
+  else current.push(draft);
+  return current;
+}
+
+function applyGuidedPhotoReferenceDraft(root, item) {
+  if (!root || !item) return;
+  const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const manualOverride = metadata.editor_intent?.manual_override;
+  const questionnaire = metadata.editor_intent?.questionnaire;
+  if (Array.isArray(questionnaire?.answers)) {
+    root.querySelectorAll("[data-photo-guided-answer-label]").forEach((input) => { input.checked = false; });
+    questionnaire.answers.forEach((answer) => {
+      (Array.isArray(answer?.selections) ? answer.selections : []).forEach((selection) => {
+        const field = String(selection?.field || "");
+        const value = String(selection?.value || "");
+        const input = Array.from(root.querySelectorAll(`[name="${CSS.escape(field)}"]`))
+          .find((candidate) => candidate.value === value);
+        if (input) input.checked = true;
+      });
+    });
+  } else {
+    const setValues = (name, values) => {
+      const selected = new Set(Array.isArray(values) ? values : [values]);
+      root.querySelectorAll(`[name="${name}"]`).forEach((input) => { input.checked = selected.has(input.value); });
+    };
+    const fallbackValue = {
+      matching_only: "strict",
+      fallback_identity_only: "fallback_identity",
+      fallback_allowed: "fallback_any",
+      disabled: "disabled",
+    }[String(metadata.selection_eligibility || "matching_only")] || "strict";
+    setValues("core_anchor", metadata.reference_roles || ["identity"]);
+    setValues("wardrobe_change", root.dataset.photoGuidedMode === "persona" ? "yes_identity" : "needs_confirmation");
+    setValues("location_change", "needs_confirmation");
+    setValues("pose_change", "needs_confirmation");
+    setValues("prefer_none", (metadata.scene_categories?.length || metadata.time_categories?.length || metadata.preferred_preset) ? [] : ["none"]);
+    setValues("prefer_scenes", metadata.scene_categories || []);
+    setValues("prefer_times", metadata.time_categories || []);
+    setValues("avoid_none", (metadata.excluded_scene_categories?.length || metadata.excluded_time_categories?.length) ? [] : ["none"]);
+    setValues("avoid_scenes", metadata.excluded_scene_categories || []);
+    setValues("avoid_times", metadata.excluded_time_categories || []);
+    setValues("preferred_preset", metadata.preferred_preset || "");
+    setValues("fallback_policy", fallbackValue);
+    setValues("outfit_behavior", metadata.outfit_lock_default ? "preserve_unless_explicit_change" : (metadata.outfit_category ? "reference_without_lock" : "ignore"));
+    setValues("outfit_category", metadata.outfit_category || "unspecified");
+  }
+  const manualOverrideToggle = root.querySelector('[name="manual_override_enabled"]');
+  if (manualOverrideToggle) manualOverrideToggle.checked = Boolean(manualOverride);
+  const manualOverrideInput = root.querySelector('[name="manual_override_json"]');
+  if (manualOverrideInput) manualOverrideInput.value = manualOverride ? JSON.stringify(manualOverride, null, 2) : "";
+  if (root.dataset.photoGuidedMode === "persona") {
+    root.querySelectorAll('[name="core_anchor"]').forEach((input) => { input.checked = input.value === "identity"; });
+    root.querySelectorAll('[name="wardrobe_change"]').forEach((input) => { input.checked = input.value === "yes_identity"; });
+  }
+  updateGuidedPhotoReferenceQuestionVisibility(root);
+}
+
+function guidedPhotoReferenceChoiceGroup(name, options, { type = "checkbox", checked = [] } = {}) {
+  const selected = new Set(Array.isArray(checked) ? checked : [checked]);
+  return options.map((option) => `
+    <label class="photo-reference-guided-choice">
+      <input
+        type="${type}"
+        name="${escapeHtml(name)}"
+        value="${escapeHtml(option.value)}"
+        data-photo-guided-answer-label="${escapeHtml(option.label)}"
+        ${selected.has(option.value) ? "checked" : ""}
+      />
+      <span><b>${escapeHtml(option.label)}</b>${option.help ? `<small>${escapeHtml(option.help)}</small>` : ""}</span>
+    </label>
+  `).join("");
+}
+
+function renderGuidedPhotoReferenceEditor() {
+  const host = document.querySelector("[data-photo-reference-guided-host]");
+  if (!host) return;
+  const sceneOptions = photoReferenceFieldOptions("scene_categories");
+  const timeOptions = photoReferenceFieldOptions("time_categories");
+  const outfitOptions = photoReferenceFieldOptions("outfit_categories");
+  const presetOptions = photoReferenceFieldOptions("presets");
+  host.innerHTML = `
+    <section class="photo-reference-guided-editor" data-photo-reference-guided-editor data-photo-guided-active-tab="answers">
+      <div class="photo-reference-guided-tabs" role="tablist" aria-label="参考图配置步骤">
+        <button type="button" class="active" data-photo-guided-tab="answers">使用方式</button>
+        <button type="button" data-photo-guided-tab="result">生成数据</button>
+        <button type="button" data-photo-guided-tab="trial">选图试跑</button>
+      </div>
+      <div data-photo-guided-panel="answers">
+        <p class="photo-reference-guided-help">每道题都从不同角度判断图片用途，可以放心选择最接近的答案。主模型会交叉审批重复证据并合并冲突。</p>
+        <p class="photo-reference-guided-model-note">审批将调用 WebUI“模型配置”中的主模型：<code>${escapeHtml(state.overview?.providers?.LLM_PROVIDER_ID || "未配置（将使用本地合并）")}</code></p>
+        <div class="photo-reference-guided-templates" role="group" aria-label="快速选择用途">
+          <span>快速套用常见答案</span>
+          <button type="button" data-photo-guided-template="identity">人物长相</button>
+          <button type="button" data-photo-guided-template="outfit">固定穿搭</button>
+          <button type="button" data-photo-guided-template="pose">动作姿势</button>
+          <button type="button" data-photo-guided-template="scene">场景背景</button>
+          <button type="button" data-photo-guided-template="style">画面风格</button>
+        </div>
+        <fieldset data-photo-guided-question="core_anchor"><legend>1. 这张图最不能丢的特点是什么？</legend>
+          <div class="photo-reference-guided-choices">
+            ${guidedPhotoReferenceChoiceGroup("core_anchor", [
+              { value: "identity", label: "人物长相", help: "脸部、发型和人物特征" },
+              { value: "outfit", label: "整套穿搭", help: "衣服款式和搭配" },
+              { value: "pose", label: "动作姿势", help: "身体动作和构图姿势" },
+              { value: "scene", label: "地点背景", help: "地点、布置和背景" },
+              { value: "style", label: "画面风格", help: "色彩、光线和质感" },
+              { value: "continuity", label: "整张图的整体一致感", help: "多个方面都要一起保持" },
+            ], { checked: ["identity"] })}
+          </div>
+        </fieldset>
+        <fieldset data-photo-guided-question="wardrobe_change"><legend>2. 换一身衣服后，这张图还适合用吗？</legend>
+          <div class="photo-reference-guided-choices is-single-column">
+            ${guidedPhotoReferenceChoiceGroup("wardrobe_change", [
+              { value: "yes_identity", label: "适合，主要看人物长相" },
+              { value: "yes_pose", label: "适合，主要看动作姿势" },
+              { value: "yes_scene", label: "适合，主要看地点背景" },
+              { value: "yes_style", label: "适合，主要看画面风格" },
+              { value: "conditional", label: "视情况而定，穿搭只是其中一部分" },
+              { value: "no_outfit_core", label: "不适合，这套穿搭就是重点" },
+              { value: "irrelevant", label: "这张图看不出或不涉及穿搭" },
+              { value: "needs_confirmation", label: "需要确认，旧配置无法判断" },
+            ], { type: "radio", checked: "yes_identity" })}
+          </div>
+        </fieldset>
+        <fieldset data-photo-guided-question="location_change"><legend>3. 换到其他地点后，这张图还适合用吗？</legend>
+          <div class="photo-reference-guided-choices is-single-column">
+            ${guidedPhotoReferenceChoiceGroup("location_change", [
+              { value: "yes_identity", label: "适合，主要看人物长相" },
+              { value: "yes_outfit", label: "适合，主要看人物穿搭" },
+              { value: "yes_pose", label: "适合，主要看动作姿势" },
+              { value: "yes_style", label: "适合，主要看画面风格" },
+              { value: "conditional", label: "视情况而定，类似地点仍可使用" },
+              { value: "no_scene_core", label: "不适合，这个地点和背景就是重点" },
+              { value: "irrelevant", label: "这张图没有明确地点或背景" },
+              { value: "needs_confirmation", label: "需要确认，旧配置无法判断" },
+            ], { type: "radio", checked: "yes_identity" })}
+          </div>
+        </fieldset>
+        <fieldset data-photo-guided-question="pose_change"><legend>4. 动作改变后，这张图还适合用吗？</legend>
+          <div class="photo-reference-guided-choices is-single-column">
+            ${guidedPhotoReferenceChoiceGroup("pose_change", [
+              { value: "yes_identity", label: "适合，主要看人物长相" },
+              { value: "yes_outfit", label: "适合，主要看人物穿搭" },
+              { value: "yes_scene", label: "适合，主要看地点背景" },
+              { value: "yes_style", label: "适合，主要看画面风格" },
+              { value: "small_change", label: "小幅改变可以，大幅改变不合适" },
+              { value: "no_pose_core", label: "不适合，这个动作和构图就是重点" },
+              { value: "irrelevant", label: "这张图没有明确动作要求" },
+              { value: "needs_confirmation", label: "需要确认，旧配置无法判断" },
+            ], { type: "radio", checked: "yes_identity" })}
+          </div>
+        </fieldset>
+        <fieldset data-photo-guided-question="priority_conditions"><legend>5. 哪些情况应该优先用这张图？</legend>
+          <div class="photo-reference-guided-choice-section"><b>默认选择</b><div class="photo-reference-guided-chips">${guidedPhotoReferenceChoiceGroup("prefer_none", [{ value: "none", label: "没有特别优先条件" }], { checked: ["none"] })}</div></div>
+          <div class="photo-reference-guided-choice-section"><b>地点或场景</b><div class="photo-reference-guided-chips">${guidedPhotoReferenceChoiceGroup("prefer_scenes", sceneOptions)}</div></div>
+          <div class="photo-reference-guided-choice-section"><b>时间</b><div class="photo-reference-guided-chips">${guidedPhotoReferenceChoiceGroup("prefer_times", timeOptions)}</div></div>
+          ${presetOptions.length > 1 ? `<div class="photo-reference-guided-choice-section"><b>生图预设</b><div class="photo-reference-guided-chips">${guidedPhotoReferenceChoiceGroup("preferred_preset", presetOptions, { type: "radio" })}</div></div>` : ""}
+        </fieldset>
+        <fieldset data-photo-guided-question="exclusion_conditions"><legend>6. 哪些情况容易用错这张图？</legend>
+          <div class="photo-reference-guided-choice-section"><b>默认选择</b><div class="photo-reference-guided-chips">${guidedPhotoReferenceChoiceGroup("avoid_none", [{ value: "none", label: "没有明确排除条件" }], { checked: ["none"] })}</div></div>
+          <div class="photo-reference-guided-choice-section"><b>地点或场景</b><div class="photo-reference-guided-chips">${guidedPhotoReferenceChoiceGroup("avoid_scenes", sceneOptions)}</div></div>
+          <div class="photo-reference-guided-choice-section"><b>时间</b><div class="photo-reference-guided-chips">${guidedPhotoReferenceChoiceGroup("avoid_times", timeOptions)}</div></div>
+        </fieldset>
+        <fieldset data-photo-guided-question="fallback_policy"><legend>7. 没有完全匹配的图片时，应该怎么处理？</legend>
+          <div class="photo-reference-guided-choices is-single-column">
+            ${guidedPhotoReferenceChoiceGroup("fallback_policy", [
+              { value: "strict", label: "宁可不用，也要等条件匹配" },
+              { value: "fallback_identity", label: "人物长相匹配时可以兜底" },
+              { value: "fallback_any", label: "没有更合适的图时就用它兜底" },
+              { value: "disabled", label: "先保存，但暂时不要用于选图" },
+              { value: "unsure", label: "不确定，让主模型根据前面答案决定" },
+            ], { type: "radio", checked: "strict" })}
+          </div>
+        </fieldset>
+        <fieldset data-photo-guided-question="outfit_rule"><legend>8. 图中的穿搭应该怎么处理？</legend>
+          <div class="photo-reference-guided-choice-section"><b>保持程度</b><div class="photo-reference-guided-choices is-single-column">
+            ${guidedPhotoReferenceChoiceGroup("outfit_behavior", [
+              { value: "ignore", label: "不把穿搭作为参考重点" },
+              { value: "reference_without_lock", label: "可以参考，但不必一直保持" },
+              { value: "preserve_unless_explicit_change", label: "通常保持，除非用户明确要求换装" },
+              { value: "unsure", label: "不确定，让主模型结合其他答案判断" },
+            ], { type: "radio", checked: "unsure" })}
+          </div></div>
+          <div class="photo-reference-guided-choice-section"><b>穿搭类型</b><div class="photo-reference-guided-choices">
+            ${guidedPhotoReferenceChoiceGroup("outfit_category", [
+              { value: "unspecified", label: "不确定或不涉及" },
+              ...outfitOptions,
+            ], { type: "radio", checked: "unspecified" })}
+          </div></div>
+        </fieldset>
+        <details class="photo-reference-guided-expert">
+          <summary>专家覆盖</summary>
+          <label class="photo-reference-guided-choice"><input type="checkbox" name="manual_override_enabled" /><span><b>启用专家覆盖</b></span></label>
+          <textarea name="manual_override_json" spellcheck="false" placeholder='{"reference_roles":["identity"]}'></textarea>
+        </details>
+        <button type="button" class="photo-reference-guided-preview" data-photo-guided-compile>调用主模型审批并查看结果</button>
+      </div>
+      <div data-photo-guided-panel="result" hidden><pre data-photo-guided-result>尚未编译</pre></div>
+      <div data-photo-guided-panel="trial" hidden>
+        <label>真实对话用户原话<textarea name="trial_text" maxlength="1200" placeholder="晚上了，在卧室穿着睡衣给我拍一张吧"></textarea></label>
+        <label>上下文<select name="trial_context_mode"><option value="current">当前用户与会话</option><option value="blank">空白上下文</option><option value="custom">自定义上下文</option></select></label>
+        <label data-photo-guided-custom-context hidden>自定义上下文<textarea name="trial_custom_context" maxlength="4000"></textarea></label>
+        <label>试跑次数<select name="trial_runs"><option value="1">1 次（约 2 次模型调用）</option><option value="3">3 次（约 6 次模型调用）</option></select></label>
+        <button type="button" data-photo-guided-trial>运行无副作用试跑</button>
+        <pre data-photo-guided-trial-result>尚未试跑</pre>
+      </div>
+    </section>`;
+  const root = host.querySelector("[data-photo-reference-guided-editor]");
+  const personaMode = state.photoReferenceEditingIndex === -2;
+  root.dataset.photoGuidedMode = personaMode ? "persona" : "library";
+  if (personaMode) {
+    host.querySelector(".photo-reference-guided-templates")?.setAttribute("hidden", "");
+    root.querySelectorAll('[name="core_anchor"]').forEach((input) => {
+      if (input.value === "identity") {
+        input.checked = true;
+        return;
+      }
+      input.checked = false;
+      input.disabled = true;
+      const choice = input.closest("label");
+      if (choice) choice.hidden = true;
+    });
+    const wardrobeInput = root.querySelector('[name="wardrobe_change"][value="yes_identity"]');
+    const fallbackInput = root.querySelector('[name="fallback_policy"][value="fallback_identity"]');
+    if (wardrobeInput) wardrobeInput.checked = true;
+    if (fallbackInput) fallbackInput.checked = true;
+  }
+  const setTab = (tab) => {
+    root.dataset.photoGuidedActiveTab = tab;
+    host.querySelectorAll("[data-photo-guided-tab]").forEach((button) => button.classList.toggle("active", button.dataset.photoGuidedTab === tab));
+    host.querySelectorAll("[data-photo-guided-panel]").forEach((panel) => { panel.hidden = panel.dataset.photoGuidedPanel !== tab; });
+  };
+  const setQuestionValues = (name, selected) => {
+    const values = new Set(Array.isArray(selected) ? selected : [selected]);
+    root.querySelectorAll(`[name="${name}"]`).forEach((input) => { input.checked = values.has(input.value); });
+  };
+  const templates = {
+    identity: { core: ["identity"], wardrobe: "yes_identity", location: "yes_identity", pose: "yes_identity", fallback: "fallback_identity", outfit: "unsure", category: "unspecified" },
+    outfit: { core: ["identity", "outfit"], wardrobe: "no_outfit_core", location: "yes_outfit", pose: "yes_outfit", fallback: "strict", outfit: "preserve_unless_explicit_change", category: "daily_outfit" },
+    pose: { core: ["pose"], wardrobe: "yes_pose", location: "yes_pose", pose: "no_pose_core", fallback: "strict", outfit: "ignore", category: "unspecified" },
+    scene: { core: ["scene"], wardrobe: "yes_scene", location: "no_scene_core", pose: "yes_scene", fallback: "strict", outfit: "ignore", category: "unspecified" },
+    style: { core: ["style"], wardrobe: "yes_style", location: "yes_style", pose: "yes_style", fallback: "fallback_any", outfit: "ignore", category: "unspecified" },
+  };
+  root.querySelectorAll("[data-photo-guided-template]").forEach((button) => button.addEventListener("click", () => {
+    const template = templates[button.dataset.photoGuidedTemplate];
+    if (!template) return;
+    setQuestionValues("core_anchor", template.core);
+    setQuestionValues("wardrobe_change", template.wardrobe);
+    setQuestionValues("location_change", template.location);
+    setQuestionValues("pose_change", template.pose);
+    setQuestionValues("fallback_policy", template.fallback);
+    setQuestionValues("outfit_behavior", template.outfit);
+    setQuestionValues("outfit_category", template.category);
+    setQuestionValues("prefer_scenes", []);
+    setQuestionValues("prefer_times", []);
+    setQuestionValues("preferred_preset", []);
+    setQuestionValues("avoid_scenes", []);
+    setQuestionValues("avoid_times", []);
+    setQuestionValues("prefer_none", "none");
+    setQuestionValues("avoid_none", "none");
+    root.querySelectorAll("[data-photo-guided-template]").forEach((item) => item.setAttribute("aria-pressed", item === button ? "true" : "false"));
+    updateGuidedPhotoReferenceQuestionVisibility(root);
+    scheduleLocalPreview();
+  }));
+  const bindNoneChoice = (noneName, optionNames) => {
+    const none = root.querySelector(`[name="${noneName}"]`);
+    const options = optionNames.flatMap((name) => Array.from(root.querySelectorAll(`[name="${name}"]`)));
+    none?.addEventListener("change", () => {
+      if (none.checked) options.forEach((input) => { input.checked = false; });
+    });
+    options.forEach((input) => input.addEventListener("change", () => {
+      if (input.checked && none) none.checked = false;
+      if (none && !options.some((item) => item.checked)) none.checked = true;
+    }));
+  };
+  bindNoneChoice("prefer_none", ["prefer_scenes", "prefer_times", "preferred_preset"]);
+  bindNoneChoice("avoid_none", ["avoid_scenes", "avoid_times"]);
+  let localPreviewTimer = null;
+  let localPreviewRevision = 0;
+  const scheduleLocalPreview = () => {
+    const revision = ++localPreviewRevision;
+    window.clearTimeout(localPreviewTimer);
+    localPreviewTimer = window.setTimeout(async () => {
+      try {
+        const result = await reviewGuidedPhotoReference(root, { useModel: false });
+        if (revision === localPreviewRevision) {
+          host.querySelector("[data-photo-guided-result]").textContent = JSON.stringify(result, null, 2);
+        }
+      } catch (_error) {
+        // The explicit approval action below owns user-visible errors.
+      }
+    }, 180);
+  };
+  root.addEventListener("change", (event) => {
+    if (event.target.matches("input[type='checkbox'], input[type='radio'], select")) {
+      updateGuidedPhotoReferenceQuestionVisibility(root);
+      scheduleLocalPreview();
+    }
+  });
+  root.querySelector('[name="manual_override_json"]')?.addEventListener("input", scheduleLocalPreview);
+  const contextMode = host.querySelector('[name="trial_context_mode"]');
+  contextMode?.addEventListener("change", () => {
+    const custom = host.querySelector("[data-photo-guided-custom-context]");
+    if (custom) custom.hidden = contextMode.value !== "custom";
+  });
+  host.querySelectorAll("[data-photo-guided-tab]").forEach((button) => button.addEventListener("click", () => setTab(button.dataset.photoGuidedTab)));
+  host.querySelector("[data-photo-guided-compile]")?.addEventListener("click", async (event) => {
+    setActionBusy(event.currentTarget, true);
+    try {
+      const result = await reviewGuidedPhotoReference(root);
+      host.querySelector("[data-photo-guided-result]").textContent = JSON.stringify(result, null, 2);
+      setTab("result");
+    } catch (error) {
+      showToast(`审批失败：${error.message}`, "error");
+    } finally {
+      setActionBusy(event.currentTarget, false);
+    }
+  });
+  host.querySelector("[data-photo-guided-trial]")?.addEventListener("click", async (event) => {
+    setActionBusy(event.currentTarget, true);
+    try {
+      const text = host.querySelector('[name="trial_text"]')?.value || "";
+      const compiled = await reviewGuidedPhotoReference(root);
+      if (!compiled?.metadata || typeof compiled.metadata !== "object") throw new Error("没有返回可试跑的选图规则");
+      const trialCandidates = guidedPhotoReferenceTrialCandidates(root, compiled.metadata);
+      const expectedSource = String(root?.closest("form")?.elements?.source?.value || "").trim();
+      const expectedReference = trialCandidates.find((item) => item.source === expectedSource);
+      const result = await postJson("/photo_reference/selection_trial", {
+        request_text: text,
+        user_id: state.selectedUserId || "",
+        context_mode: host.querySelector('[name="trial_context_mode"]')?.value || "current",
+        ambient_context: host.querySelector('[name="trial_context_mode"]')?.value === "custom" ? (host.querySelector('[name="trial_custom_context"]')?.value || "") : "",
+        runs: Number(host.querySelector('[name="trial_runs"]')?.value || 1),
+        expected_reference_id: expectedReference?.id || "",
+        candidates: trialCandidates,
+        saved: guidedPhotoReferenceSavedMetadata(),
+      });
+      host.querySelector("[data-photo-guided-trial-result]").textContent = JSON.stringify(result, null, 2);
+    } catch (error) {
+      showToast(`试跑失败：${error.message}`, "error");
+    } finally {
+      setActionBusy(event.currentTarget, false);
+    }
+  });
+  updateGuidedPhotoReferenceQuestionVisibility(root);
+}
+
 function newPhotoReferenceId() {
   const value = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `library_${value.replaceAll("-", "")}`;
@@ -24905,9 +25420,13 @@ function parsePhotoReferenceCatalog(value, stableIds = false) {
         outfit_category: String(item.outfit_category || ""),
         outfit_lock_default: item.outfit_lock_default === true,
         scene_categories: Array.isArray(item.scene_categories) ? [...item.scene_categories] : [],
+        excluded_scene_categories: Array.isArray(item.excluded_scene_categories) ? [...item.excluded_scene_categories] : [],
         time_categories: Array.isArray(item.time_categories) ? [...item.time_categories] : [],
+        excluded_time_categories: Array.isArray(item.excluded_time_categories) ? [...item.excluded_time_categories] : [],
+        selection_eligibility: String(item.selection_eligibility || "matching_only"),
         preferred_preset: String(item.preferred_preset || ""),
         metadata_source: String(item.metadata_source || "configured"),
+        editor_intent: item.editor_intent && typeof item.editor_intent === "object" ? { ...item.editor_intent } : null,
       },
     }));
 }
@@ -24969,9 +25488,13 @@ function canonicalPhotoReference(item, kind) {
     outfit_category: String(metadata.outfit_category || "").trim(),
     outfit_lock_default: metadata.outfit_lock_default === true,
     scene_categories: normalizePhotoReferenceMetadataList(metadata.scene_categories),
+    excluded_scene_categories: normalizePhotoReferenceMetadataList(metadata.excluded_scene_categories),
     time_categories: normalizePhotoReferenceMetadataList(metadata.time_categories),
+    excluded_time_categories: normalizePhotoReferenceMetadataList(metadata.excluded_time_categories),
+    selection_eligibility: String(metadata.selection_eligibility || "matching_only"),
     preferred_preset: availablePresets && !availablePresets.includes(preferredPreset) ? "" : preferredPreset,
     metadata_source: String(metadata.metadata_source || "configured"),
+    editor_intent: metadata.editor_intent && typeof metadata.editor_intent === "object" ? { ...metadata.editor_intent } : undefined,
   };
 }
 
@@ -25243,6 +25766,7 @@ function photoReferenceManagerCard(item, index) {
     preferredPreset ? `预设 ${preferredPreset}` : "",
   ].filter(Boolean);
   const roleShortcuts = photoReferenceRoleShortcuts();
+  const summary = note || (responsibilityTags.length ? responsibilityTags.join(" · ") : "尚未配置引导使用方式");
   return `
     <article class="photo-reference-item ${status?.available === false ? "is-unavailable" : ""}" data-photo-reference-card data-index="${index}">
       ${photoReferencePreviewHtml("library", source, `参考图 ${index + 1}`)}
@@ -25256,15 +25780,15 @@ function photoReferenceManagerCard(item, index) {
           </div>
         </header>
         ${responsibilityTags.length ? `<div class="photo-reference-responsibilities">${responsibilityTags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
-        <label>
+        <label hidden aria-hidden="true">
           <span>图片路径或 URL</span>
           <input type="text" data-photo-reference-source data-index="${index}" value="${escapeHtml(source)}" maxlength="1000" />
         </label>
-        <label>
+        <label hidden aria-hidden="true">
           <span>用途注释</span>
           <textarea data-photo-reference-note data-index="${index}" maxlength="500" rows="3" placeholder="服装、地点和适用场景">${escapeHtml(note)}</textarea>
         </label>
-        <details class="photo-reference-metadata-editor">
+        <details class="photo-reference-metadata-editor" hidden aria-hidden="true">
           <summary>
             <span>参考职责与服装裁决</span>
             <small>展开后可指定这张图在生图时负责保留哪些信息。留空表示不限制或由系统决定。</small>
@@ -25314,6 +25838,10 @@ function photoReferenceManagerCard(item, index) {
             <small>选择使用这张图时优先套用的生图场景预设；用户明确要求优先，冲突或失效预设不会静默替代用户要求。</small>
           </label>
         </details>
+        <p class="photo-reference-item-summary">${escapeHtml(summary)}</p>
+        <div class="photo-reference-item-actions">
+          <button type="button" data-photo-reference-configure data-index="${index}">配置使用方式</button>
+        </div>
       </div>
     </article>
   `;
@@ -25366,6 +25894,7 @@ function photoReferenceManagerPageHtml(open) {
           <p><b>${items.length} / 24</b> 张附加参考图 · ${personaSource ? "基础人设已设置" : "基础人设未设置"} · ${statusError ? "状态读取失败" : statusLoaded ? `${availableCount} 张附加图可用` : "状态读取中"}</p>
         </div>
         <div class="photo-reference-head-actions">
+          <button type="button" data-photo-reference-add-open ${items.length >= 24 ? "disabled" : ""}>添加参考图</button>
           <button type="button" data-photo-reference-refresh ${state.photoReferenceLibraryLoading ? "disabled" : ""}>${state.photoReferenceLibraryLoading ? "刷新中" : "刷新状态"}</button>
           <button type="button" class="feature-param-save" data-photo-reference-save>保存图库</button>
         </div>
@@ -25380,19 +25909,34 @@ function photoReferenceManagerPageHtml(open) {
           <small>${escapeHtml(personaStatus ? (personaStatus.available ? "文件可用" : "文件失效") : personaSource ? "待保存验证" : statusError ? "读取失败，未判定为空" : "未设置")}</small>
         </div>
         ${photoReferencePreviewHtml("persona", personaSource, "基础人设参考图")}
-        <label>
-          <span>图片路径或 URL</span>
-          <input type="text" data-photo-reference-persona-source value="${escapeHtml(personaSource)}" maxlength="1000" placeholder="C:\\role.png 或 https://..." />
-        </label>
+        <div class="photo-reference-persona-controls">
+          <label>
+            <span>图片路径或 URL</span>
+            <input type="text" data-photo-reference-persona-source value="${escapeHtml(personaSource)}" maxlength="1000" placeholder="C:\\role.png 或 https://..." />
+          </label>
+          <button type="button" data-photo-reference-persona-configure>配置使用方式</button>
+        </div>
       </section>
 
-      <form class="photo-reference-add-form" data-photo-reference-add-form>
-        <div>
-          <label><span>图片路径或 URL</span><input name="source" maxlength="1000" required placeholder="C:\\photo.png 或 https://..." /></label>
-          <label><span>用途注释</span><input name="note" maxlength="500" placeholder="居家服，在家或睡前使用" /></label>
-        </div>
-        <button type="submit" ${items.length >= 24 ? "disabled" : ""}>添加参考图</button>
-      </form>
+      <dialog class="photo-reference-add-dialog" data-photo-reference-add-dialog>
+        <form class="photo-reference-add-form" data-photo-reference-add-form>
+          <header>
+            <div><span>REFERENCE LIBRARY</span><h3>添加参考图</h3></div>
+            <button type="button" data-photo-reference-add-close aria-label="关闭添加参考图">×</button>
+          </header>
+          <div class="photo-reference-add-body">
+            <div class="photo-reference-add-basics">
+              <label><span>图片路径或 URL</span><input name="source" maxlength="1000" required placeholder="C:\\photo.png 或 https://..." /></label>
+              <label><span>用途备注</span><input name="note" maxlength="500" placeholder="例如：居家服，在家或睡前使用" /></label>
+            </div>
+            <div data-photo-reference-guided-host></div>
+          </div>
+          <footer>
+            <button type="button" data-photo-reference-add-close>取消</button>
+            <button type="submit" class="primary" ${items.length >= 24 ? "disabled" : ""}>添加到图库</button>
+          </footer>
+        </form>
+      </dialog>
 
       <div class="photo-reference-toolbar">
         <label><span>筛选图库</span><input type="search" data-photo-reference-filter placeholder="搜索路径或用途注释" /></label>
@@ -25954,6 +26498,38 @@ function syncPhotoReferenceManagerDraft() {
   return true;
 }
 
+function syncGuidedPhotoPersonaReferenceDraft(source, note, metadata) {
+  const cleanSource = normalizePhotoReferenceSource(source);
+  const payload = [];
+  if (cleanSource) {
+    payload.push(canonicalPhotoReference({
+      id: "persona",
+      kind: "persona",
+      source: cleanSource,
+      note: String(note || "").trim(),
+      metadata: guidedPhotoReferencePersonaMetadata(metadata),
+    }, "persona"));
+  }
+  photoReferenceManagerItems().forEach((item) => {
+    if (normalizePhotoReferenceSource(item?.source)) payload.push(canonicalPhotoReference(item, "library"));
+  });
+  const serialized = JSON.stringify(payload);
+  const previousSignature = photoReferenceCatalogSignature(currentPhotoReferenceCatalogValue());
+  const catalogInput = document.querySelector('[data-feature-param="photo_reference_catalog"]');
+  if (catalogInput) catalogInput.value = serialized;
+  state.featureDetailParamDraft = {
+    ...(state.featureDetailParamDraft || {}),
+    photo_reference_catalog: serialized,
+  };
+  if (previousSignature === photoReferenceCatalogSignature(serialized)) {
+    refreshFeatureDetailDirty();
+    return false;
+  }
+  if (catalogInput) rememberFeatureParamDraft(catalogInput, { allowPhotoReferenceCatalog: true });
+  markFeatureDetailDirty();
+  return true;
+}
+
 function photoReferenceDraftValidationError() {
   const items = photoReferenceManagerItems();
   if (items.length > 24) return "参考图库最多保存 24 张图片";
@@ -26036,9 +26612,50 @@ function bindPhotoReferenceManagerActions() {
     renderFeatureSwitches();
   });
   if (!manager || state.featureDetailSubpage !== "photo_reference_library") return;
+  const addDialog = manager.querySelector("[data-photo-reference-add-dialog]");
+  const closeAddDialog = () => {
+    state.photoReferenceAddDialogOpen = false;
+    state.photoReferenceEditingIndex = -1;
+    if (addDialog?.open) addDialog.close();
+  };
+  const openAddDialog = (editingIndex = -1) => {
+    if (!addDialog) return;
+    state.photoReferenceAddDialogOpen = true;
+    state.photoReferenceEditingIndex = Number.isInteger(editingIndex) ? editingIndex : -1;
+    renderGuidedPhotoReferenceEditor();
+    const form = addDialog.querySelector("[data-photo-reference-add-form]");
+    const editingPersona = state.photoReferenceEditingIndex === -2;
+    const editingItem = editingPersona
+      ? currentPhotoPersonaReference()
+      : (state.photoReferenceEditingIndex >= 0 ? photoReferenceManagerItems()[state.photoReferenceEditingIndex] : null);
+    if (form) {
+      form.elements.source.value = editingItem?.source || "";
+      form.elements.note.value = editingItem?.note || "";
+      const title = form.querySelector("header h3");
+      if (title) title.textContent = editingPersona ? "配置基础人设图" : editingItem ? "配置参考图使用方式" : "添加参考图";
+      const submit = form.querySelector('button[type="submit"]');
+      if (submit) {
+        submit.textContent = editingPersona ? "应用基础人设图" : editingItem ? "应用到图库草稿" : "添加到图库";
+        submit.disabled = !editingPersona && !editingItem && photoReferenceManagerItems().length >= 24;
+      }
+      applyGuidedPhotoReferenceDraft(form.querySelector("[data-photo-reference-guided-editor]"), editingItem);
+    }
+    if (!addDialog.open) addDialog.showModal();
+    addDialog.querySelector('[name="source"]')?.focus();
+  };
+  manager.querySelector("[data-photo-reference-add-open]")?.addEventListener("click", () => openAddDialog(-1));
+  manager.querySelector("[data-photo-reference-persona-configure]")?.addEventListener("click", () => openAddDialog(-2));
+  manager.querySelectorAll("[data-photo-reference-configure]").forEach((button) => {
+    button.addEventListener("click", () => openAddDialog(Number(button.dataset.index)));
+  });
+  manager.querySelectorAll("[data-photo-reference-add-close]").forEach((button) => button.addEventListener("click", closeAddDialog));
+  addDialog?.addEventListener("cancel", () => { state.photoReferenceAddDialogOpen = false; state.photoReferenceEditingIndex = -1; });
+  addDialog?.addEventListener("close", () => { state.photoReferenceAddDialogOpen = false; state.photoReferenceEditingIndex = -1; });
+  if (state.photoReferenceAddDialogOpen) openAddDialog(state.photoReferenceEditingIndex);
 
   manager.querySelector("[data-photo-reference-back]")?.addEventListener("click", () => {
     syncPhotoReferenceManagerDraft();
+    state.photoReferenceAddDialogOpen = false;
     state.featureDetailSubpage = "";
     state.photoReferenceManagerDraft = null;
     renderFeatureSwitches();
@@ -26108,38 +26725,71 @@ function bindPhotoReferenceManagerActions() {
       syncPhotoReferenceManagerDraft();
     });
   });
-  manager.querySelector("[data-photo-reference-add-form]")?.addEventListener("submit", (event) => {
+  manager.querySelector("[data-photo-reference-add-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const source = String(form.elements.source?.value || "").trim();
     const note = String(form.elements.note?.value || "").trim();
     const items = photoReferenceManagerItems();
+    const editingIndex = state.photoReferenceEditingIndex;
+    const editingPersona = state.photoReferenceEditingIndex === -2;
+    const editingExisting = Number.isInteger(editingIndex) && editingIndex >= 0 && Boolean(items[editingIndex]);
     if (!source) return;
-    if (items.length >= 24) {
+    if (!editingPersona && !editingExisting && items.length >= 24) {
       showToast("参考图库已达到 24 张上限", "error");
       return;
     }
-    if (items.some((item) => String(item.source || "").trim() === source)) {
+    if (!editingPersona && items.some((item, index) => index !== editingIndex && String(item.source || "").trim() === source)) {
       showToast("这张图片已经在参考图库中", "error");
       return;
     }
-    items.push({
-      id: newPhotoReferenceId(),
-      kind: "library",
-      source,
-      note,
-      metadata: {
-        reference_roles: ["identity"],
-        outfit_category: "",
-        outfit_lock_default: false,
-        scene_categories: [],
-        time_categories: [],
-        preferred_preset: "",
-        metadata_source: "configured",
-      },
-    });
-    syncPhotoReferenceManagerDraft();
-    renderFeatureSwitches();
+    const questionnaire = guidedPhotoReferenceQuestionnaire(form.querySelector("[data-photo-reference-guided-editor]"));
+    const selections = questionnaire.answers.flatMap((answer) => answer.selections);
+    if (selections.some((item) => item.value === "needs_confirmation")) {
+      showToast("请先确认旧配置中无法还原的使用方式", "error");
+      return;
+    }
+    const outfitBehavior = selections.find((item) => item.field === "outfit_behavior")?.value || "unsure";
+    const outfitCategory = selections.find((item) => item.field === "outfit_category")?.value || "unspecified";
+    if (["reference_without_lock", "preserve_unless_explicit_change"].includes(outfitBehavior) && outfitCategory === "unspecified") {
+      showToast("请选择图中的穿搭类型，或选择“不参考这张图里的穿搭”", "error");
+      return;
+    }
+    setActionBusy(event.submitter, true);
+    try {
+      const compiled = await reviewGuidedPhotoReference(
+        form.querySelector("[data-photo-reference-guided-editor]"),
+      );
+      if (!compiled?.metadata || typeof compiled.metadata !== "object") throw new Error("没有返回可保存的选图规则");
+      if (editingPersona) {
+        syncGuidedPhotoPersonaReferenceDraft(source, note, compiled.metadata);
+      } else {
+        const nextItem = {
+          id: editingExisting ? items[editingIndex].id : newPhotoReferenceId(),
+          kind: "library",
+          source,
+          note,
+          metadata: { ...compiled.metadata },
+        };
+        if (editingExisting) items[editingIndex] = nextItem;
+        else items.push(nextItem);
+        syncPhotoReferenceManagerDraft();
+      }
+      state.photoReferenceAddDialogOpen = false;
+      state.photoReferenceEditingIndex = -1;
+      if (addDialog?.open) addDialog.close();
+      renderFeatureSwitches();
+      showToast(
+        compiled.review?.status === "approved"
+          ? `主模型 ${compiled.review.provider_id || "LLM_PROVIDER_ID"} 已审批，参考图规则已写入待保存图库`
+          : `${compiled.review?.warning || "主模型未完成审批，已使用本地证据合并"} 参考图规则已写入待保存图库`,
+        "ok",
+      );
+    } catch (error) {
+      showToast(`配置失败：${error.message}`, "error");
+    } finally {
+      setActionBusy(event.submitter, false);
+    }
   });
   manager.querySelectorAll("[data-photo-reference-move]").forEach((button) => {
     button.addEventListener("click", () => {

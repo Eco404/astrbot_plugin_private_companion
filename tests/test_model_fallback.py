@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import subprocess
@@ -19,8 +20,10 @@ class _FallbackContext:
     def __init__(self, responses: dict[str, object]) -> None:
         self.responses = responses
         self.calls: list[str] = []
+        self.kwargs: list[dict] = []
 
     async def llm_generate(self, **kwargs):
+        self.kwargs.append(dict(kwargs))
         provider_id = str(kwargs.get("chat_provider_id") or "")
         self.calls.append(provider_id)
         result = self.responses.get(provider_id)
@@ -57,7 +60,95 @@ class _FallbackHarness(TokenBudgetMixin):
         self.usage.append(kwargs)
 
 
+class _UsageToolSet:
+    @staticmethod
+    def openai_schema() -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "pc_generate_photo",
+                    "description": "Capture a photo generation decision.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"prompt": {"type": "string"}},
+                        "required": ["prompt"],
+                    },
+                },
+            }
+        ]
+
+
 class ModelFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_call_uses_the_budgeted_primary_provider_path(self) -> None:
+        response = SimpleNamespace(
+            role="assistant",
+            completion_text="",
+            tools_call_name=["pc_generate_photo"],
+            tools_call_args=[{"kind": "selfie", "prompt": "portrait"}],
+        )
+        harness = _FallbackHarness({"primary": response})
+        tools = _UsageToolSet()
+
+        result = await harness._llm_tool_call(
+            "take a photo",
+            tools=tools,
+            provider_id="primary",
+            task="photo_reference_selection_trial",
+            timeout_key="LLM_PROVIDER_ID",
+        )
+
+        self.assertIs(result, response)
+        self.assertEqual(harness.context.calls, ["primary"])
+        self.assertIs(harness.context.kwargs[0]["tools"], tools)
+        self.assertTrue(harness.usage[0]["success"])
+        self.assertIn("pc_generate_photo", harness.usage[0]["prompt"])
+        self.assertIn("pc_generate_photo", harness.usage[0]["completion"])
+        self.assertIn("portrait", harness.usage[0]["completion"])
+        estimated = harness._extract_llm_usage(
+            response,
+            harness.usage[0]["prompt"],
+            harness.usage[0]["completion"],
+        )
+        self.assertTrue(estimated["estimated"])
+        self.assertGreater(
+            estimated["prompt_tokens"],
+            harness._estimate_token_count("take a photo"),
+        )
+        self.assertGreater(estimated["completion_tokens"], 0)
+
+    async def test_tool_call_preserves_timeout_error_without_configured_timeout(self) -> None:
+        harness = _FallbackHarness({"primary": asyncio.TimeoutError()})
+
+        with self.assertRaisesRegex(TimeoutError, "模型任务 photo_reference_selection_trial 调用超时"):
+            await harness._llm_tool_call(
+                "take a photo",
+                tools=_UsageToolSet(),
+                provider_id="primary",
+                task="photo_reference_selection_trial",
+            )
+
+        self.assertEqual(harness.context.calls, ["primary"])
+        self.assertIn("调用超时", harness.usage[0]["error"])
+        self.assertNotIn("NoneType", harness.usage[0]["error"])
+
+    async def test_tool_call_stops_before_provider_when_daily_budget_is_exhausted(self) -> None:
+        harness = _FallbackHarness({"primary": "unused"})
+        skips: list[dict] = []
+        harness._llm_daily_budget_remaining = lambda: 0
+        harness._record_llm_budget_skip = lambda **kwargs: skips.append(kwargs)
+
+        result = await harness._llm_tool_call(
+            "take a photo",
+            tools="trial-tools",
+            provider_id="primary",
+            task="photo_reference_selection_trial",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(harness.context.calls, [])
+        self.assertEqual(skips[0]["provider_id"], "primary")
+
     async def test_primary_failure_uses_card_fallback_once(self) -> None:
         harness = _FallbackHarness({"primary": RuntimeError("primary down"), "backup": "ok"})
         harness.model_fallback_overrides = {"DAILY_PLAN_PROVIDER_ID": "backup"}

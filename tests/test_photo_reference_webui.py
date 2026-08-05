@@ -6,6 +6,8 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 APP_JS = (PLUGIN_ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
 APP_CSS = (PLUGIN_ROOT / "pages" / "陪伴面板" / "app.css").read_text(encoding="utf-8")
 INDEX_HTML = (PLUGIN_ROOT / "pages" / "陪伴面板" / "index.html").read_text(encoding="utf-8")
+PAGE_API = (PLUGIN_ROOT / "page_api.py").read_text(encoding="utf-8")
+PHOTO_REFERENCE_METADATA = (PLUGIN_ROOT / "photo_reference_metadata.py").read_text(encoding="utf-8")
 
 
 class PhotoReferenceWebUiTests(unittest.TestCase):
@@ -109,10 +111,234 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
         self.assertIn('border-top: 1px solid var(--line-soft)', APP_CSS)
         self.assertIn('padding-top: 14px', APP_CSS)
 
+    def test_guided_questions_open_only_from_the_add_reference_dialog(self) -> None:
+        self.assertIn('data-photo-reference-add-open', APP_JS)
+        self.assertIn('<dialog class="photo-reference-add-dialog" data-photo-reference-add-dialog>', APP_JS)
+        self.assertIn('grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto;align-items:stretch', APP_CSS)
+        self.assertIn('.photo-reference-add-form>footer button{flex:0 0 auto;width:auto;white-space:nowrap}', APP_CSS)
+        self.assertIn('.photo-reference-guided-tabs button{flex:0 0 auto;width:auto', APP_CSS)
+        self.assertIn('.photo-reference-guided-templates button{flex:0 0 auto;width:auto', APP_CSS)
+        dialog_start = APP_JS.index('<dialog class="photo-reference-add-dialog"')
+        dialog_end = APP_JS.index('</dialog>', dialog_start)
+        dialog_markup = APP_JS[dialog_start:dialog_end]
+        self.assertIn('data-photo-reference-guided-host', dialog_markup)
+        self.assertIn('addDialog.showModal()', APP_JS)
+        self.assertIn('addDialog.close()', APP_JS)
+        manager_start = APP_JS.index('function bindPhotoReferenceManagerActions()')
+        manager_end = APP_JS.index('function bindPhotoApiEndpointEditor', manager_start)
+        manager_actions = APP_JS[manager_start:manager_end]
+        self.assertNotIn(
+            'if (!manager || state.featureDetailSubpage !== "photo_reference_library") return;\n  renderGuidedPhotoReferenceEditor();',
+            manager_actions,
+        )
+
+    def test_existing_cards_hide_internal_fields_and_reopen_guided_editor(self) -> None:
+        self.assertIn('class="photo-reference-metadata-editor" hidden aria-hidden="true"', APP_JS)
+        self.assertIn('data-photo-reference-configure data-index="${index}"', APP_JS)
+        self.assertIn('openAddDialog(Number(button.dataset.index))', APP_JS)
+        self.assertIn('applyGuidedPhotoReferenceDraft(', APP_JS)
+
+    def test_trial_posts_the_unsaved_draft_catalog(self) -> None:
+        trial_start = APP_JS.index("function guidedPhotoReferenceTrialCandidates")
+        trial_end = APP_JS.index("function applyGuidedPhotoReferenceDraft", trial_start)
+        trial_candidates = APP_JS[trial_start:trial_end]
+        self.assertIn('metadata_source: "guided_editor_draft"', trial_candidates)
+        self.assertIn("state.photoReferenceEditingIndex", trial_candidates)
+        self.assertIn("editingExisting", trial_candidates)
+        self.assertIn('const trialCandidates = guidedPhotoReferenceTrialCandidates(root, compiled.metadata)', APP_JS)
+        self.assertIn('candidates: trialCandidates', APP_JS)
+
+    def test_guided_metadata_answers_use_plain_language_choice_controls(self) -> None:
+        for field_name in (
+            "outfit_category",
+            "prefer_scenes",
+            "prefer_times",
+            "avoid_scenes",
+            "avoid_times",
+            "preferred_preset",
+        ):
+            with self.subTest(field_name=field_name):
+                self.assertNotIn(f'<input name="{field_name}"', APP_JS)
+        for field_name in (
+            "core_anchor",
+            "wardrobe_change",
+            "location_change",
+            "pose_change",
+            "outfit_behavior",
+            "outfit_category",
+            "prefer_none",
+            "prefer_scenes",
+            "prefer_times",
+            "avoid_none",
+            "avoid_scenes",
+            "avoid_times",
+            "preferred_preset",
+            "fallback_policy",
+        ):
+            with self.subTest(field_name=field_name):
+                self.assertIn(f'guidedPhotoReferenceChoiceGroup("{field_name}"', APP_JS)
+        self.assertIn('type="${type}"', APP_JS)
+        self.assertIn('name="${escapeHtml(name)}"', APP_JS)
+        self.assertIn('data-photo-guided-answer-label', APP_JS)
+
+    def test_guided_questionnaire_uses_eight_redundant_plain_language_questions(self) -> None:
+        questions = (
+            "1. 这张图最不能丢的特点是什么？",
+            "2. 换一身衣服后，这张图还适合用吗？",
+            "3. 换到其他地点后，这张图还适合用吗？",
+            "4. 动作改变后，这张图还适合用吗？",
+            "5. 哪些情况应该优先用这张图？",
+            "6. 哪些情况容易用错这张图？",
+            "7. 没有完全匹配的图片时，应该怎么处理？",
+            "8. 图中的穿搭应该怎么处理？",
+        )
+        for question in questions:
+            with self.subTest(question=question):
+                self.assertIn(f"<legend>{question}</legend>", APP_JS)
+        for repeated_identity_answer in (
+            'value: "yes_identity", label: "适合，主要看人物长相"',
+            'value: "yes_outfit", label: "适合，主要看人物穿搭"',
+            'value: "yes_style", label: "适合，主要看画面风格"',
+        ):
+            self.assertGreaterEqual(APP_JS.count(repeated_identity_answer), 2)
+
+    def test_guided_questions_adapt_from_four_core_questions_to_at_most_eight(self) -> None:
+        self.assertIn("function updateGuidedPhotoReferenceQuestionVisibility", APP_JS)
+        self.assertIn('const coreQuestionIds = new Set([', APP_JS)
+        for question_id in (
+            "core_anchor",
+            "priority_conditions",
+            "exclusion_conditions",
+            "fallback_policy",
+        ):
+            self.assertIn(f'"{question_id}"', APP_JS)
+        self.assertIn('questionRow.hidden = !visibleQuestionIds.has(questionId)', APP_JS)
+        self.assertIn('data-photo-guided-question="core_anchor"', APP_JS)
+        self.assertIn('data-photo-guided-question="outfit_rule"', APP_JS)
+        self.assertIn('updateGuidedPhotoReferenceQuestionVisibility(root)', APP_JS)
+
+    def test_editing_passes_saved_metadata_to_every_review_path(self) -> None:
+        self.assertIn("function guidedPhotoReferenceSavedMetadata", APP_JS)
+        self.assertIn("state.photoReferenceEditingIndex", APP_JS)
+        self.assertIn("function guidedPhotoReferenceApprovalPayload", APP_JS)
+        self.assertIn("saved: guidedPhotoReferenceSavedMetadata()", APP_JS)
+
+    def test_unchanged_guided_answers_reuse_the_model_approval(self) -> None:
+        self.assertIn("async function reviewGuidedPhotoReference", APP_JS)
+        self.assertIn("root._photoReferenceApprovalSignature === signature", APP_JS)
+        self.assertIn("root._photoReferenceApprovalResult = result", APP_JS)
+        self.assertGreaterEqual(APP_JS.count("await reviewGuidedPhotoReference(root)"), 2)
+
+    def test_quick_templates_clear_previous_scene_time_and_exclusion_choices(self) -> None:
+        template_start = APP_JS.index('root.querySelectorAll("[data-photo-guided-template]")')
+        template_end = APP_JS.index("const bindNoneChoice", template_start)
+        template_handler = APP_JS[template_start:template_end]
+        for field_name in (
+            "prefer_scenes",
+            "prefer_times",
+            "preferred_preset",
+            "avoid_scenes",
+            "avoid_times",
+        ):
+            self.assertIn(f'setQuestionValues("{field_name}", [])', template_handler)
+        self.assertIn('setQuestionValues("prefer_none", "none")', template_handler)
+        self.assertIn('setQuestionValues("avoid_none", "none")', template_handler)
+
+    def test_restoring_questionnaire_does_not_clear_expert_override(self) -> None:
+        restore_start = APP_JS.index("function applyGuidedPhotoReferenceDraft")
+        restore_end = APP_JS.index("function guidedPhotoReferenceChoiceGroup", restore_start)
+        restore = APP_JS[restore_start:restore_end]
+        self.assertIn('root.querySelectorAll("[data-photo-guided-answer-label]")', restore)
+        self.assertNotIn('querySelectorAll("input[type=\'checkbox\'], input[type=\'radio\']")', restore)
+        self.assertGreater(restore.rindex("manualOverrideToggle.checked"), restore.index("questionnaire.answers.forEach"))
+
+    def test_persona_reference_uses_the_simplified_guided_dialog(self) -> None:
+        self.assertIn("data-photo-reference-persona-configure", APP_JS)
+        self.assertIn("openAddDialog(-2)", APP_JS)
+        self.assertIn("const editingPersona = state.photoReferenceEditingIndex === -2", APP_JS)
+        self.assertIn('root.dataset.photoGuidedMode = personaMode ? "persona"', APP_JS)
+        self.assertIn("guidedPhotoReferencePersonaMetadata", APP_JS)
+
+    def test_guided_review_declares_and_uses_the_configured_main_model(self) -> None:
+        self.assertIn('state.overview?.providers?.LLM_PROVIDER_ID', APP_JS)
+        self.assertIn('审批将调用 WebUI“模型配置”中的主模型', APP_JS)
+        self.assertIn('postJson("/photo_reference/metadata/review"', APP_JS)
+        self.assertIn('questionnaire: guidedPhotoReferenceQuestionnaire(root)', APP_JS)
+        self.assertIn('compiled.review?.status === "approved"', APP_JS)
+        self.assertIn('主模型 ${compiled.review.provider_id', APP_JS)
+        review_start = PAGE_API.index("async def review_photo_reference_metadata")
+        review_end = PAGE_API.index("async def run_photo_reference_selection_trial", review_start)
+        review_endpoint = PAGE_API[review_start:review_end]
+        self.assertIn('getattr(self.plugin, "llm_provider_id", "")', review_endpoint)
+        self.assertIn('task="photo_reference_metadata_review"', review_endpoint)
+        self.assertIn('strict_provider=True', review_endpoint)
+        self.assertIn('必须是 WebUI“模型配置”中的主模型', review_endpoint)
+        self.assertNotIn("._task_provider(", review_endpoint)
+
+    def test_selection_trial_uses_the_configured_main_model_without_executing_tools(self) -> None:
+        trial_start = PAGE_API.index("async def _photo_reference_selection_trial_model_runner")
+        trial_end = PAGE_API.index("async def review_photo_reference_metadata", trial_start)
+        trial_runner = PAGE_API[trial_start:trial_end]
+        self.assertIn('getattr(self.plugin, "llm_provider_id", "")', trial_runner)
+        self.assertIn('getattr(self.plugin, "_llm_tool_call", None)', trial_runner)
+        self.assertIn('provider_id=provider_id', trial_runner)
+        self.assertIn('task="photo_reference_selection_trial"', trial_runner)
+        self.assertIn('timeout_key="LLM_PROVIDER_ID"', trial_runner)
+        self.assertIn('FunctionTool(', trial_runner)
+        self.assertIn('handler=None', trial_runner)
+        self.assertIn('tools=ToolSet([trial_tool])', trial_runner)
+        self.assertIn('WebUI“模型配置”中的主模型 plugin.llm_provider_id', trial_runner)
+        self.assertIn('不得改用任务/备用模型', trial_runner)
+        self.assertNotIn('._task_provider(', trial_runner)
+        trial_endpoint_start = PAGE_API.index("async def run_photo_reference_selection_trial")
+        trial_endpoint_end = PAGE_API.index("def _reference_asset_records", trial_endpoint_start)
+        trial_endpoint = PAGE_API[trial_endpoint_start:trial_endpoint_end]
+        self.assertIn('context_snapshot = await self._photo_reference_trial_context_snapshot', trial_endpoint)
+        self.assertIn('request_payload["ambient_context"] = context_snapshot', trial_endpoint)
+
+    def test_trial_uses_reviewed_metadata_instead_of_recompiling_one_answer(self) -> None:
+        trial_start = APP_JS.index("function guidedPhotoReferenceTrialCandidates")
+        trial_end = APP_JS.index("function applyGuidedPhotoReferenceDraft", trial_start)
+        trial_candidates = APP_JS[trial_start:trial_end]
+        self.assertIn("reviewedMetadata", trial_candidates)
+        self.assertNotIn('values("core_anchor")', trial_candidates)
+        self.assertIn("guidedPhotoReferenceTrialCandidates(root, compiled.metadata)", APP_JS)
+        self.assertIn('expected_reference_id: expectedReference?.id || ""', APP_JS)
+
+    def test_v1_metadata_requires_confirmation_for_unrecoverable_answers(self) -> None:
+        self.assertGreaterEqual(APP_JS.count('value: "needs_confirmation"'), 3)
+        self.assertIn('setValues("wardrobe_change", root.dataset.photoGuidedMode', APP_JS)
+        self.assertIn(': "needs_confirmation")', APP_JS)
+        self.assertIn('setValues("location_change", "needs_confirmation")', APP_JS)
+        self.assertIn('setValues("pose_change", "needs_confirmation")', APP_JS)
+
+    def test_guided_metadata_has_live_local_preview_and_desktop_comparison(self) -> None:
+        self.assertIn("const scheduleLocalPreview", APP_JS)
+        self.assertIn("reviewGuidedPhotoReference(root, { useModel: false })", APP_JS)
+        self.assertIn("use_model: useModel", APP_JS)
+        self.assertIn('data-photo-guided-active-tab="answers"', APP_JS)
+        self.assertIn('@media(min-width:900px)', APP_CSS)
+
+    def test_trial_defaults_to_current_user_persona_context_and_supports_expert_override(self) -> None:
+        self.assertIn('name="trial_context_mode"', APP_JS)
+        self.assertIn('user_id: state.selectedUserId || ""', APP_JS)
+        self.assertIn('context_mode: host.querySelector', APP_JS)
+        self.assertIn("function guidedPhotoReferenceManualOverride", APP_JS)
+        self.assertIn('name="manual_override_enabled"', APP_JS)
+        self.assertIn('"metadata_source": "manual_override" if manual_override else "guided_editor"', PHOTO_REFERENCE_METADATA)
+        restore_start = APP_JS.index("function applyGuidedPhotoReferenceDraft")
+        questionnaire_branch = APP_JS.index("if (Array.isArray(questionnaire?.answers))", restore_start)
+        override_restore = APP_JS.index("manualOverrideToggle.checked", restore_start)
+        self.assertGreater(override_restore, questionnaire_branch)
+        self.assertIn('root.querySelectorAll("[data-photo-guided-answer-label]")', APP_JS)
+
     def test_metadata_editor_assets_are_cache_busted(self) -> None:
-        self.assertIn('app.css?v=20260804-multi-persona-choice-v1', INDEX_HTML)
+        self.assertIn('app.css?v=20260804-reference-guided-dialog-v6', INDEX_HTML)
         self.assertIn('css/polish.css?v=20260804-expression-batch-review-v1', INDEX_HTML)
-        self.assertRegex(INDEX_HTML, r'<script src="\./app\.js\?v=[^" ]+"')
+        self.assertIn(
+            'app.js?v=20260805-reference-guided-approval-cache-v2',
+            INDEX_HTML,
+        )
 
 
 if __name__ == "__main__":

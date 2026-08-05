@@ -182,6 +182,12 @@ from .photo_reference_intent import (
     analyze_reference_intent,
     explicitly_excludes_reference_outfit,
 )
+from .photo_reference_selection import (
+    CandidateMatch,
+    SelectionResult,
+    parse_photo_reference_context_categories,
+    select_photo_reference,
+)
 from .photo_reference_plan import (
     PhotoReferencePlan,
     ReferenceFallback,
@@ -12966,9 +12972,19 @@ Output:
         continuity_key: str = "",
         wardrobe_intent: PhotoWardrobeIntent | None = None,
         trace_id: str = "",
-    ) -> dict[str, Any]:
-        if not bool(getattr(self, "enable_photo_reference_image", False)):
+        candidate_overrides: Any = None,
+        selection_provider_id: str = "",
+        selection_strict_provider: bool = False,
+        return_selection_result: bool = False,
+    ) -> dict[str, Any] | SelectionResult:
+        def empty_selection(reason: str) -> dict[str, Any] | SelectionResult:
+            if return_selection_result:
+                return SelectionResult(None, (), "none", reason)
             return {}
+
+        using_candidate_overrides = candidate_overrides is not None
+        if not using_candidate_overrides and not bool(getattr(self, "enable_photo_reference_image", False)):
+            return empty_selection("reference_feature_disabled")
         normalized_workflow = str(workflow_kind or "").strip().lower()
         portrait_workflow = normalized_workflow in {"selfie", "portrait", "自拍", "人像"}
         scoped_context = bool(requester_user_id) or bool(
@@ -12977,23 +12993,33 @@ Output:
                 ambient_context=ambient_context,
             )
         ) or bool(self._photo_reference_role_asset_candidates(request_text=request_text))
-        if not portrait_workflow and not scoped_context:
-            return {}
-        try:
-            candidates = await self._photo_reference_candidates_async(
-                allow_daily_outfit=allow_daily_outfit,
-                requester_user_id=requester_user_id,
-                request_text=request_text,
-                ambient_context=ambient_context,
-                scoped_only=not portrait_workflow,
-            )
-        except TypeError:
-            # Keep compatibility with lightweight test/integration adapters that
-            # still expose the original one-argument candidate loader.
-            candidates = await self._photo_reference_candidates_async(
-                allow_daily_outfit=allow_daily_outfit,
-            )
-        recent_candidate = self._recent_sent_photo_continuity_candidate(continuity_key)
+        if not portrait_workflow and not scoped_context and not using_candidate_overrides:
+            return empty_selection("workflow_does_not_use_reference")
+        if using_candidate_overrides:
+            candidates = []
+            for raw_candidate in candidate_overrides or ():
+                if not isinstance(raw_candidate, dict):
+                    continue
+                candidate = self._normalize_photo_reference_candidate_metadata(dict(raw_candidate))
+                if not candidate.get("path") and candidate.get("source"):
+                    candidate["path"] = candidate["source"]
+                candidates.append(candidate)
+        else:
+            try:
+                candidates = await self._photo_reference_candidates_async(
+                    allow_daily_outfit=allow_daily_outfit,
+                    requester_user_id=requester_user_id,
+                    request_text=request_text,
+                    ambient_context=ambient_context,
+                    scoped_only=not portrait_workflow,
+                )
+            except TypeError:
+                # Keep compatibility with lightweight test/integration adapters that
+                # still expose the original one-argument candidate loader.
+                candidates = await self._photo_reference_candidates_async(
+                    allow_daily_outfit=allow_daily_outfit,
+                )
+        recent_candidate = {} if using_candidate_overrides else self._recent_sent_photo_continuity_candidate(continuity_key)
         if recent_candidate:
             if all(
                 not self._photo_reference_paths_equal(item.get("path", ""), recent_candidate.get("path", ""))
@@ -13003,7 +13029,7 @@ Output:
             else:
                 recent_candidate = {}
         if not candidates:
-            return {}
+            return empty_selection("no_candidates")
         legacy_context = str(selection_context or "").strip()
         if legacy_context:
             looks_like_ambient_context = bool(
@@ -13035,6 +13061,68 @@ Output:
             )
         requested_category = wardrobe_intent.target_category or suggested_category
         excluded_categories = set(wardrobe_intent.excluded_categories)
+        request_scenes, request_times, request_excluded_scenes, request_excluded_times = (
+            parse_photo_reference_context_categories(request_text)
+        )
+        suggested_scenes, suggested_times, suggested_excluded_scenes, suggested_excluded_times = (
+            parse_photo_reference_context_categories(suggested_scene_preset)
+        )
+        ambient_scenes, ambient_times, ambient_excluded_scenes, ambient_excluded_times = (
+            parse_photo_reference_context_categories(ambient_context)
+        )
+        # Hard eligibility follows the strongest current signal. Historical schedule
+        # text remains a weak score/prompt hint and must never override this turn.
+        if request_scenes or request_excluded_scenes:
+            requested_scene_categories = request_scenes
+            excluded_scene_categories = request_excluded_scenes
+        elif suggested_scenes or suggested_excluded_scenes:
+            requested_scene_categories = suggested_scenes
+            excluded_scene_categories = suggested_excluded_scenes
+        else:
+            requested_scene_categories = ambient_scenes
+            excluded_scene_categories = ambient_excluded_scenes
+        if request_times or request_excluded_times:
+            requested_time_categories = request_times
+            excluded_time_categories = request_excluded_times
+        elif suggested_times or suggested_excluded_times:
+            requested_time_categories = suggested_times
+            excluded_time_categories = suggested_excluded_times
+        else:
+            requested_time_categories = ambient_times
+            excluded_time_categories = ambient_excluded_times
+
+        seen_candidate_ids: set[str] = set()
+        for index, item in enumerate(candidates, start=1):
+            base_id = _single_line(item.get("id"), 120) or f"candidate-{index}"
+            candidate_id = base_id
+            suffix = 2
+            while candidate_id in seen_candidate_ids:
+                candidate_id = f"{base_id}#{suffix}"
+                suffix += 1
+            item["id"] = candidate_id
+            seen_candidate_ids.add(candidate_id)
+
+        policy_result = select_photo_reference(
+            {
+                "request_text": request_text,
+                "outfit_category": requested_category,
+                "scene_categories": requested_scene_categories,
+                "time_categories": requested_time_categories,
+                "excluded_scene_categories": excluded_scene_categories,
+                "excluded_time_categories": excluded_time_categories,
+            },
+            candidates,
+        )
+        policy_matches = {item.candidate_id: item for item in policy_result.candidates}
+        candidate_policy_exclusions: dict[str, set[str]] = {}
+        eligible_candidates: list[dict[str, Any]] = []
+        for item in candidates:
+            item_id = str(item.get("id") or "")
+            reasons = set(policy_matches.get(item_id).excluded if item_id in policy_matches else ())
+            candidate_policy_exclusions[item_id] = reasons
+            if not reasons:
+                eligible_candidates.append(item)
+
         scored_candidates = [
             (
                 item,
@@ -13058,6 +13146,7 @@ Output:
             pair
             for pair in scored_candidates
             if pair[0].get("kind") != "recent_sent_photo"
+            and not candidate_policy_exclusions.get(str(pair[0].get("id") or ""))
             and responsible_outfit_category(pair[0]) not in excluded_categories
             and (
                 not requested_category
@@ -13071,11 +13160,11 @@ Output:
         fallback = max(normal_scored, key=lambda pair: pair[1])[0] if normal_scored else None
         selected = fallback
         selection_source = "rule_fallback"
-        selection_reason = "model_not_attempted"
+        selection_reason = "model_not_attempted" if eligible_candidates else "no_eligible_reference"
         model_reply = ""
+        provider_id = _single_line(selection_provider_id, 160)
         provider_selector = getattr(self, "_task_provider", None)
-        provider_id = ""
-        if callable(provider_selector):
+        if not provider_id and callable(provider_selector):
             provider_id = provider_selector(
                 getattr(self, "photo_prompt_provider_id", ""),
                 getattr(self, "fast_response_provider_id", ""),
@@ -13086,10 +13175,13 @@ Output:
         specialized_candidate = any(
             bool(item.get("outfit_lock_default"))
             or any(role in {"outfit", "scene", "continuity"} for role in (item.get("reference_roles") or []))
-            for item in candidates
+            for item in eligible_candidates
         )
-        needs_model_choice = len(candidates) > 1 or bool(recent_candidate) or specialized_candidate
+        needs_model_choice = len(eligible_candidates) > 1 or bool(recent_candidate) or specialized_candidate
+        model_attempted = False
+        model_selected_id = ""
         if (request_text or ambient_context or schedule_history_context) and needs_model_choice and callable(llm_call):
+            model_attempted = True
             selection_reason = "model_invalid_response"
             options = "\n".join(
                 f"{index}. id={item['id']}；角色={_single_line(item.get('role_name'), 80) or 'Bot/未指定'}；"
@@ -13097,13 +13189,17 @@ Output:
                 f"服装类别={_single_line(item.get('outfit_category'), 40) or 'none'}；"
                 f"场景类别={','.join(sorted(str(value) for value in (item.get('scene_categories') or []) if str(value).strip())) or 'none'}；"
                 f"时间类别={','.join(sorted(str(value) for value in (item.get('time_categories') or []) if str(value).strip())) or 'none'}；"
+                f"选用策略={_single_line(item.get('selection_eligibility'), 40) or 'matching_only'}；"
+                f"排除场景={','.join(sorted(str(value) for value in (item.get('excluded_scene_categories') or []) if str(value).strip())) or 'none'}；"
+                f"排除时间={','.join(sorted(str(value) for value in (item.get('excluded_time_categories') or []) if str(value).strip())) or 'none'}；"
                 f"默认锁服装={bool(item.get('outfit_lock_default'))}；注释={_single_line(item.get('note'), 360)}"
-                for index, item in enumerate(candidates, start=1)
+                for index, item in enumerate(eligible_candidates, start=1)
             )
             none_option = "\n0. 不使用这些候选参考图，按当前要求生成全新画面"
             prompt = f"""
 你在为角色生图选择一张人物参考图。结合最终画面需求中的日程、位置、当前场景和服装需求，按管理员给每张图的用途注释判断。
 优先选择用途更具体且与当前场景兼容的参考图；只有没有更具体的场景或服装参考时，才选择基础人物身份图。
+严格遵守候选的选用策略、排除场景与排除时间；条件不匹配时输出 0，不要为了使用参考图而曲解用户原话。
 明确处于家里、卧室、睡前或刚起床时，优先在适用的居家服/睡衣参考中选择；只有明确外出、通勤、上学、逛街或展示今日穿搭时才选今日穿搭。
 当前要求明确否定某类服装时，不得选择以该服装为职责的参考图；即使它是唯一候选，也应输出 0。普通换装或自定义衣服没有匹配参考时，可选身份图或输出 0，不要让旧衣服反向覆盖新要求。
 用户原始要求高于环境上下文；两者冲突时必须按用户原始要求选图，不能让日程或位置覆盖用户明确要求。
@@ -13130,7 +13226,14 @@ Output:
 {options}{none_option}
             """.strip()
             try:
-                raw = await llm_call(prompt, max_tokens=12, provider_id=provider_id or None, task="photo_reference_selection")
+                llm_kwargs = {
+                    "max_tokens": 12,
+                    "provider_id": provider_id or None,
+                    "task": "photo_reference_selection",
+                }
+                if selection_strict_provider:
+                    llm_kwargs["strict_provider"] = True
+                raw = await llm_call(prompt, **llm_kwargs)
                 model_reply = _single_line(raw, 80)
                 match = re.search(r"(?<!\d)(\d{1,2})(?!\d)", model_reply)
                 choice = int(match.group(1)) if match else -1
@@ -13138,8 +13241,9 @@ Output:
                     selected = None
                     selection_source = "model"
                     selection_reason = "fresh_image_requested"
-                elif match and 1 <= choice <= len(candidates):
-                    proposed = candidates[choice - 1]
+                elif match and 1 <= choice <= len(eligible_candidates):
+                    proposed = eligible_candidates[choice - 1]
+                    model_selected_id = str(proposed.get("id") or "")
                     proposed_category = responsible_outfit_category(proposed)
                     if proposed_category and proposed_category in excluded_categories:
                         selected = None
@@ -13211,6 +13315,35 @@ Output:
             _single_line(selected.get("note"), 160) if isinstance(selected, dict) else "-",
             len(candidates),
         )
+        def structured_exclusions(item: dict[str, Any]) -> tuple[str, ...]:
+            reasons = set(candidate_policy_exclusions.get(str(item.get("id") or ""), set()))
+            if responsible_outfit_category(item) in excluded_categories:
+                reasons.add("outfit")
+            return tuple(sorted(reasons))
+
+        structured_matches = tuple(
+            CandidateMatch(
+                candidate_id=str(item.get("id") or ""),
+                score=float(score),
+                rank=index,
+                matched=tuple(policy_matches.get(str(item.get("id") or "")).matched) if str(item.get("id") or "") in policy_matches else tuple(),
+                excluded=structured_exclusions(item),
+                reason="formal_model_selection" if selection_source == "model" else selection_reason,
+            )
+            for index, (item, score) in enumerate(
+                sorted(scored_candidates, key=lambda pair: (-pair[1], str(pair[0].get("id") or ""))),
+                start=1,
+            )
+        )
+        structured_selection = SelectionResult(
+            selected=selected if isinstance(selected, dict) else None,
+            candidates=structured_matches,
+            selection_source=selection_source,
+            selection_reason=selection_reason,
+            fallback_id=str(fallback.get("id") or "") if isinstance(fallback, dict) else "",
+            model_attempted=model_attempted,
+            model_selected_id=model_selected_id,
+        )
         self._append_photo_generation_trace_event(
             trace_id,
             "reference_candidates",
@@ -13225,6 +13358,10 @@ Output:
                         "outfit_lock_default": bool(item.get("outfit_lock_default")),
                         "scene_categories": list(item.get("scene_categories") or ()),
                         "time_categories": list(item.get("time_categories") or ()),
+                        "excluded_scene_categories": list(item.get("excluded_scene_categories") or ()),
+                        "excluded_time_categories": list(item.get("excluded_time_categories") or ()),
+                        "selection_eligibility": item.get("selection_eligibility") or "matching_only",
+                        "policy_exclusions": sorted(candidate_policy_exclusions.get(str(item.get("id") or ""), set())),
                         "metadata_source": item.get("metadata_source"),
                         "score": score,
                     }
@@ -13235,10 +13372,13 @@ Output:
                 "model_reply": model_reply,
                 "selection_source": selection_source,
                 "selection_reason": selection_reason,
+                "selection_result": structured_selection.to_dict(),
                 "schedule_history_context": _single_line(schedule_history_context, 800),
                 "schedule_history_used": bool(str(schedule_history_context or "").strip()),
             },
         )
+        if return_selection_result:
+            return structured_selection
         return self._normalize_photo_reference_candidate_metadata(selected) if isinstance(selected, dict) else {}
 
     async def _analyze_photo_reference_intent_async(
