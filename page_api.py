@@ -2217,10 +2217,10 @@ class PrivateCompanionPageApi(
         request_payload: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Capture a native tool call from the configured main model without execution."""
-        caller = getattr(getattr(self.plugin, "context", None), "llm_generate", None)
-        # 维护者注意：这里必须直接调用 AstrBot Context.llm_generate，并固定使用
-        # WebUI“模型配置”中的主模型 plugin.llm_provider_id。该 API 只返回 Function Calling，
-        # 不会执行 handler=None 的 pc_generate_photo 试跑工具，也不得改用任务/备用模型。
+        caller = getattr(self.plugin, "_llm_tool_call", None)
+        # 维护者注意：这里必须通过 TokenBudgetMixin._llm_tool_call 调用 AstrBot Function Calling，
+        # 并固定使用 WebUI“模型配置”中的主模型 plugin.llm_provider_id。该预算包装层不会执行
+        # handler=None 的 pc_generate_photo 试跑工具，也不得改用任务/备用模型。
         provider_id = self._single_line(getattr(self.plugin, "llm_provider_id", ""), 160)
         if not callable(caller) or not provider_id:
             return {"tool_name": "", "arguments": {}, "status": "model_unavailable"}
@@ -2259,11 +2259,13 @@ class PrivateCompanionPageApi(
                 handler=None,
             )
             response = await caller(
-                chat_provider_id=provider_id,
-                prompt=request_text,
+                request_text,
                 tools=ToolSet([trial_tool]),
                 max_tokens=320,
                 system_prompt=system_prompt,
+                provider_id=provider_id,
+                task="photo_reference_selection_trial",
+                timeout_key="LLM_PROVIDER_ID",
             )
         except Exception as exc:
             logger.info("[PrivateCompanionPage] 参考图试跑主模型工具判断失败: %s", exc)
@@ -2273,6 +2275,8 @@ class PrivateCompanionPageApi(
                 "status": "model_error",
                 "error": self._single_line(exc, 180),
             }
+        if response is None:
+            return {"tool_name": "", "arguments": {}, "status": "model_unavailable"}
         raw_names = getattr(response, "tools_call_name", None) or []
         raw_arguments = getattr(response, "tools_call_args", None) or []
         names = [raw_names] if isinstance(raw_names, str) else list(raw_names)
@@ -2428,7 +2432,7 @@ class PrivateCompanionPageApi(
         # 维护者注意：试跑中的正式选图也固定使用 WebUI 模型配置的主模型，
         # selection_strict_provider=True 禁止任务模型或备用模型替换本次判断。
         provider_id = self._single_line(getattr(self.plugin, "llm_provider_id", ""), 160)
-        if not callable(selector):
+        if not callable(selector) or not provider_id:
             return rule_selection
         kind = self._single_line(selection_request.get("kind") or "text2img", 24).lower()
         workflow_kind = "selfie" if kind == "sticker" else kind

@@ -21609,6 +21609,16 @@ textarea {
   gap: 4px;
 }
 
+.photo-reference-persona-controls {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.photo-reference-persona-controls > button {
+  justify-self: start;
+}
+
 .photo-reference-persona h3,
 .photo-reference-persona span,
 .photo-reference-persona small {

@@ -13,6 +13,7 @@ from quart import Quart
 
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
 from astrbot_plugin_private_companion.photo_reference_catalog import CATALOG_VERSION
+from astrbot_plugin_private_companion.photo_reference_selection import SelectionResult
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,15 +105,16 @@ class PhotoReferenceLibraryPageApiTests(unittest.IsolatedAsyncioTestCase):
             plugin = _PhotoReferencePagePlugin(Path(temp_dir))
             plugin.llm_provider_id = "webui-main-provider"
             captured: dict[str, object] = {}
-
-            async def llm_generate(**kwargs: object) -> SimpleNamespace:
+            async def llm_tool_call(prompt: str, **kwargs: object) -> SimpleNamespace:
+                captured["prompt"] = prompt
                 captured.update(kwargs)
                 return SimpleNamespace(
+                    completion_text="",
                     tools_call_name=["pc_generate_photo"],
                     tools_call_args=[{"kind": "selfie", "prompt": "卧室自拍", "scene_preset": "睡前"}],
                 )
 
-            plugin.context = SimpleNamespace(llm_generate=llm_generate)
+            plugin._llm_tool_call = llm_tool_call
             api = PrivateCompanionPageApi(plugin)
             result = await api._photo_reference_selection_trial_model_runner(
                 "给我拍一张",
@@ -122,11 +124,54 @@ class PhotoReferenceLibraryPageApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "captured")
         self.assertEqual(result["tool_name"], "pc_generate_photo")
         self.assertEqual(result["arguments"]["kind"], "selfie")
-        self.assertEqual(captured["chat_provider_id"], "webui-main-provider")
+        self.assertEqual(captured["provider_id"], "webui-main-provider")
         self.assertEqual(captured["prompt"], "给我拍一张")
         tools = captured["tools"]
         self.assertEqual([tool.name for tool in tools.tools], ["pc_generate_photo"])
         self.assertIsNone(tools.tools[0].handler)
+        self.assertEqual(captured["task"], "photo_reference_selection_trial")
+        self.assertEqual(captured["timeout_key"], "LLM_PROVIDER_ID")
+
+    async def test_selection_trial_reports_when_budget_wrapper_returns_no_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin = _PhotoReferencePagePlugin(Path(temp_dir))
+            plugin.llm_provider_id = "webui-main-provider"
+            calls = 0
+
+            async def llm_tool_call(*_args: object, **_kwargs: object) -> None:
+                nonlocal calls
+                calls += 1
+                return None
+
+            plugin._llm_tool_call = llm_tool_call
+            api = PrivateCompanionPageApi(plugin)
+            result = await api._photo_reference_selection_trial_model_runner("给我拍一张", {})
+
+        self.assertEqual(result["status"], "model_unavailable")
+        self.assertEqual(calls, 1)
+
+    async def test_selection_trial_selector_does_not_fall_back_without_main_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin = _PhotoReferencePagePlugin(Path(temp_dir))
+            plugin.llm_provider_id = ""
+            calls = 0
+
+            async def selector(*_args: object, **_kwargs: object) -> None:
+                nonlocal calls
+                calls += 1
+
+            plugin._select_photo_reference_candidate_async = selector
+            api = PrivateCompanionPageApi(plugin)
+            sentinel = SelectionResult(
+                selected=None,
+                candidates=(),
+                selection_source="none",
+                selection_reason="no_usable_reference",
+            )
+            result = await api._photo_reference_selection_trial_selector({}, (), sentinel)
+
+        self.assertIs(result, sentinel)
+        self.assertEqual(calls, 0)
 
     async def test_selection_trial_context_includes_persona_and_recent_conversation(self) -> None:
         class ConversationManager:
@@ -513,7 +558,7 @@ class PhotoReferenceLibraryPageUiTests(unittest.TestCase):
         self.assertIn('grid-template-columns: repeat(2, minmax(0, 1fr));', self.styles)
         self.assertIn('@media (max-width: 520px)', self.styles)
         self.assertIn('.photo-reference-manager[hidden]', self.styles)
-        self.assertIn('./app.css?v=20260804-reference-guided-dialog-v5', self.html)
+        self.assertIn('./app.css?v=20260804-reference-guided-dialog-v6', self.html)
         self.assertRegex(self.html, r'<script src="\./app\.js\?v=[^" ]+"')
 
     def test_structured_metadata_round_trip_keeps_explicit_false_lock(self) -> None:

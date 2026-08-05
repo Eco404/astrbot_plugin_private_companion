@@ -981,6 +981,131 @@ class TokenBudgetMixin:
         configured = _safe_float(overrides.get(provider_key), 0.0, 0.0)
         return min(600.0, configured) if configured >= 5.0 else None
 
+    async def _llm_tool_call(
+        self,
+        prompt: str,
+        *,
+        tools: Any,
+        max_tokens: int = 600,
+        provider_id: str | None = None,
+        task: str | None = None,
+        system_prompt: str | None = None,
+        timeout_key: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> Any | None:
+        """Call one exact provider with native tools under normal token controls."""
+        selected_provider = self._resolve_chat_provider_id(provider_id)
+        task_key = _single_line(task, 40) or self._classify_llm_prompt(prompt)
+        usage_prompt = "\n\n".join(
+            part for part in (str(system_prompt or "").strip(), str(prompt or "").strip()) if part
+        )
+        budget_exempt = self._is_llm_budget_exempt_task(task_key)
+        if not budget_exempt and self._daily_token_soft_limit_should_defer(task_key):
+            self._record_llm_budget_skip(
+                provider_id=selected_provider,
+                task=task_key,
+                prompt=usage_prompt,
+                error="daily_token_soft_limit_deferred",
+            )
+            return None
+        if not budget_exempt and self._llm_daily_budget_remaining() == 0:
+            self._record_llm_budget_skip(
+                provider_id=selected_provider,
+                task=task_key,
+                prompt=usage_prompt,
+            )
+            return None
+        if not selected_provider:
+            return None
+
+        started_at = time.time()
+        response = None
+        try:
+            kwargs: dict[str, Any] = {
+                "prompt": prompt,
+                "chat_provider_id": selected_provider,
+                "tools": tools,
+            }
+            if max_tokens and max_tokens > 0:
+                kwargs["max_tokens"] = max_tokens
+            if system_prompt:
+                kwargs["system_prompt"] = system_prompt
+            effective_timeout = self._model_timeout_seconds_for_call(
+                task=task_key,
+                provider_id=selected_provider,
+                timeout_key=str(timeout_key or task_key),
+                timeout_seconds=timeout_seconds,
+            )
+            request_call = self.context.llm_generate(**kwargs)
+            try:
+                response = (
+                    await asyncio.wait_for(request_call, timeout=effective_timeout)
+                    if effective_timeout is not None
+                    else await request_call
+                )
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError(
+                    f"模型任务 {task_key} 超过 {effective_timeout:.0f} 秒未返回"
+                ) from exc
+
+            completion = str(getattr(response, "completion_text", "") or "").strip()
+            response_role = _single_line(getattr(response, "role", ""), 20).lower()
+            semantic_provider_error = _looks_like_upstream_llm_error_response(completion)
+            if response_role == "err" or semantic_provider_error:
+                failure_code = (
+                    "provider_error_role"
+                    if response_role == "err"
+                    else "semantic_provider_error"
+                )
+                self._record_llm_usage(
+                    provider_id=selected_provider,
+                    task=task_key,
+                    prompt=usage_prompt,
+                    completion=completion,
+                    elapsed_ms=int((time.time() - started_at) * 1000),
+                    success=False,
+                    error=failure_code,
+                    resp=response,
+                    budget_exempt=budget_exempt,
+                )
+                return None
+            if response is None:
+                self._record_llm_usage(
+                    provider_id=selected_provider,
+                    task=task_key,
+                    prompt=usage_prompt,
+                    completion="",
+                    elapsed_ms=int((time.time() - started_at) * 1000),
+                    success=False,
+                    error="empty_response",
+                    budget_exempt=budget_exempt,
+                )
+                return None
+            self._record_llm_usage(
+                provider_id=selected_provider,
+                task=task_key,
+                prompt=usage_prompt,
+                completion=completion,
+                elapsed_ms=int((time.time() - started_at) * 1000),
+                success=True,
+                resp=response,
+                budget_exempt=budget_exempt,
+            )
+            return response
+        except Exception as exc:
+            self._record_llm_usage(
+                provider_id=selected_provider,
+                task=task_key,
+                prompt=usage_prompt,
+                completion="",
+                elapsed_ms=int((time.time() - started_at) * 1000),
+                success=False,
+                error=str(exc),
+                resp=response,
+                budget_exempt=budget_exempt,
+            )
+            raise
+
     async def _llm_call(
         self,
         prompt: str,

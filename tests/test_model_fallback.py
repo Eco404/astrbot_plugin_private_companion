@@ -19,8 +19,10 @@ class _FallbackContext:
     def __init__(self, responses: dict[str, object]) -> None:
         self.responses = responses
         self.calls: list[str] = []
+        self.kwargs: list[dict] = []
 
     async def llm_generate(self, **kwargs):
+        self.kwargs.append(dict(kwargs))
         provider_id = str(kwargs.get("chat_provider_id") or "")
         self.calls.append(provider_id)
         result = self.responses.get(provider_id)
@@ -58,6 +60,45 @@ class _FallbackHarness(TokenBudgetMixin):
 
 
 class ModelFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_call_uses_the_budgeted_primary_provider_path(self) -> None:
+        response = SimpleNamespace(
+            role="assistant",
+            completion_text="",
+            tools_call_name=["pc_generate_photo"],
+            tools_call_args=[{"kind": "selfie", "prompt": "portrait"}],
+        )
+        harness = _FallbackHarness({"primary": response})
+
+        result = await harness._llm_tool_call(
+            "take a photo",
+            tools="trial-tools",
+            provider_id="primary",
+            task="photo_reference_selection_trial",
+            timeout_key="LLM_PROVIDER_ID",
+        )
+
+        self.assertIs(result, response)
+        self.assertEqual(harness.context.calls, ["primary"])
+        self.assertEqual(harness.context.kwargs[0]["tools"], "trial-tools")
+        self.assertTrue(harness.usage[0]["success"])
+
+    async def test_tool_call_stops_before_provider_when_daily_budget_is_exhausted(self) -> None:
+        harness = _FallbackHarness({"primary": "unused"})
+        skips: list[dict] = []
+        harness._llm_daily_budget_remaining = lambda: 0
+        harness._record_llm_budget_skip = lambda **kwargs: skips.append(kwargs)
+
+        result = await harness._llm_tool_call(
+            "take a photo",
+            tools="trial-tools",
+            provider_id="primary",
+            task="photo_reference_selection_trial",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(harness.context.calls, [])
+        self.assertEqual(skips[0]["provider_id"], "primary")
+
     async def test_primary_failure_uses_card_fallback_once(self) -> None:
         harness = _FallbackHarness({"primary": RuntimeError("primary down"), "backup": "ok"})
         harness.model_fallback_overrides = {"DAILY_PLAN_PROVIDER_ID": "backup"}

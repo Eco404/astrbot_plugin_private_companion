@@ -202,6 +202,44 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
         ):
             self.assertGreaterEqual(APP_JS.count(repeated_identity_answer), 2)
 
+    def test_guided_questions_adapt_from_four_core_questions_to_at_most_eight(self) -> None:
+        self.assertIn("function updateGuidedPhotoReferenceQuestionVisibility", APP_JS)
+        self.assertIn('const coreQuestionIds = new Set([', APP_JS)
+        for question_id in (
+            "core_anchor",
+            "priority_conditions",
+            "exclusion_conditions",
+            "fallback_policy",
+        ):
+            self.assertIn(f'"{question_id}"', APP_JS)
+        self.assertIn('questionRow.hidden = !visibleQuestionIds.has(questionId)', APP_JS)
+        self.assertIn('data-photo-guided-question="core_anchor"', APP_JS)
+        self.assertIn('data-photo-guided-question="outfit_rule"', APP_JS)
+        self.assertIn('updateGuidedPhotoReferenceQuestionVisibility(root)', APP_JS)
+
+    def test_editing_passes_saved_metadata_to_every_review_path(self) -> None:
+        self.assertIn("function guidedPhotoReferenceSavedMetadata", APP_JS)
+        self.assertIn("state.photoReferenceEditingIndex", APP_JS)
+        self.assertGreaterEqual(
+            APP_JS.count("saved: guidedPhotoReferenceSavedMetadata()"),
+            4,
+        )
+
+    def test_restoring_questionnaire_does_not_clear_expert_override(self) -> None:
+        restore_start = APP_JS.index("function applyGuidedPhotoReferenceDraft")
+        restore_end = APP_JS.index("function guidedPhotoReferenceChoiceGroup", restore_start)
+        restore = APP_JS[restore_start:restore_end]
+        self.assertIn('root.querySelectorAll("[data-photo-guided-answer-label]")', restore)
+        self.assertNotIn('querySelectorAll("input[type=\'checkbox\'], input[type=\'radio\']")', restore)
+        self.assertGreater(restore.rindex("manualOverrideToggle.checked"), restore.index("questionnaire.answers.forEach"))
+
+    def test_persona_reference_uses_the_simplified_guided_dialog(self) -> None:
+        self.assertIn("data-photo-reference-persona-configure", APP_JS)
+        self.assertIn("openAddDialog(-2)", APP_JS)
+        self.assertIn("const editingPersona = state.photoReferenceEditingIndex === -2", APP_JS)
+        self.assertIn('root.dataset.photoGuidedMode = personaMode ? "persona"', APP_JS)
+        self.assertIn("guidedPhotoReferencePersonaMetadata", APP_JS)
+
     def test_guided_review_declares_and_uses_the_configured_main_model(self) -> None:
         self.assertIn('state.overview?.providers?.LLM_PROVIDER_ID', APP_JS)
         self.assertIn('审批将调用 WebUI“模型配置”中的主模型', APP_JS)
@@ -223,8 +261,10 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
         trial_end = PAGE_API.index("async def review_photo_reference_metadata", trial_start)
         trial_runner = PAGE_API[trial_start:trial_end]
         self.assertIn('getattr(self.plugin, "llm_provider_id", "")', trial_runner)
-        self.assertIn('getattr(self.plugin, "context", None)', trial_runner)
-        self.assertIn('chat_provider_id=provider_id', trial_runner)
+        self.assertIn('getattr(self.plugin, "_llm_tool_call", None)', trial_runner)
+        self.assertIn('provider_id=provider_id', trial_runner)
+        self.assertIn('task="photo_reference_selection_trial"', trial_runner)
+        self.assertIn('timeout_key="LLM_PROVIDER_ID"', trial_runner)
         self.assertIn('FunctionTool(', trial_runner)
         self.assertIn('handler=None', trial_runner)
         self.assertIn('tools=ToolSet([trial_tool])', trial_runner)
@@ -248,7 +288,8 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
 
     def test_v1_metadata_requires_confirmation_for_unrecoverable_answers(self) -> None:
         self.assertGreaterEqual(APP_JS.count('value: "needs_confirmation"'), 3)
-        self.assertIn('setValues("wardrobe_change", "needs_confirmation")', APP_JS)
+        self.assertIn('setValues("wardrobe_change", root.dataset.photoGuidedMode', APP_JS)
+        self.assertIn(': "needs_confirmation")', APP_JS)
         self.assertIn('setValues("location_change", "needs_confirmation")', APP_JS)
         self.assertIn('setValues("pose_change", "needs_confirmation")', APP_JS)
 
@@ -268,12 +309,13 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
         restore_start = APP_JS.index("function applyGuidedPhotoReferenceDraft")
         questionnaire_branch = APP_JS.index("if (Array.isArray(questionnaire?.answers))", restore_start)
         override_restore = APP_JS.index("manualOverrideToggle.checked", restore_start)
-        self.assertLess(override_restore, questionnaire_branch)
+        self.assertGreater(override_restore, questionnaire_branch)
+        self.assertIn('root.querySelectorAll("[data-photo-guided-answer-label]")', APP_JS)
 
     def test_metadata_editor_assets_are_cache_busted(self) -> None:
-        self.assertIn('app.css?v=20260804-reference-guided-dialog-v5', INDEX_HTML)
+        self.assertIn('app.css?v=20260804-reference-guided-dialog-v6', INDEX_HTML)
         self.assertIn('css/polish.css?v=20260804-expression-batch-review-v1', INDEX_HTML)
-        self.assertIn('app.js?v=20260804-reference-guided-dialog-v5', INDEX_HTML)
+        self.assertIn('app.js?v=20260804-reference-guided-dialog-v6', INDEX_HTML)
 
 
 if __name__ == "__main__":
