@@ -110,6 +110,7 @@ from .companion_interaction_expression import (
     current_interaction_projection,
 )
 from .emotion_event_ledger import record_recent_emotion_event
+from .interaction_dynamics import project_interaction_dynamics, settle_interaction_dynamics
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -318,7 +319,13 @@ class UserMemoryMixin:
             if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
             else None
         )
-        stage = relationship_stage_for_score(score, policy)["phase"]
+        stage_projection = relationship_stage_for_score(
+            score,
+            policy,
+            previous_stage_key=user.get("relationship_phase_key", ""),
+        )
+        stage = stage_projection["phase"]
+        user["relationship_phase_key"] = stage.get("key", "acquaintance")
         stage_key = str(stage.get("key") or "acquaintance")
         if stage_key in {"deeply_distant", "strongly_distant", "distant"}:
             level = "陌生"
@@ -5625,7 +5632,7 @@ Local classifier result:
                 "updated_at": now,
             }
 
-        if existing.get("manual_override") and (
+        if not contact_active and existing.get("manual_override") and (
             not existing.get("expires_at") or _safe_float(existing.get("expires_at"), 0) > now
         ):
             event_recorder = getattr(self, "_record_interaction_emotion_event", None)
@@ -5691,6 +5698,34 @@ Local classifier result:
             user["current_interaction"] = existing
             return
 
+        dynamics: dict[str, Any] = {}
+        dynamics_kind = emotion_event if emotion_event != "neutral" else inbound_intent
+        prior_expires_at = _safe_float(existing.get("expires_at"), 0)
+        if not contact_active and dynamics_kind in {"hurt", "apology", "comfort", "praise", "intimacy", "play"}:
+            dynamics = settle_interaction_dynamics(
+                existing,
+                requested_band=band,
+                event_kind=dynamics_kind,
+                intensity=intensity or pressure * 20,
+                now=now,
+            )
+            if dynamics:
+                band = str(dynamics.get("expression_band") or band)
+                hard_expires_at = expires_at
+                try:
+                    negative_dynamics = float(dynamics.get("polarity") or 0) < 0
+                except (TypeError, ValueError):
+                    negative_dynamics = False
+                if negative_dynamics and prior_expires_at > now:
+                    hard_expires_at = min(hard_expires_at, prior_expires_at) if hard_expires_at > 0 else prior_expires_at
+                dynamic_expires_at = _safe_float(dynamics.get("expires_at"), hard_expires_at)
+                if hard_expires_at > 0:
+                    dynamics["hard_expires_at"] = hard_expires_at
+                    dynamics["expires_at"] = min(dynamic_expires_at, hard_expires_at)
+                    expires_at = hard_expires_at
+                else:
+                    expires_at = dynamic_expires_at
+
         event_recorder = getattr(self, "_record_interaction_emotion_event", None)
         emotion_event_record = event_recorder(
             user,
@@ -5700,17 +5735,20 @@ Local classifier result:
             status="applied",
             expires_at=expires_at,
         ) if callable(event_recorder) else None
+        interaction_payload = {
+            "expression_band": band,
+            "source": "automatic",
+            "reason": reason_code,
+            "updated_at": now,
+            "expires_at": expires_at,
+            "manual_override": False,
+            "last_event_id": (emotion_event_record or {}).get("event_id", ""),
+            "trace_id": (emotion_event_record or {}).get("trace_id", ""),
+        }
+        if dynamics:
+            interaction_payload.update(dynamics)
         user["current_interaction"] = current_interaction_projection(
-            {
-                "expression_band": band,
-                "source": "automatic",
-                "reason": reason_code,
-                "updated_at": now,
-                "expires_at": expires_at,
-                "manual_override": False,
-                "last_event_id": (emotion_event_record or {}).get("event_id", ""),
-                "trace_id": (emotion_event_record or {}).get("trace_id", ""),
-            },
+            interaction_payload,
             relationship_role=role,
             relationship_mode=relationship_mode,
             relationship_score=user.get("relationship_score"),
@@ -7538,7 +7576,13 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                 if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
                 else None
             )
-            stage = relationship_stage_for_score(user.get("relationship_score", 0), policy)["phase"]
+            stage_projection = relationship_stage_for_score(
+                user.get("relationship_score", 0),
+                policy,
+                previous_stage_key=user.get("relationship_phase_key", ""),
+            )
+            stage = stage_projection["phase"]
+            user["relationship_phase_key"] = stage.get("key", "acquaintance")
             relationship_baseline = {
                 "stage_key": stage.get("key"),
                 "tone": stage.get("tone"),

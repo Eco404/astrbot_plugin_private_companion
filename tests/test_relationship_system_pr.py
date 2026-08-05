@@ -17,6 +17,7 @@ from companion_interaction_expression import (
     expression_decision_prompt,
     normalize_normal_interaction_band_cap,
 )
+from interaction_dynamics import settle_interaction_dynamics
 from relationship_ledger import (
     apply_natural_relationship_decay,
     apply_relationship_event,
@@ -93,6 +94,7 @@ SETTLE_INTERACTION = _class_method(
         "Any": Any,
         "current_interaction_projection": current_interaction_projection,
         "logger": _Logger(),
+        "settle_interaction_dynamics": settle_interaction_dynamics,
         "_now_ts": lambda: NOW,
         "_safe_float": _safe_float,
         "_safe_int": _safe_int,

@@ -1640,7 +1640,12 @@ class MemoryCompanionAdapterMixin:
             if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
             else None
         )
-        projection = relationship_projection_for_bridge(user.get("relationship_score", 0), policy)
+        projection = relationship_projection_for_bridge(
+            user.get("relationship_score", 0),
+            policy,
+            previous_stage_key=user.get("relationship_phase_key", ""),
+        )
+        user["relationship_phase_key"] = projection.get("phase_key", "acquaintance")
         role_getter = getattr(self, "_private_user_role", None)
         try:
             role = role_getter(user, user_id) if callable(role_getter) else str(user.get("relationship_role") or "friend")

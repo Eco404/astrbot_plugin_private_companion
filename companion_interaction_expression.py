@@ -13,6 +13,11 @@ from enum import Enum
 import re
 from typing import Any, Mapping
 
+try:
+    from .interaction_dynamics import project_interaction_dynamics
+except ImportError:  # pragma: no cover - direct module import in lightweight tests
+    from interaction_dynamics import project_interaction_dynamics
+
 
 EXPRESSION_CONTRACT_VERSION = "companion_interaction_expression.v1"
 CONTENT_TIERS = ("normal", "flirt", "adult")
@@ -612,6 +617,16 @@ def current_interaction_projection(
 ) -> dict[str, Any]:
     """Normalize persisted and legacy interaction state for runtime/page use."""
     raw = dict(value) if isinstance(value, Mapping) else {}
+    current_ts = _bounded_timestamp(now)
+    hard_expires_at = _bounded_timestamp(raw.get("hard_expires_at") or raw.get("expires_at"))
+    dynamics = project_interaction_dynamics(raw, now=current_ts) if current_ts else {}
+    if dynamics:
+        if hard_expires_at:
+            dynamics["expires_at"] = min(
+                _bounded_timestamp(dynamics.get("expires_at")) or hard_expires_at,
+                hard_expires_at,
+            )
+        raw.update(dynamics)
     band = _band_from_interaction(raw) or ExpressionBand.RELAXED
     role = _text(relationship_role)
     score = _bounded_int(raw.get("relationship_score", relationship_score), 0, -1200, 1200)
@@ -628,15 +643,15 @@ def current_interaction_projection(
         band = normal_cap_band
         reason_codes.append("normal_interaction_band_cap_applied")
     expires_at = _bounded_timestamp(raw.get("expires_at"))
-    current_ts = _bounded_timestamp(now)
     manual = bool(raw.get("manual_override") or _text(raw.get("source")) == "manual")
-    if expires_at and current_ts and current_ts >= expires_at:
+    dynamics_hard_expired = bool(dynamics and hard_expires_at and current_ts and current_ts >= hard_expires_at)
+    if (not dynamics or dynamics_hard_expired) and expires_at and current_ts and current_ts >= expires_at:
         band = ExpressionBand.RELAXED
         manual = False
         reason_codes.append("interaction_expired")
     source = "manual" if manual else _text(raw.get("source")) or "automatic"
     reason = str(raw.get("reason") or raw.get("reason_code") or "").replace("\r", " ").replace("\n", " ")[:120]
-    return {
+    projection = {
         "expression_band": band.value,
         "label": EXPRESSION_BAND_LABELS[band.value],
         "source": source,
@@ -651,6 +666,19 @@ def current_interaction_projection(
         "last_event_id": _bounded_text(raw.get("last_event_id"), 96),
         "trace_id": _bounded_text(raw.get("trace_id"), 96),
     }
+    if dynamics:
+        projection.update({
+            "dynamics_version": dynamics["dynamics_version"],
+            "load": dynamics["load"],
+            "peak_intensity": dynamics["peak_intensity"],
+            "decay_started_at": dynamics["decay_started_at"],
+            "half_life": dynamics["half_life"],
+            "recovery_band": dynamics["recovery_band"],
+            "projection_revision": dynamics["projection_revision"],
+            "polarity": dynamics["polarity"],
+            "base_band": dynamics["base_band"],
+        })
+    return projection
 
 
 def expression_decision_prompt(value: ExpressionDecision | Mapping[str, Any]) -> str:

@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from companion_interaction_expression import allowed_expression_bands, current_interaction_projection  # noqa: E402
+from interaction_dynamics import settle_interaction_dynamics  # noqa: E402
 from relationship_ledger import (  # noqa: E402
     is_owner_exclusive,
     normalize_relationship_mode,
@@ -109,6 +110,7 @@ def _load_interaction_settler() -> Any:
         "current_interaction_projection": current_interaction_projection,
         "deepcopy": copy.deepcopy,
         "logger": _Logger(),
+        "settle_interaction_dynamics": settle_interaction_dynamics,
         "_now_ts": time.time,
         "_safe_float": _safe_float,
         "_safe_int": _safe_int,
