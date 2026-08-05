@@ -106,6 +106,7 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _normalize_outbound_punctuation_flow, _normalize_photo_subject_owner, _now_ts, _path_text, _photo_subject_owner_prompt_label, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
+from .affect_modulation import compose_affect_modulation
 from .daily_state_tick import DailyStateTickMixin
 from .memo_notes import memo_note_due_state, memo_note_sort_key, normalize_memo_note
 from .planning import (
@@ -8663,6 +8664,7 @@ class DailyStateMixin(DailyStateTickMixin):
             "energy": energy,
             "note": note,
             "conditions": active,
+            "affect_modulation": compose_affect_modulation(active, now=composed_at),
         }
         if override_active:
             result["location_override_ts"] = existing_override_ts

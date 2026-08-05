@@ -17,6 +17,10 @@ try:
     from .interaction_dynamics import project_interaction_dynamics
 except ImportError:  # pragma: no cover - direct module import in lightweight tests
     from interaction_dynamics import project_interaction_dynamics
+try:
+    from .affect_modulation_contract import normalize_affect_modulation
+except ImportError:  # pragma: no cover
+    from affect_modulation_contract import normalize_affect_modulation
 
 
 EXPRESSION_CONTRACT_VERSION = "companion_interaction_expression.v1"
@@ -98,6 +102,7 @@ class ExpressionDecision:
     proactive_target: int
     proactive_cooldown_until: float
     tts_style: str
+    affect_modulation: Mapping[str, Any]
     allowed_behaviors: tuple[str, ...]
     safety_mode: str
     blocker: str | None
@@ -520,6 +525,24 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
         warmth = min(100, warmth + 5)
         reasons.append("up_mood_expression_lift")
 
+    modulation = normalize_affect_modulation(bot_state.get("affect_modulation"))
+    if modulation["confidence"] > 0:
+        if modulation["valence"] <= -0.35:
+            warmth = max(0, warmth - 3)
+            if tone not in {"reserved", "careful"}:
+                tone = "gentle"
+        elif modulation["valence"] >= 0.35 and band not in {ExpressionBand.AVOIDANT, ExpressionBand.HURT}:
+            warmth = min(100, warmth + 3)
+        if modulation["arousal"] <= 0.2:
+            tts_style = "soft"
+        elif modulation["arousal"] >= 0.7 and not low_energy and not down_mood and band not in {ExpressionBand.AVOIDANT, ExpressionBand.HURT}:
+            tts_style = "bright"
+        if modulation["vulnerability"] >= 0.65:
+            followup = False
+            if tone != "reserved":
+                tone = "careful"
+        reasons.append("affect_modulation_applied")
+
     schedule = _mapping(source.get("schedule"))
     candidate = _mapping(source.get("proactive_candidate"))
     budget = _candidate_budget(candidate)
@@ -593,6 +616,7 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
         proactive_target=stage_target,
         proactive_cooldown_until=proactive_cooldown_until,
         tts_style=tts_style,
+        affect_modulation=modulation,
         allowed_behaviors=behaviors,
         safety_mode="contact_boundary_passive" if contact_boundary else "normal",
         blocker=None,
@@ -741,6 +765,7 @@ def _blocked_decision(reason: str, blocker: str, inherited_reasons: list[str]) -
         proactive_target=0,
         proactive_cooldown_until=0.0,
         tts_style="none",
+        affect_modulation=normalize_affect_modulation({}),
         allowed_behaviors=(),
         safety_mode=reason,
         blocker=blocker,
