@@ -7764,6 +7764,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "兼容": "openai",
             "兼容模式": "openai",
             "external": "openai",
+            "openrouter": "openrouter",
+            "open-router": "openrouter",
+            "open_router": "openrouter",
+            "openrouter.ai": "openrouter",
             "agnes": "agnes",
             "agnes-ai": "agnes",
             "agnes_ai": "agnes",
@@ -7811,7 +7815,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "海螺": "minimax",
             "海螺ai": "minimax",
         }
-        return aliases.get(text, text if text in {"auto", "openai", "agnes", "bailian", "modelscope", "doubao", "gemini", "sensenova", "minimax"} else "auto")
+        return aliases.get(text, text if text in {"auto", "openai", "openrouter", "agnes", "bailian", "modelscope", "doubao", "gemini", "sensenova", "minimax"} else "auto")
 
     @staticmethod
     def _normalize_external_image_endpoint_enabled(value: Any, default: bool = True) -> bool:
@@ -7907,6 +7911,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         }
         base_lower = str(endpoint.get("base_url") or "").lower()
         model_lower = str(endpoint.get("model") or "").lower()
+        parsed_base = urlparse(base_lower if "://" in base_lower else f"https://{base_lower}")
+        base_host = str(parsed_base.hostname or "").strip().lower()
+        if endpoint["platform"] in {"auto", "openai", "openrouter"} and (
+            base_host == "openrouter.ai" or base_host.endswith(".openrouter.ai")
+        ):
+            endpoint["platform"] = "openrouter"
         if endpoint["platform"] in {"auto", "openai"} and (
             "apihub.agnes-ai.com" in base_lower or model_lower.startswith("agnes-image-")
         ):

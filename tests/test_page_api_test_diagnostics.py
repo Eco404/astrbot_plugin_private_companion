@@ -69,6 +69,22 @@ class PageApiTestDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sanitized["diagnostic_entries"])
         self.assertEqual(sanitized["steps"][0]["elapsed_ms"], 0)
 
+    def test_image_api_404_is_classified_as_endpoint_mismatch(self) -> None:
+        for message in (
+            "HTTP 404: connection reached the service but the route was not found",
+            "未找到生图接口",
+            "端点不匹配：请核对请求 URL",
+        ):
+            with self.subTest(message=message):
+                result = self.api._classify_test_failure(
+                    "image_api_endpoint",
+                    {"ok": False, "error": message},
+                )
+                self.assertEqual(result["error_code"], "endpoint_mismatch")
+                self.assertEqual(result["error_category"], "端点不匹配")
+                self.assertFalse(result["retryable"])
+                self.assertIn("请求 URL", result["suggestion"])
+
     def test_legacy_history_gets_repeatable_request_id_and_diagnostics(self) -> None:
         data = {
             "users": {},

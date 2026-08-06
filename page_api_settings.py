@@ -576,6 +576,10 @@ class PageSettingNormalizerMixin:
             aliases = {
                 "openai兼容": "openai",
                 "openai-compatible": "openai",
+                "openrouter": "openrouter",
+                "open-router": "openrouter",
+                "open_router": "openrouter",
+                "openrouter.ai": "openrouter",
                 "agnes": "agnes",
                 "agnes-ai": "agnes",
                 "agnes_ai": "agnes",
@@ -609,7 +613,7 @@ class PageSettingNormalizerMixin:
                 "海螺ai": "minimax",
             }
             mode = aliases.get(mode, mode)
-            return mode if mode in {"auto", "openai", "agnes", "sensenova", "bailian", "modelscope", "doubao", "gemini", "minimax"} else "auto"
+            return mode if mode in {"auto", "openai", "openrouter", "agnes", "sensenova", "bailian", "modelscope", "doubao", "gemini", "minimax"} else "auto"
         return _SETTING_UNHANDLED
 
     def _normalize_page_delivery_setting(self, key: str, value: Any) -> Any:

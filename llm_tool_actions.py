@@ -3020,8 +3020,29 @@ class LlmToolActionsMixin:
                     {"status": "error", "message": f"参考图解析失败：{_single_line(exc, 160)}"},
                     ensure_ascii=False,
                 )
+        prompt_format_mode = ""
+        prompt_format_getter = getattr(self, "_photo_generation_prompt_format_mode", None)
+        if callable(prompt_format_getter):
+            try:
+                prompt_format_mode = (
+                    _single_line(prompt_format_getter(), 40).lower() or "traditional"
+                )
+            except Exception as exc:
+                logger.debug(
+                    "[PrivateCompanion] tool 生图读取提示词格式失败，保留原始提示词: %s",
+                    _single_line(exc, 160),
+                )
+                prompt_format_mode = "traditional"
         prompt_builder = getattr(self, "_build_natural_language_photo_prompt", None)
-        if callable(prompt_builder):
+        use_natural_prompt_builder = not callable(prompt_format_getter) or prompt_format_mode in {
+            "natural_language",
+            "natural",
+            "prose",
+            "description",
+            "自然语言",
+            "自然语言描述",
+        }
+        if callable(prompt_builder) and use_natural_prompt_builder:
             prompt_sections = prompt_builder(
                 prompt=content,
                 kind="selfie" if intent_kind == "sticker" else intent_kind,
@@ -3068,6 +3089,8 @@ class LlmToolActionsMixin:
             "workflow_default_scene_preset": workflow_default_preset,
             "prompt_sections": prompt_sections,
         }
+        if callable(prompt_format_getter):
+            generation_kwargs["prompt_format"] = prompt_format_mode
         try:
             generation_output = await asyncio.wait_for(
                 structured_generator(**generation_kwargs)

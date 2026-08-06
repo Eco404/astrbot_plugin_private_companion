@@ -14022,6 +14022,11 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             )
         except Exception:
             platform = ""
+        if platform == "openrouter":
+            # OpenRouter exposes provider capacity as ``input_references``;
+            # use its common documented ceiling while preserving prompt-side
+            # projection when a request carries more assets.
+            return min(requested, 3)
         if platform != "openai" or not self._external_image_model_supports_multi_reference(
             endpoint.get("model")
         ):
@@ -14755,6 +14760,18 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 pass
         return "", "候选不可用"
 
+    @staticmethod
+    def _external_image_api_is_openrouter_url(value: Any) -> bool:
+        raw = str(value or "").strip()
+        if not raw:
+            return False
+        try:
+            parsed = urlparse(raw if "://" in raw else f"https://{raw.lstrip('/')}")
+        except Exception:
+            return False
+        host = str(parsed.hostname or "").strip().lower()
+        return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
     def _resolved_external_image_api_platform_for_values(
         self,
         *,
@@ -14766,6 +14783,11 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         platform = normalizer(configured) if callable(normalizer) else str(configured or "auto").strip().lower()
         raw_base = str(base_url or "").strip().lower()
         model = str(model_name or "").strip().lower()
+        if platform == "openrouter" or (
+            platform in {"auto", "openai"}
+            and self._external_image_api_is_openrouter_url(raw_base)
+        ):
+            return "openrouter"
         if platform in {"auto", "openai"} and (
             "apihub.agnes-ai.com" in raw_base or model.startswith("agnes-image-")
         ):
@@ -14780,7 +14802,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             platform == "auto" and model in {"image-01", "image-01-live"}
         ):
             return "minimax"
-        if platform in {"openai", "agnes", "bailian", "modelscope", "doubao", "gemini", "sensenova", "minimax"}:
+        if platform in {"openai", "openrouter", "agnes", "bailian", "modelscope", "doubao", "gemini", "sensenova", "minimax"}:
             return platform
         base = self._normalized_external_image_api_base_url(raw_base, platform=platform).lower()
         if "apihub.agnes-ai.com" in base or model.startswith("agnes-image-"):
@@ -14823,6 +14845,14 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         parsed = urlparse(raw)
         host = (parsed.netloc or "").strip().lower()
         path = (parsed.path or "").strip()
+
+        if resolved_platform == "openrouter":
+            return re.sub(
+                r"/images(?:/(?:generations|edits))?/?$",
+                "",
+                raw,
+                flags=re.I,
+            ).rstrip("/")
 
         if resolved_platform == "agnes" or host == "apihub.agnes-ai.com":
             scheme = parsed.scheme or "https"
@@ -14943,7 +14973,10 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             task_root = re.sub(r"/tasks(?:/.*)?$", "", raw, flags=re.I)
             if task_root != raw:
                 return task_root.rstrip("/")
-        elif resolved_platform == "openai":
+        elif resolved_platform == "openai" and (
+            host in {"dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com"}
+            or host.endswith(".maas.aliyuncs.com")
+        ):
             if re.search(r"/api/v1(?:/services/aigc/.*)?$", raw, flags=re.I):
                 root = re.sub(r"/api/v1(?:/services/aigc/.*)?$", "", raw, flags=re.I).rstrip("/")
                 return f"{root}/compatible-mode/v1"
@@ -14962,6 +14995,8 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             return "Gemini"
         if resolved == "openai":
             return "OpenAI 兼容"
+        if resolved == "openrouter":
+            return "OpenRouter"
         if resolved == "agnes":
             return "Agnes Image"
         if resolved == "sensenova":
@@ -14980,6 +15015,8 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         if platform == "minimax":
             return f"{base}/image_generation"
         endpoint_type = str(endpoint_type or "generations").strip().lower()
+        if platform == "openrouter" and endpoint_type == "edits":
+            return base if base.endswith("/images") else f"{base}/images"
         target = "edits" if endpoint_type == "edits" else "generations"
         if base.endswith(f"/images/{target}"):
             return base
@@ -14998,6 +15035,8 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         ).rstrip("/")
         endpoint_type = str(endpoint_type or "generations").strip().lower()
         if platform == "minimax":
+            return [primary]
+        if platform == "openrouter" and endpoint_type == "edits":
             return [primary]
         target = "edits" if endpoint_type == "edits" else "generations"
         lowered_base = base.lower()
@@ -17444,6 +17483,8 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         reference_image_paths: Any = (),
         image_size: str = "",
     ) -> tuple[str, str]:
+        platform = self._resolved_external_image_api_platform()
+        use_openrouter_json = platform == "openrouter"
         endpoint = self._external_image_endpoint("edits")
         if not endpoint:
             return "", "未配置在线图片 API 地址"
@@ -17515,6 +17556,22 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     )
                 return form
 
+            openrouter_payload: dict[str, Any] = {}
+            if use_openrouter_json:
+                openrouter_payload = {
+                    "model": self.external_image_api_model,
+                    "prompt": submitted_prompt_text,
+                    "input_references": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{content_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+                            },
+                        }
+                        for _path, image_bytes, content_type in image_payloads
+                    ],
+                }
+
             headers = {"Authorization": f"Bearer {self.external_image_api_key}"}
             headers.update(self._external_image_custom_headers())
             timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
@@ -17536,7 +17593,12 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                             attempt + 1,
                             _single_line(submitted_prompt_text, 180),
                         )
-                        async with session.post(candidate_endpoint, headers=headers, data=build_form()) as response:
+                        request_data = (
+                            {"json": openrouter_payload}
+                            if use_openrouter_json
+                            else {"data": build_form()}
+                        )
+                        async with session.post(candidate_endpoint, headers=headers, **request_data) as response:
                             text = await response.text()
                             logger.info(
                                 "[PrivateCompanion] 在线图片 API 参考图响应: endpoint=%s status=%s chars=%s preview=%s",

@@ -19,6 +19,13 @@
 
 ### 生图提示词表达方式同步到工具生图
 - 修复用户指令触发 `pc_generate_photo` 工具生图时，注入的【图库表情与生图工具】说明没有包含“提示词表达方式”的格式要求，模型可能按自己的习惯书写 prompt，与主动拍照/自拍链路的格式不一致的问题；现在工具说明会按 `photo_generation_prompt_format` 配置明确要求 `prompt` 参数使用对应的书写格式，与主动生图保持同一套格式约束。
+- 修复工具执行阶段仍会无条件构造自然语言提示词分段的问题；`nai` 会保留 `{}`、`[]` 和权重语法，`traditional` 会保留正向/负向结构，只有 `natural_language` 才进入自然语言分段流程，并将同一份格式快照传到实际生图后端。
+
+### OpenRouter 参考图链路
+
+- 在线生图平台新增 `openrouter`，也会按 `openrouter.ai` 地址自动识别；文生图继续使用已兼容的 `/images/generations`，携带参考图时改用 JSON `POST /images` 与 `input_references`，最多提交 3 张参考图，不再请求不存在的 `/images/edits`。
+- OpenRouter 的 `/api/v1` 地址无论是否带尾斜杠都保持原样；原有 `/api/v1` 到 DashScope `compatible-mode/v1` 的改写现在仅作用于阿里云相关主机，避免误改其他 OpenAI 兼容地址。
+- 模型页、配置保存、命令配置与两套陪伴面板均可选择 OpenRouter；排障页会把生图 HTTP 404 归类为“端点不匹配”，并提示核对实际请求 URL 和平台协议。
 
 ### 分段回复剩余组件
 

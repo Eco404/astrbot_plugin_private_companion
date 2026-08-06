@@ -362,6 +362,49 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["sent"])
         self.assertTrue(payload["must_not_claim_sent"])
 
+    async def test_tool_photo_prompt_builder_respects_configured_format(self) -> None:
+        cases = (
+            ("nai", "1girl, red hair, {holding umbrella}, rain, wet ground, solo", False),
+            (
+                "traditional",
+                "Positive prompt: 1girl, red hair, rain. Negative prompt: text, watermark.",
+                False,
+            ),
+            (
+                "natural_language",
+                "A red-haired girl holds an umbrella on a rainy street.",
+                True,
+            ),
+        )
+
+        for prompt_format, prompt, expects_sections in cases:
+            with self.subTest(prompt_format=prompt_format):
+                harness = _PromptAwarePhotoToolHarness()
+                harness.image_path = self.image_path
+                harness._photo_generation_prompt_format_mode = (
+                    lambda mode=prompt_format: mode
+                )
+
+                payload = json.loads(
+                    await harness._pc_generate_photo_impl(
+                        _FakeEvent(),
+                        prompt=prompt,
+                        kind="selfie",
+                        send=False,
+                    )
+                )
+
+                self.assertEqual(payload["status"], "success")
+                self.assertEqual(harness.generation_kwargs["prompt_text"], prompt)
+                self.assertEqual(
+                    harness.generation_kwargs["prompt_format"],
+                    prompt_format,
+                )
+                self.assertEqual(
+                    harness.generation_kwargs["prompt_sections"] is not None,
+                    expects_sections,
+                )
+
     async def test_group_photo_without_explicit_reference_is_rejected_before_generation(self) -> None:
         harness = _PhotoToolHarness()
         harness.image_path = self.image_path

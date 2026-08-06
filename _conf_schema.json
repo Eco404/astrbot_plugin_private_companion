@@ -9952,7 +9952,7 @@
       "photo_persona_reference_image_path": {
         "description": "人设参考图路径或图片 URL",
         "type": "string",
-        "hint": "可选。仅在人设/穿搭参考图一致性开启时使用。可填 png/jpg/jpeg/webp 本地文件路径，也可填 http(s) 图片 URL；URL 会在首次自拍/人像生图前下载一次并自动回写为本地缓存路径。ComfyUI 会按参考计划把图片传给匹配 images=N 的自拍/改图工作流；只有 images=1 时会选择主参考并把其余职责转为文字提示。在线图片 API 会优先尝试 OpenAI 兼容 /images/edits 参考图接口；SDGen 按文字降级。",
+        "hint": "可选。仅在人设/穿搭参考图一致性开启时使用。可填 png/jpg/jpeg/webp 本地文件路径，也可填 http(s) 图片 URL；URL 会在首次自拍/人像生图前下载一次并自动回写为本地缓存路径。ComfyUI 会按参考计划把图片传给匹配 images=N 的自拍/改图工作流；只有 images=1 时会选择主参考并把其余职责转为文字提示。在线图片 API 会按平台使用对应参考图协议：OpenAI 兼容使用 /images/edits，OpenRouter 使用 JSON /images + input_references；SDGen 按文字降级。",
         "default": "",
         "invisible": true,
         "condition": {
@@ -10175,7 +10175,7 @@
       "external_image_api_platform": {
         "description": "在线生图模型平台",
         "type": "string",
-        "hint": "可填：auto、openai、agnes、sensenova、minimax、bailian、modelscope、doubao、gemini。minimax 使用官方 /v1/image_generation JSON 协议，支持 image-01 / image-01-live 与单张人物参考图；auto 会按地址和模型名自动识别。",
+        "hint": "可填：auto、openai、openrouter、agnes、sensenova、minimax、bailian、modelscope、doubao、gemini。OpenRouter 填写 https://openrouter.ai/api/v1，参考图使用 JSON /images + input_references；minimax 使用官方 /v1/image_generation JSON 协议，支持 image-01 / image-01-live 与单张人物参考图；auto 会按地址和模型名自动识别。",
         "default": "auto",
         "condition": {
           "enable_photo_text_action": true
@@ -10184,7 +10184,7 @@
       "EXTERNAL_IMAGE_API_BASE_URL": {
         "description": "在线图片 API 地址",
         "type": "string",
-        "hint": "MiniMax 国内站填写 https://api.minimaxi.com/v1 或完整 https://api.minimaxi.com/v1/image_generation，国际站使用 https://api.minimax.io/v1；旧写法 /v1/image/generation 会自动纠正。Agnes Image 填写 https://apihub.agnes-ai.com/v1；其他 OpenAI 兼容平台可填写 API 根地址或完整 /images/generations。",
+        "hint": "OpenRouter 填写 https://openrouter.ai/api/v1；MiniMax 国内站填写 https://api.minimaxi.com/v1 或完整 https://api.minimaxi.com/v1/image_generation，国际站使用 https://api.minimax.io/v1；旧写法 /v1/image/generation 会自动纠正。Agnes Image 填写 https://apihub.agnes-ai.com/v1；其他 OpenAI 兼容平台可填写 API 根地址或完整 /images/generations。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
@@ -10270,7 +10270,7 @@
       "backup_external_image_api_platform": {
         "description": "备选在线生图模型平台",
         "type": "string",
-        "hint": "可填：auto、openai、agnes、sensenova、minimax、bailian、modelscope、doubao、gemini。含义与主在线生图平台一致，只在备选在线 API 生效时使用。",
+        "hint": "可填：auto、openai、openrouter、agnes、sensenova、minimax、bailian、modelscope、doubao、gemini。OpenRouter 填写 https://openrouter.ai/api/v1，参考图使用 JSON /images + input_references；含义与主在线生图平台一致，只在备选在线 API 生效时使用。",
         "default": "auto",
         "condition": {
           "enable_photo_text_action": true,
@@ -10280,7 +10280,7 @@
       "BACKUP_EXTERNAL_IMAGE_API_BASE_URL": {
         "description": "备选在线图片 API 地址",
         "type": "string",
-        "hint": "主在线图片 API 失败后才会使用。支持 MiniMax /v1/image_generation、SenseNova U1 Fast、OpenAI 兼容 images、阿里云百炼、魔搭社区、豆包/火山方舟 Seedream 和 Gemini 图片接口。",
+        "hint": "主在线图片 API 失败后才会使用。支持 OpenRouter /api/v1/images + input_references、MiniMax /v1/image_generation、SenseNova U1 Fast、OpenAI 兼容 images、阿里云百炼、魔搭社区、豆包/火山方舟 Seedream 和 Gemini 图片接口。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true,
@@ -10345,7 +10345,7 @@
       "external_image_api_endpoints": {
         "description": "在线生图 API 优先级队列",
         "type": "list",
-        "hint": "可选。用于配置任意数量的在线生图 API，数组顺序就是尝试顺序。每项支持 name、enabled、platform、base_url、api_key、model、size、ratio、timeout_seconds、custom_headers。MiniMax 可使用 size=1024x1024 或 ratio=1:1/2:3/16:9；Agnes 可用 size=1K-4K；为空时继续沿用主用/备选字段。",
+        "hint": "可选。用于配置任意数量的在线生图 API，数组顺序就是尝试顺序。每项支持 name、enabled、platform、base_url、api_key、model、size、ratio、timeout_seconds、custom_headers。OpenRouter 使用 platform=openrouter 与 https://openrouter.ai/api/v1；MiniMax 可使用 size=1024x1024 或 ratio=1:1/2:3/16:9；Agnes 可用 size=1K-4K；为空时继续沿用主用/备选字段。",
         "default": [],
         "condition": {
           "enable_photo_text_action": true

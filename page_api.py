@@ -4883,6 +4883,13 @@ class PrivateCompanionPageApi(
                 "检查额度和并发限制，等待限流窗口恢复后重试。",
             ),
             (
+                "endpoint_mismatch",
+                "端点不匹配",
+                False,
+                ("http 404", "http状态 404", "status=404", "status 404", "未找到生图接口", "端点不匹配"),
+                "当前平台返回 HTTP 404，通常是生图端点协议不匹配；核对实际请求 URL、平台选择和参考图/文生图端点后再试。",
+            ),
+            (
                 "network",
                 "网络连接失败",
                 True,
@@ -5234,6 +5241,7 @@ class PrivateCompanionPageApi(
         platform_labels = {
             "auto": "自动识别",
             "openai": "OpenAI 兼容",
+            "openrouter": "OpenRouter",
             "agnes": "Agnes Image",
             "sensenova": "SenseNova 日日新",
             "bailian": "阿里云百炼",
@@ -20532,7 +20540,7 @@ class PrivateCompanionPageApi(
                 elif key in {"external_image_api_platform", "backup_external_image_api_platform"}:
                     normalizer = getattr(self.plugin, "_normalize_external_image_api_platform", None)
                     text = normalizer(text) if callable(normalizer) else text.lower()
-                    if text not in {"auto", "openai", "agnes", "sensenova", "bailian", "modelscope", "doubao", "gemini", "minimax"}:
+                    if text not in {"auto", "openai", "openrouter", "agnes", "sensenova", "bailian", "modelscope", "doubao", "gemini", "minimax"}:
                         text = "auto"
                 setattr(self.plugin, attr, text)
         timeout = self._config_get("external_image_api_timeout_seconds")
