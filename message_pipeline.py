@@ -39,6 +39,8 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             sender_display_name=sender_display_name,
             now=received_ts,
         )
+        if isinstance(private_user, dict):
+            user_id = _single_line(private_user.get("user_id"), 160) or user_id
         migrator = getattr(self, "_req036_migrate_configured_target_capability", None)
         if callable(migrator):
             migrator(user_id, private_user)
@@ -360,7 +362,11 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         fast_user_is_owner = self._private_user_role(fast_user, user_id) == "owner"
         if fast_user_is_owner:
             self._handle_meal_care_inbound(fast_user, safe_text or text, now=received_ts)
-        if fast_user_is_owner and self._apply_interaction_warmth_to_state(text, fast_user):
+        if (
+            bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            and fast_user_is_owner
+            and self._apply_interaction_warmth_to_state(text, fast_user)
+        ):
             self._apply_relationship_event(
                 fast_user,
                 1,
@@ -865,7 +871,13 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 event_id=self._event_message_id(event),
                 now=received_ts,
             )
-        interaction_warmth_applied = bool(text) and is_target_user and user_is_owner and self._apply_interaction_warmth_to_state(text, user)
+        interaction_warmth_applied = (
+            bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            and bool(text)
+            and is_target_user
+            and user_is_owner
+            and self._apply_interaction_warmth_to_state(text, user)
+        )
         if interaction_warmth_applied:
             self._apply_relationship_event(
                 user,
@@ -940,10 +952,6 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
     elif is_target_user:
         pass
     if is_target_user:
-        self._create_lifecycle_background_task(
-            self._refresh_persona_relationship(user_id, user_snapshot, trigger="inbound"),
-            label="refresh_persona_relationship_inbound",
-        )
         self._create_lifecycle_background_task(
             self._maybe_refresh_companion_memory(user_id, user_snapshot),
             label="refresh_companion_memory_inbound",
@@ -1137,20 +1145,26 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
         group = self._get_group(group_id)
         if sender_id:
             users = self.data.get("users", {})
-            current_sender = users.get(sender_id) if isinstance(users, dict) else None
-            if sender_id in set(self._configured_target_ids()) or (
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            scoped_sender_id = (
+                resolver(event, sender_id)
+                if callable(resolver)
+                else self._canonical_private_user_id(sender_id)
+            )
+            current_sender = users.get(scoped_sender_id) if isinstance(users, dict) else None
+            if scoped_sender_id in set(self._configured_target_ids()) or (
                 isinstance(current_sender, dict) and bool(current_sender.get("manual_enabled"))
             ):
-                target_user = self._get_user(sender_id)
+                target_user = self._get_user(scoped_sender_id)
                 target_user["last_activity_at"] = received_ts
                 self._mark_greetings_satisfied_by_recent_activity(target_user, activity_ts=received_ts)
                 if self._cancel_inbound_conflicting_greeting(
                     target_user,
                     now=received_ts,
-                    user_id=sender_id,
+                    user_id=scoped_sender_id,
                     trigger_umo=str(getattr(event, "unified_msg_origin", "") or ""),
                 ):
-                    logger.info("[PrivateCompanion] 目标用户已在群内交流,已请求取消冲突问候候选: group=%s user=%s", group_id, sender_id)
+                    logger.info("[PrivateCompanion] 目标用户已在群内交流,已请求取消冲突问候候选: group=%s user=%s", group_id, scoped_sender_id)
                     if not self._simulation_active(target_user) and _safe_float(target_user.get("next_proactive_at"), 0) <= 0:
                         self._schedule_next_proactive(target_user, now=received_ts)
                 self._maybe_schedule_post_goodnight_group_activity(

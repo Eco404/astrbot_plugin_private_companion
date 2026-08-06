@@ -922,16 +922,6 @@ class GroupObservationMixin:
                 qq_nickname = _single_line(nickname_getter(event), 40)
             except Exception:
                 qq_nickname = ""
-        if self.enable_group_member_profiles:
-            profile_ensurer = getattr(self, "_ensure_worldbook_group_observation_profile", None)
-            if callable(profile_ensurer):
-                profile_ensurer(
-                    group_id=str(group_id or group.get("group_id") or ""),
-                    sender_id=sender_id,
-                    qq_nickname=qq_nickname,
-                    group_card=sender_name,
-                    now=now,
-                )
         sender_role = self._group_sender_role_from_event(event) if event is not None else "unknown"
         if event is not None:
             self._observe_group_role_from_event(
@@ -949,8 +939,7 @@ class GroupObservationMixin:
             "ts": now,
             "sender_id": sender_id,
             "name": _single_line(sender_name, 30) or sender_id,
-            "identity_name": self._group_member_identity_name(sender_id, sender_name, limit=30),
-            "identity_known": bool(self._worldbook_profile_by_user_id(sender_id, include_observation=True)),
+            "identity_name": _single_line(sender_name, 30) or "群成员",
             "group_role": sender_role,
             "group_role_label": self._GROUP_ROLE_LABELS.get(sender_role, "未知"),
             "text": cleaned,
@@ -975,17 +964,7 @@ class GroupObservationMixin:
             })
         recent.append(record)
         del recent[:-self.max_group_recent_messages]
-        self._record_user_recent_group_message_from_observation(
-            group_id=str(group_id or group.get("group_id") or ""),
-            sender_id=sender_id,
-            sender_name=sender_name,
-            text=cleaned,
-            scene=scene,
-            message_id=message_id,
-            ts=now,
-        )
-
-        if self.enable_group_member_profiles:
+        if self.enable_group_relationship_graph:
             members = group.setdefault("members", {})
             if not isinstance(members, dict):
                 members = {}
@@ -1011,9 +990,7 @@ class GroupObservationMixin:
                     events.append({"ts": now, "old": previous_display_name, "new": display_name})
                     del events[:-12]
             member["name"] = _single_line(sender_name, 30) or member.get("name") or sender_id
-            member["qq_nickname"] = qq_nickname or _single_line(member.get("qq_nickname"), 30)
-            member["identity_name"] = self._group_member_identity_name(sender_id, sender_name, limit=30)
-            member["identity_known"] = bool(self._worldbook_profile_by_user_id(sender_id, include_observation=True))
+            member["identity_name"] = _single_line(sender_name, 30) or "群成员"
             member.pop("identity_note", None)
             member.pop("boundary_note", None)
             member["count"] = _safe_int(member.get("count"), 0, 0) + 1
@@ -1022,7 +999,6 @@ class GroupObservationMixin:
                 member["group_role"] = sender_role
                 member["group_role_label"] = self._GROUP_ROLE_LABELS[sender_role]
                 member["group_role_updated_at"] = now
-            self._remember_worldbook_observed_name(sender_id, sender_name)
             phrases = member.setdefault("recent_phrases", [])
             if not isinstance(phrases, list):
                 phrases = []
@@ -1030,14 +1006,6 @@ class GroupObservationMixin:
             if 2 <= len(cleaned) <= 50 and not blocked_by_guard:
                 phrases.insert(0, cleaned)
                 member["recent_phrases"] = list(dict.fromkeys(phrases))[:8]
-            if not blocked_by_guard:
-                self._maybe_add_worldbook_pending_observation(
-                    sender_id=sender_id,
-                    sender_name=sender_name,
-                    group_id=str(group.get("group_id") or group.get("id") or ""),
-                    text=cleaned,
-                    now=now,
-                )
 
         if blocked_by_guard:
             logger.info(
@@ -2016,14 +1984,6 @@ class GroupObservationMixin:
             add(member.get("display_name"))
             add(member.get("nickname"))
             add(member.get("card"))
-            profile = self._worldbook_profile_by_user_id(str(user_id), include_observation=True)
-            if isinstance(profile, dict):
-                add(profile.get("name"))
-                for key in ("aliases", "observed_names"):
-                    raw = profile.get(key)
-                    if isinstance(raw, list):
-                        for item in raw:
-                            add(item)
         return tokens
 
     def _cleanup_group_slang_terms(self, group: dict[str, Any]) -> bool:
@@ -2378,7 +2338,6 @@ class GroupObservationMixin:
             "sender_id": sender_id,
             "name": _single_line(sender_name, 30) or sender_id,
             "identity_name": self._group_member_identity_name(sender_id, sender_name, limit=30),
-            "identity_known": bool(self._worldbook_profile_by_user_id(sender_id, include_observation=True)),
             "ts": now,
             "text": _single_line(text, 80),
         }
@@ -2589,9 +2548,6 @@ class GroupObservationMixin:
         scene_text = self._format_group_scene_awareness_for_prompt(group, sender_id, text)
         if scene_text:
             lines.append(scene_text)
-        worldbook_text = self._format_worldbook_group_members_for_prompt(group, sender_id, text)
-        if worldbook_text:
-            lines.append(worldbook_text)
         current_observation = self._format_current_group_member_observation_for_prompt(group, sender_id, text)
         if current_observation:
             lines.append(current_observation)
@@ -3369,12 +3325,9 @@ class GroupObservationMixin:
         text: str,
         now: float | None = None,
     ) -> None:
-        if not (
-            self.enable_worldbook_member_recognition
-            and self.enable_group_member_profiles
-            and getattr(self, "worldbook_auto_pending_observations", True)
-        ):
-            return
+        # Retired compatibility entrypoint: observed group messages update the
+        # unified archive upstream, never a second Worldbook person profile.
+        return
         user_id = str(sender_id or "").strip()
         if not user_id:
             return

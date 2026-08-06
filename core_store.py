@@ -1310,6 +1310,170 @@ class CoreStoreMixin:
             current = str(aliases.get(current) or "").strip()
         return current or str(user_id or "").strip()
 
+    def _private_event_identity_context(self, event: Any, subject_id: Any) -> dict[str, str]:
+        """Build a bounded platform/account identity for a user record."""
+        subject = self._normalize_private_identity_id(subject_id) or _single_line(subject_id, 128)
+        platform_getter = getattr(self, "_platform_kind_for_event", None)
+        platform = platform_getter(event) if callable(platform_getter) else "generic"
+        platform = _single_line(platform, 40).lower() or "generic"
+        adapter = _single_line(getattr(event, "adapter_instance_id", ""), 120)
+        if not adapter:
+            origin = _single_line(getattr(event, "unified_msg_origin", ""), 240)
+            adapter = origin.split(":", 1)[0] if ":" in origin else origin
+            adapter = _single_line(adapter, 80)
+        self_getter = getattr(self, "_event_self_id", None)
+        bot_id = ""
+        if callable(self_getter):
+            try:
+                bot_id = self._normalize_private_identity_id(self_getter(event))
+            except Exception:
+                bot_id = ""
+        return {
+            "subject": subject,
+            "platform": platform,
+            "adapter": adapter,
+            "bot_id": bot_id,
+        }
+
+    def _private_user_matches_event_identity(
+        self,
+        user: Any,
+        context: dict[str, str],
+    ) -> bool:
+        if not isinstance(user, dict) or not isinstance(context, dict):
+            return False
+        subject = _single_line(context.get("subject"), 128)
+        stored_subject = _single_line(user.get("identity_subject_id"), 128)
+        if not stored_subject:
+            stored_umo = _single_line(user.get("umo") or user.get("last_inbound_umo"), 240)
+            parser = getattr(self, "_private_umo_session_id", None)
+            if callable(parser) and stored_umo:
+                try:
+                    stored_subject = _single_line(parser(stored_umo), 128)
+                except Exception:
+                    stored_subject = ""
+        if subject and stored_subject and subject != stored_subject:
+            return False
+        platform = _single_line(context.get("platform"), 40).lower()
+        stored_platform = _single_line(user.get("identity_platform_kind"), 40).lower()
+        if not stored_platform:
+            umo = _single_line(user.get("umo") or user.get("last_inbound_umo"), 240)
+            platform_parser = getattr(self, "_platform_kind_for_umo", None)
+            if callable(platform_parser) and umo:
+                try:
+                    stored_platform = _single_line(platform_parser(umo), 40).lower()
+                except Exception:
+                    stored_platform = ""
+        if not stored_platform or not platform or stored_platform != platform:
+            return False
+        for field, stored_field in (
+            ("adapter", "identity_adapter_instance_id"),
+            ("bot_id", "identity_bot_id"),
+        ):
+            expected = _single_line(context.get(field), 120)
+            actual = _single_line(user.get(stored_field), 120)
+            # A stamped profile with a missing account marker is not safe to
+            # reuse for a concrete adapter/bot event.  Treat it as legacy and
+            # let the resolver create an isolated scoped record instead of
+            # silently sharing data between Bot accounts.
+            if expected and (not actual or expected != actual):
+                return False
+        return True
+
+    def _event_private_user_storage_id(self, event: Any, user_id: Any) -> str:
+        """Resolve a private/group event to a platform-isolated users key."""
+        raw = _single_line(user_id, 160)
+        normalized = self._normalize_private_identity_id(raw)
+        canonical = self._canonical_private_user_id(normalized or raw)
+        if not canonical:
+            return ""
+        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else {}
+        if not isinstance(users, dict):
+            return canonical
+        context = self._private_event_identity_context(event, raw)
+        # Reuse a previously isolated record for the same exact platform/account.
+        for stored_id, candidate in users.items():
+            if self._canonical_private_user_id(str(stored_id or "")) == canonical and self._private_user_matches_event_identity(candidate, context):
+                return str(stored_id)
+            if isinstance(candidate, dict) and _single_line(candidate.get("identity_subject_id"), 128) == context.get("subject") and self._private_user_matches_event_identity(candidate, context):
+                return str(stored_id)
+        existing = users.get(canonical)
+        if not isinstance(existing, dict) or self._private_user_matches_event_identity(existing, context):
+            return canonical
+        stored_subject = _single_line(existing.get("identity_subject_id"), 128)
+        stored_platform = _single_line(existing.get("identity_platform_kind"), 40).lower()
+        if not stored_platform:
+            stored_umo = _single_line(existing.get("umo") or existing.get("last_inbound_umo"), 240)
+            platform_parser = getattr(self, "_platform_kind_for_umo", None)
+            if callable(platform_parser) and stored_umo:
+                try:
+                    inferred_platform = _single_line(platform_parser(stored_umo), 40).lower()
+                except Exception:
+                    inferred_platform = ""
+                if inferred_platform and inferred_platform != "generic":
+                    stored_platform = inferred_platform
+        # Claim an unversioned legacy record on its first concrete event. The
+        # normal profile path stamps the platform/account immediately, so a
+        # later same-ID event from another platform is isolated below.
+        if not stored_platform and (not stored_subject or stored_subject == context.get("subject")):
+            return canonical
+        # A conflicting platform/account never inherits the existing record.
+        digest = hashlib.sha256(
+            f"{context.get('platform','generic')}|{context.get('adapter','')}|{context.get('bot_id','')}|{canonical}".encode("utf-8")
+        ).hexdigest()[:16]
+        return _single_line(f"{context.get('platform','generic')}:{canonical}:{digest}", 160)
+
+    def _stamp_private_event_identity(self, user: dict[str, Any], event: Any, subject_id: Any) -> None:
+        if not isinstance(user, dict):
+            return
+        context = self._private_event_identity_context(event, subject_id)
+        user["identity_subject_id"] = context.get("subject", "")
+        user["identity_platform_kind"] = context.get("platform", "generic")
+        if context.get("adapter"):
+            user["identity_adapter_instance_id"] = context["adapter"]
+        if context.get("bot_id"):
+            user["identity_bot_id"] = context["bot_id"]
+
+    def _private_user_id_for_event(self, event: Any, user_id: Any = None) -> str:
+        """Return the storage key for a raw sender in this event's identity scope."""
+        raw = user_id
+        if raw is None:
+            try:
+                raw = event.get_sender_id()
+            except Exception:
+                raw = ""
+        raw_text = _single_line(raw, 160)
+        normalizer = getattr(self, "_normalize_private_identity_id", None)
+        normalized = normalizer(raw_text) if callable(normalizer) else raw_text
+        normalized = normalized or raw_text
+        resolver = getattr(self, "_event_private_user_storage_id", None)
+        if callable(resolver):
+            try:
+                resolved = resolver(event, normalized)
+            except Exception:
+                resolved = ""
+            if resolved:
+                return _single_line(resolved, 160)
+            # A resolver failure on a concrete platform/account must not fall
+            # back to a bare sender ID, which would re-open the cross-adapter
+            # collision this scoped resolver is meant to prevent.  Preserve a
+            # deterministic namespace so the event can still be handled and
+            # diagnosed without inheriting another profile.
+            try:
+                context = self._private_event_identity_context(event, normalized)
+            except Exception:
+                context = {}
+            platform = _single_line(context.get("platform"), 40).lower() if isinstance(context, dict) else ""
+            adapter = _single_line(context.get("adapter"), 120) if isinstance(context, dict) else ""
+            bot_id = _single_line(context.get("bot_id"), 120) if isinstance(context, dict) else ""
+            if platform and platform != "generic" and (adapter or bot_id):
+                canonical = _single_line(self._canonical_private_user_id(normalized), 128)
+                digest = hashlib.sha256(
+                    f"{platform}|{adapter}|{bot_id}|{canonical}".encode("utf-8")
+                ).hexdigest()[:16]
+                return _single_line(f"{platform}:{canonical}:{digest}", 160)
+        return _single_line(self._canonical_private_user_id(normalized), 160)
+
     @staticmethod
     def _normalize_private_identity_id(value: Any, limit: int = 128) -> str:
         if isinstance(value, (dict, list, tuple, set)):
@@ -2104,6 +2268,11 @@ class CoreStoreMixin:
 
     def _ensure_relationship_user_state(self, user: dict[str, Any], *, created: bool = False) -> bool:
         """Lazily normalize additive relationship fields without migrating user identity or data paths."""
+        # The user-visible affinity master switch is intentionally a hard
+        # runtime boundary: archived relationship data remains readable, but
+        # it must not be normalized, decayed or otherwise changed while off.
+        if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
+            return False
         before = {
             "relationship_mode": user.get("relationship_mode"),
             "relationship_score": user.get("relationship_score"),
@@ -2185,6 +2354,12 @@ class CoreStoreMixin:
         event_id: str = "",
         now: float | None = None,
     ) -> dict[str, Any]:
+        if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
+            return {
+                "changed": False,
+                "code": "relationship_system_disabled",
+                "score": user.get("relationship_score"),
+            }
         if bool(getattr(self, "enable_p4_b_legacy_score_isolation", False)):
             return {
                 "changed": False,
@@ -2324,7 +2499,12 @@ class CoreStoreMixin:
         raw_user_id = str(user_id or "").strip()
         identity_normalizer = getattr(self, "_normalize_private_identity_id", None)
         normalized_user_id = identity_normalizer(raw_user_id) if callable(identity_normalizer) else ""
-        canonical_user_id = self._canonical_private_user_id(normalized_user_id or raw_user_id)
+        resolver = getattr(self, "_event_private_user_storage_id", None)
+        canonical_user_id = (
+            resolver(event, normalized_user_id or raw_user_id)
+            if callable(resolver)
+            else self._canonical_private_user_id(normalized_user_id or raw_user_id)
+        )
         if not canonical_user_id or self._is_bot_self_user_id(canonical_user_id):
             return None, False
         platform_kind = self._platform_kind_for_event(event)
@@ -2333,6 +2513,9 @@ class CoreStoreMixin:
         users = self.data.setdefault("users", {})
         existing = users.get(canonical_user_id) if isinstance(users, dict) else None
         if isinstance(existing, dict):
+            stamper = getattr(self, "_stamp_private_event_identity", None)
+            if callable(stamper):
+                stamper(existing, event, normalized_user_id or raw_user_id)
             # A legacy/migrated profile remains addressable even when automatic
             # creation is disabled.  Its REQ-036 capability state, not a DM,
             # decides whether the conversation may proceed.
@@ -2343,6 +2526,9 @@ class CoreStoreMixin:
             return None, False
 
         user = self._get_user(canonical_user_id)
+        stamper = getattr(self, "_stamp_private_event_identity", None)
+        if callable(stamper):
+            stamper(user, event, normalized_user_id or raw_user_id)
         created_at = float(now if now is not None else _now_ts())
         user["auto_profile_created"] = True
         user["auto_profile_created_at"] = created_at

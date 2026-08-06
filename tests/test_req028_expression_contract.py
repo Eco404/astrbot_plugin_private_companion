@@ -266,8 +266,8 @@ class Req028ExpressionContractTests(unittest.TestCase):
         constants = {node.value for node in ast.walk(profile_method) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
         self.assertNotIn("persona_relationship", constants)
         default_source = (ROOT / "constants.py").read_text(encoding="utf-8")
-        self.assertIn('"persona_relationship": {}', default_source)
-        self.assertIn('"relationship_state": {}', default_source)
+        self.assertNotIn('"persona_relationship": {}', default_source)
+        self.assertNotIn('"relationship_state": {}', default_source)
         self.assertIn("current_interaction_projection", ast.unparse(profile_method))
 
         expression_context = next(

@@ -446,6 +446,12 @@ class EventDispatchMixin:
                 user_id = _single_line(event.get_sender_id(), 160)
             except Exception:
                 user_id = _single_line(raw.get("user_id") or raw.get("openid"), 160)
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            if user_id and callable(resolver):
+                try:
+                    user_id = _single_line(resolver(event, user_id), 160) or user_id
+                except Exception:
+                    pass
             return f"private:{user_id}" if user_id else (umo or "unknown")
 
         group_id = self._extract_group_id_from_event(event)

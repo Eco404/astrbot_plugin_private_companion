@@ -224,6 +224,22 @@ class PrivateImageMixin:
         return False
 
     async def _persist_private_inbound_images(self, event: AstrMessageEvent, user_id: str) -> list[str]:
+        # Image files are private user state. Resolve the sender against the
+        # current platform/adapter/bot account before choosing the debounce
+        # directory so equal raw IDs cannot share cached media.
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        if callable(resolver):
+            try:
+                raw_sender = event.get_sender_id()
+            except Exception:
+                raw_sender = ""
+            if raw_sender:
+                try:
+                    scoped = _single_line(resolver(event, raw_sender), 160)
+                except Exception:
+                    scoped = ""
+                if scoped:
+                    user_id = scoped
         result: list[str] = []
         target_dir = Path(self.data_dir) / "private_inbound_images" / re.sub(r"[^0-9A-Za-z_.-]+", "_", str(user_id or "unknown"))
         try:
@@ -3800,6 +3816,12 @@ class PrivateImageMixin:
         if private_chat:
             if not bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True))):
                 return ""
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            if callable(resolver):
+                try:
+                    sender_id = _single_line(resolver(event, sender_id), 160) or sender_id
+                except Exception:
+                    pass
             scope = f"private:{sender_id}"
             key = self._semantic_buffer_key(scope, sender_id)
         else:
@@ -4616,7 +4638,12 @@ class PrivateImageMixin:
         try:
             if not bool(getattr(event, "is_private_chat", lambda: False)()):
                 return ""
-            user_id = self._canonical_private_user_id(str(event.get_sender_id()))
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            user_id = (
+                resolver(event)
+                if callable(resolver)
+                else self._canonical_private_user_id(str(event.get_sender_id()))
+            )
         except Exception:
             return ""
         raw_users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
@@ -4763,6 +4790,12 @@ class PrivateImageMixin:
             sender_id = ""
         if not sender_id:
             return {}
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        if callable(resolver):
+            try:
+                sender_id = _single_line(resolver(event, sender_id), 160) or sender_id
+            except Exception:
+                pass
         key = self._semantic_buffer_key(f"private:{sender_id}", sender_id)
         now = _now_ts()
         handoffs = self._cleanup_private_image_vision_handoffs(now=now)

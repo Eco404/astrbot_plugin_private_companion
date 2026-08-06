@@ -7462,27 +7462,34 @@ Output:
     def _start_passive_input_status_loop(self, event: AstrMessageEvent, user_id: str = "") -> None:
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         parsed_user_id = self._input_status_user_id_from_umo(umo)
-        user_id = str(user_id or parsed_user_id or "").strip()
-        if not parsed_user_id or parsed_user_id != user_id or not user_id.isdigit():
+        # ``user_id`` is normally the platform-scoped profile storage key.  It
+        # may contain a namespace/digest for a QQ-official event, while the
+        # OneBot transport still requires the numeric sender from the UMO.
+        storage_user_id = str(user_id or parsed_user_id or "").strip()
+        if not parsed_user_id or not parsed_user_id.isdigit():
             return
+        task_key = storage_user_id or parsed_user_id
         tasks = getattr(self, "_passive_input_status_tasks", None)
         if not isinstance(tasks, dict):
             tasks = {}
             self._passive_input_status_tasks = tasks
-        old_task = tasks.get(user_id)
+        old_task = tasks.get(task_key)
         if isinstance(old_task, asyncio.Task) and not old_task.done():
             old_task.cancel()
-        task = asyncio.create_task(self._passive_input_status_loop(user_id))
-        tasks[user_id] = task
+        task = asyncio.create_task(self._passive_input_status_loop(parsed_user_id))
+        tasks[task_key] = task
         try:
-            setattr(event, "private_companion_input_status_user_id", user_id)
+            # Keep the scoped key on the event so stop/cleanup remains
+            # isolated, but expose the numeric transport ID for diagnostics.
+            setattr(event, "private_companion_input_status_user_id", task_key)
+            setattr(event, "private_companion_input_status_transport_id", parsed_user_id)
         except Exception:
             pass
 
         def _cleanup(done_task: asyncio.Task) -> None:
-            current = tasks.get(user_id)
+            current = tasks.get(task_key)
             if current is done_task:
-                tasks.pop(user_id, None)
+                tasks.pop(task_key, None)
 
         task.add_done_callback(_cleanup)
 

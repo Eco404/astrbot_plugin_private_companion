@@ -3650,6 +3650,24 @@ class CommandHandlersMixin:
     async def _photo_reference_sources_from_current_event(self, event: AstrMessageEvent, user_id: str) -> list[str]:
         sources: list[str] = []
 
+        # Keep persisted message images in the same platform/account scope as
+        # the active user profile.  Callers from older command paths may still
+        # pass the raw sender ID, so resolve from the event here as the single
+        # boundary rather than relying on every caller to do it correctly.
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        if callable(resolver):
+            try:
+                raw_sender = event.get_sender_id()
+            except Exception:
+                raw_sender = ""
+            if raw_sender:
+                try:
+                    scoped = _single_line(resolver(event, raw_sender), 160)
+                except Exception:
+                    scoped = ""
+                if scoped:
+                    user_id = scoped
+
         def add(value: Any) -> None:
             text = str(value or "").strip()
             if text and text not in sources:

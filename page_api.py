@@ -315,7 +315,6 @@ class PrivateCompanionPageApi(
         user: dict[str, Any],
         *,
         relationship_stage: str,
-        worldbook_member: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """Return a user-scoped display DTO without authority or private content."""
         del user_id
@@ -410,14 +409,6 @@ class PrivateCompanionPageApi(
                     "momentum_band": self._single_line(raw.get("momentum_band"), 20) if observed else "unknown",
                 }
 
-        network = {
-            "status": "registered" if isinstance(worldbook_member, dict) else "not_registered",
-            "pending_observation_count": (
-                max(0, self._int(worldbook_member.get("pending_observation_count")))
-                if isinstance(worldbook_member, dict)
-                else 0
-            ),
-        }
         return {
             "relationship_mode": mode,
             "relationship_intimacy": intimacy,
@@ -430,7 +421,7 @@ class PrivateCompanionPageApi(
             "relationship_stage": self._single_line(relationship_stage, 24) or "unclassified",
             "interaction": {"inbound_count": inbound, "reply_count": replies, "reply_band": reply_band},
             "memory_phase": memory_phase,
-            "network": network,
+            "network": {"status": "group_local_only", "pending_observation_count": 0},
             "reply_temperature": {"status": "live_chat_only"},
         }
 
@@ -13711,9 +13702,6 @@ class PrivateCompanionPageApi(
         else:
             display_name = f"临时会话 · {user_id_text[:8]}"
         relationship_stage = ""
-        rel_state = user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {}
-        if isinstance(rel_state, dict):
-            relationship_stage = self._single_line(rel_state.get("stage"), 12)
         profile_getter = getattr(self.plugin, "_relationship_profile", None)
         if not relationship_stage and callable(profile_getter):
             try:
@@ -13722,9 +13710,6 @@ class PrivateCompanionPageApi(
                     relationship_stage = self._single_line(profile.get("level"), 12)
             except Exception:
                 relationship_stage = ""
-        if relationship_stage not in {"亲近", "熟悉", "陌生"}:
-            persona_profile = user.get("persona_relationship") if isinstance(user.get("persona_relationship"), dict) else {}
-            relationship_stage = self._single_line(persona_profile.get("level"), 12) if isinstance(persona_profile, dict) else ""
         if relationship_stage not in {"亲近", "熟悉", "陌生"}:
             score = self._int(user.get("relationship_score"))
             inbound_count = self._int(user.get("inbound_count"))
@@ -13740,12 +13725,10 @@ class PrivateCompanionPageApi(
         role = self.plugin._private_user_role(user, user_id_text) if hasattr(self.plugin, "_private_user_role") else ""
         role_labeler = getattr(self.plugin, "_private_user_role_label", None)
         role_label = role_labeler(role) if callable(role_labeler) else ("主要用户" if role == "owner" else "次要用户")
-        relationship_state = self._emotion_relationship_state_summary(rel_state)
         relationship_panel = self._relationship_panel(
             user_id_text,
             user,
             relationship_stage=relationship_stage,
-            worldbook_member=None,
         )
         relationship_mode = relationship_panel["relationship_mode"]
         relationship_intimacy = relationship_panel["relationship_intimacy"]
@@ -13887,7 +13870,6 @@ class PrivateCompanionPageApi(
             "relationship_ledger": relationship_panel["relationship_changes"],
             "current_interaction": current_interaction,
             "expression_decision": relationship_panel["expression_decision"],
-            "relationship_state": relationship_state,
             "pending_emotion_judgement": pending_emotion_judgement,
             "last_emotion_judgement": last_emotion_judgement,
             "last_emotion_judgement_error": last_emotion_judgement_error,
@@ -17939,16 +17921,20 @@ class PrivateCompanionPageApi(
             "enable_almanac_perception",
             "default_nickname",
             "enable_auto_user_profile_creation",
+            "portrait_global_mode",
             "auto_enable_companion_for_new_users",
             "auto_profile_platforms",
             "default_nickname_strategy",
             "default_proactive_enabled",
             "default_proactive_daily_limit",
+            "owner_companion_enabled",
             "default_interaction_band",
             "enable_custom_relationship_stage_policy",
             "relationship_stage_policy",
             "relationship_positive_stage_cap_key",
             "normal_interaction_band_cap",
+            "owner_group_relationship_projection",
+            "owner_group_interaction_projection",
             "enable_relationship_content_tiers",
             "enable_flirt_content_tier",
             "enable_adult_content_tier",
@@ -20044,6 +20030,11 @@ class PrivateCompanionPageApi(
                 else:
                     self.plugin._save_data_sync()
             return
+        if key in {"owner_group_relationship_projection", "owner_group_interaction_projection"}:
+            normalized = self._normalize_bool_value(value)
+            self._set_config_value(key, normalized)
+            setattr(self.plugin, key, normalized)
+            return
         self._set_config_value(key, value)
         if key == "enable_body_monitor_integration":
             enabled = self._normalize_bool_value(value)
@@ -21006,16 +20997,20 @@ class PrivateCompanionPageApi(
             "enable_almanac_perception",
             "default_nickname",
             "enable_auto_user_profile_creation",
+            "portrait_global_mode",
             "auto_enable_companion_for_new_users",
             "auto_profile_platforms",
             "default_nickname_strategy",
             "default_proactive_enabled",
             "default_proactive_daily_limit",
+            "owner_companion_enabled",
             "default_interaction_band",
             "enable_custom_relationship_stage_policy",
             "relationship_stage_policy",
             "relationship_positive_stage_cap_key",
             "normal_interaction_band_cap",
+            "owner_group_relationship_projection",
+            "owner_group_interaction_projection",
             "enable_relationship_content_tiers",
             "enable_flirt_content_tier",
             "enable_adult_content_tier",

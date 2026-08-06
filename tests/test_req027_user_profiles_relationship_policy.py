@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import hashlib
 import importlib.util
 from pathlib import Path
 import re
@@ -84,11 +85,18 @@ CORE_METHODS = _load_class_methods(
         "_auto_profile_nickname",
         "_ensure_auto_private_user_profile",
         "_is_target_private_user",
+        "_normalize_private_identity_id",
+        "_private_event_identity_context",
+        "_private_user_matches_event_identity",
+        "_event_private_user_storage_id",
+        "_stamp_private_event_identity",
+        "_private_user_id_for_event",
     },
     {
         "Any": Any,
         "re": re,
         "_single_line": _single_line,
+        "hashlib": hashlib,
         "_safe_int": lambda value, default=0, minimum=None, maximum=None: max(
             minimum if minimum is not None else int(float(value)),
             min(maximum if maximum is not None else int(float(value)), int(float(value))),
@@ -125,7 +133,11 @@ class _AutoProfileHost:
         return value in self.bot_ids
 
     def _platform_kind_for_event(self, _event: Any) -> str:
-        return self.platform_kind
+        return str(getattr(_event, "platform_kind", "") or self.platform_kind)
+
+    @staticmethod
+    def _event_self_id(event: Any) -> str:
+        return str(getattr(event, "self_id", "") or "")
 
     def _normalize_platform_kind(self, value: Any) -> str:
         return _load_platform_compat().PlatformCompatibilityMixin._normalize_platform_kind(value)
@@ -134,10 +146,12 @@ class _AutoProfileHost:
         return list(self.targets)
 
     def _get_user(self, user_id: str) -> dict[str, Any]:
-        return self.data["users"].setdefault(
+        user = self.data["users"].setdefault(
             user_id,
             {"enabled": False, "relationship_role": "friend", "relationship_score": 7},
         )
+        user.setdefault("user_id", user_id)
+        return user
 
     def _note_private_user_umo(self, _user_id: str, user: dict[str, Any], umo: str) -> None:
         user["umo"] = umo
@@ -148,6 +162,17 @@ class _AutoProfileHost:
 
 for _name, _method in CORE_METHODS.items():
     setattr(_AutoProfileHost, _name, _method)
+
+
+class _IdentityEvent:
+    def __init__(self, platform: str, adapter: str, bot_id: str, subject: str = "123") -> None:
+        self.platform_kind = platform
+        self.adapter_instance_id = adapter
+        self.self_id = bot_id
+        self.unified_msg_origin = f"{adapter}:FriendMessage:{subject}"
+
+    def get_sender_id(self) -> str:
+        return self.unified_msg_origin.rsplit(":FriendMessage:", 1)[-1]
 
 
 class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
@@ -256,6 +281,100 @@ class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
         self.assertFalse(host._is_target_private_user("10001", {"auto_enabled": True, "manual_disabled": True}))
         self.assertTrue(host._is_target_private_user("10001", {"auto_enabled": True, "manual_disabled": False}))
 
+    def test_private_profiles_are_isolated_by_platform_and_bot_account(self) -> None:
+        host = _AutoProfileHost()
+        host.enable_auto_user_profile_creation = True
+
+        onebot_event = _IdentityEvent("onebot", "onebot-main", "bot-onebot")
+        owner, created = host._ensure_auto_private_user_profile(onebot_event, user_id="123", now=1.0)
+        self.assertTrue(created)
+        assert owner is not None
+        owner["relationship_role"] = "owner"
+        owner["enabled"] = True
+        owner["unified_profile_capabilities"] = {
+            "private_companion_enabled": True,
+            "proactive_private_enabled": True,
+        }
+
+        official_event = _IdentityEvent("qq_official", "qq-official-test", "bot-official")
+        isolated, isolated_created = host._ensure_auto_private_user_profile(official_event, user_id="123", now=2.0)
+        self.assertTrue(isolated_created)
+        assert isolated is not None
+        self.assertIsNot(owner, isolated)
+        self.assertNotEqual(owner["user_id"], isolated["user_id"])
+        self.assertEqual("friend", isolated.get("relationship_role"))
+        self.assertFalse(isolated.get("enabled", True))
+        self.assertNotEqual("owner", isolated.get("relationship_role"))
+        self.assertEqual("qq_official", isolated.get("identity_platform_kind"))
+
+        same_official, same_created = host._ensure_auto_private_user_profile(official_event, user_id="123", now=3.0)
+        self.assertIs(isolated, same_official)
+        self.assertFalse(same_created)
+
+        second_official = _IdentityEvent("qq_official", "qq-official-other", "bot-official-2")
+        other, other_created = host._ensure_auto_private_user_profile(second_official, user_id="123", now=4.0)
+        self.assertTrue(other_created)
+        assert other is not None
+        self.assertIsNot(isolated, other)
+        self.assertNotEqual(isolated["user_id"], other["user_id"])
+        self.assertEqual("qq_official", other.get("identity_platform_kind"))
+
+    def test_unversioned_legacy_profile_is_claimed_once_then_isolated(self) -> None:
+        host = _AutoProfileHost()
+        host.enable_auto_user_profile_creation = True
+        legacy = host._get_user("123")
+        legacy["relationship_role"] = "owner"
+        legacy["enabled"] = True
+
+        onebot_event = _IdentityEvent("onebot", "onebot-main", "bot-onebot")
+        claimed, created = host._ensure_auto_private_user_profile(onebot_event, user_id="123", now=1.0)
+        self.assertIs(legacy, claimed)
+        self.assertFalse(created)
+        self.assertEqual("onebot", legacy.get("identity_platform_kind"))
+        self.assertEqual("bot-onebot", legacy.get("identity_bot_id"))
+
+        official_event = _IdentityEvent("qq_official", "qq-official-test", "bot-official")
+        isolated, isolated_created = host._ensure_auto_private_user_profile(official_event, user_id="123", now=2.0)
+        self.assertTrue(isolated_created)
+        assert isolated is not None
+        self.assertIsNot(legacy, isolated)
+        self.assertNotEqual("owner", isolated.get("relationship_role"))
+        self.assertEqual("qq_official", isolated.get("identity_platform_kind"))
+
+    def test_stamped_profile_without_account_markers_isolated_for_other_bot(self) -> None:
+        host = _AutoProfileHost()
+        host.enable_auto_user_profile_creation = True
+        legacy = host._get_user("123")
+        legacy["identity_subject_id"] = "123"
+        legacy["identity_platform_kind"] = "qq_official"
+        legacy["relationship_role"] = "owner"
+        legacy["enabled"] = True
+
+        first_event = _IdentityEvent("qq_official", "qq-official-main", "")
+        first, first_created = host._ensure_auto_private_user_profile(first_event, user_id="123", now=1.0)
+        self.assertIsNot(first, legacy)
+        self.assertTrue(first_created)
+        self.assertEqual("qq-official-main", first.get("identity_adapter_instance_id"))
+
+        second_event = _IdentityEvent("qq_official", "qq-official-other", "bot-2")
+        second, second_created = host._ensure_auto_private_user_profile(second_event, user_id="123", now=2.0)
+        self.assertTrue(second_created)
+        self.assertIsNot(first, second)
+        self.assertIsNot(legacy, second)
+
+    def test_event_resolver_failure_falls_back_to_scoped_identity(self) -> None:
+        host = _AutoProfileHost()
+        event = _IdentityEvent("qq_official", "qq-official-test", "bot-official")
+
+        def broken_resolver(_event: Any, _user_id: Any) -> str:
+            raise RuntimeError("resolver unavailable")
+
+        host._event_private_user_storage_id = broken_resolver
+        resolved = host._private_user_id_for_event(event, "123")
+
+        self.assertRegex(resolved, r"^qq_official:123:[0-9a-f]{16}$")
+        self.assertNotEqual("123", resolved)
+
     def test_page_api_normalizes_new_profile_settings(self) -> None:
         method = _load_class_methods(
             "page_api_settings.py",
@@ -296,7 +415,7 @@ class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
         self.assertIn('data-feature-open="${escapeHtml(key)}"', source)
         schema = (ROOT / "_conf_schema.json").read_text(encoding="utf-8")
         self.assertIn("新用户最小档案", schema)
-        self.assertIn("亲密度阶段策略", source)
+        self.assertIn("启用好感度系统", source)
         self.assertIn("用户档案", html)
         self.assertIn("记忆插件协同", html)
 

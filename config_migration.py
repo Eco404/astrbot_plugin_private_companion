@@ -140,6 +140,15 @@ LEGACY_DEFAULT_VALUE_MIGRATIONS: dict[str, tuple[Any, Any]] = {
     "forward_message_image_vision_timeout_seconds": (6.0, 60.0),
 }
 
+# v6.0.7 repurposed the old custom-stage-policy switch as the relationship
+# system master switch.  In older releases ``false`` meant "use the built-in
+# policy", so treating that value as a hard off switch would silently disable
+# relationship accounting for existing installations.  Keep a private,
+# one-time marker outside the public schema so a later explicit dashboard
+# change to ``false`` remains authoritative.
+_RELATIONSHIP_SWITCH_MIGRATION_MARKER = "_relationship_switch_semantics_version"
+_RELATIONSHIP_SWITCH_MIGRATION_VERSION = 1
+
 
 def migrate_flat_config_into_schema_groups(
     config: Any,
@@ -176,6 +185,9 @@ def _migrate_flat_config_into_schema_groups(
     legacy_sources = [root]
     if isinstance(legacy_group, dict):
         legacy_sources.append(legacy_group)
+
+    relationship_switch_changes = _migrate_relationship_switch_semantics(root, schema_map)
+    changed.extend(relationship_switch_changes)
 
     # 参考图目录升级需要先于通用的“分组值优先”处理。AstrBot 会为新版
     # 分组补上空默认值；这不代表用户主动清空，不能覆盖仍然非空的旧字段。
@@ -317,6 +329,48 @@ def _migrate_flat_config_into_schema_groups(
     if save:
         _save_config_after_schema_migration(config, logger=logger)
     return len(changed)
+
+
+def _migrate_relationship_switch_semantics(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Preserve the pre-v6.0.7 meaning of the relationship switch once.
+
+    The old key was a policy *selection* toggle whose default was ``false``;
+    both values still left the built-in relationship ledger active.  The new
+    release uses the same persisted key as a total enable/disable switch.
+    Existing values therefore need a one-time normalization to ``true``.
+    A private marker prevents a user's later explicit disable from being
+    rewritten on every startup.
+    """
+
+    marker = root.get(_RELATIONSHIP_SWITCH_MIGRATION_MARKER)
+    if marker == _RELATIONSHIP_SWITCH_MIGRATION_VERSION:
+        return []
+    key = "enable_custom_relationship_stage_policy"
+    item = schema_map.get(key)
+    if not isinstance(item, dict):
+        return []
+    group_key = str(item.get("group") or "")
+    group = root.get(group_key) if group_key else None
+    has_legacy_value = key in root or (isinstance(group, dict) and key in group)
+    if not has_legacy_value:
+        # A brand-new config will receive the schema default later; there is
+        # no legacy choice to migrate and no marker to persist.
+        return []
+
+    changed: list[str] = []
+    if root.get(key) is not True:
+        root[key] = True
+        changed.append(f"{key}~relationship-switch-v1")
+    if isinstance(group, dict) and key in group and group.get(key) is not True:
+        group[key] = True
+        changed.append(f"{group_key}.{key}~relationship-switch-v1")
+    if root.get(_RELATIONSHIP_SWITCH_MIGRATION_MARKER) != _RELATIONSHIP_SWITCH_MIGRATION_VERSION:
+        root[_RELATIONSHIP_SWITCH_MIGRATION_MARKER] = _RELATIONSHIP_SWITCH_MIGRATION_VERSION
+        changed.append(f"{_RELATIONSHIP_SWITCH_MIGRATION_MARKER}~set")
+    return changed
 
 
 def _preserve_legacy_photo_reference_config(

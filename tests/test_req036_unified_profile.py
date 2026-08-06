@@ -476,6 +476,18 @@ class Req036CompanionTests(unittest.TestCase):
         state["proactive_private_enabled"] = True
         self.assertEqual("proactive_requires_private_companion", proactive_private_gate({"unified_profile_capabilities": state})["code"])
 
+    def test_portrait_capability_fails_closed_without_memory_backend(self) -> None:
+        state = default_capabilities()
+        state["portrait_mode"] = "learn_and_use"
+        state["portrait_mode_override"] = "explicit"
+        summary = capability_summary(
+            {"unified_profile_capabilities": state},
+            portrait_backend_available=False,
+        )
+        self.assertEqual("disabled", summary["portrait_mode"])
+        self.assertFalse(summary["portrait_learning_enabled"])
+        self.assertFalse(summary["portrait_usage_enabled"])
+
     def test_administrator_update_records_only_capability_audit(self) -> None:
         user: dict[str, Any] = {"unified_profile_capabilities": default_capabilities()}
         result = update_capabilities(
@@ -491,6 +503,19 @@ class Req036CompanionTests(unittest.TestCase):
         self.assertEqual("use_existing", result["capabilities"]["portrait_mode"])
         self.assertEqual("page_administrator", user["unified_profile_capability_audit"][-1]["actor_id"])
         self.assertNotIn("content", repr(user["unified_profile_capability_audit"]))
+
+    def test_req039_group_path_uses_shared_user_and_ledger(self) -> None:
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        plugin = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "PrivateCompanionPlugin")
+        capture = next(node for node in plugin.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "_capture_group_observation_event")
+        rendered = ast.unparse(capture)
+        self.assertIn("_req039_ensure_group_unified_user", rendered)
+        self.assertIn("reason_code='group_inbound'", rendered)
+        expression = next(node for node in plugin.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "inject_unified_relationship_expression")
+        expression_rendered = ast.unparse(expression)
+        self.assertIn("group_id = '' if is_private", expression_rendered)
+        self.assertIn("'private_chat': is_private", expression_rendered)
 
     def test_capability_migration_is_dry_idempotent_and_reversible(self) -> None:
         data: dict[str, Any] = {

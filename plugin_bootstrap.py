@@ -306,7 +306,7 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
         self.worldview_adaptation_mode = "auto"
     self.worldview_adaptation_prompt = self._cfg_str(c, "worldview_adaptation_prompt", "")
     self.default_nickname = self._cfg_str(c, "default_nickname", "你", "你")
-    self.enable_auto_user_profile_creation = self._cfg_bool(c, "enable_auto_user_profile_creation", False)
+    self.enable_auto_user_profile_creation = self._cfg_bool(c, "enable_auto_user_profile_creation", True)
     self.auto_enable_companion_for_new_users = self._cfg_bool(c, "auto_enable_companion_for_new_users", False)
     self.auto_profile_platforms = self._cfg_raw(
         c,
@@ -322,15 +322,16 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
         self.default_nickname_strategy = "platform_display_name"
     self.default_proactive_enabled = self._cfg_bool(c, "default_proactive_enabled", False)
     self.default_proactive_daily_limit = self._cfg_int(c, "default_proactive_daily_limit", 0, 0, 30)
+    self.owner_companion_enabled = self._cfg_bool(c, "owner_companion_enabled", True)
     self.private_companion_disabled_reply = self._cfg_str(
         c,
         "private_companion_disabled_reply",
         DEFAULT_UNAUTHORIZED_PRIVATE_REPLY,
         DEFAULT_UNAUTHORIZED_PRIVATE_REPLY,
     )
-    self.portrait_global_mode = self._cfg_str(c, "portrait_global_mode", "disabled", "disabled")
+    self.portrait_global_mode = self._cfg_str(c, "portrait_global_mode", "learn_and_use", "learn_and_use")
     if self.portrait_global_mode not in {"disabled", "use_existing", "learn_and_use"}:
-        self.portrait_global_mode = "disabled"
+        self.portrait_global_mode = "learn_and_use"
     self.require_private_opt_in = self._cfg_bool(c, "require_private_opt_in", True)
     self.target_user_ids = self._cfg_raw(c, "target_user_ids", [])
     self.private_user_aliases = self._parse_private_user_aliases(self._cfg_raw(c, "private_user_aliases", ""))
@@ -341,7 +342,7 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.default_interaction_band = self._cfg_str(c, "default_interaction_band", "relaxed")
     if self.default_interaction_band not in {"avoidant", "hurt", "relaxed", "lively", "warm"}:
         self.default_interaction_band = "relaxed"
-    self.enable_custom_relationship_stage_policy = self._cfg_bool(c, "enable_custom_relationship_stage_policy", False)
+    self.enable_custom_relationship_stage_policy = self._cfg_bool(c, "enable_custom_relationship_stage_policy", True)
     self.relationship_stage_policy = normalize_relationship_stage_policy(
         self._cfg_raw(c, "relationship_stage_policy", [])
     )
@@ -351,6 +352,8 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.normal_interaction_band_cap = self._cfg_str(c, "normal_interaction_band_cap", "warm")
     if self.normal_interaction_band_cap not in {"relaxed", "lively", "warm"}:
         self.normal_interaction_band_cap = "warm"
+    self.owner_group_relationship_projection = self._cfg_bool(c, "owner_group_relationship_projection", True)
+    self.owner_group_interaction_projection = self._cfg_bool(c, "owner_group_interaction_projection", True)
     self.enable_relationship_content_tiers = self._cfg_bool(c, "enable_relationship_content_tiers", False)
     self.enable_flirt_content_tier = self._cfg_bool(c, "enable_flirt_content_tier", True)
     self.enable_adult_content_tier = self._cfg_bool(c, "enable_adult_content_tier", False)
@@ -1156,6 +1159,9 @@ def _initialize_review_and_group_config(self: Any, c: Any) -> None:
     self.proactive_review_low_score_threshold = self._cfg_unit_interval(c, "proactive_review_low_score_threshold", 0.34, 0.0)
     self.proactive_review_pressure_threshold = self._cfg_unit_interval(c, "proactive_review_pressure_threshold", 0.55, 0.0)
     self.enable_passive_topic_suppression = self._cfg_bool(c, "enable_passive_topic_suppression", True)
+    # The unified ledger owns runtime updates.  Keep the legacy switches
+    # readable for diagnostics and old config pages, but do not let their
+    # persisted values disable the unified path.
     self.enable_relationship_analysis = self._cfg_bool(c, "enable_relationship_analysis", True)
     self.enable_relationship_state_machine = self._cfg_bool(c, "enable_relationship_state_machine", True)
     self.enable_emotion_simulation = self._cfg_bool(c, "enable_emotion_simulation", True)
@@ -1226,6 +1232,8 @@ def _initialize_review_and_group_config(self: Any, c: Any) -> None:
     self.group_blacklist_ids = self._cfg_raw(c, "group_blacklist_ids", [])
     self.require_target_group = self._cfg_bool(c, "require_target_group", True)
     self.enable_group_slang_learning = self._cfg_bool(c, "enable_group_slang_learning", True)
+    # Group observation no longer writes the retired Worldbook member profile,
+    # but keep this compatibility switch readable for existing installations.
     self.enable_group_member_profiles = self._cfg_bool(c, "enable_group_member_profiles", True)
     self.enable_group_member_safety = self._cfg_bool(c, "enable_group_member_safety", True)
     self.group_member_safety_review_mode = self._cfg_str(

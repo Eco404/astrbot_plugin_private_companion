@@ -68,7 +68,12 @@ async def inject_humanized_state(
     private_user_active = False
     if is_private_chat:
         try:
-            private_user_id = self._canonical_private_user_id(str(event.get_sender_id()))
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            private_user_id = (
+                resolver(event)
+                if callable(resolver)
+                else self._canonical_private_user_id(str(event.get_sender_id()))
+            )
         except Exception:
             private_user_id = ""
         raw_users = self.data.get("users", {})
@@ -157,7 +162,12 @@ async def inject_humanized_state(
                 await self._append_reply_style_to_request(event, req, mode="group")
         if is_private_chat:
             try:
-                backlog_user_id = self._canonical_private_user_id(str(event.get_sender_id()))
+                resolver = getattr(self, "_private_user_id_for_event", None)
+                backlog_user_id = (
+                    resolver(event)
+                    if callable(resolver)
+                    else self._canonical_private_user_id(str(event.get_sender_id()))
+                )
             except Exception:
                 backlog_user_id = ""
             backlog_user = self.data.get("users", {}).get(backlog_user_id) if backlog_user_id else None
@@ -399,7 +409,12 @@ async def inject_humanized_state(
         log_bookshelf_secret_skip("group_chat")
         return
     try:
-        user_id = self._canonical_private_user_id(str(event.get_sender_id()))
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        user_id = (
+            resolver(event)
+            if callable(resolver)
+            else self._canonical_private_user_id(str(event.get_sender_id()))
+        )
     except Exception:
         log_bookshelf_secret_skip("private_sender_missing")
         return

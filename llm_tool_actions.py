@@ -421,6 +421,34 @@ class LlmToolActionsMixin:
     def _reaction_expression_explicit_request_matches(text: Any) -> bool:
         return reaction_expression_explicit_request(text)
 
+    def _reaction_expression_event_storage_id(self, event: Any, user_id: Any) -> str:
+        """Resolve an event sender to the platform/account-scoped users key."""
+        raw_id = _single_line(user_id, 160)
+        if not raw_id:
+            return ""
+        # Callers may feed the already-resolved storage key back into a later
+        # state step. Do not namespace that key a second time.
+        try:
+            event_sender = _single_line(event.get_sender_id(), 160)
+        except Exception:
+            event_sender = ""
+        platform_getter = getattr(self, "_platform_kind_for_event", None)
+        try:
+            platform = _single_line(platform_getter(event), 40).lower() if callable(platform_getter) else ""
+        except Exception:
+            platform = ""
+        if event_sender and raw_id != event_sender and platform and raw_id.startswith(f"{platform}:"):
+            return raw_id
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        if callable(resolver):
+            try:
+                resolved = _single_line(resolver(event, raw_id), 160)
+            except Exception:
+                resolved = ""
+            if resolved:
+                return resolved
+        return raw_id
+
     def _reaction_expression_feedback_user(
         self,
         user_id: Any,
@@ -437,6 +465,8 @@ class LlmToolActionsMixin:
                 normalized_id,
                 create=bool(create_for_opt_out and reaction_expression_explicit_opt_out(text)),
             )
+        if event is not None:
+            normalized_id = self._reaction_expression_event_storage_id(event, normalized_id)
         data = getattr(self, "data", None)
         users = data.get("users") if isinstance(data, dict) else None
         if not normalized_id or not isinstance(users, dict):
@@ -1292,8 +1322,14 @@ class LlmToolActionsMixin:
             requester = event.get_sender_id()
         except Exception:
             requester = ""
+        identity_for_event = getattr(plugin, "_event_permission_identity_id", None)
         identity = getattr(plugin, "_permission_identity_id", None)
-        if callable(identity):
+        if callable(identity_for_event):
+            try:
+                requester = identity_for_event(event)
+            except Exception:
+                requester = ""
+        elif callable(identity):
             try:
                 requester = identity(requester)
             except Exception:
@@ -1989,7 +2025,12 @@ class LlmToolActionsMixin:
         except Exception:
             is_private = ":FriendMessage:" in str(getattr(event, "unified_msg_origin", "") or "")
         try:
-            requester_id = self._permission_identity_id(event.get_sender_id())
+            identity_for_event = getattr(self, "_event_permission_identity_id", None)
+            requester_id = (
+                identity_for_event(event)
+                if callable(identity_for_event)
+                else self._permission_identity_id(event.get_sender_id())
+            )
         except Exception:
             requester_id = ""
         allowed = bool(is_private and requester_id and self._is_private_companion_owner_user_id(requester_id))
@@ -2635,6 +2676,9 @@ class LlmToolActionsMixin:
             requester_id = str(event.get_sender_id())
         except Exception:
             requester_id = ""
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        if callable(resolver) and requester_id:
+            requester_id = resolver(event, requester_id)
         requester = None
         user_getter = getattr(self, "_get_user", None)
         target_checker = getattr(self, "_is_target_private_user", None)
@@ -3192,7 +3236,7 @@ class LlmToolActionsMixin:
             )
         if ok:
             try:
-                user_id = str(event.get_sender_id())
+                user_id = self._reaction_expression_event_storage_id(event, event.get_sender_id())
             except Exception:
                 user_id = ""
             if user_id and callable(getattr(self, "_command_photo_quota_left", None)):
@@ -3487,6 +3531,8 @@ class LlmToolActionsMixin:
         if not resolved_scope:
             resolved_scope = self._reaction_expression_scope(event) if event is not None else "private"
         if resolved_scope != "group":
+            if event is not None:
+                normalized_id = self._reaction_expression_event_storage_id(event, normalized_id)
             getter = getattr(self, "_get_user", None)
             if not callable(getter):
                 return None
@@ -4113,6 +4159,8 @@ class LlmToolActionsMixin:
             user_id = _single_line(event.get_sender_id(), 160)
         except Exception:
             user_id = ""
+        if scope == "private" and user_id:
+            user_id = self._reaction_expression_event_storage_id(event, user_id)
         if not user_id:
             authorization["reason"] = "missing_user"
             self._set_reaction_expression_authorization(event, authorization)
@@ -4708,6 +4756,8 @@ class LlmToolActionsMixin:
             user_id = _single_line(event.get_sender_id(), 160)
         except Exception:
             user_id = ""
+        if scope == "private" and user_id:
+            user_id = self._reaction_expression_event_storage_id(event, user_id)
         if not user_id:
             return json.dumps(
                 self._reaction_expression_skip_result(
@@ -5551,7 +5601,10 @@ class LlmToolActionsMixin:
         if callable(snapshot_builder) and callable(snapshot_formatter):
             try:
                 sender_getter = getattr(event, "get_sender_id", None)
-                sender_id = _single_line(sender_getter() if callable(sender_getter) else "", 80)
+                sender_id = self._reaction_expression_event_storage_id(
+                    event,
+                    sender_getter() if callable(sender_getter) else "",
+                )
                 users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) and isinstance(self.data.get("users"), dict) else {}
                 current_user = users.get(sender_id) if sender_id else None
                 if isinstance(current_user, dict):
@@ -5802,7 +5855,7 @@ class LlmToolActionsMixin:
         )
         if sent and snapshot_caption:
             try:
-                user_id = str(event.get_sender_id())
+                user_id = self._reaction_expression_event_storage_id(event, event.get_sender_id())
             except Exception:
                 user_id = ""
             if user_id:
@@ -6882,7 +6935,12 @@ class LlmToolActionsMixin:
         except Exception:
             is_private = ":FriendMessage:" in str(getattr(event, "unified_msg_origin", "") or "")
         try:
-            requester_id = self._permission_identity_id(event.get_sender_id())
+            identity_for_event = getattr(self, "_event_permission_identity_id", None)
+            requester_id = (
+                identity_for_event(event)
+                if callable(identity_for_event)
+                else self._permission_identity_id(event.get_sender_id())
+            )
         except Exception:
             requester_id = ""
         owner_only = bool(getattr(self, "cross_user_memory_owner_only", True))
@@ -7034,7 +7092,12 @@ class LlmToolActionsMixin:
         if not is_private:
             return False
         try:
-            requester_id = self._permission_identity_id(event.get_sender_id())
+            identity_for_event = getattr(self, "_event_permission_identity_id", None)
+            requester_id = (
+                identity_for_event(event)
+                if callable(identity_for_event)
+                else self._permission_identity_id(event.get_sender_id())
+            )
         except Exception:
             requester_id = ""
         owner_allowed = bool(requester_id and self._is_private_companion_owner_user_id(requester_id))
@@ -7178,6 +7241,12 @@ class LlmToolActionsMixin:
             sender_id = str(event.get_sender_id())
         except Exception:
             sender_id = ""
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        if callable(resolver) and sender_id:
+            try:
+                sender_id = _single_line(resolver(event, sender_id), 160) or sender_id
+            except Exception:
+                pass
         users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
         user = users.get(sender_id) if sender_id and isinstance(users, dict) else None
         if isinstance(user, dict):

@@ -156,6 +156,7 @@ from .unified_profile_contract import (
 from .unified_profile_service import (
     DEFAULT_UNAUTHORIZED_PRIVATE_REPLY,
     capability_summary as req036_capability_summary,
+    ensure_new_profile_capabilities as req036_ensure_new_profile_capabilities,
     private_companion_gate as req036_private_companion_gate,
     proactive_private_gate as req036_proactive_private_gate,
     update_capabilities as req036_update_capabilities,
@@ -2606,11 +2607,58 @@ class PrivateCompanionPlugin(
     def get_unified_person_projection(self, person_id: str) -> dict[str, Any] | None:
         return self._active_unified_person_registry().read_projection(person_id)
 
+    def _req036_owner_companion_status(self, user: Any) -> tuple[bool, bool] | None:
+        """Return the global/private owner gates, or ``None`` for friends."""
+        if not isinstance(user, dict) or _single_line(user.get("relationship_role"), 40).lower() != "owner":
+            return None
+
+        def enabled(value: Any, default: bool = True) -> bool:
+            if value is None:
+                return default
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"false", "0", "no", "off", "disabled", "停用", "关闭", "关", "否", ""}:
+                    return False
+                if normalized in {"true", "1", "yes", "on", "enabled", "启用", "开启", "开", "是"}:
+                    return True
+            return bool(value)
+
+        global_enabled = enabled(getattr(self, "owner_companion_enabled", True))
+        user_enabled = enabled(user.get("owner_companion_enabled"), True)
+        return global_enabled, user_enabled
+
     def _req036_private_gate_for_user(self, user: Any) -> dict[str, Any]:
-        return req036_private_companion_gate(
+        gate = req036_private_companion_gate(
             user,
             getattr(self, "private_companion_disabled_reply", DEFAULT_UNAUTHORIZED_PRIVATE_REPLY),
         )
+        owner_status = self._req036_owner_companion_status(user)
+        if owner_status is None:
+            return gate
+        global_enabled, user_enabled = owner_status
+        capabilities = gate.get("capabilities")
+        if not global_enabled or not user_enabled:
+            gate["allowed"] = False
+            gate["code"] = "owner_companion_disabled"
+            gate["reply"] = _single_line(
+                getattr(self, "private_companion_disabled_reply", DEFAULT_UNAUTHORIZED_PRIVATE_REPLY),
+                480,
+            ) or DEFAULT_UNAUTHORIZED_PRIVATE_REPLY
+            if isinstance(capabilities, dict):
+                capabilities["private_companion_enabled"] = False
+                capabilities["proactive_private_enabled"] = False
+                capabilities["effective_proactive_private_enabled"] = False
+            return gate
+        # A pre-REQ036 owner may not have a capability document at all. Keep
+        # that legacy account usable, while a present document remains the
+        # administrator's explicit source of truth.
+        if not isinstance(user.get("unified_profile_capabilities"), dict):
+            gate["allowed"] = True
+            gate["code"] = "owner_default_enabled"
+            gate["reply"] = ""
+            if isinstance(capabilities, dict):
+                capabilities["private_companion_enabled"] = True
+        return gate
 
     def _req036_migrate_configured_target_capability(self, user_id: Any, user: Any) -> bool:
         """Materialize the one-time legacy target grant without reopening an explicit decision."""
@@ -2657,12 +2705,41 @@ class PrivateCompanionPlugin(
         return bool(result.get("ok"))
 
     def _req036_capability_summary_for_user(self, user: Any) -> dict[str, Any]:
-        return req036_capability_summary(
+        bridge = self._memory_companion_bridge()
+        portrait_backend_available = callable(getattr(bridge, "read_unified_profile_portrait", None))
+        summary = req036_capability_summary(
             user,
             global_portrait_mode=getattr(self, "portrait_global_mode", "disabled"),
+            portrait_backend_available=portrait_backend_available,
         )
+        owner_status = self._req036_owner_companion_status(user)
+        if owner_status is None:
+            return summary
+        global_enabled, user_enabled = owner_status
+        if not global_enabled or not user_enabled:
+            summary["private_companion_enabled"] = False
+            summary["proactive_private_enabled"] = False
+            summary["effective_proactive_private_enabled"] = False
+            reasons = list(summary.get("blocked_reasons") or [])
+            if "owner_companion_disabled" not in reasons:
+                reasons.append("owner_companion_disabled")
+            summary["blocked_reasons"] = reasons[:8]
+        elif not isinstance(user.get("unified_profile_capabilities"), dict):
+            summary["private_companion_enabled"] = True
+            summary["proactive_private_enabled"] = True
+            summary["effective_proactive_private_enabled"] = True
+            summary["grant_source"] = "owner_default_enabled"
+            summary["blocked_reasons"] = []
+        return summary
 
     def _req036_proactive_private_allowed(self, user: Any) -> bool:
+        owner_status = self._req036_owner_companion_status(user)
+        if owner_status is not None:
+            global_enabled, user_enabled = owner_status
+            if not global_enabled or not user_enabled:
+                return False
+            if not isinstance(user.get("unified_profile_capabilities"), dict):
+                return True
         return bool(req036_proactive_private_gate(user).get("allowed"))
 
     def _req036_update_capabilities(
@@ -2674,6 +2751,16 @@ class PrivateCompanionPlugin(
         target_identity: str = "",
         reason_code: str = "administrator_update",
     ) -> dict[str, Any]:
+        requested_mode = _single_line(changes.get("portrait_mode"), 40).lower() if isinstance(changes, dict) else ""
+        if requested_mode and requested_mode not in {"disabled", "off", "follow_global"}:
+            bridge = self._memory_companion_bridge()
+            if not callable(getattr(bridge, "read_unified_profile_portrait", None)):
+                return {
+                    "ok": False,
+                    "code": "memory_companion_required",
+                    "message": "需要安装并启用 MemoryCompanion",
+                    "capabilities": self._req036_capability_summary_for_user(user),
+                }
         return req036_update_capabilities(
             user,
             changes,
@@ -2683,6 +2770,74 @@ class PrivateCompanionPlugin(
             target_identity=target_identity,
             reason_code=reason_code,
         )
+
+    def _req039_ensure_group_unified_user(
+        self,
+        event: Any,
+        *,
+        sender_id: str,
+        sender_name: str = "",
+    ) -> dict[str, Any] | None:
+        """Resolve a group speaker into the same user record used by DMs.
+
+        This creates identity/relationship state only.  It deliberately does
+        not grant either private-companion or proactive-private permission.
+        """
+        raw_sender_id = _single_line(sender_id, 160)
+        normalizer = getattr(self, "_normalize_private_identity_id", None)
+        normalized_sender_id = normalizer(raw_sender_id) if callable(normalizer) else raw_sender_id
+        normalized_sender_id = normalized_sender_id or raw_sender_id
+        self_getter = getattr(self, "_event_self_id", None)
+        try:
+            self_id = _single_line(self_getter(event), 160) if callable(self_getter) else ""
+        except Exception:
+            self_id = ""
+        if not normalized_sender_id or normalized_sender_id == self_id or raw_sender_id == self_id:
+            return None
+        resolver = getattr(self, "_event_private_user_storage_id", None)
+        canonical = (
+            resolver(event, normalized_sender_id)
+            if callable(resolver)
+            else self._canonical_private_user_id(normalized_sender_id)
+        )
+        canonical = _single_line(canonical, 160)
+        bot_checker = getattr(self, "_is_bot_self_user_id", None)
+        if not canonical or (callable(bot_checker) and bot_checker(canonical)):
+            return None
+        users = self.data.get("users")
+        existed_before_group_observation = isinstance(users, dict) and isinstance(users.get(canonical), dict)
+        user = self._get_user(canonical)
+        user["user_id"] = canonical
+        stamper = getattr(self, "_stamp_private_event_identity", None)
+        if callable(stamper):
+            stamper(user, event, normalized_sender_id)
+        user.setdefault("profile_origin", "group_observation")
+        if not _single_line(user.get("nickname"), 80):
+            user["nickname"] = _single_line(sender_name, 80) or canonical
+        # A group observation may create a neutral profile, but must never
+        # revoke an existing private-chat authorization merely because that
+        # person subsequently speaks in a group.
+        capabilities_missing = not isinstance(user.get("unified_profile_capabilities"), dict)
+        capabilities = req036_ensure_new_profile_capabilities(user) if capabilities_missing else user.get("unified_profile_capabilities")
+        if not isinstance(capabilities, dict):
+            return user
+        if _single_line(user.get("relationship_role"), 40) == "owner":
+            owner_status_getter = getattr(self, "_req036_owner_companion_status", None)
+            owner_status = owner_status_getter(user) if callable(owner_status_getter) else None
+            owner_enabled = bool(owner_status and all(owner_status))
+            if owner_enabled and (not existed_before_group_observation or capabilities_missing):
+                capabilities["private_companion_enabled"] = True
+                capabilities["proactive_private_enabled"] = True
+                capabilities["grant_source"] = "owner_default_enabled"
+                user["private_companion_enabled"] = True
+                user["proactive_private_enabled"] = True
+                user["enabled"] = True
+        elif not existed_before_group_observation:
+            capabilities["private_companion_enabled"] = False
+            capabilities["proactive_private_enabled"] = False
+            user["private_companion_enabled"] = False
+            user["proactive_private_enabled"] = False
+        return user
 
     def _req036_attach_unified_profile_context(
         self,
@@ -2890,12 +3045,35 @@ class PrivateCompanionPlugin(
             return {"available": False, "code": "bridge_degraded", "last_synced_at": "", "portrait_revision": 0}
         if not isinstance(result, dict):
             return {"available": False, "code": "bridge_degraded", "last_synced_at": "", "portrait_revision": 0}
-        return {
+        response = {
             "available": bool(result.get("ok")),
             "code": _single_line(result.get("code"), 80) or "bridge_degraded",
             "last_synced_at": _single_line(result.get("last_synced_at"), 80),
             "portrait_revision": _safe_int(result.get("portrait_revision"), 0, 0),
         }
+        projection = self.get_unified_person_projection(person_id)
+        portrait_reader = getattr(bridge, "read_unified_profile_portrait", None) if bridge is not None else None
+        if not response["available"] or not isinstance(projection, dict) or not callable(portrait_reader):
+            return response
+        try:
+            request = req036_build_portrait_request(
+                person_ref=req036_build_person_ref(projection),
+                requester_person_id=person_id,
+                target_person_id=person_id,
+                scope="private",
+                purpose="summarize_to_subject",
+            )
+            portrait = portrait_reader(request, limit=3)
+            if asyncio.iscoroutine(portrait) or hasattr(portrait, "__await__"):
+                portrait = await portrait
+            response["summaries"] = [
+                _single_line(item.get("summary"), 80)
+                for item in (portrait.get("items", []) if isinstance(portrait, dict) else [])
+                if isinstance(item, dict) and _single_line(item.get("summary"), 80)
+            ][:3]
+        except Exception:
+            response["summaries"] = []
+        return response
 
     def read_p4_effect_state(self, person_id: str) -> dict[str, Any]:
         return self._active_unified_person_registry().read_p4_effect_state(person_id)
@@ -5113,7 +5291,12 @@ class PrivateCompanionPlugin(
                 if reference and callable(rewriter):
                     sender_id = ""
                     try:
-                        sender_id = self._canonical_private_user_id(str(event.get_sender_id()))
+                        resolver = getattr(self, "_private_user_id_for_event", None)
+                        sender_id = (
+                            resolver(event)
+                            if callable(resolver)
+                            else self._canonical_private_user_id(str(event.get_sender_id()))
+                        )
                     except Exception:
                         try:
                             sender_id = str(event.get_sender_id())
@@ -6010,7 +6193,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             user_id = str(event.get_sender_id())
         except Exception:
             user_id = ""
-        user_id = self._canonical_private_user_id(_single_line(user_id, 80))
+        user_id = _single_line(user_id, 80)
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        user_id = (
+            resolver(event, user_id)
+            if callable(resolver) and user_id
+            else self._canonical_private_user_id(user_id)
+        )
         if not user_id:
             return False
         raw_users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
@@ -8842,6 +9031,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 target_user_id = str(event.get_sender_id())
             except Exception:
                 target_user_id = ""
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            if callable(resolver) and target_user_id:
+                target_user_id = resolver(event, target_user_id)
             if not target_user_id:
                 return ""
             async with self._data_lock:
@@ -9059,7 +9251,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         memo_marker = "<!-- private_companion_memo_management_v1 -->"
         try:
             memo_private = bool(getattr(event, "is_private_chat", lambda: False)())
-            memo_requester = self._permission_identity_id(event.get_sender_id())
+            identity_for_event = getattr(self, "_event_permission_identity_id", None)
+            memo_requester = (
+                identity_for_event(event)
+                if callable(identity_for_event)
+                else self._permission_identity_id(event.get_sender_id())
+            )
         except Exception:
             memo_private = ":FriendMessage:" in str(getattr(event, "unified_msg_origin", "") or "")
             memo_requester = ""
@@ -9758,9 +9955,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 sender_display_name = ""
             if sender_id:
                 users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
-                current_user = users.get(sender_id) if isinstance(users, dict) else None
+                resolver = getattr(self, "_private_user_id_for_event", None)
+                scoped_sender_id = (
+                    resolver(event, sender_id)
+                    if callable(resolver)
+                    else self._canonical_private_user_id(sender_id)
+                )
+                current_user = users.get(scoped_sender_id) if isinstance(users, dict) else None
                 sender_is_target = self._is_target_private_user(
-                    sender_id,
+                    scoped_sender_id,
                     current_user if isinstance(current_user, dict) else None,
                 )
         lines = [
@@ -9833,7 +10036,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         except Exception:
             user_id = ""
         user_id = _single_line(user_id, 40)
-        canonical_user_id = self._canonical_private_user_id(user_id) if user_id else ""
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        canonical_user_id = (
+            resolver(event, user_id)
+            if callable(resolver) and user_id
+            else self._canonical_private_user_id(user_id)
+            if user_id
+            else ""
+        )
         if canonical_user_id:
             user_id = canonical_user_id
         if not user_id or self._is_bot_self_user_id(user_id):
@@ -10072,7 +10282,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             except Exception:
                 sender_id = ""
         users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else {}
-        user = users.get(sender_id) if sender_id and isinstance(users, dict) and isinstance(users.get(sender_id), dict) else {}
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        scoped_sender_id = (
+            resolver(event, sender_id)
+            if callable(resolver) and sender_id
+            else self._canonical_private_user_id(sender_id)
+        )
+        user = users.get(scoped_sender_id) if scoped_sender_id and isinstance(users, dict) and isinstance(users.get(scoped_sender_id), dict) else {}
         rewriter = getattr(self, "_rewrite_reference_reply_with_persona", None)
         if status not in {"success", "scheduled"}:
             if callable(rewriter):
@@ -10172,7 +10388,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             result = {"status": "error", "message": _single_line(result_raw, 240)}
         status = _single_line(result.get("status"), 40)
         if status in {"need_group", "not_found"} and _single_line(payload.get("destination"), 20) == "group":
-            self._store_pending_atrelay_request(str(event.get_sender_id()), payload, _single_line(result.get("message"), 120))
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            pending_user_id = (
+                resolver(event)
+                if callable(resolver)
+                else str(event.get_sender_id())
+            )
+            self._store_pending_atrelay_request(pending_user_id, payload, _single_line(result.get("message"), 120))
         logger.info(
             "[PrivateCompanion] 明确转述请求已本地直通: status=%s destination=%s target=%s text=%s",
             status or "-",
@@ -10627,7 +10849,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         except Exception:
             return "", None
         try:
-            user_id = self._canonical_private_user_id(str(event.get_sender_id()))
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            user_id = (
+                resolver(event)
+                if callable(resolver)
+                else self._canonical_private_user_id(str(event.get_sender_id()))
+            )
         except Exception:
             return "", None
         users = self.data.get("users", {})
@@ -11490,7 +11717,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if not self._safe_event_is_private(event):
             return False
         try:
-            requester_id = self._canonical_private_user_id(self._safe_event_sender_id(event))
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            requester_id = (
+                resolver(event)
+                if callable(resolver)
+                else self._canonical_private_user_id(self._safe_event_sender_id(event))
+            )
         except Exception:
             requester_id = ""
         if not requester_id:
@@ -11530,7 +11762,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         already_denied = bool(getattr(event, "private_companion_req036_denied", False))
         try:
-            user_id = self._canonical_private_user_id(str(event.get_sender_id()))
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            user_id = (
+                resolver(event)
+                if callable(resolver)
+                else self._canonical_private_user_id(str(event.get_sender_id()))
+            )
         except Exception:
             user_id = ""
         users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
@@ -11617,10 +11854,19 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         """Inject one fail-closed relationship expression decision before Memory enrichment."""
         if self is None or req is None or not bool(getattr(self, "enabled", False)):
             return
-        if not self._safe_event_is_private(event):
+        if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
+            return
+        is_private = self._safe_event_is_private(event)
+        group_id = "" if is_private else self._extract_group_id_from_event(event)
+        if not is_private and not group_id:
             return
         try:
-            sender_id = self._canonical_private_user_id(self._safe_event_sender_id(event))
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            sender_id = (
+                resolver(event)
+                if callable(resolver)
+                else self._canonical_private_user_id(self._safe_event_sender_id(event))
+            )
         except Exception:
             sender_id = ""
         users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
@@ -11645,10 +11891,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     "adult_enabled": bool(getattr(self, "enable_adult_content_tier", False)),
                     "adult_owner_confirmed": bool(getattr(self, "adult_content_owner_confirmed", False)),
                     "require_turn_consent": bool(getattr(self, "adult_content_require_turn_consent", True)),
-                    "private_chat": True,
+                    "private_chat": is_private,
                     "local_provider_configured": bool(getattr(self, "adult_content_provider_id", "")),
                     "local_provider_match": self._adult_content_provider_matches(event, req),
                 },
+                channel_scope="private" if is_private else "group",
             )
             projection = expression.to_dict() if hasattr(expression, "to_dict") else dict(expression or {})
         except Exception as exc:
@@ -12300,6 +12547,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 self._stop_passive_input_status_loop(event)
                 release_now = True
                 return
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            if callable(resolver):
+                user_id = resolver(event, user_id)
             raw_users = self.data.get("users", {})
             current_user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
             if not isinstance(current_user, dict):
@@ -12790,6 +13040,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     sender_display_name=sender_display_name,
                     now=_now_ts(),
                 )
+                if isinstance(private_user, dict):
+                    user_id = _single_line(private_user.get("user_id"), 160) or user_id
                 migrator = getattr(self, "_req036_migrate_configured_target_capability", None)
                 if callable(migrator):
                     migrator(user_id, private_user)
@@ -12966,11 +13218,25 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
 
         raw_user_id = str(event.get_sender_id() or "").strip()
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        canonicalizer = getattr(self, "_canonical_private_user_id", None)
         identity_normalizer = getattr(self, "_normalize_private_identity_id", None)
-        user_id = identity_normalizer(raw_user_id) if callable(identity_normalizer) else raw_user_id
-        user_id = user_id or raw_user_id
+        fallback_user_id = (
+            identity_normalizer(raw_user_id)
+            if callable(identity_normalizer)
+            else raw_user_id
+        ) or raw_user_id
+        user_id = (
+            resolver(event, raw_user_id)
+            if callable(resolver)
+            else canonicalizer(fallback_user_id) if callable(canonicalizer) else fallback_user_id
+        )
+        user_id = _single_line(user_id, 160) or raw_user_id
         async with self._data_lock:
             user = self._get_user(user_id)
+            stamper = getattr(self, "_stamp_private_event_identity", None)
+            if is_private and callable(stamper):
+                stamper(user, event, raw_user_id)
             self._note_private_user_umo(user_id, user, event.unified_msg_origin)
 
             if action in private_delivery_bind_actions:
@@ -13408,6 +13674,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 sender_display_name=sender_display_name,
                 now=_now_ts(),
             )
+            if isinstance(private_user, dict):
+                user_id = _single_line(private_user.get("user_id"), 160) or user_id
             migrator = getattr(self, "_req036_migrate_configured_target_capability", None)
             migrated = bool(migrator(user_id, private_user)) if callable(migrator) else False
             private_gate = self._req036_private_gate_for_user(private_user)
@@ -13515,6 +13783,28 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 message_id=self._event_message_id(event),
                 event=event,
             )
+            ensure_unified_user = getattr(self, "_req039_ensure_group_unified_user", None)
+            unified_user = (
+                ensure_unified_user(event, sender_id=sender_id, sender_name=sender_name)
+                if callable(ensure_unified_user)
+                else None
+            )
+            if (
+                captured
+                and isinstance(unified_user, dict)
+                and bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            ):
+                received_ts = _now_ts()
+                unified_user["last_seen"] = max(_safe_float(unified_user.get("last_seen"), 0), received_ts)
+                unified_user["last_activity_at"] = max(_safe_float(unified_user.get("last_activity_at"), 0), received_ts)
+                unified_user["inbound_count"] = _safe_int(unified_user.get("inbound_count"), 0) + 1
+                self._apply_relationship_event(
+                    unified_user,
+                    1,
+                    reason_code="group_inbound",
+                    event_id=self._event_message_id(event),
+                    now=received_ts,
+                )
             if captured:
                 self._schedule_data_save()
         activity_recorder = getattr(self, "_record_c3_inbound_activity", None)
@@ -13617,7 +13907,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
         async with self._data_lock:
             users = self.data.get("users", {}) if isinstance(self.data, dict) else {}
-            canonical_sender_id = self._canonical_private_user_id(sender_id)
+            resolver = getattr(self, "_event_private_user_storage_id", None)
+            canonical_sender_id = (
+                resolver(event, sender_id)
+                if callable(resolver)
+                else self._canonical_private_user_id(sender_id)
+            )
             observed_user = users.get(canonical_sender_id) if isinstance(users, dict) else None
             self._req036_attach_unified_profile_context(
                 event,
@@ -13703,7 +13998,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         # low-sensitivity, same-person Memory request below.
         if not isinstance(getattr(event, "private_companion_unified_profile_context", None), dict):
             try:
-                sender_id = self._canonical_private_user_id(str(event.get_sender_id()))
+                raw_sender_id = str(event.get_sender_id())
+                resolver = getattr(self, "_event_private_user_storage_id", None)
+                sender_id = (
+                    resolver(event, raw_sender_id)
+                    if callable(resolver)
+                    else self._canonical_private_user_id(raw_sender_id)
+                )
             except Exception:
                 sender_id = ""
             async with self._data_lock:

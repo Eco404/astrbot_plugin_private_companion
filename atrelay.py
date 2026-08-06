@@ -242,6 +242,29 @@ _PLATFORM_DISPLAY_NAMES = {
 class AtRelayMixin:
     """跨群/私聊转发工具的目标解析、边界和队列"""
 
+    def _atrelay_event_user_id(self, event: AstrMessageEvent | None) -> str:
+        """Resolve the current sender inside its platform/account boundary."""
+        if event is None:
+            return ""
+        try:
+            raw_id = _single_line(event.get_sender_id(), 160)
+        except Exception:
+            raw_id = ""
+        if not raw_id:
+            return ""
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        if callable(resolver):
+            try:
+                resolved = _single_line(resolver(event, raw_id), 160)
+            except Exception:
+                resolved = ""
+            if resolved:
+                return resolved
+        try:
+            return _single_line(self._canonical_private_user_id(raw_id), 160) or raw_id
+        except Exception:
+            return raw_id
+
     async def _get_group_member_list_for_tool(
         self,
         event: AstrMessageEvent,
@@ -528,14 +551,7 @@ class AtRelayMixin:
         return f"{name}（ID:{uid}）" if uid else name
 
     def _atrelay_source_identity_label(self, event: AstrMessageEvent) -> str:
-        try:
-            raw_id = str(event.get_sender_id())
-        except Exception:
-            raw_id = ""
-        try:
-            user_id = self._canonical_private_user_id(raw_id)
-        except Exception:
-            user_id = raw_id
+        user_id = self._atrelay_event_user_id(event)
         fallback = ""
         try:
             fallback = self._sender_display_name(event)
@@ -622,14 +638,7 @@ class AtRelayMixin:
         final_reply = _single_line(result.get("final_reply"), 80) or "说过啦。"
         reference = _single_line(result.get("final_reply_reference"), 260)
         if reference:
-            sender_id = ""
-            try:
-                sender_id = self._canonical_private_user_id(str(event.get_sender_id()))
-            except Exception:
-                try:
-                    sender_id = str(event.get_sender_id())
-                except Exception:
-                    sender_id = ""
+            sender_id = self._atrelay_event_user_id(event)
             users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else {}
             user = users.get(sender_id) if sender_id and isinstance(users, dict) and isinstance(users.get(sender_id), dict) else {}
             rewriter = getattr(self, "_rewrite_reference_reply_with_persona", None)
@@ -969,13 +978,7 @@ class AtRelayMixin:
     def _atrelay_source_snapshot_for_event(self, event: AstrMessageEvent | None) -> tuple[str, str]:
         if event is None:
             return "", ""
-        try:
-            source_user = self._canonical_private_user_id(str(event.get_sender_id()))
-        except Exception:
-            try:
-                source_user = str(event.get_sender_id())
-            except Exception:
-                source_user = ""
+        source_user = self._atrelay_event_user_id(event)
         try:
             source_name = self._atrelay_identity_label(source_user, self._sender_display_name(event))
         except Exception:
@@ -1070,7 +1073,12 @@ class AtRelayMixin:
         requester_id = ""
         if event is not None:
             try:
-                requester_id = self._permission_identity_id(event.get_sender_id())
+                identity_for_event = getattr(self, "_event_permission_identity_id", None)
+                requester_id = (
+                    identity_for_event(event)
+                    if callable(identity_for_event)
+                    else self._permission_identity_id(event.get_sender_id())
+                )
             except Exception:
                 requester_id = ""
         checker = getattr(self, "_is_private_companion_owner_user_id", None)
@@ -1200,14 +1208,7 @@ class AtRelayMixin:
         expire_hours: Any = 12,
     ) -> dict[str, Any]:
         source_umo = _single_line(getattr(event, "unified_msg_origin", ""), 120)
-        try:
-            source_user = _single_line(event.get_sender_id(), 40)
-        except Exception:
-            source_user = ""
-        try:
-            source_user = self._canonical_private_user_id(source_user)
-        except Exception:
-            pass
+        source_user = _single_line(self._atrelay_event_user_id(event), 40)
         source_name = self._atrelay_identity_label(source_user)
         platform = source_umo.split(":", 1)[0] if ":" in source_umo else (self.target_platform or "aiocqhttp")
         if not source_umo and source_user:

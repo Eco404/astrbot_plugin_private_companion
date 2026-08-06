@@ -5800,11 +5800,14 @@ Local classifier result:
     def _update_relationship_state_from_intent(self, user: dict[str, Any], intent: dict[str, Any]) -> None:
         if not isinstance(intent, dict):
             return
-        emotion_enabled = bool(getattr(self, "enable_emotion_simulation", True))
-        relation_enabled = bool(getattr(self, "enable_relationship_state_machine", True))
-        if not (emotion_enabled or relation_enabled):
+        if not bool(getattr(self, "enable_custom_relationship_stage_policy", True)):
             return
+        # REQ-040: the seven-band interaction projection is the only durable
+        # relationship-expression state.  Legacy relationship_state is not
+        # produced or consumed any more.
         self._settle_current_interaction_from_intent(user, intent)
+        user.pop("relationship_state", None)
+        return
         state = user.setdefault("relationship_state", {})
         if not isinstance(state, dict):
             state = {}
@@ -7239,6 +7242,9 @@ Local classifier result:
             event_umo = _single_line(getattr(event, "unified_msg_origin", ""), 180)
         except Exception:
             return ""
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        if callable(resolver):
+            user_id = resolver(event, user_id)
         consume_suspended = False
         recent_delivery_context = ""
         async with self._data_lock:
@@ -7592,8 +7598,13 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         schedule: dict[str, Any] | None = None,
         message_intent: dict[str, Any] | None = None,
         content_policy: dict[str, Any] | None = None,
+        channel_scope: str = "private",
         now: float | None = None,
     ):
+        if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
+            # Keep the caller contract stable without reading or projecting
+            # archived affinity data when the master switch is off.
+            return build_expression_decision({})
         decision_now = _now_ts() if now is None else _safe_float(now, _now_ts(), 0)
         role_getter = getattr(self, "_private_user_role", None)
         try:
@@ -7601,7 +7612,10 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         except Exception:
             role = str(user.get("relationship_role") or "friend")
         relationship_mode = str(user.get("relationship_mode") or "normal")
-        if role == "owner" and relationship_mode == "owner_exclusive":
+        is_owner_group = channel_scope == "group" and role == "owner"
+        project_relationship = is_owner_group and bool(getattr(self, "owner_group_relationship_projection", True))
+        project_interaction = is_owner_group and bool(getattr(self, "owner_group_interaction_projection", True))
+        if role == "owner" and relationship_mode == "owner_exclusive" and not project_relationship:
             relationship_baseline = {
                 "stage_key": "owner_exclusive",
                 "tone": _single_line(getattr(self, "owner_exclusive_tone", "温暖、亲近、稳定"), 120),
@@ -7648,12 +7662,9 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                 },
             }
         interaction_source = user.get("current_interaction")
-        legacy_state = user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {}
-        legacy_mode = _single_line(legacy_state.get("mode"), 24).lower()
-        legacy_cooldown_until = max(
-            _safe_float(legacy_state.get("backoff_until"), 0),
-            _safe_float(legacy_state.get("hurt_until"), 0),
-        )
+        # ``relationship_state`` is retained only for historical diagnostics.
+        # It must not become a second authority for the unified expression.
+        legacy_cooldown_until = 0
         has_explicit_interaction = bool(
             isinstance(interaction_source, dict)
             and _single_line(
@@ -7664,19 +7675,10 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                 24,
             )
         )
-        if not has_explicit_interaction and legacy_mode in {"backoff", "refusing", "hurt", "careful", "warming"}:
-            legacy_active = legacy_mode in {"careful", "warming"} or legacy_cooldown_until <= 0 or legacy_cooldown_until > decision_now
-            if legacy_active:
-                interaction_source = {
-                    "expression_band": legacy_mode,
-                    "source": "legacy_compatibility",
-                    "reason": "legacy_relationship_state_projection",
-                    "expires_at": legacy_cooldown_until,
-                }
         interaction = current_interaction_projection(
             interaction_source,
-            relationship_role=role,
-            relationship_mode=relationship_mode,
+            relationship_role="friend" if project_interaction else role,
+            relationship_mode="normal" if project_relationship else relationship_mode,
             relationship_score=user.get("relationship_score"),
             normal_interaction_band_cap=getattr(self, "normal_interaction_band_cap", "warm"),
             now=decision_now,
@@ -7700,8 +7702,8 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         return build_expression_decision(
             {
                 "relationship_score": user.get("relationship_score", 0),
-                "relationship_role": role,
-                "relationship_mode": relationship_mode,
+                "relationship_role": "friend" if project_interaction else role,
+                "relationship_mode": "normal" if project_relationship else relationship_mode,
                 "relationship_baseline": relationship_baseline,
                 "relationship_stage": relationship_baseline.get("stage_key"),
                 "normal_interaction_band_cap": getattr(self, "normal_interaction_band_cap", "warm"),
@@ -7842,18 +7844,10 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         )
 
     def _format_private_identity_anchor_for_prompt(self, user_id: str, user: dict[str, Any], event: Any | None = None) -> str:
-        worldbook_profile = None
-        try:
-            worldbook_profile = self._worldbook_profile_by_user_id(user_id)
-        except Exception:
-            worldbook_profile = None
-        worldbook_name = _single_line(worldbook_profile.get("name"), 24) if isinstance(worldbook_profile, dict) else ""
-        stable_name = _single_line(user.get("nickname") or worldbook_name or self.default_nickname, 24)
-        identity_note = (
-            _single_line(worldbook_profile.get("identity_note") or worldbook_profile.get("note") or worldbook_profile.get("content"), 180)
-            if isinstance(worldbook_profile, dict)
-            else ""
-        )
+        # The unified archive is the only person authority.  Retired
+        # Worldbook identities and text must never enter a private prompt.
+        stable_name = _single_line(user.get("nickname") or self.default_nickname, 24)
+        identity_note = _single_line(user.get("profile_note"), 180)
         display_name = _single_line(user.get("last_display_name") or user.get("display_name"), 40)
         if event is not None:
             try:
@@ -8474,8 +8468,9 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         trigger: str = "interaction",
         force: bool = False,
     ) -> bool:
-        if not bool(getattr(self, "enable_relationship_analysis", True)):
-            return False
+        # REQ040 compatibility no-op: this old LLM relationship analyzer is
+        # no longer allowed to update any user state.
+        return False
         now = _now_ts()
         async with self._data_lock:
             analysis_user = dict(self._get_user(user_id))

@@ -178,10 +178,39 @@ class InteractionUtilsMixin:
         Private-user aliases intentionally merge conversation data, but they must
         never turn a different sender into an owner or administrator.
         """
+        raw = _single_line(user_id, 160)
         normalizer = getattr(self, "_normalize_private_identity_id", None)
         if callable(normalizer):
-            return normalizer(user_id)
-        return _single_line(user_id, 128)
+            normalized = normalizer(raw)
+            if normalized:
+                return normalized
+        users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+        user = users.get(raw) if isinstance(users, dict) else None
+        if (
+            raw
+            and isinstance(user, dict)
+            and _single_line(user.get("identity_subject_id"), 128)
+            and _single_line(user.get("identity_platform_kind"), 40)
+        ):
+            return raw
+        return ""
+
+    def _event_permission_identity_id(self, event: AstrMessageEvent | None) -> str:
+        if event is None:
+            return ""
+        try:
+            raw_user_id = event.get_sender_id()
+        except Exception:
+            return ""
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        if callable(resolver):
+            try:
+                resolved = _single_line(resolver(event, raw_user_id), 160)
+            except Exception:
+                resolved = ""
+            if resolved:
+                return resolved
+        return self._permission_identity_id(raw_user_id)
 
     def _relationship_owner_user_ids(self) -> set[str]:
         users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
@@ -240,10 +269,7 @@ class InteractionUtilsMixin:
         )
 
     def _can_manage_private_companion(self, event: AstrMessageEvent) -> bool:
-        try:
-            user_id = str(event.get_sender_id())
-        except Exception:
-            user_id = ""
+        user_id = self._event_permission_identity_id(event)
         return self._is_plugin_manager_user_id(user_id)
 
     def _can_manage_sensitive_location(self, event: AstrMessageEvent) -> bool:
@@ -252,9 +278,9 @@ class InteractionUtilsMixin:
         try:
             if not bool(getattr(event, "is_private_chat", lambda: False)()):
                 return False
-            user_id = self._permission_identity_id(event.get_sender_id())
         except Exception:
             return False
+        user_id = self._event_permission_identity_id(event)
         return bool(user_id and self._is_private_companion_owner_user_id(user_id))
 
     @staticmethod
@@ -263,10 +289,7 @@ class InteractionUtilsMixin:
         return "城市设置只允许主要用户本人在自己的私聊中管理。"
 
     def _can_manage_group_companion(self, event: AstrMessageEvent) -> bool:
-        try:
-            user_id = str(event.get_sender_id())
-        except Exception:
-            user_id = ""
+        user_id = self._event_permission_identity_id(event)
         return self._is_plugin_manager_user_id(user_id) or self._is_group_admin_event(event)
 
     def _management_denied_text(self) -> str:

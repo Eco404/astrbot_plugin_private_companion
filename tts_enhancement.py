@@ -3947,6 +3947,45 @@ TTS 朗读文本：
                     add(raw)
         return ids
 
+    def _event_main_user_profile_match(self, event: Any, raw_user_id: Any) -> tuple[bool, bool]:
+        """Return ``(is_owner, identity_resolved)`` for this event scope.
+
+        ``target_user_ids`` predates platform/account-scoped profiles.  Once an
+        event resolves to a stamped profile (or to a different scoped storage
+        key), that identity must take precedence so an equal raw ID on another
+        adapter cannot inherit the owner's TTS rules.
+        """
+        normalizer = getattr(self, "_normalize_private_identity_id", None)
+        raw_id = normalizer(raw_user_id) if callable(normalizer) else _single_line(raw_user_id, 128)
+        if not raw_id:
+            return False, False
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        if not callable(resolver):
+            return False, False
+        try:
+            storage_id = _single_line(resolver(event, raw_id), 160)
+        except Exception:
+            return False, False
+        if not storage_id:
+            return False, False
+        users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+        profile = users.get(storage_id) if isinstance(users, dict) else None
+        if isinstance(profile, dict):
+            identity_stamped = bool(
+                _single_line(profile.get("identity_subject_id"), 128)
+                or _single_line(profile.get("identity_platform_kind"), 40)
+                or storage_id != raw_id
+            )
+            if identity_stamped:
+                role_normalizer = getattr(self, "_normalize_private_user_role", None)
+                role = (
+                    role_normalizer(profile.get("relationship_role"))
+                    if callable(role_normalizer)
+                    else _single_line(profile.get("relationship_role"), 40).lower()
+                )
+                return role == "owner", True
+        return False, storage_id != raw_id
+
     def _event_targets_main_user(self, event: Any) -> bool:
         main_ids = self._configured_main_user_ids()
         if not main_ids:
@@ -3956,10 +3995,15 @@ TTS 朗读文本：
             sender = normalizer(event.get_sender_id()) if callable(normalizer) else _single_line(event.get_sender_id(), 128)
         except Exception:
             sender = ""
-        if sender and sender in main_ids:
-            return True
+        if sender:
+            sender_is_owner, sender_identity_resolved = self._event_main_user_profile_match(event, sender)
+            if sender_is_owner:
+                return True
+            if not sender_identity_resolved and sender in main_ids:
+                return True
         for target in self._event_at_qq_ids(event):
-            if target in main_ids:
+            target_is_owner, target_identity_resolved = self._event_main_user_profile_match(event, target)
+            if target_is_owner or (not target_identity_resolved and target in main_ids):
                 return True
         return False
 

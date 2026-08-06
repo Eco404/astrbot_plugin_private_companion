@@ -7,9 +7,10 @@ from astrbot_plugin_private_companion.interaction_utils import InteractionUtilsM
 
 
 class _Event:
-    def __init__(self, sender_id: str, *, private: bool = True) -> None:
+    def __init__(self, sender_id: str, *, private: bool = True, scoped_id: str = "") -> None:
         self.sender_id = sender_id
         self.private = private
+        self.scoped_id = scoped_id
 
     def get_sender_id(self) -> str:
         return self.sender_id
@@ -40,6 +41,10 @@ class _PermissionHarness(InteractionUtilsMixin):
 
     def _configured_target_ids(self) -> list[str]:
         return list(self.target_user_ids)
+
+    @staticmethod
+    def _event_permission_identity_id(event: _Event) -> str:
+        return event.scoped_id or event.sender_id
 
     @staticmethod
     def _configured_admin_ids() -> set[str]:
@@ -80,6 +85,24 @@ class InteractionPermissionTests(unittest.TestCase):
         self.assertNotIn("当前", denial)
         self.assertNotIn("绑定城市", denial)
         self.assertNotIn("LocationID", denial)
+
+    def test_event_scoped_identity_does_not_inherit_owner_from_same_raw_id(self) -> None:
+        self.plugin.data["users"]["onebot:123:isolated"] = {
+            "relationship_role": "owner",
+            "identity_subject_id": "123",
+            "identity_platform_kind": "onebot",
+        }
+        self.plugin.data["users"]["123"] = {
+            "relationship_role": "owner",
+            "identity_subject_id": "123",
+            "identity_platform_kind": "onebot",
+        }
+        self.assertTrue(self.plugin._can_manage_private_companion(_Event("123", scoped_id="123")))
+        self.assertFalse(
+            self.plugin._can_manage_private_companion(
+                _Event("123", scoped_id="qq_official:123:isolated")
+            )
+        )
 
 
 if __name__ == "__main__":
