@@ -11452,17 +11452,29 @@ class DailyStateMixin(DailyStateTickMixin):
 
     def _prepared_lightweight_state_injection(self, state: dict[str, Any], *, force: bool = False) -> str:
         now = _now_ts()
-        cache = getattr(self, "_passive_light_injection_cache", None)
+        persona_scope = str(
+            getattr(
+                self,
+                "_effective_plugin_persona_id",
+                lambda: getattr(self, "plugin_specific_persona_id", ""),
+            )()
+            or ""
+        ).strip() or "__default__"
+        cache_store = getattr(self, "_passive_light_injection_cache", None)
+        if not isinstance(cache_store, dict) or "text" in cache_store:
+            cache_store = {}
+        cache = cache_store.get(persona_scope)
         if isinstance(cache, dict) and not force:
             text = str(cache.get("text") or "").strip()
             if text and cache.get("date") == _today_key() and now - _safe_float(cache.get("ts"), 0) < 60:
                 return text
         text = self._format_lightweight_state_injection(state)
-        self._passive_light_injection_cache = {
+        cache_store[persona_scope] = {
             "date": _today_key(),
             "ts": now,
             "text": text,
         }
+        self._passive_light_injection_cache = cache_store
         return text
 
     async def _refresh_passive_injection_cache(self) -> None:

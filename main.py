@@ -1916,6 +1916,72 @@ class PrivateCompanionPlugin(
             if "cache" in lowered or lowered in {"conversation_history", "recent_context", "pending_context"}:
                 profile.pop(key, None)
 
+    def _reset_persona_prompt_caches(self, *persona_ids: Any) -> None:
+        for attr, value in (
+            ("_default_persona_prompt_cache", ""),
+            ("_default_persona_prompt_cache_at", 0.0),
+            ("_default_persona_prompt_cache_umo", ""),
+            ("_default_persona_prompt_cache_persona_id", ""),
+            ("_default_persona_prompt_cache_by_scope", {}),
+        ):
+            try:
+                setattr(self, attr, deepcopy(value))
+            except Exception:
+                pass
+
+        ids = {
+            pid
+            for pid in (self._sanitize_persona_id(value) for value in persona_ids)
+            if pid
+        }
+        cache = getattr(self, "_passive_light_injection_cache", None)
+        if not isinstance(cache, dict) or "text" in cache or not ids:
+            self._passive_light_injection_cache = {}
+            return
+        next_cache = dict(cache)
+        for pid in ids:
+            next_cache.pop(pid, None)
+        self._passive_light_injection_cache = next_cache
+
+    def _clear_persona_window_runtime_cache(self, window_key: Any) -> None:
+        window = _single_line(window_key, 240)
+        if not window:
+            return
+        cache = getattr(self, "_passive_state_session_cache", None)
+        if isinstance(cache, dict):
+            cache.pop(window, None)
+
+    def _clear_persona_switch_caches(self, *persona_ids: Any) -> dict[str, Any]:
+        """Clear transient profile caches before a forced window rebind."""
+        ids: list[str] = []
+        for raw_id in persona_ids:
+            pid = self._sanitize_persona_id(raw_id)
+            if pid and pid not in ids:
+                ids.append(pid)
+        if not ids:
+            return {"ok": True, "cache_cleared": False}
+        profiles = {pid: self._ensure_persona_profile(pid) for pid in ids}
+        before = {pid: deepcopy(profile) for pid, profile in profiles.items()}
+        next_profiles = {pid: deepcopy(profile) for pid, profile in profiles.items()}
+        for profile in next_profiles.values():
+            self._clear_persona_runtime_cache(profile)
+        try:
+            for pid, profile in next_profiles.items():
+                self._save_persona_profile_sync(pid, profile)
+        except Exception as exc:
+            for pid, profile in before.items():
+                try:
+                    self._save_persona_profile_sync(pid, profile)
+                except Exception:
+                    pass
+            return {"ok": False, "message": f"人格缓存清理落盘失败: {_single_line(exc, 120)}"}
+        for pid, profile in profiles.items():
+            profile.clear()
+            profile.update(next_profiles[pid])
+        # Prompt caches are process-level and may outlive the profile switch.
+        self._reset_persona_prompt_caches(*ids)
+        return {"ok": True, "cache_cleared": True}
+
     def _migrate_persona_profile(self, source_persona_id: Any, target_persona_id: Any, keys: list[Any]) -> dict[str, Any]:
         source = self._sanitize_persona_id(source_persona_id)
         target = self._sanitize_persona_id(target_persona_id)
@@ -2000,7 +2066,110 @@ class PrivateCompanionPlugin(
         source_data.update(source_next)
         target_data.clear()
         target_data.update(target_next)
+        self._reset_persona_prompt_caches(source, target)
         return {"ok": True, "source_persona_id": source, "target_persona_id": target, "keys": migration_keys, "cache_cleared": True}
+
+    def _persona_window_switch_snapshot(
+        self,
+        window_key: Any,
+        persona_ids: list[Any] | tuple[Any, ...] = (),
+    ) -> dict[str, Any]:
+        ids: list[str] = []
+        for raw_id in persona_ids:
+            pid = self._sanitize_persona_id(raw_id)
+            if pid and pid not in ids:
+                ids.append(pid)
+        profiles: dict[str, dict[str, Any]] = {}
+        for pid in ids:
+            profile = deepcopy(self._ensure_persona_profile(pid))
+            self._clear_persona_runtime_cache(profile)
+            profiles[pid] = profile
+        window = _single_line(window_key, 240)
+        session_cache = getattr(self, "_passive_state_session_cache", None)
+        return {
+            "window_key": window,
+            "bindings": deepcopy(
+                self._cfg_raw(
+                    getattr(self, "config", {}),
+                    "multi_persona_window_bindings",
+                    {},
+                )
+            ),
+            "claims": deepcopy(getattr(self, "_persona_window_claims", {})),
+            "conflicts": deepcopy(getattr(self, "_persona_window_conflicts", {})),
+            "page_current_persona_id": str(
+                getattr(self, "_page_current_persona_id", "") or ""
+            ),
+            "profiles": profiles,
+            "passive_state_session_present": bool(
+                window and isinstance(session_cache, dict) and window in session_cache
+            ),
+            "passive_state_session_entry": deepcopy(
+                session_cache.get(window)
+                if window and isinstance(session_cache, dict)
+                else None
+            ),
+        }
+
+    def _restore_persona_window_switch_snapshot(
+        self,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        errors: list[str] = []
+        try:
+            bindings = snapshot.get("bindings")
+            _set_into_config(
+                self.config,
+                "multi_persona_window_bindings",
+                deepcopy(bindings if isinstance(bindings, dict) else {}),
+            )
+        except Exception as exc:
+            errors.append(f"binding:{_single_line(exc, 80)}")
+
+        for attr, key in (
+            ("_persona_window_claims", "claims"),
+            ("_persona_window_conflicts", "conflicts"),
+        ):
+            previous = deepcopy(snapshot.get(key) or {})
+            current = getattr(self, attr, None)
+            if isinstance(current, dict):
+                current.clear()
+                current.update(previous)
+            else:
+                setattr(self, attr, previous)
+        self._page_current_persona_id = str(
+            snapshot.get("page_current_persona_id") or ""
+        )
+        window = _single_line(snapshot.get("window_key"), 240)
+        if window:
+            session_cache = getattr(self, "_passive_state_session_cache", None)
+            if not isinstance(session_cache, dict):
+                session_cache = {}
+                self._passive_state_session_cache = session_cache
+            if snapshot.get("passive_state_session_present"):
+                session_cache[window] = deepcopy(
+                    snapshot.get("passive_state_session_entry")
+                )
+            else:
+                session_cache.pop(window, None)
+
+        restored_ids: list[str] = []
+        profiles = snapshot.get("profiles")
+        if isinstance(profiles, dict):
+            for raw_id, previous in profiles.items():
+                pid = self._sanitize_persona_id(raw_id)
+                if not pid or not isinstance(previous, dict):
+                    continue
+                restored_ids.append(pid)
+                try:
+                    self._save_persona_profile_sync(pid, previous)
+                    current = self._ensure_persona_profile(pid)
+                    current.clear()
+                    current.update(deepcopy(previous))
+                except Exception as exc:
+                    errors.append(f"profile:{pid}:{_single_line(exc, 80)}")
+        self._reset_persona_prompt_caches(*restored_ids)
+        return {"ok": not errors, "errors": errors}
 
     async def _migrate_persona_profile_async(
         self,
@@ -2047,10 +2216,32 @@ class PrivateCompanionPlugin(
                 "message": "该窗口已绑定其他人格，请先迁移资料后再切换",
             }
         migrated = None
+        cache_cleared = False
         if source_persona_id and migrate_keys:
-            migrated = self._migrate_persona_profile(source_persona_id, pid, migrate_keys)
+            source = self._sanitize_persona_id(source_persona_id)
+            if not window or not previous or previous == pid or source != previous:
+                return {
+                    "ok": False,
+                    "conflict": True,
+                    "stale_conflict": True,
+                    "window_key": window,
+                    "current_persona_id": previous,
+                    "expected_persona_id": source,
+                    "requested_persona_id": pid,
+                    "migration_available": bool(previous and previous != pid),
+                    "message": "窗口绑定已变化，请重新确认当前来源人格后再切换",
+                }
+            migrated = self._migrate_persona_profile(source, pid, migrate_keys)
             if not migrated.get("ok"):
                 return migrated
+            cache_cleared = bool(migrated.get("cache_cleared"))
+        elif window and previous and previous != pid and force:
+            cleared = self._clear_persona_switch_caches(previous, pid)
+            if not cleared.get("ok"):
+                return cleared
+            cache_cleared = bool(cleared.get("cache_cleared"))
+        if window and previous and previous != pid:
+            self._clear_persona_window_runtime_cache(window)
         if window:
             bindings[window] = pid
             _set_into_config(self.config, "multi_persona_window_bindings", bindings)
@@ -2058,15 +2249,98 @@ class PrivateCompanionPlugin(
             self._persona_window_conflicts.pop(window, None)
         self._ensure_persona_profile(pid)
         self._page_current_persona_id = pid
-        return {"ok": True, "enabled": True, "switched": True, "persona_id": pid, "window_key": window, "previous_persona_id": previous, "migrated": migrated}
+        return {
+            "ok": True,
+            "enabled": True,
+            "switched": True,
+            "persona_id": pid,
+            "window_key": window,
+            "previous_persona_id": previous,
+            "migrated": migrated,
+            "cache_cleared": cache_cleared,
+        }
 
-    async def _switch_persona_for_window_async(self, *args, **kwargs) -> dict[str, Any]:
+    async def _switch_persona_for_window_async(
+        self,
+        *args,
+        persist: bool = False,
+        **kwargs,
+    ) -> dict[str, Any]:
         source_persona_id = str(kwargs.get("source_persona_id") or "").strip()
         migrate_keys = kwargs.get("migrate_keys")
-        if source_persona_id and isinstance(migrate_keys, list) and migrate_keys:
+        window_key = _single_line(kwargs.get("window_key"), 240)
+        force_rebind = bool(kwargs.get("force")) and bool(window_key)
+        transactional_switch = bool(window_key) and bool(persist)
+        if (
+            (source_persona_id and isinstance(migrate_keys, list) and migrate_keys)
+            or force_rebind
+            or transactional_switch
+        ):
             await self._flush_scheduled_data_save()
             async with self._data_lock:
-                return self._switch_persona_for_window(*args, **kwargs)
+                target_id = self._sanitize_persona_id(
+                    args[0] if args else kwargs.get("persona_id", "")
+                )
+                bindings = self._persona_window_bindings()
+                claims = getattr(self, "_persona_window_claims", {})
+                previous = ""
+                if window_key:
+                    previous = bindings.get(window_key) or (
+                        claims.get(window_key, "") if isinstance(claims, dict) else ""
+                    )
+                profile_ids: list[str] = []
+                if force_rebind and previous and previous != target_id:
+                    profile_ids = [previous, target_id]
+                snapshot = (
+                    self._persona_window_switch_snapshot(window_key, profile_ids)
+                    if transactional_switch
+                    else None
+                )
+                result = self._switch_persona_for_window(*args, **kwargs)
+                if (
+                    not transactional_switch
+                    or not result.get("ok")
+                    or not result.get("window_key")
+                ):
+                    return result
+
+                saver = getattr(self, "_save_config_if_possible", None)
+                config_saved = False
+                if callable(saver):
+                    try:
+                        config_saved = bool(await saver())
+                    except Exception as exc:
+                        logger.warning(
+                            "[PrivateCompanion] 人格窗口绑定保存失败: %s",
+                            _single_line(exc, 120),
+                        )
+                if config_saved:
+                    result["config_saved"] = True
+                    return result
+
+                rollback = self._restore_persona_window_switch_snapshot(snapshot or {})
+                rollback_config_saved = False
+                if callable(saver):
+                    try:
+                        rollback_config_saved = bool(await saver())
+                    except Exception as exc:
+                        logger.warning(
+                            "[PrivateCompanion] 人格窗口绑定回滚保存失败: %s",
+                            _single_line(exc, 120),
+                        )
+                message = "窗口绑定配置未落盘，已回滚本次切换并清理临时缓存"
+                if not rollback.get("ok"):
+                    message = "窗口绑定配置未落盘，且资料回滚未完整完成，请检查日志"
+                return {
+                    "ok": False,
+                    "message": message,
+                    "config_saved": False,
+                    "rolled_back": bool(rollback.get("ok")),
+                    "rollback_config_saved": rollback_config_saved,
+                    "window_key": window_key,
+                    "persona_id": target_id,
+                    "previous_persona_id": previous,
+                }
         return self._switch_persona_for_window(*args, **kwargs)
 
     def _multi_persona_status(self) -> dict[str, Any]:

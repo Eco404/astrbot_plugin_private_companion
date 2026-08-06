@@ -10896,20 +10896,26 @@ class PrivateCompanionPageApi(
             "migrate_keys": migrate_keys,
             "force": bool(payload.get("force")),
         }
-        result = await switcher(persona_id, **switch_args) if callable(switcher) else self.plugin._switch_persona_for_window(
-            persona_id,
-            **switch_args,
+        if window_key and not callable(switcher):
+            return self._error("当前运行态缺少安全窗口绑定事务，请重载插件后重试")
+        result = (
+            await switcher(
+                persona_id,
+                persist=bool(window_key),
+                **switch_args,
+            )
+            if callable(switcher)
+            else self.plugin._switch_persona_for_window(
+                persona_id,
+                **switch_args,
+            )
         )
         if not result.get("ok"):
             if result.get("conflict"):
                 return self._ok(result)
             return self._error(result.get("message") or "人格窗口存在冲突")
-        saver = getattr(self.plugin, "_save_config_if_possible", None)
-        if callable(saver) and result.get("window_key"):
-            try:
-                await saver()
-            except Exception:
-                pass
+        if result.get("window_key") and result.get("config_saved") is not True:
+            return self._error("窗口绑定配置未确认落盘，本次切换已取消")
         return self._ok(result)
 
     async def migrate_persona_profile(self) -> dict[str, Any]:
@@ -10960,16 +10966,16 @@ class PrivateCompanionPageApi(
                 if hasattr(raw, "__await__"):
                     raw = await raw
                 for persona in self._iter_persona_entries(raw):
-                    pid = persona.get("id") or persona.get("name") or persona.get("persona_id")
-                    label = persona.get("name") or persona.get("label") or persona.get("id") or pid
+                    pid = persona.get("persona_id") or persona.get("id") or persona.get("name")
+                    label = persona.get("name") or persona.get("label") or persona.get("persona_id") or persona.get("id") or pid
                     add_item(pid, label=str(label or ""), source="运行态人格")
             except Exception:
                 continue
         for attr_name in ("personas", "persona_pool", "_personas", "_persona_pool"):
             raw = getattr(manager, attr_name, None) if manager is not None else None
             for persona in self._iter_persona_entries(raw):
-                pid = persona.get("id") or persona.get("name") or persona.get("persona_id")
-                label = persona.get("name") or persona.get("label") or persona.get("id") or pid
+                pid = persona.get("persona_id") or persona.get("id") or persona.get("name")
+                label = persona.get("name") or persona.get("label") or persona.get("persona_id") or persona.get("id") or pid
                 add_item(pid, label=str(label or ""), source="运行态人格")
 
         configured = self._single_line(getattr(self.plugin, "plugin_specific_persona_id", ""), 120)
@@ -10993,8 +10999,8 @@ class PrivateCompanionPageApi(
                     add_item(persona_id, source=path.name)
             for persona_key in ("persona", "personas", "persona_settings", "personality", "personalities"):
                 for persona in self._iter_persona_entries(data.get(persona_key)):
-                    pid = persona.get("id") or persona.get("name") or persona.get("persona_id")
-                    label = persona.get("name") or persona.get("label") or persona.get("id") or pid
+                    pid = persona.get("persona_id") or persona.get("id") or persona.get("name")
+                    label = persona.get("name") or persona.get("label") or persona.get("persona_id") or persona.get("id") or pid
                     add_item(pid, label=str(label or ""), source=path.name)
 
         return list(items.values())
@@ -11006,29 +11012,99 @@ class PrivateCompanionPageApi(
         return [{"id": "", "label": "继承 AstrBot 当前配置人格", "source": "当前会话", "is_default": True}]
 
     def _iter_persona_entries(self, raw: Any) -> list[dict[str, Any]]:
-        if isinstance(raw, dict):
+        def safe_attr(item: Any, key: str, default: Any = None) -> Any:
+            try:
+                return getattr(item, key, default)
+            except Exception:
+                return default
+
+        def object_entry(item: Any, fallback_id: Any = None) -> dict[str, Any] | None:
+            """Normalize a Persona model without allowing one bad item to abort enumeration."""
+            dumped: dict[str, Any] | None = None
+            for method_name in ("model_dump", "dict"):
+                method = safe_attr(item, method_name)
+                if not callable(method):
+                    continue
+                try:
+                    candidate = method()
+                except TypeError:
+                    try:
+                        candidate = method(exclude_none=False)
+                    except Exception:
+                        continue
+                except Exception:
+                    continue
+                if isinstance(candidate, Mapping):
+                    dumped = dict(candidate)
+                    break
+            if dumped is not None:
+                if fallback_id not in (None, ""):
+                    has_identity = any(
+                        str(dumped.get(key) or "").strip()
+                        for key in ("id", "persona_id", "name")
+                    )
+                    if not has_identity:
+                        dumped["id"] = fallback_id
+                    dumped.setdefault("name", dumped.get("label") or fallback_id)
+                return dumped
+
+            persona_id = (
+                safe_attr(item, "persona_id")
+                or safe_attr(item, "id")
+                or safe_attr(item, "name")
+                or fallback_id
+            )
+            if persona_id in (None, ""):
+                return None
+            name = safe_attr(item, "name") or persona_id
+            label = safe_attr(item, "label") or name or persona_id
+            prompt = safe_attr(item, "system_prompt") or safe_attr(item, "prompt") or ""
+            return {
+                "id": persona_id,
+                "name": name,
+                "label": label,
+                "system_prompt": prompt,
+            }
+
+        if isinstance(raw, Mapping):
+            persona_record = bool(raw.get("persona_id")) or (
+                bool(raw.get("id") or raw.get("name"))
+                and any(key in raw for key in ("system_prompt", "prompt", "content", "description"))
+            )
+            if persona_record:
+                return [dict(raw)]
             result: list[dict[str, Any]] = []
             for key, value in raw.items():
-                if isinstance(value, dict):
+                if isinstance(value, Mapping):
                     item = dict(value)
                     item.setdefault("id", key)
                     item.setdefault("name", item.get("label") or key)
                     result.append(item)
                 elif isinstance(value, str):
                     result.append({"id": key, "name": key, "prompt": value})
-                elif isinstance(value, list):
+                elif isinstance(value, (list, tuple, set)):
                     result.extend(self._iter_persona_entries(value))
+                elif value is not None:
+                    item = object_entry(value, key)
+                    if item is not None:
+                        result.append(item)
             return result
-        elif isinstance(raw, list):
+        elif isinstance(raw, (list, tuple, set)):
             values = raw
         else:
-            return []
+            values = [raw]
         result: list[dict[str, Any]] = []
         for item in values:
-            if isinstance(item, dict):
-                result.append(item)
+            if isinstance(item, Mapping):
+                result.append(dict(item))
             elif isinstance(item, str):
                 result.append({"id": item, "name": item})
+            else:
+                # AstrBot's current PersonaManager returns SQLModel/Pydantic
+                # Persona objects rather than plain dictionaries.
+                normalized = object_entry(item)
+                if normalized is not None:
+                    result.append(normalized)
         return result
 
     def _astrbot_config_candidate_paths(self) -> list[Path]:
@@ -11093,6 +11169,11 @@ class PrivateCompanionPageApi(
         if isinstance(raw, dict):
             for key in ("prompt", "system_prompt", "content", "persona", "personality", "description", "text"):
                 text = str(raw.get(key) or "").strip()
+                if text:
+                    return text
+        else:
+            for key in ("prompt", "system_prompt", "content", "persona", "personality", "description", "text"):
+                text = str(getattr(raw, key, "") or "").strip()
                 if text:
                     return text
         return ""
