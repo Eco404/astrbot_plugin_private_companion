@@ -116,6 +116,16 @@ BUILD_EXPRESSION_FOR_USER = _class_method(
         "_single_line": _single_line,
     },
 )
+APPLY_RELATIONSHIP_EVENT = _class_method(
+    "core_store.py",
+    "CoreStoreMixin",
+    "_apply_relationship_event",
+    {
+        "Any": Any,
+        "apply_relationship_event": apply_relationship_event,
+        "migrate_legacy_relationship_score": migrate_legacy_relationship_score,
+    },
+)
 
 
 class _InteractionHost:
@@ -135,7 +145,7 @@ class _InteractionHost:
 
 
 class _ExpressionHost:
-    enable_custom_relationship_stage_policy = False
+    enable_custom_relationship_stage_policy = True
     normal_interaction_band_cap = "warm"
     owner_exclusive_tone = "温暖、亲近、稳定"
     owner_exclusive_address_style = "优先使用已确认的专属称呼"
@@ -442,10 +452,21 @@ class _RelationshipStateHost:
     relationship_decay_early_per_day = 0
     relationship_decay_middle_per_day = 0
     relationship_decay_late_per_day = 0
-    enable_custom_relationship_stage_policy = False
+    enable_custom_relationship_stage_policy = True
     relationship_stage_policy = None
 
     _ensure_relationship_user_state = ENSURE_RELATIONSHIP_STATE
+
+
+class _RelationshipLedgerHost:
+    enable_custom_relationship_stage_policy = False
+    enable_p4_b_legacy_score_isolation = False
+
+    _apply_relationship_event = APPLY_RELATIONSHIP_EVENT
+
+    @staticmethod
+    def _schedule_data_save() -> None:
+        return None
 
 
 def _update_user(user: dict[str, Any], payload: dict[str, Any], *, interaction_cap: str = "warm") -> tuple[dict[str, Any], _ApiHost]:
@@ -764,6 +785,26 @@ def test_zero_rate_decay_settlement_is_reported_for_persistence() -> None:
     assert host._ensure_relationship_user_state(user) is False
 
 
+def test_disabled_affinity_master_switch_does_not_settle_ledger_or_expression() -> None:
+    host = _RelationshipLedgerHost()
+    user = {
+        "user_id": "u-disabled",
+        "relationship_score": 4,
+        "relationship_score_schema_version": 2,
+        "relationship_ledger": [{"event_id": "existing", "delta": 4}],
+    }
+    before = copy.deepcopy(user)
+
+    result = host._apply_relationship_event(user, 2, reason_code="inbound", event_id="new")
+
+    assert result["code"] == "relationship_system_disabled"
+    assert user == before
+    expression_host = _ExpressionHost()
+    expression_host.enable_custom_relationship_stage_policy = False
+    decision = expression_host._build_expression_decision_for_user(user, channel_scope="group", now=NOW)
+    assert decision.expression_band == "relaxed"
+
+
 def test_all_seven_interaction_bands_are_owner_only_where_required() -> None:
     assert len(OWNER_EXPRESSION_BANDS) == 7
     for band in OWNER_EXPRESSION_BANDS:
@@ -877,7 +918,7 @@ def test_unified_decision_owns_proactive_readiness_and_cooldown() -> None:
     assert "proactive_readiness_suppressed" in suppressed.reason_codes
 
 
-def test_legacy_relationship_state_is_only_a_unified_compatibility_input() -> None:
+def test_legacy_relationship_state_cannot_override_unified_expression() -> None:
     host = _ExpressionHost()
     decision = host._build_expression_decision_for_user(
         {
@@ -890,11 +931,9 @@ def test_legacy_relationship_state_is_only_a_unified_compatibility_input() -> No
         proactive_candidate={"eligible": True, "budget": 5},
         now=NOW,
     )
-    assert decision.expression_band == "hurt"
-    assert decision.proactive_budget == 0
-    assert decision.proactive_cooldown_until == NOW + 600
-    assert "interaction_band_applied" in decision.reason_codes
-    assert "proactive_cooldown_active" in decision.reason_codes
+    assert decision.expression_band != "hurt"
+    assert decision.proactive_cooldown_until != NOW + 600
+    assert "legacy_relationship_state_projection" not in decision.reason_codes
 
 
 def test_private_intent_settles_boundary_reengagement_and_hurt_without_legacy_authority() -> None:
@@ -1210,9 +1249,49 @@ def test_legacy_relationship_state_has_no_parallel_expression_consumers() -> Non
     assert main_source.count("expression_decision_prompt(projection)") == 1
 
 
+def test_owner_group_projection_is_defaulted_and_never_mutates_real_relationship() -> None:
+    host = _ExpressionHost()
+    user = {
+        "user_id": "owner-1",
+        "relationship_role": "owner",
+        "relationship_mode": "owner_exclusive",
+        "relationship_score": 999,
+        "current_interaction": {"expression_band": "affectionate", "source": "manual"},
+        "relationship_ledger": [{"event_type": "manual", "delta": 99}],
+    }
+    before = copy.deepcopy(user)
+
+    group = host._build_expression_decision_for_user(user, channel_scope="group", now=NOW)
+
+    assert group.expression_band in {"relaxed", "lively", "warm"}
+    assert group.content_tier == "normal"
+    assert user["relationship_role"] == before["relationship_role"]
+    assert user["relationship_mode"] == before["relationship_mode"]
+    assert user["relationship_score"] == before["relationship_score"]
+    assert user["current_interaction"] == before["current_interaction"]
+    assert user["relationship_ledger"] == before["relationship_ledger"]
+
+
+def test_owner_group_projection_switches_can_be_independently_opted_out() -> None:
+    host = _ExpressionHost()
+    host.owner_group_relationship_projection = False
+    host.owner_group_interaction_projection = False
+    user = {
+        "user_id": "owner-1",
+        "relationship_role": "owner",
+        "relationship_mode": "owner_exclusive",
+        "relationship_score": 999,
+        "current_interaction": {"expression_band": "affectionate", "source": "manual"},
+    }
+
+    group = host._build_expression_decision_for_user(user, channel_scope="group", now=NOW)
+
+    assert group.expression_band == "affectionate"
+
+
 def test_active_panel_exposes_relationship_cards() -> None:
     source = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
-    assert 'enable_custom_relationship_stage_policy: ["亲密度阶段策略"' in source
+    assert 'enable_custom_relationship_stage_policy: ["启用好感度系统"' in source
     assert 'enable_relationship_content_tiers: ["关系内容尺度"' in source
     assert 'data-feature-param="relationship_stage_policy"' in source
     assert 'id="relationshipStageForm"' in source

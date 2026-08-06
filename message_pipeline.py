@@ -360,7 +360,11 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         fast_user_is_owner = self._private_user_role(fast_user, user_id) == "owner"
         if fast_user_is_owner:
             self._handle_meal_care_inbound(fast_user, safe_text or text, now=received_ts)
-        if fast_user_is_owner and self._apply_interaction_warmth_to_state(text, fast_user):
+        if (
+            bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            and fast_user_is_owner
+            and self._apply_interaction_warmth_to_state(text, fast_user)
+        ):
             self._apply_relationship_event(
                 fast_user,
                 1,
@@ -865,7 +869,13 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 event_id=self._event_message_id(event),
                 now=received_ts,
             )
-        interaction_warmth_applied = bool(text) and is_target_user and user_is_owner and self._apply_interaction_warmth_to_state(text, user)
+        interaction_warmth_applied = (
+            bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            and bool(text)
+            and is_target_user
+            and user_is_owner
+            and self._apply_interaction_warmth_to_state(text, user)
+        )
         if interaction_warmth_applied:
             self._apply_relationship_event(
                 user,
@@ -940,10 +950,6 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
     elif is_target_user:
         pass
     if is_target_user:
-        self._create_lifecycle_background_task(
-            self._refresh_persona_relationship(user_id, user_snapshot, trigger="inbound"),
-            label="refresh_persona_relationship_inbound",
-        )
         self._create_lifecycle_background_task(
             self._maybe_refresh_companion_memory(user_id, user_snapshot),
             label="refresh_companion_memory_inbound",

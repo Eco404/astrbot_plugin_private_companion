@@ -306,7 +306,7 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
         self.worldview_adaptation_mode = "auto"
     self.worldview_adaptation_prompt = self._cfg_str(c, "worldview_adaptation_prompt", "")
     self.default_nickname = self._cfg_str(c, "default_nickname", "你", "你")
-    self.enable_auto_user_profile_creation = self._cfg_bool(c, "enable_auto_user_profile_creation", False)
+    self.enable_auto_user_profile_creation = self._cfg_bool(c, "enable_auto_user_profile_creation", True)
     self.auto_enable_companion_for_new_users = self._cfg_bool(c, "auto_enable_companion_for_new_users", False)
     self.auto_profile_platforms = self._cfg_raw(
         c,
@@ -328,9 +328,9 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
         DEFAULT_UNAUTHORIZED_PRIVATE_REPLY,
         DEFAULT_UNAUTHORIZED_PRIVATE_REPLY,
     )
-    self.portrait_global_mode = self._cfg_str(c, "portrait_global_mode", "disabled", "disabled")
+    self.portrait_global_mode = self._cfg_str(c, "portrait_global_mode", "learn_and_use", "learn_and_use")
     if self.portrait_global_mode not in {"disabled", "use_existing", "learn_and_use"}:
-        self.portrait_global_mode = "disabled"
+        self.portrait_global_mode = "learn_and_use"
     self.require_private_opt_in = self._cfg_bool(c, "require_private_opt_in", True)
     self.target_user_ids = self._cfg_raw(c, "target_user_ids", [])
     self.private_user_aliases = self._parse_private_user_aliases(self._cfg_raw(c, "private_user_aliases", ""))
@@ -341,7 +341,7 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.default_interaction_band = self._cfg_str(c, "default_interaction_band", "relaxed")
     if self.default_interaction_band not in {"avoidant", "hurt", "relaxed", "lively", "warm"}:
         self.default_interaction_band = "relaxed"
-    self.enable_custom_relationship_stage_policy = self._cfg_bool(c, "enable_custom_relationship_stage_policy", False)
+    self.enable_custom_relationship_stage_policy = self._cfg_bool(c, "enable_custom_relationship_stage_policy", True)
     self.relationship_stage_policy = normalize_relationship_stage_policy(
         self._cfg_raw(c, "relationship_stage_policy", [])
     )
@@ -351,6 +351,8 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.normal_interaction_band_cap = self._cfg_str(c, "normal_interaction_band_cap", "warm")
     if self.normal_interaction_band_cap not in {"relaxed", "lively", "warm"}:
         self.normal_interaction_band_cap = "warm"
+    self.owner_group_relationship_projection = self._cfg_bool(c, "owner_group_relationship_projection", True)
+    self.owner_group_interaction_projection = self._cfg_bool(c, "owner_group_interaction_projection", True)
     self.enable_relationship_content_tiers = self._cfg_bool(c, "enable_relationship_content_tiers", False)
     self.enable_flirt_content_tier = self._cfg_bool(c, "enable_flirt_content_tier", True)
     self.enable_adult_content_tier = self._cfg_bool(c, "enable_adult_content_tier", False)
@@ -1154,7 +1156,10 @@ def _initialize_review_and_group_config(self: Any, c: Any) -> None:
     self.proactive_review_pressure_threshold = self._cfg_unit_interval(c, "proactive_review_pressure_threshold", 0.55, 0.0)
     self.enable_passive_topic_suppression = self._cfg_bool(c, "enable_passive_topic_suppression", True)
     self.enable_relationship_analysis = self._cfg_bool(c, "enable_relationship_analysis", True)
-    self.enable_relationship_state_machine = self._cfg_bool(c, "enable_relationship_state_machine", True)
+    # Unified ledger + current seven-band interaction replaced both legacy
+    # analyzers.  Keep only compatibility no-ops for old persisted config.
+    self.enable_relationship_state_machine = False
+    self.enable_relationship_analysis = False
     self.enable_emotion_simulation = self._cfg_bool(c, "enable_emotion_simulation", True)
     self.enable_llm_emotion_judgement = self._cfg_bool(c, "enable_llm_emotion_judgement", False)
     self.emotion_judgement_mode = self._cfg_str(c, "emotion_judgement_mode", "suspicious", "suspicious").lower()
@@ -1223,7 +1228,10 @@ def _initialize_review_and_group_config(self: Any, c: Any) -> None:
     self.group_blacklist_ids = self._cfg_raw(c, "group_blacklist_ids", [])
     self.require_target_group = self._cfg_bool(c, "require_target_group", True)
     self.enable_group_slang_learning = self._cfg_bool(c, "enable_group_slang_learning", True)
-    self.enable_group_member_profiles = self._cfg_bool(c, "enable_group_member_profiles", True)
+    # REQ-040: group observation owns only group-scoped nodes, never a second
+    # personal profile system.  Keep the compatibility attribute false so old
+    # Worldbook paths cannot be reached from runtime configuration.
+    self.enable_group_member_profiles = False
     self.enable_group_member_safety = self._cfg_bool(c, "enable_group_member_safety", True)
     self.group_member_safety_review_mode = self._cfg_str(
         c, "group_member_safety_review_mode", "directed", "directed"
@@ -1340,19 +1348,22 @@ def _initialize_group_and_provider_config(self: Any, c: Any) -> None:
     self.group_slang_web_search_results = self._cfg_int(c, "group_slang_web_search_results", 2, 1, 5)
     self.enable_group_relationship_graph = self._cfg_bool(c, "enable_group_relationship_graph", True)
     self.enable_group_privacy_guard = self._cfg_bool(c, "enable_group_privacy_guard", True)
-    self.enable_worldbook_member_recognition = self._cfg_bool(c, "enable_worldbook_member_recognition", True)
-    self.enable_atrelay_tools = self._cfg_bool(c, "enable_atrelay_tools", True)
-    self.enable_cross_user_memory_bridge = self._cfg_bool(c, "enable_cross_user_memory_bridge", False)
+    self.enable_worldbook_member_recognition = False
+    # REQ040: the retired cross-person Worldbook path must never participate
+    # in a group or private reply.  Group-local relationship edges are kept by
+    # group_observation independently of these switches.
+    self.enable_atrelay_tools = False
+    self.enable_cross_user_memory_bridge = False
     self.cross_user_memory_owner_only = self._cfg_bool(c, "cross_user_memory_owner_only", True)
-    self.atrelay_require_worldbook_first = self._cfg_bool(c, "atrelay_require_worldbook_first", True)
+    self.atrelay_require_worldbook_first = False
     self.atrelay_member_cache_minutes = self._cfg_int(c, "atrelay_member_cache_minutes", 60, 1, 1440)
     self.atrelay_sensitive_confirm = self._cfg_bool(c, "atrelay_sensitive_confirm", True)
     self.enable_atrelay_llm_rewrite = self._cfg_bool(c, "enable_atrelay_llm_rewrite", True)
     self.atrelay_default_relay_style = self._cfg_str(c, "atrelay_default_relay_style", "persona", "persona")
     self.atrelay_multi_target_limit = self._cfg_int(c, "atrelay_multi_target_limit", 5, 1, 20)
-    self.worldbook_auto_import = self._cfg_bool(c, "worldbook_auto_import", True)
-    self.worldbook_member_match_aliases = self._cfg_bool(c, "worldbook_member_match_aliases", True)
-    self.worldbook_self_registration = self._cfg_bool(c, "worldbook_self_registration", True)
+    self.worldbook_auto_import = False
+    self.worldbook_member_match_aliases = False
+    self.worldbook_self_registration = False
     self.worldbook_self_registration_block_words = self._parse_text_list_config(
         self._cfg_raw(c, "worldbook_self_registration_block_words", []),
         limit=120,
@@ -1365,9 +1376,9 @@ def _initialize_group_and_provider_config(self: Any, c: Any) -> None:
     if self.worldbook_self_registration_block_reply in {"这个称呼我先不记。", "你是小猪"}:
         self.worldbook_self_registration_block_reply = "这个称呼我不记。"
         _set_into_config(c, "worldbook_self_registration_block_reply", self.worldbook_self_registration_block_reply)
-    self.worldbook_auto_pending_observations = self._cfg_bool(c, "worldbook_auto_pending_observations", True)
-    self.worldbook_member_inject_limit = self._cfg_int(c, "worldbook_member_inject_limit", 6, 1, 20)
-    self.worldbook_config_paths = self._cfg_str(c, "worldbook_config_paths", "")
+    self.worldbook_auto_pending_observations = False
+    self.worldbook_member_inject_limit = 0
+    self.worldbook_config_paths = ""
     self.group_interject_provider_id = self._cfg_str(c, "GROUP_INTERJECT_PROVIDER_ID", "")
     self.group_episode_provider_id = self._cfg_str(c, "GROUP_EPISODE_PROVIDER_ID", "")
     self.group_slang_provider_id = self._cfg_str(c, "GROUP_SLANG_PROVIDER_ID", "")

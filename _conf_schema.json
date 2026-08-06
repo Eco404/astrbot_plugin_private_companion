@@ -211,8 +211,8 @@
       "enable_auto_user_profile_creation": {
         "description": "新用户最小档案",
         "type": "bool",
-        "hint": "默认关闭。开启后首次收到真实私聊时才建立最小用户档案；建档不会自动授予主要用户、跨用户查询、主动触达或 P4 权限。",
-        "default": false
+        "hint": "默认开启。首次收到允许范围内的真实私聊消息时建立统一用户档案；建档不会自动授予私聊陪伴、主动陪伴、主要用户、跨用户查询或 P4 权限。群聊档案仍由统一群聊观测链路建立。",
+        "default": true
       },
       "auto_enable_companion_for_new_users": {
         "description": "自动接管新用户陪伴",
@@ -227,13 +227,19 @@
         "hint": "私聊陪伴未获管理员授权时直接发送的固定文本。为空或无效时使用内置默认文本；此分支不会调用 LLM、Memory、工具、画像或关系结算。",
         "default": "老大不让我跟陌生人说话哦。"
       },
+      "owner_companion_enabled": {
+        "description": "主要用户陪伴开关",
+        "type": "bool",
+        "hint": "默认开启。仅插件 Dashboard 设置页的受信后台管理员可修改；群主、群管理员、聊天命令和平台角色均不能触发。关闭后主要用户的私聊陪伴与主动私聊立即停用，但不删除身份、画像或好感度。",
+        "default": true
+      },
       "portrait_global_mode": {
         "description": "全局智能画像模式",
         "type": "string",
         "options": ["disabled", "use_existing", "learn_and_use"],
         "labels": ["关闭智能画像", "仅使用已有画像", "持续学习与使用"],
-        "hint": "默认关闭。管理员可在单个用户档案中选择跟随全局或显式覆盖；画像不能授予私聊或主动联系权限。",
-        "default": "disabled"
+        "hint": "默认持续学习与使用。管理员可在单个用户档案中选择跟随全局或显式覆盖；未安装或未兼容 MemoryCompanion 时会自动关闭且不可开启。画像不能授予私聊或主动联系权限。",
+        "default": "learn_and_use"
       },
       "auto_profile_platforms": {
         "description": "自动建档平台",
@@ -275,10 +281,10 @@
         "default": "relaxed"
       },
       "enable_custom_relationship_stage_policy": {
-        "description": "亲密度阶段策略",
+        "description": "启用好感度系统",
         "type": "bool",
-        "hint": "关闭时使用内置八阶段策略；开启后使用陪伴面板详情页编辑的自定义标签、语气和软行为。固定阶段键与分数范围不变。",
-        "default": false
+        "hint": "默认开启的总开关。关闭后私聊和群聊均不结算好感度账本、不更新关系/当前互动、不注入关系表达，也不按好感度影响主动额度；用户档案和画像仍正常更新，历史关系数据会保留。开启后使用八阶段、七档互动与已配置的阶段策略。",
+        "default": true
       },
       "relationship_stage_policy": {
         "description": "亲密度阶段策略数据",
@@ -302,6 +308,18 @@
         "labels": ["放松", "活泼", "温暖"],
         "hint": "普通用户的当前互动状态最多到这里。主要用户账户不受此温度上限影响。",
         "default": "warm"
+      },
+      "owner_group_relationship_projection": {
+        "description": "主要用户群聊长期关系降级",
+        "type": "bool",
+        "hint": "默认开启。群聊表达时将主要用户的专属长期关系投影为普通用户阶段；不会修改真实关系账本、私聊专属关系或权限。",
+        "default": true
+      },
+      "owner_group_interaction_projection": {
+        "description": "主要用户群聊互动状态降级",
+        "type": "bool",
+        "hint": "默认开启。群聊表达时将主要用户的当前互动投影限制在普通用户互动温度上限；不会修改真实当前互动或私聊表达。",
+        "default": true
       },
       "enable_relationship_content_tiers": {
         "description": "关系内容尺度",

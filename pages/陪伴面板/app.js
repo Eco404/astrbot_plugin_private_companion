@@ -1114,8 +1114,9 @@ const providerGroupByKey = providerGroups.reduce((acc, group) => {
 const featureMeta = {
   enable_proactive_only_mode: ["仅保留主动能力", "只让本插件负责主动私聊调度、生成和发送；普通私聊/群聊放行给默认主链或其他插件。"],
   enable_multi_persona_mode: ["多人格支持模式", "按人格隔离资料、日程、状态、日记、用户、群聊和 Token；同一窗口固定使用一个人格，避免串人格。"],
-  enable_custom_relationship_stage_policy: ["亲密度阶段策略", "保留固定八阶段和分数范围，配置每一阶段的标签、语气、称呼尺度与软行为上限。"],
+  enable_custom_relationship_stage_policy: ["启用好感度系统", "关闭后不记账、不更新关系或当前互动、不注入关系表达；用户档案和画像仍会更新，已有关系数据会保留。"],
   enable_relationship_content_tiers: ["关系内容尺度", "把日常、含蓄暧昧和成人私密内容纳入同一表达决策；关系阶段只是必要条件，不会自动授权。"],
+  enable_auto_user_profile_creation: ["用户档案", "首次收到符合范围的真实消息时自动建立统一用户档案；不会自动授予私聊陪伴或主动联系权限。"],
   enable_mai_style_integration: ["私聊互动策略", "把相处分寸、偏好和本轮接话方式注入回复。"],
   enable_companion_memory: ["本地陪伴画像", "在插件内整理当前私聊的偏好、边界和关系线索；跨会话长期记忆依赖外部记忆插件。"],
   enable_expression_learning: ["表达方式学习", "从选定私聊或群聊提取抽象表达特征，并按范围用于私聊被动、私聊主动和群聊回复。"],
@@ -1252,9 +1253,11 @@ const featureSearchAliases = {
 
 const featureGroups = [
   {
-    title: "用户与关系",
-    note: "长期亲密度、短期互动状态与内容尺度的统一表达配置。",
+    title: "用户与好感度",
+    note: "用户档案、用户画像、好感度总开关、互动状态与内容尺度配置。",
     keys: [
+      "enable_auto_user_profile_creation",
+      "enable_companion_memory",
       "enable_custom_relationship_stage_policy",
       "enable_relationship_content_tiers",
     ],
@@ -1283,10 +1286,9 @@ const featureGroups = [
   },
   {
     title: "私聊陪伴",
-    note: "关系、本地陪伴画像、回复策略、主动终审和自然表达；长期记忆由外部插件联动。",
+    note: "回复策略、主动终审和自然表达；用户画像在“用户与好感度”统一管理，长期记忆由外部插件联动。",
     keys: [
       "enable_mai_style_integration",
-      "enable_companion_memory",
       "enable_intent_emotion_analysis",
       "enable_proactive_message_review",
       "enable_passive_topic_suppression",
@@ -1569,10 +1571,18 @@ const safeFeatureKeys = [
 ];
 
 const configLabels = {
+  auto_profile_platforms: "自动建档平台",
+  default_nickname_strategy: "新用户默认称呼来源",
+  auto_enable_companion_for_new_users: "新用户自动授予私聊陪伴（兼容项）",
+  default_proactive_enabled: "新用户默认允许主动陪伴",
+  default_proactive_daily_limit: "新用户默认每日主动上限",
+  portrait_global_mode: "全局智能画像模式",
   default_interaction_band: "默认互动状态",
   relationship_stage_policy: "八阶段策略",
   relationship_positive_stage_cap_key: "普通用户长期关系上限阶段",
   normal_interaction_band_cap: "普通用户互动状态上限",
+  owner_group_relationship_projection: "主要用户群聊长期关系降级",
+  owner_group_interaction_projection: "主要用户群聊互动状态降级",
   enable_flirt_content_tier: "允许含蓄暧昧档",
   enable_adult_content_tier: "允许成人私密档",
   adult_content_owner_confirmed: "确认主要用户已成年",
@@ -2189,6 +2199,8 @@ const configDescriptions = {
   relationship_stage_policy: "固定八阶段键与阈值，只编辑显示、语气、称呼尺度和软行为，不能授予权限。",
   relationship_positive_stage_cap_key: "普通用户的自动与管理员手动调整均不能超过该阶段；主要用户专属关系不受影响。",
   normal_interaction_band_cap: "普通用户自动或手动可达到的最高互动状态；亲近和爱意始终只属于主要用户。",
+  owner_group_relationship_projection: "开启后，主要用户在群聊中的长期关系表达降级为普通用户阶段；真实账本和私聊关系不变。",
+  owner_group_interaction_projection: "开启后，主要用户在群聊中的当前互动表达不超过普通用户温度上限；真实状态和私聊表达不变。",
   enable_flirt_content_tier: "只允许亲密及以上、私聊且当前互动不是回避或受伤时使用非露骨暧昧表达。",
   enable_adult_content_tier: "只打开成人档资格检查；主要用户、专属关系、爱意、私聊、成年确认、当轮同意和指定 Provider 必须同时成立。",
   adult_content_owner_confirmed: "仅由管理员在后台确认主要用户已成年；插件不会从亲密度、聊天内容或模型结果推断年龄。",
@@ -2811,10 +2823,19 @@ const advancedCycleSettingKeys = [
 ];
 
 const featureSettingGroups = {
+  enable_auto_user_profile_creation: [
+    "auto_profile_platforms",
+    "default_nickname_strategy",
+    "auto_enable_companion_for_new_users",
+    "default_proactive_enabled",
+    "default_proactive_daily_limit",
+  ],
   enable_custom_relationship_stage_policy: [
     "relationship_stage_policy",
     "relationship_positive_stage_cap_key",
     "normal_interaction_band_cap",
+    "owner_group_relationship_projection",
+    "owner_group_interaction_projection",
     "owner_exclusive_label",
     "owner_exclusive_tone",
     "owner_exclusive_address_style",
@@ -2853,7 +2874,7 @@ const featureSettingGroups = {
     "persona_inner_voice_prompt",
     "persona_proactive_voice_prompt",
   ],
-  enable_companion_memory: ["memory_refresh_interval_minutes", "max_companion_memory_items"],
+  enable_companion_memory: ["portrait_global_mode", "memory_refresh_interval_minutes", "max_companion_memory_items"],
   enable_expression_learning: ["expression_learning_mode", "enable_expression_manual_review", "enable_expression_style_review", "max_learned_expression_items"],
   enable_intent_emotion_analysis: [],
   enable_passive_response_review: ["passive_review_mode", "passive_review_strength", "response_review_max_chars"],
@@ -2915,7 +2936,7 @@ const featureSettingGroups = {
   enable_group_context_injection: ["max_group_recent_messages", "enable_group_scene_awareness", "group_scene_recent_limit", "FORWARD_MESSAGE_PROVIDER_ID"],
   enable_group_injection_guard: ["enable_group_privacy_guard", "enable_group_persona_denoise", "enable_group_reality_promise_guard"],
   enable_group_wakeup_enhancement: ["group_wakeup_direct_words", "group_wakeup_owner_direct_words", "group_wakeup_context_words", "group_wakeup_short_text_wait_seconds", "group_wakeup_cooldown_seconds", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes", "group_wakeup_log_limit", "group_wakeup_interest_keywords", "group_wakeup_interest_probability", "enable_group_wakeup_question", "group_wakeup_question_threshold", "enable_group_wakeup_cold_group", "group_wakeup_cold_group_threshold", "group_wakeup_cold_group_idle_minutes", "group_wakeup_topic_interest_max_boost", "group_wakeup_generated_keyword_limit", "group_wakeup_debounce_pending_penalty", "enable_group_interjection", "group_interject_min_interval_minutes", "group_interject_max_daily", "enable_group_interjection_feedback", "GROUP_INTERJECT_PROVIDER_ID"],
-  enable_group_member_profiles: ["enable_group_relationship_graph", "max_group_relationship_edges", "enable_worldbook_member_recognition", "worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_self_registration_block_words", "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths", "enable_group_slang_learning", "enable_group_slang_meanings", "enable_group_slang_web_search", "max_group_slang_terms", "group_slang_summary_minutes", "group_slang_web_search_terms", "group_slang_web_search_results", "enable_group_topic_threads", "max_group_topic_threads", "enable_group_episode_memory", "group_episode_refresh_minutes", "max_group_episodes", "GROUP_SLANG_PROVIDER_ID", "GROUP_EPISODE_PROVIDER_ID"],
+  enable_group_member_profiles: ["enable_group_relationship_graph", "max_group_relationship_edges", "enable_group_slang_learning", "enable_group_slang_meanings", "enable_group_slang_web_search", "max_group_slang_terms", "group_slang_summary_minutes", "group_slang_web_search_terms", "group_slang_web_search_results", "enable_group_topic_threads", "max_group_topic_threads", "enable_group_episode_memory", "group_episode_refresh_minutes", "max_group_episodes", "GROUP_SLANG_PROVIDER_ID", "GROUP_EPISODE_PROVIDER_ID"],
   enable_group_slang_learning: ["max_group_slang_terms", "max_group_recent_messages", "enable_group_slang_meanings", "enable_group_slang_web_search", "group_slang_web_search_terms", "group_slang_web_search_results"],
   enable_group_slang_meanings: ["max_group_slang_terms", "enable_group_slang_web_search"],
   enable_group_slang_web_search: ["group_slang_web_search_terms", "group_slang_web_search_results"],
@@ -2960,6 +2981,13 @@ const featureSettingGroups = {
 };
 
 const featureSettingSections = {
+  enable_auto_user_profile_creation: [
+    {
+      title: "自动建档范围",
+      note: "只建立统一用户档案；新用户的私聊陪伴和主动陪伴仍默认关闭，须在用户页单独授权。",
+      keys: ["auto_profile_platforms", "default_nickname_strategy", "auto_enable_companion_for_new_users", "default_proactive_enabled", "default_proactive_daily_limit"],
+    },
+  ],
   enable_multi_persona_mode: [
     {
       title: "人格隔离范围",
@@ -2971,7 +2999,7 @@ const featureSettingSections = {
     {
       title: "长期关系与上限",
       note: "阶段键与分数范围固定；关系和互动上限下调后按后端规则收敛。",
-      keys: ["relationship_stage_policy", "relationship_positive_stage_cap_key", "normal_interaction_band_cap"],
+      keys: ["relationship_stage_policy", "relationship_positive_stage_cap_key", "normal_interaction_band_cap", "owner_group_relationship_projection", "owner_group_interaction_projection"],
     },
     {
       title: "主要用户专属关系",
@@ -2999,6 +3027,18 @@ const featureSettingSections = {
       title: "成人私密边界",
       note: "成人档不会由关系自动开启；缺少任一条件都会降级。插件二次复核固定使用指定 Provider，主回复链回退仍由 AstrBot 配置决定。",
       keys: ["enable_adult_content_tier", "adult_content_owner_confirmed", "adult_content_require_turn_consent", "ADULT_CONTENT_PROVIDER_ID"],
+    },
+  ],
+  enable_companion_memory: [
+    {
+      title: "智能画像模式",
+      note: "默认持续学习与使用；全局模式只决定是否读取或持续学习画像，不会授予私聊或主动联系权限。未安装记忆插件时，智能画像会自动关闭。",
+      keys: ["portrait_global_mode"],
+    },
+    {
+      title: "本地画像整理",
+      note: "本地陪伴画像用于当前插件内的稳定偏好和边界整理，不替代外部长期记忆。",
+      keys: ["memory_refresh_interval_minutes", "max_companion_memory_items"],
     },
   ],
   enable_reply_interception_forward: [
@@ -3382,9 +3422,9 @@ const featureSettingSections = {
   ],
   enable_group_member_profiles: [
     {
-      title: "成员与关系网",
-      note: "近期成员观察、群友互动边、关系网身份识别和自登记都在这里。",
-      keys: ["enable_group_relationship_graph", "max_group_relationship_edges", "enable_worldbook_member_recognition", "worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_self_registration_block_words", "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths"],
+      title: "群内互动图",
+      note: "仅记录本群成员近期的接话、玩梗和争论走向；不建立跨群个人资料。",
+      keys: ["enable_group_relationship_graph", "max_group_relationship_edges"],
     },
     {
       title: "黑话学习",
@@ -3726,6 +3766,8 @@ const featureSettingTypes = {
   default_interaction_band: { type: "select", options: [["avoidant", "回避"], ["hurt", "受伤"], ["relaxed", "放松"], ["lively", "活泼"], ["warm", "温暖"]] },
   relationship_positive_stage_cap_key: { type: "select", options: [["familiar", "熟悉"], ["close", "亲近"], ["intimate", "亲密"], ["deeply_bonded", "深度联结"]] },
   normal_interaction_band_cap: { type: "select", options: [["relaxed", "放松"], ["lively", "活泼"], ["warm", "温暖"]] },
+  owner_group_relationship_projection: { type: "checkbox" },
+  owner_group_interaction_projection: { type: "checkbox" },
   enable_flirt_content_tier: { type: "checkbox" },
   enable_adult_content_tier: { type: "checkbox" },
   adult_content_owner_confirmed: { type: "checkbox" },
@@ -13677,15 +13719,7 @@ function renderLearningSummary() {
   const ruleCount = Number(library.rule_group_count ?? library.rule_count ?? library.pattern_count ?? (Array.isArray(library.rule_groups) ? library.rule_groups.length : 0));
   const pendingCount = Number(library.pending_rule_group_count ?? library.pending_rule_count ?? library.pending_count ?? (Array.isArray(library.pending_rule_groups) ? library.pending_rule_groups.length : 0));
   const skillCount = Number(growth.skill_count || skills.length || 0);
-  const worldbook = state.overview?.worldbook || {};
-  const relationshipCount = Number(worldbook.member_count || 0);
-  const pendingObservationCount = Number(worldbook.pending_observation_total || 0);
   root.innerHTML = `
-    <button id="learningTabSocial" type="button" role="tab" aria-controls="learningPanelSocial" data-learning-section="social" class="learning-summary-card" aria-label="关系网，共 ${escapeHtml(relationshipCount)} 个节点">
-      <b>${escapeHtml(relationshipCount)}</b>
-      <span>关系网</span>
-      <small id="worldbookNavSummary">${escapeHtml(pendingObservationCount)} 条待确认</small>
-    </button>
     <button id="learningTabSkills" type="button" role="tab" aria-controls="learningPanelSkills" data-learning-section="skills" class="learning-summary-card" aria-label="技能，共 ${escapeHtml(skillCount)} 项">
       <b>${escapeHtml(skillCount)}</b>
       <span>技能</span>
@@ -13837,23 +13871,36 @@ function renderUsers() {
     ? rows.map((user) => `
       <tr data-user-id="${escapeHtml(user.user_id)}" class="${user.user_id === state.selectedUserId ? "is-selected" : ""}">
         <td class="user-cell identity"><strong title="${escapeHtml(user.display_name || user.nickname || user.user_id)}">${escapeHtml(user.display_name || user.nickname || user.user_id)}</strong> ${userPlatformBadge(user)}${Array.isArray(user.alias_user_ids) && user.alias_user_ids.length ? ` <span class="badge ok" title="${escapeHtml(user.alias_user_ids.join("\\n"))}">已合并 ${escapeHtml(user.alias_user_ids.length)} 个身份</span>` : ""}<br><span class="user-id-line"><span class="muted mono" title="${escapeHtml(user.user_id)}">${escapeHtml(user.user_id)}</span><button type="button" class="copy-id-btn" data-copy-user-id="${escapeHtml(user.user_id)}">复制</button></span></td>
+        <td class="user-cell recent">${escapeHtml(user.last_seen)}<br><span class="muted">上次主动 ${escapeHtml(user.last_sent)}</span></td>
         <td class="user-cell relation"><span class="badge ${user.enabled ? "" : "off"}">${escapeHtml(user.enabled ? "启用" : "停用")}</span> <span class="badge">${escapeHtml(user.relationship_role_label || "次要用户")}</span> <span class="muted">${escapeHtml(user.relationship_stage || "未分层")}</span><br><span>分数 ${escapeHtml(user.relationship_score)}</span></td>
         <td class="user-cell compact">入站 ${escapeHtml(user.inbound_count)} · 回复 ${escapeHtml(user.reply_count)}<br><span class="muted">记忆 ${escapeHtml(user.memory_items)} 条</span></td>
         <td class="user-cell proactive"><span>今日 ${escapeHtml(user.sent_today)} · 总计 ${escapeHtml(user.proactive_sent_count)}</span><br><span class="muted truncate" title="${escapeHtml(user.next_proactive || "")}">${escapeHtml(user.next_proactive)}</span></td>
-        <td class="user-cell recent">${escapeHtml(user.last_seen)}<br><span class="muted">上次主动 ${escapeHtml(user.last_sent)}</span></td>
-        <td class="user-cell action"><button type="button" class="table-action ${user.enabled ? "danger-outline" : ""}" data-user-toggle="${escapeHtml(user.user_id)}">${escapeHtml(user.enabled ? "停用" : "启用")}</button></td>
+        <td class="user-cell action"><div class="user-capability-actions"><button type="button" class="table-action ${user.private_companion_enabled ? "" : "danger-outline"}" data-private-toggle="${escapeHtml(user.user_id)}">${escapeHtml(user.private_companion_enabled ? "私聊陪伴：开" : "私聊陪伴：关")}</button><button type="button" class="table-action ${user.proactive_private_enabled ? "" : "danger-outline"}" data-proactive-toggle="${escapeHtml(user.user_id)}">${escapeHtml(user.proactive_private_enabled ? "主动陪伴：开" : "主动陪伴：关")}</button></div></td>
       </tr>
     `).join("")
     : `<tr><td class="empty" colspan="6">暂无私聊对象</td></tr>`;
-  document.querySelectorAll("[data-user-toggle]").forEach((button) => {
+  const updateUserCapability = async (button, dataKey, field, label) => {
+    const user = state.users.find((item) => item.user_id === button.dataset[dataKey]);
+    if (!user) return;
+    const nextValue = !Boolean(user[field]);
+    const saved = await runAction(() => postJson("/user/update", { user_id: user.user_id, [field]: nextValue }), `${label}已${nextValue ? "开启" : "关闭"}`, button, { reload: false });
+    if (saved) {
+      const index = state.users.findIndex((item) => item.user_id === user.user_id);
+      if (index >= 0) state.users[index] = { ...state.users[index], ...saved };
+      renderUsers();
+      if (state.selectedUserId === user.user_id) await renderUserDetail(true);
+    }
+  };
+  document.querySelectorAll("[data-private-toggle]").forEach((button) => {
     button.addEventListener("click", async (event) => {
       event.stopPropagation();
-      const user = state.users.find((item) => item.user_id === button.dataset.userToggle);
-      if (!user) return;
-      await runAction(() => postJson("/user/update", {
-        user_id: user.user_id,
-        enabled: !user.enabled,
-      }), !user.enabled ? "已启用私聊对象" : "已停用私聊对象", button);
+      await updateUserCapability(button, "privateToggle", "private_companion_enabled", "私聊陪伴");
+    });
+  });
+  document.querySelectorAll("[data-proactive-toggle]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await updateUserCapability(button, "proactiveToggle", "proactive_private_enabled", "主动陪伴");
     });
   });
   document.querySelectorAll("[data-copy-user-id]").forEach((button) => {
@@ -13954,7 +14001,7 @@ function renderRelationshipStatus(detail) {
   return `
     <section class="companion-intimacy-card">
       <div class="companion-intimacy-head">
-        <div><span class="relationship-kicker">RELATIONSHIP</span><h3>亲密度与互动表达</h3><p>${escapeHtml(exclusive ? "主要用户专属固定关系，不参与自动增减或自然回落。" : (phase.description || "长期关系使用阶段展示；精确数值仅用于管理员调整。"))}</p></div>
+        <div><span class="relationship-kicker">长期好感度</span><h3>关系阶段与当前相处状态</h3><p>${escapeHtml(exclusive ? "主要用户专属固定关系，不参与自动增减或自然回落。" : "上方是长期关系阶段与分数；下方是这一刻的七档互动语气，两者共同影响主动陪伴。")}</p></div>
         <div class="companion-intimacy-current"><strong>${escapeHtml(exclusive ? (ownerProjection.label || "专属联结") : (phase.label || "初识"))}</strong><span>${exclusive ? "固定" : escapeHtml(value)}</span></div>
       </div>
       ${relationshipStageBar(stages, currentKey, value, isOwner)}
@@ -13980,7 +14027,7 @@ function renderRelationshipStatus(detail) {
         </form>
       </details>
       <section class="current-interaction-card">
-        <div class="current-interaction-head"><div><span class="relationship-kicker">CURRENT INTERACTION</span><h3>当前互动状态</h3><p>短期表达修正，会与长期关系、日程和安全边界共同决定当下语气。</p></div><strong>${escapeHtml(interaction.label)}</strong></div>
+        <div class="current-interaction-head"><div><span class="relationship-kicker">当前互动</span><h3>当前互动状态</h3><p>短期表达修正，会与长期关系、日程和安全边界共同决定当下语气。</p></div><strong>${escapeHtml(interaction.label)}</strong></div>
         <div class="interaction-stage-bar" role="img" aria-label="当前互动状态 ${escapeHtml(interaction.label)}">
           ${RELATIONSHIP_INTERACTION_BANDS.map(([key, label]) => `<div class="interaction-stage-segment ${interaction.expressionBand === key ? "is-current" : ""} ${!interaction.allowed.has(key) ? "is-disabled" : ""}"><i></i><span>${escapeHtml(label)}</span></div>`).join("")}
         </div>
@@ -14000,9 +14047,9 @@ function renderRelationshipStatus(detail) {
         </form>
       </section>
       <div class="relationship-expression-status">
-        <span><b>表达档位</b>${escapeHtml(expression.expression_band || "relaxed")}</span>
+        <span><b>当前语气</b>${escapeHtml(Object.fromEntries(RELATIONSHIP_INTERACTION_BANDS)[expression.expression_band] || "放松")}</span>
         <span><b>内容尺度</b>${escapeHtml(contentTier)}</span>
-        <span><b>Provider 规则</b>${escapeHtml(providerPolicy)}</span>
+        <span><b>模型规则</b>${escapeHtml(providerPolicy)}</span>
         <span><b>主动额度</b>${escapeHtml(expression.proactive_budget ?? 0)}</span>
       </div>
     </section>
@@ -14057,7 +14104,7 @@ async function renderUserDetail(forceFetch = false) {
       ${renderRelationshipPanel(detail.relationship_panel)}
       ${renderUnifiedProfileCapabilityPanel(detail)}
       ${renderPortraitBridgeStatus(detail.portrait_bridge)}
-      ${detailBlock("关系和主动", detail.formatted?.relationship || "", [["角色", detail.relationship_role_label || ""], ["有效主动上限", `${detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited)} / 天`], ["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
+      ${detailBlock("陪伴权限与主动计划", `长期关系：${detail.relationship_stage || detail.relationship_intimacy?.phase?.label || "初识"} ｜ 当前互动：${normalizedCurrentInteraction(detail.current_interaction, detail.relationship_role === "owner").label}`, [["角色", detail.relationship_role_label || ""], ["有效主动上限", `${detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited)} / 天`], ["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
       ${renderPrivateDeliveryRoute(detail)}
       ${renderPrivateBehaviorHabits(detail)}
       ${emotionGateBlock(detail)}
@@ -14096,20 +14143,8 @@ function renderUnifiedProfileCapabilityPanel(detail) {
   return `
     <section class="detail-block unified-profile-capabilities">
       <header class="detail-block-head"><div><h2>统一档案与当前身份权限</h2><p>仅管理员可修改；关联身份不会自动获得私聊或主动权限。</p></div><span class="badge ${privateEnabled ? "ok" : "off"}">${escapeHtml(privateEnabled ? "私聊已授权" : "私聊未授权")}</span></header>
-      <form id="unifiedProfileCapabilitiesForm" class="inline-form">
-        <label><input name="private_companion_enabled" type="checkbox" ${privateEnabled ? "checked" : ""} /> 私聊陪伴</label>
-        <label><input name="proactive_private_enabled" type="checkbox" ${proactiveEnabled ? "checked" : ""} /> 主动私聊</label>
-        <label>智能画像
-          <select name="portrait_mode">
-            <option value="follow_global" ${override === "follow_global" ? "selected" : ""}>跟随全局设置</option>
-            <option value="disabled" ${override === "disabled" ? "selected" : ""}>关闭智能画像</option>
-            <option value="use_existing" ${override === "use_existing" ? "selected" : ""}>仅使用已有画像</option>
-            <option value="learn_and_use" ${override === "learn_and_use" ? "selected" : ""}>持续学习与使用</option>
-          </select>
-        </label>
-        <button type="submit">保存权限</button>
-      </form>
-      <dl><dt>统一人物</dt><dd>${escapeHtml(personId || "等待精确身份投影")}</dd><dt>画像实际模式</dt><dd>${escapeHtml(portraitModeLabel(effectivePortraitMode))}</dd><dt>主动联系</dt><dd>${escapeHtml(effectiveProactive ? "可在既有日程和安全门内执行" : proactiveEnabled ? "等待私聊陪伴授权" : "关闭")}</dd></dl>
+      <p class="muted">私聊陪伴与主动陪伴请使用上方列表中的独立按钮管理。</p>
+      <dl><dt>统一人物</dt><dd>${escapeHtml(personId || "等待精确身份投影")}</dd><dt>私聊陪伴</dt><dd>${escapeHtml(privateEnabled ? "开启" : "关闭")}</dd><dt>主动陪伴</dt><dd>${escapeHtml(effectiveProactive ? "可在既有日程和安全门内执行" : proactiveEnabled ? "等待私聊陪伴授权" : "关闭")}</dd><dt>画像实际模式</dt><dd>${escapeHtml(portraitModeLabel(effectivePortraitMode))}</dd></dl>
     </section>
   `;
 }
@@ -14120,9 +14155,10 @@ function renderPortraitBridgeStatus(value) {
   const code = String(status.code || "bridge_unavailable");
   const syncedAt = String(status.last_synced_at || "");
   const revision = Number(status.portrait_revision || 0);
+  const summaries = Array.isArray(status.summaries) ? status.summaries.filter(Boolean).slice(0, 3) : [];
   return detailBlock(
     "画像同步状态",
-    available ? "画像事实和治理入口由 Memory 独立维护；本页不缓存或显示旧画像正文。" : "Memory 当前不可用或身份尚未精确投影；为避免陈旧披露，本页不会回显任何画像摘要。",
+    available ? (summaries.length ? `Memory 只读映射：${summaries.join("；")}` : "Memory 已连接；该用户暂未形成可展示的低敏画像摘要。") : "Memory 当前不可用或身份尚未精确投影；为避免陈旧披露，本页不会回显任何画像摘要。",
     [
       ["Bridge", available ? "可用" : code],
       ["最近同步", syncedAt || "暂无"],
@@ -14175,13 +14211,13 @@ function renderRelationshipPanel(panel) {
   const interaction = data.interaction && typeof data.interaction === "object" ? data.interaction : {};
   const memory = data.memory_phase && typeof data.memory_phase === "object" ? data.memory_phase : {};
   const network = data.network && typeof data.network === "object" ? data.network : {};
-  return detailBlock("Relationship", "Read-only local projection", [
-    ["Basis", basis.band || "initial"],
-    ["Stage", data.relationship_stage || "unclassified"],
-    ["Interaction", `${interaction.inbound_count || 0} inbound, ${interaction.reply_count || 0} replies (${interaction.reply_band || "unknown"})`],
-    ["Memory phase", `${memory.phase || "unknown"} (${memory.status || "unavailable"})`],
-    ["Worldbook", `${network.status || "not_registered"}, ${network.pending_observation_count || 0} pending`],
-    ["Reply temperature", data.reply_temperature?.status || "live_chat_only"],
+  return detailBlock("关系概览", "本地只读投影", [
+    ["基础状态", basis.band === "initial" ? "初始" : (basis.band || "初始")],
+    ["关系阶段", data.relationship_stage || "未分层"],
+    ["互动统计", `入站 ${interaction.inbound_count || 0} · 回复 ${interaction.reply_count || 0}（${interaction.reply_band === "no_proactive_sample" ? "暂无主动样本" : interaction.reply_band || "未知"}）`],
+    ["记忆阶段", `${memory.phase === "unknown" ? "未知" : memory.phase || "未知"}（${memory.status === "unavailable" ? "暂不可用" : memory.status || "暂不可用"}）`],
+    ["群观察档案", `${network.status === "registered" ? "已登记" : "未登记"}，待整理 ${network.pending_observation_count || 0} 条`],
+    ["回复温度", data.reply_temperature?.status === "live_chat_only" ? "仅真实聊天有效" : data.reply_temperature?.status || "仅真实聊天有效"],
   ]);
 }
 
@@ -15449,28 +15485,6 @@ function bindUserActions(detail) {
       await renderUserDetail(true);
     }
   };
-  const capabilityForm = $("#unifiedProfileCapabilitiesForm");
-  capabilityForm?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const saved = await runAction(
-      () => postJson("/user/update", {
-        user_id: detail.user_id,
-        private_companion_enabled: form.get("private_companion_enabled") === "on",
-        proactive_private_enabled: form.get("proactive_private_enabled") === "on",
-        portrait_mode: String(form.get("portrait_mode") || "follow_global"),
-      }),
-      "已保存统一档案权限",
-      event.submitter,
-      { reload: false },
-    );
-    if (saved) {
-      const index = state.users.findIndex((item) => item.user_id === detail.user_id);
-      if (index >= 0) state.users[index] = { ...state.users[index], ...saved };
-      renderUsers();
-      await refreshSelectedUserDetail();
-    }
-  });
   $("#relationshipStageForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const selectedKey = String(new FormData(event.currentTarget).get("relationship_stage_key") || "");
@@ -23323,7 +23337,9 @@ function featureSwitchItem(key) {
   if (!locked && key === "enable_custom_relationship_stage_policy") {
     const settings = state.overview?.settings || {};
     const count = normalizeRelationshipPolicy(settings.relationship_stage_policy).length || 8;
-    stateText = `${checked ? "自定义" : "内置"} · ${count} 阶段｜关系上限 ${relationshipStageCapLabel(settings.relationship_positive_stage_cap_key)}｜互动上限 ${normalInteractionCapLabel(settings.normal_interaction_band_cap)}`;
+    stateText = checked
+      ? `已启用 · ${count} 阶段｜关系上限 ${relationshipStageCapLabel(settings.relationship_positive_stage_cap_key)}｜互动上限 ${normalInteractionCapLabel(settings.normal_interaction_band_cap)}`
+      : "已关闭 · 不记账、不注入关系表达、不影响画像";
   }
   const lockNote = tempUnlocked ? "已临时放行，关闭仅保留主动能力后清空" : "仅保留主动能力中，原配置保留";
   const relatedText = related.length ? `建议同步：${related.map((item) => item.label || item.key).join("、")}` : "";
@@ -23581,6 +23597,14 @@ function photoSettingVisibleForValues(settingKey, values = {}) {
 }
 
 function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = state.overview?.settings || {}) {
+  const retired = new Set([
+    "enable_worldbook_member_recognition", "worldbook_auto_import", "worldbook_member_match_aliases",
+    "worldbook_self_registration", "worldbook_self_registration_block_words",
+    "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations",
+    "worldbook_member_inject_limit", "worldbook_config_paths", "enable_relationship_analysis",
+    "enable_relationship_state_machine", "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
+  ]);
+  if (retired.has(settingKey)) return false;
   const boolSetting = (name) => {
     if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, name)) return Boolean(state.featureDraft[name]);
     return toBool(settings[name]);
@@ -24338,10 +24362,10 @@ const featureDetailGuides = {
     disabled: "所有请求保持日常档；主动消息、群聊、普通用户和记忆插件上下文始终不获得成人内容授权。",
   },
   enable_custom_relationship_stage_policy: {
-    summary: "统一维护长期亲密度阶段、主要用户专属表达、七档互动状态事件和自然回落算法。",
-    trigger: "用户详情展示、真实私聊表达决策、主动预算和页面只读投影时。",
+    summary: "统一管理长期好感度阶段、主要用户专属表达、七档互动状态事件和自然回落算法。",
+    trigger: "开启后，私聊与群聊消息进入账本结算，并在回复和主动额度中应用统一关系表达。",
     enabled: "使用下方阶段表达、事件上限、回落规则和互动状态事件参数；所有结果仍受联系边界与安全约束。",
-    disabled: "使用内置八阶段策略；既有用户分数、安全与权限均不改变。",
+    disabled: "不结算账本、不更新关系或当前互动、不向回复注入好感度表达；用户档案、画像和群聊观察继续工作，历史关系数据不删除。",
   },
   enable_proactive_only_mode: {
     summary: "让本插件只负责主动来找用户的链路，并可与 Proactive Chat 共享发送出口和主动状态，普通聊天继续放行给 AstrBot 默认主链或其他插件。",
@@ -24356,10 +24380,10 @@ const featureDetailGuides = {
     disabled: "其他学习内容仍可记录，但主回复更接近 AstrBot 原本的普通回复。",
   },
   enable_companion_memory: {
-    summary: "在插件内把当前私聊整理成轻量陪伴画像，例如偏好、边界、称呼、重要事实和相处习惯；它不替代外部长期记忆。",
-    trigger: "私聊积累到整理间隔或消息阈值时低频执行。",
-    enabled: "Bot 会在本插件的当前私聊资料中参考这些稳定线索；跨会话深度召回仍依赖外部记忆插件。",
-    disabled: "不会新增本地陪伴画像，已有画像仍可在页面中查看和管理；外部长期记忆联动不由此开关控制。",
+    summary: "统一管理智能画像模式和插件内轻量陪伴画像，例如偏好、边界、称呼、重要事实和相处习惯。",
+    trigger: "私聊或群聊档案积累到条件后按各自边界更新；外部记忆画像只读映射，不会由本页改写。",
+    enabled: "Bot 会在允许的链路中参考稳定画像线索；跨会话深度召回仍依赖外部记忆插件。",
+    disabled: "不新增插件内画像整理；已保存的用户档案和外部记忆不会删除。",
   },
   enable_expression_learning: {
     summary: "从允许的私聊或群聊提取句长、场景和口语特征，让私聊被动、私聊主动与群聊回复共享稳定的 Bot 表达底色。",

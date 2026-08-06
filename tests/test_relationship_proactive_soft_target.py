@@ -13,7 +13,7 @@ from astrbot_plugin_private_companion.relationship_policy import default_relatio
 
 class _ProactiveHarness(ProactiveMixin):
     max_daily_messages = 8
-    enable_custom_relationship_stage_policy = False
+    enable_custom_relationship_stage_policy = True
     normal_interaction_band_cap = "warm"
     owner_exclusive_proactive_limit = 6
 
@@ -84,6 +84,19 @@ class RelationshipProactiveSoftTargetTests(unittest.TestCase):
 
         harness.max_daily_messages = 0
         self.assertEqual(0, harness._effective_user_daily_limit({**distant, "relationship_score": 0}))
+
+    def test_disabled_affinity_master_switch_uses_only_the_normal_daily_limit(self) -> None:
+        harness = _ProactiveHarness()
+        harness.enable_custom_relationship_stage_policy = False
+        distant = {
+            "relationship_role": "friend",
+            "relationship_mode": "normal",
+            "relationship_score": -1200,
+            "current_interaction": {"expression_band": "hurt"},
+        }
+
+        self.assertEqual(8, harness._effective_user_daily_limit(distant))
+        self.assertEqual(8, harness._relationship_proactive_soft_target(distant))
 
     def test_cooldown_and_hurt_state_remain_hard_decision_gates(self) -> None:
         baseline = {

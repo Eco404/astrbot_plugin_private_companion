@@ -129,7 +129,12 @@ def ensure_new_profile_capabilities(user: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def capability_summary(user: Any, *, global_portrait_mode: str = "disabled") -> dict[str, Any]:
+def capability_summary(
+    user: Any,
+    *,
+    global_portrait_mode: str = "disabled",
+    portrait_backend_available: bool = True,
+) -> dict[str, Any]:
     source = user if isinstance(user, dict) else {}
     capabilities = source.get("unified_profile_capabilities")
     if not isinstance(capabilities, dict):
@@ -137,6 +142,12 @@ def capability_summary(user: Any, *, global_portrait_mode: str = "disabled") -> 
     resolved = dict(capabilities)
     if resolved.get("portrait_mode_override") != "explicit":
         resolved["portrait_mode"] = normalize_portrait_mode(global_portrait_mode)
+    # Portrait facts belong to MemoryCompanion.  Do not leave a misleading
+    # enabled state behind when the optional backend is absent or incompatible.
+    if not portrait_backend_available:
+        resolved["portrait_mode"] = "disabled"
+        resolved["portrait_mode_override"] = "explicit"
+        resolved["portrait_backend_code"] = "memory_companion_required"
     return build_capability_summary(resolved)
 
 

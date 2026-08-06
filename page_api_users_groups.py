@@ -80,7 +80,6 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         try:
             async with self.plugin._data_lock:
                 user = deepcopy((self.plugin.data.get("users") or {}).get(user_id))
-                worldbook_member = self._worldbook_member_for_private_user_locked(self.plugin.data, user_id, user if isinstance(user, dict) else {})
                 daily_state = deepcopy(self.plugin.data.get("daily_state"))
                 state_conditions = deepcopy(self.plugin.data.get("state_conditions"))
             if not isinstance(user, dict):
@@ -90,7 +89,6 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 user_id,
                 user,
                 relationship_stage=str(detail.get("relationship_stage") or ""),
-                worldbook_member=worldbook_member,
             )
             detail["relationship_panel"] = relationship_panel
             detail["current_interaction"] = relationship_panel["current_interaction"]
@@ -113,7 +111,6 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     "memory": user.get("companion_memory") if isinstance(user.get("companion_memory"), dict) else {},
                     "expression_profile": self._expression_profile_summary(user),
                     "intent_profile": user.get("intent_profile") if isinstance(user.get("intent_profile"), dict) else {},
-                    "relationship_state": user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {},
                     "behavior_habits": self._behavior_habit_summary(user),
                     "dialogue_episodes": self._limited_list(user.get("dialogue_episodes"), 12),
                     "open_loops": self._limited_list(user.get("open_loops"), 12),
@@ -121,9 +118,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     "last_user_message": self._display_message_text(user.get("last_user_message"), 500),
                     "last_companion_message": self._display_message_text(user.get("last_companion_message"), 500),
                     "delivery_route": delivery_route if isinstance(delivery_route, dict) else {},
-                    "worldbook_member": worldbook_member,
                     "formatted": {
-                        "relationship": self.plugin._format_relationship_summary(user),
                         "action_affinity": self.plugin._format_action_affinity_summary(user),
                         "next_proactive": self.plugin._format_next_proactive(user),
                     },
@@ -312,6 +307,13 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 ):
                     if capability_key in payload:
                         capability_changes[capability_key] = payload.get(capability_key)
+                if role == "owner" and previous_role != "owner":
+                    # Becoming the configured primary user is the sole role
+                    # transition that grants the two private capabilities.
+                    # Later edits preserve any explicit administrator choice.
+                    capability_changes["private_companion_enabled"] = True
+                    capability_changes["proactive_private_enabled"] = True
+                    user["owner_companion_enabled"] = True
                 if capability_changes:
                     updater = getattr(self.plugin, "_req036_update_capabilities", None)
                     if not callable(updater):
@@ -442,7 +444,6 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                         ("companion_memory", {}),
                         ("expression_profile", {}),
                         ("intent_profile", {}),
-                        ("relationship_state", {}),
                         ("recent_reply_topics", []),
                         ("dialogue_episodes", []),
                         ("open_loops", []),

@@ -2104,6 +2104,11 @@ class CoreStoreMixin:
 
     def _ensure_relationship_user_state(self, user: dict[str, Any], *, created: bool = False) -> bool:
         """Lazily normalize additive relationship fields without migrating user identity or data paths."""
+        # The user-visible affinity master switch is intentionally a hard
+        # runtime boundary: archived relationship data remains readable, but
+        # it must not be normalized, decayed or otherwise changed while off.
+        if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
+            return False
         before = {
             "relationship_mode": user.get("relationship_mode"),
             "relationship_score": user.get("relationship_score"),
@@ -2185,6 +2190,12 @@ class CoreStoreMixin:
         event_id: str = "",
         now: float | None = None,
     ) -> dict[str, Any]:
+        if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
+            return {
+                "changed": False,
+                "code": "relationship_system_disabled",
+                "score": user.get("relationship_score"),
+            }
         if bool(getattr(self, "enable_p4_b_legacy_score_isolation", False)):
             return {
                 "changed": False,

@@ -1100,6 +1100,8 @@ class ProactiveMixin(UserRestGateMixin):
         if max_daily_messages <= 0 or override == 0:
             return 0
         user_limit = max_daily_messages if override is None else max(0, override)
+        if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
+            return max(0, min(max_daily_messages, user_limit))
         role = self._private_user_role(user)
         mode = str(user.get("relationship_mode") or "normal")
         relationship_is_distant = False
@@ -1131,6 +1133,8 @@ class ProactiveMixin(UserRestGateMixin):
         return max(0, min(max_daily_messages, user_limit, dynamic_limit))
 
     def _relationship_proactive_soft_target(self, user: dict[str, Any]) -> int:
+        if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
+            return max(1, _safe_int(getattr(self, "max_daily_messages", 1), 1, 0, 30))
         role = self._private_user_role(user)
         mode = str(user.get("relationship_mode") or "normal")
         if role == "owner" and mode == "owner_exclusive":

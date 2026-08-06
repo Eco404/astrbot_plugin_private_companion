@@ -296,7 +296,7 @@ class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
         self.assertIn('data-feature-open="${escapeHtml(key)}"', source)
         schema = (ROOT / "_conf_schema.json").read_text(encoding="utf-8")
         self.assertIn("新用户最小档案", schema)
-        self.assertIn("亲密度阶段策略", source)
+        self.assertIn("启用好感度系统", source)
         self.assertIn("用户档案", html)
         self.assertIn("记忆插件协同", html)
 

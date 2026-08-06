@@ -69,6 +69,70 @@ class ConfigGroupAuthorityTests(unittest.TestCase):
 
         self.assertEqual(plugin.config["basic_config"]["bot_name"], "新名字")
 
+    def test_owner_group_projection_switches_are_page_writable_and_group_persistent(self):
+        plugin = SimpleNamespace(
+            config={},
+            owner_group_relationship_projection=True,
+            owner_group_interaction_projection=True,
+        )
+        api = PrivateCompanionPageApi.__new__(PrivateCompanionPageApi)
+        api.plugin = plugin
+        api._schema_key_index_cache = None
+
+        self.assertIn("owner_group_relationship_projection", api._allowed_setting_keys())
+        self.assertIn("owner_group_interaction_projection", api._allowed_setting_keys())
+
+        api._apply_config_value("owner_group_relationship_projection", "关闭")
+        api._apply_config_value("owner_group_interaction_projection", False)
+
+        grouped = plugin.config["basic_config"]
+        self.assertFalse(grouped["owner_group_relationship_projection"])
+        self.assertFalse(grouped["owner_group_interaction_projection"])
+        self.assertFalse(plugin.owner_group_relationship_projection)
+        self.assertFalse(plugin.owner_group_interaction_projection)
+
+        reloaded = json.loads(json.dumps(plugin.config, ensure_ascii=False))
+        self.assertFalse(_flat_get(reloaded, "owner_group_relationship_projection", True))
+        self.assertFalse(_flat_get(reloaded, "owner_group_interaction_projection", True))
+
+    def test_global_portrait_mode_is_page_writable_and_group_persistent(self):
+        plugin = SimpleNamespace(config={}, portrait_global_mode="disabled")
+        api = PrivateCompanionPageApi.__new__(PrivateCompanionPageApi)
+        api.plugin = plugin
+        api._schema_key_index_cache = None
+
+        self.assertIn("portrait_global_mode", api._allowed_setting_keys())
+        self.assertIn("portrait_global_mode", api._runtime_settings())
+
+        api._apply_config_value("portrait_global_mode", "learn_and_use")
+
+        self.assertEqual("learn_and_use", plugin.portrait_global_mode)
+        self.assertEqual("learn_and_use", plugin.config["basic_config"]["portrait_global_mode"])
+        reloaded = json.loads(json.dumps(plugin.config, ensure_ascii=False))
+        self.assertEqual("learn_and_use", _flat_get(reloaded, "portrait_global_mode"))
+
+    def test_profile_portrait_and_relationship_defaults_are_enabled_for_new_configurations(self):
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        items = schema["basic_config"]["items"]
+
+        self.assertTrue(items["enable_auto_user_profile_creation"]["default"])
+        self.assertEqual("learn_and_use", items["portrait_global_mode"]["default"])
+        self.assertTrue(items["enable_custom_relationship_stage_policy"]["default"])
+
+        bootstrap = (ROOT / "plugin_bootstrap.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'self._cfg_bool(c, "enable_auto_user_profile_creation", True)',
+            bootstrap,
+        )
+        self.assertIn(
+            'self._cfg_str(c, "portrait_global_mode", "learn_and_use", "learn_and_use")',
+            bootstrap,
+        )
+        self.assertIn(
+            'self._cfg_bool(c, "enable_custom_relationship_stage_policy", True)',
+            bootstrap,
+        )
+
     @staticmethod
     def _schema_file(folder: str) -> Path:
         path = Path(folder) / "schema.json"

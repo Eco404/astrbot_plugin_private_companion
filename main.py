@@ -156,6 +156,7 @@ from .unified_profile_contract import (
 from .unified_profile_service import (
     DEFAULT_UNAUTHORIZED_PRIVATE_REPLY,
     capability_summary as req036_capability_summary,
+    ensure_new_profile_capabilities as req036_ensure_new_profile_capabilities,
     private_companion_gate as req036_private_companion_gate,
     proactive_private_gate as req036_proactive_private_gate,
     update_capabilities as req036_update_capabilities,
@@ -2607,10 +2608,23 @@ class PrivateCompanionPlugin(
         return self._active_unified_person_registry().read_projection(person_id)
 
     def _req036_private_gate_for_user(self, user: Any) -> dict[str, Any]:
-        return req036_private_companion_gate(
+        gate = req036_private_companion_gate(
             user,
             getattr(self, "private_companion_disabled_reply", DEFAULT_UNAUTHORIZED_PRIVATE_REPLY),
         )
+        if (
+            isinstance(user, dict)
+            and _single_line(user.get("relationship_role"), 40) == "owner"
+            and bool(getattr(self, "owner_companion_enabled", True))
+            and user.get("owner_companion_enabled") is not False
+        ):
+            gate["allowed"] = True
+            gate["code"] = "owner_default_enabled"
+            gate["reply"] = ""
+            capabilities = gate.get("capabilities")
+            if isinstance(capabilities, dict):
+                capabilities["private_companion_enabled"] = True
+        return gate
 
     def _req036_migrate_configured_target_capability(self, user_id: Any, user: Any) -> bool:
         """Materialize the one-time legacy target grant without reopening an explicit decision."""
@@ -2657,12 +2671,22 @@ class PrivateCompanionPlugin(
         return bool(result.get("ok"))
 
     def _req036_capability_summary_for_user(self, user: Any) -> dict[str, Any]:
+        bridge = self._memory_companion_bridge()
+        portrait_backend_available = callable(getattr(bridge, "read_unified_profile_portrait", None))
         return req036_capability_summary(
             user,
             global_portrait_mode=getattr(self, "portrait_global_mode", "disabled"),
+            portrait_backend_available=portrait_backend_available,
         )
 
     def _req036_proactive_private_allowed(self, user: Any) -> bool:
+        if (
+            isinstance(user, dict)
+            and _single_line(user.get("relationship_role"), 40) == "owner"
+            and bool(getattr(self, "owner_companion_enabled", True))
+            and user.get("owner_companion_enabled") is not False
+        ):
+            return True
         return bool(req036_proactive_private_gate(user).get("allowed"))
 
     def _req036_update_capabilities(
@@ -2674,6 +2698,16 @@ class PrivateCompanionPlugin(
         target_identity: str = "",
         reason_code: str = "administrator_update",
     ) -> dict[str, Any]:
+        requested_mode = _single_line(changes.get("portrait_mode"), 40).lower() if isinstance(changes, dict) else ""
+        if requested_mode and requested_mode not in {"disabled", "off", "follow_global"}:
+            bridge = self._memory_companion_bridge()
+            if not callable(getattr(bridge, "read_unified_profile_portrait", None)):
+                return {
+                    "ok": False,
+                    "code": "memory_companion_required",
+                    "message": "需要安装并启用 MemoryCompanion",
+                    "capabilities": self._req036_capability_summary_for_user(user),
+                }
         return req036_update_capabilities(
             user,
             changes,
@@ -2683,6 +2717,55 @@ class PrivateCompanionPlugin(
             target_identity=target_identity,
             reason_code=reason_code,
         )
+
+    def _req039_ensure_group_unified_user(
+        self,
+        event: Any,
+        *,
+        sender_id: str,
+        sender_name: str = "",
+    ) -> dict[str, Any] | None:
+        """Resolve a group speaker into the same user record used by DMs.
+
+        This creates identity/relationship state only.  It deliberately does
+        not grant either private-companion or proactive-private permission.
+        """
+        canonical = self._canonical_private_user_id(_single_line(sender_id, 120))
+        if not canonical or self._is_bot_self_user_id(canonical):
+            return None
+        users = self.data.get("users")
+        existed_before_group_observation = isinstance(users, dict) and isinstance(users.get(canonical), dict)
+        user = self._get_user(canonical)
+        user["user_id"] = canonical
+        user.setdefault("profile_origin", "group_observation")
+        if not _single_line(user.get("nickname"), 80):
+            user["nickname"] = _single_line(sender_name, 80) or canonical
+        # A group observation may create a neutral profile, but must never
+        # revoke an existing private-chat authorization merely because that
+        # person subsequently speaks in a group.
+        capabilities = (
+            req036_ensure_new_profile_capabilities(user)
+            if not existed_before_group_observation
+            else user.get("unified_profile_capabilities")
+        )
+        if not isinstance(capabilities, dict):
+            return user
+        if _single_line(user.get("relationship_role"), 40) == "owner":
+            owner_enabled = user.get("owner_companion_enabled") is not False
+            user["owner_companion_enabled"] = owner_enabled
+            if owner_enabled:
+                capabilities["private_companion_enabled"] = True
+                capabilities["proactive_private_enabled"] = True
+                capabilities["grant_source"] = "owner_default_enabled"
+                user["private_companion_enabled"] = True
+                user["proactive_private_enabled"] = True
+                user["enabled"] = True
+        elif not existed_before_group_observation:
+            capabilities["private_companion_enabled"] = False
+            capabilities["proactive_private_enabled"] = False
+            user["private_companion_enabled"] = False
+            user["proactive_private_enabled"] = False
+        return user
 
     def _req036_attach_unified_profile_context(
         self,
@@ -2890,12 +2973,35 @@ class PrivateCompanionPlugin(
             return {"available": False, "code": "bridge_degraded", "last_synced_at": "", "portrait_revision": 0}
         if not isinstance(result, dict):
             return {"available": False, "code": "bridge_degraded", "last_synced_at": "", "portrait_revision": 0}
-        return {
+        response = {
             "available": bool(result.get("ok")),
             "code": _single_line(result.get("code"), 80) or "bridge_degraded",
             "last_synced_at": _single_line(result.get("last_synced_at"), 80),
             "portrait_revision": _safe_int(result.get("portrait_revision"), 0, 0),
         }
+        projection = self.get_unified_person_projection(person_id)
+        portrait_reader = getattr(bridge, "read_unified_profile_portrait", None) if bridge is not None else None
+        if not response["available"] or not isinstance(projection, dict) or not callable(portrait_reader):
+            return response
+        try:
+            request = req036_build_portrait_request(
+                person_ref=req036_build_person_ref(projection),
+                requester_person_id=person_id,
+                target_person_id=person_id,
+                scope="private",
+                purpose="summarize_to_subject",
+            )
+            portrait = portrait_reader(request, limit=3)
+            if asyncio.iscoroutine(portrait) or hasattr(portrait, "__await__"):
+                portrait = await portrait
+            response["summaries"] = [
+                _single_line(item.get("summary"), 80)
+                for item in (portrait.get("items", []) if isinstance(portrait, dict) else [])
+                if isinstance(item, dict) and _single_line(item.get("summary"), 80)
+            ][:3]
+        except Exception:
+            response["summaries"] = []
+        return response
 
     def read_p4_effect_state(self, person_id: str) -> dict[str, Any]:
         return self._active_unified_person_registry().read_p4_effect_state(person_id)
@@ -11611,7 +11717,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         """Inject one fail-closed relationship expression decision before Memory enrichment."""
         if self is None or req is None or not bool(getattr(self, "enabled", False)):
             return
-        if not self._safe_event_is_private(event):
+        if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
+            return
+        is_private = self._safe_event_is_private(event)
+        group_id = "" if is_private else self._extract_group_id_from_event(event)
+        if not is_private and not group_id:
             return
         try:
             sender_id = self._canonical_private_user_id(self._safe_event_sender_id(event))
@@ -11639,10 +11749,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     "adult_enabled": bool(getattr(self, "enable_adult_content_tier", False)),
                     "adult_owner_confirmed": bool(getattr(self, "adult_content_owner_confirmed", False)),
                     "require_turn_consent": bool(getattr(self, "adult_content_require_turn_consent", True)),
-                    "private_chat": True,
+                    "private_chat": is_private,
                     "local_provider_configured": bool(getattr(self, "adult_content_provider_id", "")),
                     "local_provider_match": self._adult_content_provider_matches(event, req),
                 },
+                channel_scope="private" if is_private else "group",
             )
             projection = expression.to_dict() if hasattr(expression, "to_dict") else dict(expression or {})
         except Exception as exc:
@@ -13509,6 +13620,28 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 message_id=self._event_message_id(event),
                 event=event,
             )
+            ensure_unified_user = getattr(self, "_req039_ensure_group_unified_user", None)
+            unified_user = (
+                ensure_unified_user(event, sender_id=sender_id, sender_name=sender_name)
+                if callable(ensure_unified_user)
+                else None
+            )
+            if (
+                captured
+                and isinstance(unified_user, dict)
+                and bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            ):
+                received_ts = _now_ts()
+                unified_user["last_seen"] = max(_safe_float(unified_user.get("last_seen"), 0), received_ts)
+                unified_user["last_activity_at"] = max(_safe_float(unified_user.get("last_activity_at"), 0), received_ts)
+                unified_user["inbound_count"] = _safe_int(unified_user.get("inbound_count"), 0) + 1
+                self._apply_relationship_event(
+                    unified_user,
+                    1,
+                    reason_code="group_inbound",
+                    event_id=self._event_message_id(event),
+                    now=received_ts,
+                )
             if captured:
                 self._schedule_data_save()
         activity_recorder = getattr(self, "_record_c3_inbound_activity", None)

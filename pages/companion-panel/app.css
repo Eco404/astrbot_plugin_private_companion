@@ -22868,27 +22868,27 @@ table {
 
 .private-user-table th:nth-child(2),
 .private-user-table td:nth-child(2) {
-  width: 12%;
+  width: 14%;
 }
 
 .private-user-table th:nth-child(3),
 .private-user-table td:nth-child(3) {
-  width: 14%;
+  width: 16%;
 }
 
 .private-user-table th:nth-child(4),
 .private-user-table td:nth-child(4) {
-  width: 34%;
+  width: 14%;
 }
 
 .private-user-table th:nth-child(5),
 .private-user-table td:nth-child(5) {
-  width: 13%;
+  width: 20%;
 }
 
 .private-user-table th:nth-child(6),
 .private-user-table td:nth-child(6) {
-  width: 8%;
+  width: 16%;
   text-align: right;
 }
 
@@ -23032,6 +23032,28 @@ tbody tr.is-selected {
 
 .user-cell.action {
   text-align: right;
+}
+
+.private-user-list-wrap {
+  max-height: 440px;
+  overflow-y: auto;
+}
+
+.private-user-list-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.user-capability-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.user-capability-actions .table-action {
+  min-width: 102px;
 }
 
 .relationship-phase-summary {
