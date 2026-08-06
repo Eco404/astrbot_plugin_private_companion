@@ -218,6 +218,10 @@ class PageSettingNormalizerMixin:
             normalizer = getattr(self.plugin, "_normalize_model_timeout_overrides", None)
             normalized = normalizer(value) if callable(normalizer) else {}
             return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+        if key == "model_token_limit_overrides":
+            normalizer = getattr(self.plugin, "_normalize_model_token_limit_overrides", None)
+            normalized = normalizer(value) if callable(normalizer) else {}
+            return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
         if key == "model_fallback_overrides":
             normalizer = getattr(self.plugin, "_normalize_model_fallback_overrides", None)
             normalized = normalizer(value) if callable(normalizer) else {}

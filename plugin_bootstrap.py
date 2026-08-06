@@ -400,6 +400,9 @@ def _initialize_world_and_model_config(self: Any, c: Any) -> None:
     self.model_timeout_overrides = self._normalize_model_timeout_overrides(
         self._cfg_raw(c, "model_timeout_overrides", {})
     )
+    self.model_token_limit_overrides = self._normalize_model_token_limit_overrides(
+        self._cfg_raw(c, "model_token_limit_overrides", {})
+    )
     self.model_fallback_overrides = self._normalize_model_fallback_overrides(
         self._cfg_raw(c, "model_fallback_overrides", {})
     )

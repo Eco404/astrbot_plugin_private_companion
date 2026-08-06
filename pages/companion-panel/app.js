@@ -117,6 +117,7 @@ const state = {
   providerConfigMode: "",
   providerDraft: {},
   providerTimeoutDraft: {},
+  providerTokenLimitDraft: {},
   providerFallbackDraft: {},
   providerTestResults: {},
   availableTtsProviders: [],
@@ -286,6 +287,21 @@ function normalizeModelTimeoutOverrides(raw) {
     if (!isProviderConfigKey(key)) return;
     const timeout = Math.round(Number(value));
     if (Number.isFinite(timeout) && timeout >= 5 && timeout <= 600) result[key] = timeout;
+  });
+  return result;
+}
+
+function normalizeModelTokenLimitOverrides(raw) {
+  let source = raw;
+  if (typeof source === "string") {
+    try { source = JSON.parse(source || "{}"); } catch (_error) { source = {}; }
+  }
+  if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+  const result = {};
+  Object.entries(source).forEach(([key, value]) => {
+    if (!isProviderConfigKey(key)) return;
+    const tokenLimit = Math.round(Number(value));
+    if (Number.isFinite(tokenLimit) && tokenLimit >= 256 && tokenLimit <= 2000000) result[key] = tokenLimit;
   });
   return result;
 }
@@ -483,8 +499,8 @@ function syncProviderConfigModeControls() {
   const hint = document.getElementById("providerConfigModeHint");
   if (hint) {
     hint.textContent = quick
-      ? "快速配置显示通用场景模型；夹层阅读视觉模型始终单独配置。"
-      : "精准配置显示各任务单独 Provider；快速入口不会参与本模式保存。";
+      ? "快速配置显示通用场景模型；插件识图和夹层阅读视觉模型各自独立。"
+      : "精准配置显示各任务单独 Provider；独立识图不会跟随文本模型改写。";
   }
 }
 
@@ -5837,6 +5853,10 @@ function applyOverviewData(overview) {
     resetBookshelfSelection();
   }
   state.overview = overview;
+  if (!state.setupGuideOpen) {
+    state.setupGuideDraft = null;
+    state.setupGuideProviderTests = {};
+  }
   const overviewMemoNotes = overview?.bookshelf?.memo_notes;
   if (overviewMemoNotes && typeof overviewMemoNotes === "object") {
     state.memoNotes = overviewMemoNotes;
@@ -5852,6 +5872,7 @@ function applyOverviewData(overview) {
     .map((endpoint, index) => photoApiEndpointFingerprint(endpoint, index));
   state.providerConfigMode = inferProviderConfigMode(overview);
   state.providerTimeoutDraft = normalizeModelTimeoutOverrides(overview?.settings?.model_timeout_overrides);
+  state.providerTokenLimitDraft = normalizeModelTokenLimitOverrides(overview?.settings?.model_token_limit_overrides);
   state.providerFallbackDraft = normalizeModelFallbackOverrides(overview?.settings?.model_fallback_overrides);
   state.pageFontFamily = normalizePageFontFamily(overview?.settings?.page_font_family);
   state.pageTheme = normalizePageTheme(overview?.settings?.page_theme);
@@ -21021,6 +21042,8 @@ function renderCurrentPersonaStatus(settings) {
       state.memoNotes = null;
       state.tokenStats = null;
       state.expressionLibrary = null;
+      state.setupGuideDraft = null;
+      state.setupGuideProviderTests = {};
       state.lazyLoaded.userGroupLists = false;
       state.lazyLoaded.memoNotes = false;
       state.lazyLoaded.tokenStats = false;
@@ -27853,6 +27876,13 @@ function currentProviderTimeoutValues() {
   return normalizeModelTimeoutOverrides(state.overview?.settings?.model_timeout_overrides);
 }
 
+function currentProviderTokenLimitValues() {
+  if (window.PrivateCompanionProviderTree?.currentProviderTokenLimitValues) {
+    return window.PrivateCompanionProviderTree.currentProviderTokenLimitValues({ document, state });
+  }
+  return normalizeModelTokenLimitOverrides(state.overview?.settings?.model_token_limit_overrides);
+}
+
 function currentProviderFallbackValues() {
   if (window.PrivateCompanionProviderTree?.currentProviderFallbackValues) {
     return window.PrivateCompanionProviderTree.currentProviderFallbackValues({ document, state });
@@ -34140,25 +34170,27 @@ $("#saveProvidersBtn").addEventListener("click", async () => {
   }
   const values = currentProviderValues();
   const timeoutOverrides = currentProviderTimeoutValues();
+  const tokenLimitOverrides = currentProviderTokenLimitValues();
   const fallbackOverrides = currentProviderFallbackValues();
   const deepseekPeak = window.PrivateCompanionProviderTree.currentDeepseekPeakValues({ document, state });
   const provider_config_mode = currentProviderConfigMode();
   const providers = {};
   Object.keys(providerLabels).forEach((key) => {
-    if (visibleConfigKey(key)) providers[key] = values[key] || "";
+    if (visibleConfigKey(key) && providerAllowedInCurrentMode(key)) providers[key] = values[key] || "";
   });
   providers.DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID = deepseekPeak.provider;
   const saved = await runAction(
     () => postJson("/settings/update", { settings: {
       provider_config_mode,
       model_timeout_overrides: timeoutOverrides,
+      model_token_limit_overrides: tokenLimitOverrides,
       model_fallback_overrides: fallbackOverrides,
       enable_deepseek_peak_replacement: deepseekPeak.enabled,
       deepseek_peak_windows: deepseekPeak.windows,
       deepseek_peak_timezone: deepseekPeak.timezone,
       deepseek_peak_match_keywords: deepseekPeak.keywords,
     }, providers, overwrite_provider_modes: true }),
-    "已保存模型配置，并覆盖 quick / precision 两套分流",
+    "已保存模型配置，并同步 quick / precision 文本分流；独立识图保持原配置",
     $("#saveProvidersBtn")
   );
   if (!actionResultPersisted(saved)) return;
@@ -34166,8 +34198,10 @@ $("#saveProvidersBtn").addEventListener("click", async () => {
   state.overview.settings = { ...(state.overview.settings || {}), provider_config_mode };
   state.providerDraft = {};
   state.providerTimeoutDraft = { ...timeoutOverrides };
+  state.providerTokenLimitDraft = { ...tokenLimitOverrides };
   state.providerFallbackDraft = { ...fallbackOverrides };
   state.overview.settings.model_timeout_overrides = { ...timeoutOverrides };
+  state.overview.settings.model_token_limit_overrides = { ...tokenLimitOverrides };
   state.overview.settings.model_fallback_overrides = { ...fallbackOverrides };
   state.providerConfigMode = provider_config_mode;
   renderProviders();

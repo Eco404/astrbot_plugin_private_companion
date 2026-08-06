@@ -980,7 +980,18 @@ class ForwardMessageMixin:
         attempts = 0
         seen_providers: set[str] = set()
         skipped_providers: list[str] = []
-        for provider_id, provider_source, _configured_prompt in self._private_image_visual_provider_candidates(umo):
+        candidates = self._private_image_visual_provider_candidates(umo)
+        primary_visual_id = next(
+            (_single_line(item[0], 160) for item in candidates if len(item) >= 2 and item[1] == "plugin_vision"),
+            "",
+        )
+        fallback_visual_id = next(
+            (_single_line(item[0], 160) for item in candidates if len(item) >= 2 and item[1] == "plugin_vision_fallback"),
+            "",
+        )
+        visual_key_getter = getattr(self, "_private_image_visual_provider_card_key", None)
+        visual_provider_key = visual_key_getter() if callable(visual_key_getter) else "PLUGIN_VISION_PROVIDER_ID"
+        for provider_id, provider_source, _configured_prompt in candidates:
             provider_id = _single_line(provider_id, 160)
             if not provider_id:
                 skipped_providers.append(f"{provider_source}:empty")
@@ -1024,13 +1035,31 @@ class ForwardMessageMixin:
                 continue
             try:
                 start = time.time()
+                token_skip_getter = getattr(self, "_model_token_limit_should_skip_primary", None)
+                if callable(token_skip_getter) and token_skip_getter(
+                    task="forward_message_image_vision",
+                    provider_id=provider_id,
+                    primary_provider_id=primary_visual_id,
+                    fallback_provider_id=fallback_visual_id,
+                    provider_key=visual_provider_key,
+                    prompt=prompt,
+                    max_tokens=260,
+                    image_count=len(image_urls),
+                ):
+                    self._record_llm_usage(
+                        provider_id=provider_id,
+                        task="forward_message_image_vision",
+                        prompt=prompt,
+                        completion="",
+                        resp=None,
+                        elapsed_ms=0,
+                        success=False,
+                        error="model_token_limit_exceeded",
+                        budget_exempt=True,
+                    )
+                    skipped_providers.append(f"{provider_source}:token_limit")
+                    continue
                 timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
-                visual_key_getter = getattr(self, "_private_image_visual_provider_card_key", None)
-                visual_provider_key = (
-                    visual_key_getter()
-                    if callable(visual_key_getter)
-                    else "PLUGIN_VISION_PROVIDER_ID"
-                )
                 override_timeout = (
                     timeout_getter(
                         task="forward_message_image_vision",

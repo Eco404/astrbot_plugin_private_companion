@@ -7989,6 +7989,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         complex_model = str(getattr(self, "complex_reasoning_provider_id", "") or "").strip()
         creative = str(getattr(self, "creative_model_provider_id", "") or "").strip()
         plugin_vision = str(getattr(self, "plugin_vision_provider_id", "") or "").strip()
+        config = getattr(self, "config", None)
+
+        def configured_provider(config_key: str, fallback: str = "") -> str:
+            # Preserve an explicit empty value while tolerating older configs
+            # that do not yet contain the independent vision key.
+            raw = self._cfg_raw(config, config_key, None)
+            return fallback if raw is None else str(raw or "").strip()
 
         attr_config_keys = {
             "llm_provider_id": "LLM_PROVIDER_ID",
@@ -8028,10 +8035,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         }
 
         if str(getattr(self, "provider_config_mode", "quick") or "quick").strip().lower() != "quick":
-            config = getattr(self, "config", None)
             for attr, config_key in attr_config_keys.items():
                 setattr(self, attr, self._cfg_str(config, config_key, ""))
-            self.plugin_vision_provider_id = ""
+            self.plugin_vision_provider_id = configured_provider("PLUGIN_VISION_PROVIDER_ID", plugin_vision)
             return
 
         def fill(attr: str, provider_id: str) -> None:
@@ -8085,12 +8091,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         # JM reading has its own visual route even in quick mode.  Keeping it
         # independent prevents a generic image-model change from changing the
         # cost and output quality of bookshelf analysis.
-        config = getattr(self, "config", None)
         self.private_reading_vision_provider_id = self._cfg_str(
             config,
             "PRIVATE_READING_VISION_PROVIDER_ID",
             str(getattr(self, "private_reading_vision_provider_id", "") or ""),
         )
+        self.plugin_vision_provider_id = configured_provider("PLUGIN_VISION_PROVIDER_ID", plugin_vision)
 
     def _detect_astrbot_version(self) -> str:
         candidates: list[Any] = []

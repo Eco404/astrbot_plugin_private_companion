@@ -4281,6 +4281,56 @@ Provider 规则：{emotion_rule}
             except Exception:
                 provider_id = ""
         record_usage = getattr(self, "_record_llm_usage", None)
+        fallback_getter = getattr(self, "_model_fallback_provider_id", None)
+        fallback_id = (
+            fallback_getter("tts_conversion_provider_id", provider_id)
+            if callable(fallback_getter)
+            else ""
+        )
+        provider_context = getattr(self, "context", None)
+        provider_getter = getattr(provider_context, "get_provider_by_id", None)
+        fallback_provider = (
+            provider_getter(fallback_id)
+            if fallback_id and callable(provider_getter)
+            else None
+        )
+        token_skip_getter = getattr(self, "_model_token_limit_should_skip_primary", None)
+        if (
+            allow_fallback
+            and fallback_provider is not None
+            and callable(token_skip_getter)
+            and token_skip_getter(
+                task=task,
+                provider_id=provider_id,
+                primary_provider_id=provider_id,
+                fallback_provider_id=fallback_id,
+                provider_key="tts_conversion_provider_id",
+                prompt=prompt,
+                max_tokens=max_tokens,
+            )
+        ):
+            if callable(record_usage):
+                record_usage(
+                    provider_id=provider_id,
+                    task=task,
+                    prompt=prompt,
+                    completion="",
+                    elapsed_ms=0,
+                    success=False,
+                    error="model_token_limit_exceeded",
+                )
+            logger.info(
+                "[PrivateCompanion] TTS主模型预估超出 Token 上限，跳过并切换备用模型: primary=%s fallback=%s",
+                _single_line(provider_id, 80) or "default",
+                _single_line(fallback_id, 80),
+            )
+            return await self._tts_provider_text_chat(
+                fallback_provider,
+                prompt,
+                max_tokens=max_tokens,
+                task=task,
+                allow_fallback=False,
+            )
         try:
             timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
             timeout = (
@@ -4336,14 +4386,6 @@ Provider 规则：{emotion_rule}
                     _single_line(completion, 160),
                 )
             if (not completion.strip() or safety_refusal) and allow_fallback:
-                fallback_getter = getattr(self, "_model_fallback_provider_id", None)
-                fallback_id = (
-                    fallback_getter("tts_conversion_provider_id", provider_id)
-                    if callable(fallback_getter)
-                    else ""
-                )
-                provider_getter = getattr(self.context, "get_provider_by_id", None)
-                fallback_provider = provider_getter(fallback_id) if fallback_id and callable(provider_getter) else None
                 if fallback_provider is not None:
                     logger.warning(
                         "[PrivateCompanion] TTS文本主模型%s,尝试卡片备用模型: primary=%s fallback=%s",
@@ -4384,14 +4426,6 @@ Provider 规则：{emotion_rule}
                     error=str(exc),
                 )
             if allow_fallback:
-                fallback_getter = getattr(self, "_model_fallback_provider_id", None)
-                fallback_id = (
-                    fallback_getter("tts_conversion_provider_id", provider_id)
-                    if callable(fallback_getter)
-                    else ""
-                )
-                provider_getter = getattr(self.context, "get_provider_by_id", None)
-                fallback_provider = provider_getter(fallback_id) if fallback_id and callable(provider_getter) else None
                 if fallback_provider is not None:
                     logger.warning(
                         "[PrivateCompanion] TTS文本主模型失败,尝试卡片备用模型: primary=%s fallback=%s",

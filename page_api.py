@@ -1650,10 +1650,29 @@ class PrivateCompanionPageApi(
         supports_image = getattr(self.plugin, "_provider_supports_image", None)
         cooldown_check = getattr(self.plugin, "_private_image_provider_in_failure_cooldown", None)
         candidates = candidates_getter("") if callable(candidates_getter) else []
+        candidate_rows = candidates if isinstance(candidates, list) else []
         prompt = self._reaction_library_analysis_prompt(items)
         last_error = "未配置可用的视觉模型"
         seen: set[str] = set()
-        for row in candidates if isinstance(candidates, list) else []:
+        primary_visual_id = next(
+            (
+                self._single_line(row[0], 160)
+                for row in candidate_rows
+                if isinstance(row, (list, tuple)) and len(row) >= 2 and row[1] == "plugin_vision"
+            ),
+            "",
+        )
+        fallback_visual_id = next(
+            (
+                self._single_line(row[0], 160)
+                for row in candidate_rows
+                if isinstance(row, (list, tuple)) and len(row) >= 2 and row[1] == "plugin_vision_fallback"
+            ),
+            "",
+        )
+        visual_key_getter = getattr(self.plugin, "_private_image_visual_provider_card_key", None)
+        visual_provider_key = visual_key_getter() if callable(visual_key_getter) else "PLUGIN_VISION_PROVIDER_ID"
+        for row in candidate_rows:
             if not isinstance(row, (list, tuple)) or not row:
                 continue
             provider_id = self._single_line(row[0], 160)
@@ -1665,6 +1684,31 @@ class PrivateCompanionPageApi(
                 continue
             provider = provider_getter(provider_id) if callable(provider_getter) else None
             if provider is None or (callable(supports_image) and not supports_image(provider)):
+                continue
+            token_skip_getter = getattr(self.plugin, "_model_token_limit_should_skip_primary", None)
+            if callable(token_skip_getter) and token_skip_getter(
+                task="reaction_library_analysis",
+                provider_id=provider_id,
+                primary_provider_id=primary_visual_id,
+                fallback_provider_id=fallback_visual_id,
+                provider_key=visual_provider_key,
+                prompt=prompt,
+                max_tokens=1200,
+                image_count=len(image_urls),
+            ):
+                recorder = getattr(self.plugin, "_record_llm_usage", None)
+                if callable(recorder):
+                    recorder(
+                        provider_id=provider_id,
+                        task="reaction_library_analysis",
+                        prompt=prompt,
+                        completion="",
+                        elapsed_ms=0,
+                        success=False,
+                        error="model_token_limit_exceeded",
+                        budget_exempt=False,
+                    )
+                last_error = "主视觉模型预估超出 Token 上限，已切换备用模型"
                 continue
             budget_check = getattr(self.plugin, "_can_run_llm_task", None)
             if callable(budget_check) and not budget_check(provider_id, task="reaction_library_analysis"):
@@ -16145,7 +16189,6 @@ class PrivateCompanionPageApi(
         fast = self._single_line(values.get("FAST_RESPONSE_PROVIDER_ID"), 160)
         complex_model = self._single_line(values.get("COMPLEX_REASONING_PROVIDER_ID") or values.get("LLM_PROVIDER_ID"), 160)
         creative = self._single_line(values.get("CREATIVE_MODEL_PROVIDER_ID"), 160)
-        plugin_vision = self._single_line(values.get("PLUGIN_VISION_PROVIDER_ID"), 160)
         return {
             "LLM_PROVIDER_ID": complex_model,
             "MAI_STYLE_PROVIDER_ID": fast or complex_model,
@@ -16203,12 +16246,10 @@ class PrivateCompanionPageApi(
             or complex_model,
             160,
         )
-        plugin_vision = self._single_line(values.get("NARRATION_PROVIDER_ID"), 160)
         return {
             "FAST_RESPONSE_PROVIDER_ID": fast,
             "COMPLEX_REASONING_PROVIDER_ID": complex_model,
             "CREATIVE_MODEL_PROVIDER_ID": creative,
-            "PLUGIN_VISION_PROVIDER_ID": plugin_vision,
         }
 
     def _expand_provider_overwrite_bundle(self, mode: str, values: dict[str, str]) -> dict[str, str]:
@@ -17846,6 +17887,7 @@ class PrivateCompanionPageApi(
             "page_theme",
             "provider_config_mode",
             "model_timeout_overrides",
+            "model_token_limit_overrides",
             "model_fallback_overrides",
             "enable_deepseek_peak_replacement",
             "enable_body_monitor_integration",
@@ -20056,6 +20098,10 @@ class PrivateCompanionPageApi(
             normalizer = getattr(self.plugin, "_normalize_model_timeout_overrides", None)
             self.plugin.model_timeout_overrides = normalizer(value) if callable(normalizer) else {}
             return
+        if key == "model_token_limit_overrides":
+            normalizer = getattr(self.plugin, "_normalize_model_token_limit_overrides", None)
+            self.plugin.model_token_limit_overrides = normalizer(value) if callable(normalizer) else {}
+            return
         if key == "model_fallback_overrides":
             normalizer = getattr(self.plugin, "_normalize_model_fallback_overrides", None)
             self.plugin.model_fallback_overrides = normalizer(value) if callable(normalizer) else {}
@@ -20908,6 +20954,7 @@ class PrivateCompanionPageApi(
             "page_theme",
             "provider_config_mode",
             "model_timeout_overrides",
+            "model_token_limit_overrides",
             "model_fallback_overrides",
             "enable_deepseek_peak_replacement",
             "deepseek_peak_windows",

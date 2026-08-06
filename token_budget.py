@@ -125,6 +125,13 @@ def _looks_like_upstream_llm_error_response(text: Any) -> bool:
 class TokenBudgetMixin:
     """Methods split from main.PrivateCompanionPlugin."""
 
+    # A card limit is an optional, per-request estimate used only to decide
+    # whether the configured fallback should take the request.  It is not a
+    # daily quota and it does not truncate a request when no fallback exists.
+    MODEL_TOKEN_LIMIT_MIN = 256
+    MODEL_TOKEN_LIMIT_MAX = 2_000_000
+    MODEL_IMAGE_TOKEN_ESTIMATE = 256
+
     def _token_usage_now_dt(self) -> datetime:
         now_getter = getattr(self, "_environment_now", None)
         if callable(now_getter):
@@ -141,7 +148,10 @@ class TokenBudgetMixin:
             return 0
         ascii_chars = sum(1 for ch in raw if ord(ch) < 128)
         non_ascii_chars = max(0, len(raw) - ascii_chars)
-        return max(1, int(ascii_chars / 4.0 + non_ascii_chars / 1.6))
+        # CJK and many emoji tokenizers are close to one token per character.
+        # Use a conservative estimate here so a configured card ceiling does
+        # not silently allow an over-limit request to reach the primary model.
+        return max(1, int(ascii_chars / 4.0 + non_ascii_chars))
 
     @staticmethod
     def _usage_raw_value(usage: Any, key: str) -> Any:
@@ -940,6 +950,30 @@ class TokenBudgetMixin:
                 normalized[key] = timeout
         return normalized
 
+    @classmethod
+    def _normalize_model_token_limit_overrides(cls, value: Any) -> dict[str, int]:
+        """Normalize optional per-card single-request token ceilings."""
+        raw = value
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raw = {}
+        if not isinstance(raw, dict):
+            return {}
+        normalized: dict[str, int] = {}
+        for raw_key, raw_limit in raw.items():
+            key = str(raw_key or "").strip()
+            if key not in MODEL_PROVIDER_KEYS:
+                continue
+            try:
+                limit = int(float(raw_limit))
+            except (TypeError, ValueError):
+                continue
+            if cls.MODEL_TOKEN_LIMIT_MIN <= limit <= cls.MODEL_TOKEN_LIMIT_MAX:
+                normalized[key] = limit
+        return normalized
+
     @staticmethod
     def _normalize_model_fallback_overrides(value: Any) -> dict[str, str]:
         raw = value
@@ -1039,6 +1073,150 @@ class TokenBudgetMixin:
         configured = _safe_float(overrides.get(provider_key), 0.0, 0.0)
         return min(600.0, configured) if configured >= 5.0 else None
 
+    def _model_token_limit_provider_key(
+        self,
+        task: str,
+        provider_id: str = "",
+        token_limit_key: str = "",
+    ) -> str:
+        return self._model_provider_key_for_call(task, provider_id, token_limit_key)
+
+    def _model_token_limit_for_call(
+        self,
+        *,
+        task: str,
+        provider_id: str = "",
+        token_limit_key: str = "",
+        token_limit: int | float | None = None,
+    ) -> int | None:
+        """Return the configured card ceiling, or ``None`` when disabled."""
+        raw = token_limit
+        if raw is None:
+            overrides = getattr(self, "model_token_limit_overrides", {})
+            if not isinstance(overrides, dict):
+                return None
+            provider_key = self._model_token_limit_provider_key(task, provider_id, token_limit_key)
+            raw = overrides.get(provider_key)
+        try:
+            parsed = int(float(raw))
+        except (TypeError, ValueError):
+            return None
+        if self.MODEL_TOKEN_LIMIT_MIN <= parsed <= self.MODEL_TOKEN_LIMIT_MAX:
+            return parsed
+        return None
+
+    @classmethod
+    def _estimate_model_request_tokens(
+        cls,
+        prompt: Any,
+        *,
+        system_prompt: Any = "",
+        tool_schema: Any = "",
+        max_tokens: Any = 0,
+        image_count: Any = 0,
+    ) -> int:
+        """Estimate text, bounded image input, and requested output tokens."""
+        parts = [
+            str(system_prompt or "").strip(),
+            str(prompt or "").strip(),
+            str(tool_schema or "").strip(),
+        ]
+        input_text = "\n\n".join(part for part in parts if part)
+        try:
+            output_tokens = max(0, int(float(max_tokens or 0)))
+        except (TypeError, ValueError):
+            output_tokens = 0
+        try:
+            images = max(0, int(float(image_count or 0)))
+        except (TypeError, ValueError):
+            images = 0
+        return (
+            cls._estimate_token_count(input_text)
+            + output_tokens
+            + images * cls.MODEL_IMAGE_TOKEN_ESTIMATE
+        )
+
+    def _model_token_limit_route_for_call(
+        self,
+        *,
+        task: str,
+        primary_provider_id: str,
+        fallback_provider_id: str,
+        provider_key: str = "",
+        prompt: Any = "",
+        system_prompt: Any = "",
+        tool_schema: Any = "",
+        max_tokens: Any = 0,
+        image_count: Any = 0,
+        token_limit: int | float | None = None,
+    ) -> tuple[bool, int | None, int]:
+        """Decide whether a card's fallback should handle this request."""
+        if not fallback_provider_id or not primary_provider_id:
+            return False, None, self._estimate_model_request_tokens(
+                prompt,
+                system_prompt=system_prompt,
+                tool_schema=tool_schema,
+                max_tokens=max_tokens,
+                image_count=image_count,
+            )
+        limit = self._model_token_limit_for_call(
+            task=task,
+            provider_id=primary_provider_id,
+            token_limit_key=provider_key,
+            token_limit=token_limit,
+        )
+        estimate = self._estimate_model_request_tokens(
+            prompt,
+            system_prompt=system_prompt,
+            tool_schema=tool_schema,
+            max_tokens=max_tokens,
+            image_count=image_count,
+        )
+        if limit is None or estimate <= limit:
+            return False, limit, estimate
+        logger.warning(
+            "[PrivateCompanion] 请求预估 Token 超过模型卡上限，跳过主模型并切换备用模型: task=%s card=%s estimate=%s limit=%s primary=%s fallback=%s",
+            _single_line(task, 80) or "unknown",
+            provider_key or "unknown",
+            estimate,
+            limit,
+            _single_line(primary_provider_id, 120),
+            _single_line(fallback_provider_id, 120),
+        )
+        return True, limit, estimate
+
+    def _model_token_limit_should_skip_primary(
+        self,
+        *,
+        task: str,
+        provider_id: str,
+        primary_provider_id: str,
+        fallback_provider_id: str,
+        provider_key: str,
+        prompt: Any = "",
+        system_prompt: Any = "",
+        tool_schema: Any = "",
+        max_tokens: Any = 0,
+        image_count: Any = 0,
+        token_limit: int | float | None = None,
+    ) -> bool:
+        """Return whether a direct provider path should skip its primary card."""
+        if not provider_id or provider_id != primary_provider_id:
+            return False
+        routed, _limit, _estimate = self._model_token_limit_route_for_call(
+            task=task,
+            primary_provider_id=primary_provider_id,
+            fallback_provider_id=fallback_provider_id,
+            provider_key=provider_key,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            tool_schema=tool_schema,
+            max_tokens=max_tokens,
+            image_count=image_count,
+            token_limit=token_limit,
+        )
+        return routed
+
     @staticmethod
     def _llm_tool_schema_for_usage(tools: Any) -> str:
         """Serialize a tool schema for fallback token estimation only."""
@@ -1092,8 +1270,10 @@ class TokenBudgetMixin:
         system_prompt: str | None = None,
         timeout_key: str | None = None,
         timeout_seconds: float | None = None,
+        token_limit: int | float | None = None,
+        strict_provider: bool = False,
     ) -> Any | None:
-        """Call one exact provider with native tools under normal token controls."""
+        """Call a provider with native tools and one optional card fallback."""
         selected_provider = self._resolve_chat_provider_id(provider_id)
         task_key = _single_line(task, 40) or self._classify_llm_prompt(prompt)
         tool_schema = self._llm_tool_schema_for_usage(tools)
@@ -1124,95 +1304,146 @@ class TokenBudgetMixin:
             return None
         if not selected_provider:
             return None
-
-        started_at = time.time()
-        response = None
-        try:
-            kwargs: dict[str, Any] = {
-                "prompt": prompt,
-                "chat_provider_id": selected_provider,
-                "tools": tools,
-            }
-            if max_tokens and max_tokens > 0:
-                kwargs["max_tokens"] = max_tokens
-            if system_prompt:
-                kwargs["system_prompt"] = system_prompt
-            effective_timeout = self._model_timeout_seconds_for_call(
+        if strict_provider:
+            provider_key, fallback_provider = str(timeout_key or task_key), ""
+        else:
+            provider_key, fallback_provider = self._model_fallback_provider_for_call(
                 task=task_key,
-                provider_id=selected_provider,
-                timeout_key=str(timeout_key or task_key),
-                timeout_seconds=timeout_seconds,
+                primary_provider_id=selected_provider,
+                provider_key=str(timeout_key or ""),
             )
-            request_call = self.context.llm_generate(**kwargs)
+        token_routed, _, estimated_tokens = self._model_token_limit_route_for_call(
+            task=task_key,
+            primary_provider_id=selected_provider,
+            fallback_provider_id=fallback_provider,
+            provider_key=provider_key or str(timeout_key or ""),
+            prompt=prompt,
+            system_prompt=system_prompt,
+            tool_schema=tool_schema,
+            max_tokens=max_tokens,
+            token_limit=token_limit,
+        )
+        candidates = ([fallback_provider] if token_routed else [selected_provider])
+        if not token_routed and fallback_provider:
+            candidates.append(fallback_provider)
+        for attempt_index, attempt_provider in enumerate(candidates):
+            started_at = time.time()
+            response = None
             try:
-                response = (
-                    await asyncio.wait_for(request_call, timeout=effective_timeout)
-                    if effective_timeout is not None
-                    else await request_call
+                kwargs: dict[str, Any] = {
+                    "prompt": prompt,
+                    "chat_provider_id": attempt_provider,
+                    "tools": tools,
+                }
+                if max_tokens and max_tokens > 0:
+                    kwargs["max_tokens"] = max_tokens
+                if system_prompt:
+                    kwargs["system_prompt"] = system_prompt
+                effective_timeout = self._model_timeout_seconds_for_call(
+                    task=task_key,
+                    provider_id=attempt_provider,
+                    timeout_key=provider_key or str(timeout_key or ""),
+                    timeout_seconds=timeout_seconds,
                 )
-            except asyncio.TimeoutError as exc:
-                if effective_timeout is None:
-                    raise TimeoutError(f"模型任务 {task_key} 调用超时") from exc
-                raise TimeoutError(f"模型任务 {task_key} 超过 {effective_timeout:.0f} 秒未返回") from exc
+                request_call = self.context.llm_generate(**kwargs)
+                try:
+                    response = (
+                        await asyncio.wait_for(request_call, timeout=effective_timeout)
+                        if effective_timeout is not None
+                        else await request_call
+                    )
+                except asyncio.TimeoutError as exc:
+                    if effective_timeout is None:
+                        raise TimeoutError(f"模型任务 {task_key} 调用超时") from exc
+                    raise TimeoutError(f"模型任务 {task_key} 超过 {effective_timeout:.0f} 秒未返回") from exc
 
-            completion = str(getattr(response, "completion_text", "") or "").strip()
-            usage_completion = self._llm_tool_response_for_usage(response, completion)
-            response_role = _single_line(getattr(response, "role", ""), 20).lower()
-            semantic_provider_error = _looks_like_upstream_llm_error_response(completion)
-            if response_role == "err" or semantic_provider_error:
-                failure_code = (
-                    "provider_error_role"
-                    if response_role == "err"
-                    else "semantic_provider_error"
-                )
+                completion = str(getattr(response, "completion_text", "") or "").strip()
+                usage_completion = self._llm_tool_response_for_usage(response, completion)
+                response_role = _single_line(getattr(response, "role", ""), 20).lower()
+                semantic_provider_error = _looks_like_upstream_llm_error_response(completion)
+                if response_role == "err" or semantic_provider_error:
+                    failure_code = (
+                        "provider_error_role"
+                        if response_role == "err"
+                        else "semantic_provider_error"
+                    )
+                    self._record_llm_usage(
+                        provider_id=attempt_provider,
+                        task=task_key,
+                        prompt=usage_prompt,
+                        completion=usage_completion,
+                        elapsed_ms=int((time.time() - started_at) * 1000),
+                        success=False,
+                        error=failure_code,
+                        resp=response,
+                        budget_exempt=budget_exempt,
+                    )
+                    if attempt_index + 1 < len(candidates):
+                        logger.warning(
+                            "[PrivateCompanion] 工具调用主模型失败，尝试卡片备用模型: task=%s card=%s primary=%s fallback=%s kind=%s",
+                            _single_line(task_key, 80) or "unknown",
+                            provider_key or "unknown",
+                            _single_line(selected_provider, 120),
+                            _single_line(candidates[attempt_index + 1], 120),
+                            failure_code,
+                        )
+                        continue
+                    return None
+                if response is None:
+                    self._record_llm_usage(
+                        provider_id=attempt_provider,
+                        task=task_key,
+                        prompt=usage_prompt,
+                        completion="",
+                        elapsed_ms=int((time.time() - started_at) * 1000),
+                        success=False,
+                        error="empty_response",
+                        budget_exempt=budget_exempt,
+                    )
+                    if attempt_index + 1 < len(candidates):
+                        continue
+                    return None
                 self._record_llm_usage(
-                    provider_id=selected_provider,
+                    provider_id=attempt_provider,
                     task=task_key,
                     prompt=usage_prompt,
                     completion=usage_completion,
                     elapsed_ms=int((time.time() - started_at) * 1000),
-                    success=False,
-                    error=failure_code,
+                    success=True,
                     resp=response,
                     budget_exempt=budget_exempt,
                 )
-                return None
-            if response is None:
+                if attempt_index > 0 or token_routed:
+                    logger.info(
+                        "[PrivateCompanion] 工具调用使用备用模型: task=%s card=%s provider=%s estimated_tokens=%s",
+                        _single_line(task_key, 80) or "unknown",
+                        provider_key or "unknown",
+                        _single_line(attempt_provider, 120),
+                        estimated_tokens,
+                    )
+                return response
+            except Exception as exc:
                 self._record_llm_usage(
-                    provider_id=selected_provider,
+                    provider_id=attempt_provider,
                     task=task_key,
                     prompt=usage_prompt,
                     completion="",
                     elapsed_ms=int((time.time() - started_at) * 1000),
                     success=False,
-                    error="empty_response",
+                    error=str(exc),
+                    resp=response,
                     budget_exempt=budget_exempt,
                 )
-                return None
-            self._record_llm_usage(
-                provider_id=selected_provider,
-                task=task_key,
-                prompt=usage_prompt,
-                completion=usage_completion,
-                elapsed_ms=int((time.time() - started_at) * 1000),
-                success=True,
-                resp=response,
-                budget_exempt=budget_exempt,
-            )
-            return response
-        except Exception as exc:
-            self._record_llm_usage(
-                provider_id=selected_provider,
-                task=task_key,
-                prompt=usage_prompt,
-                completion="",
-                elapsed_ms=int((time.time() - started_at) * 1000),
-                success=False,
-                error=str(exc),
-                resp=response,
-                budget_exempt=budget_exempt,
-            )
-            raise
+                if attempt_index + 1 < len(candidates):
+                    logger.warning(
+                        "[PrivateCompanion] 工具调用失败，尝试卡片备用模型: task=%s card=%s error=%s",
+                        _single_line(task_key, 80) or "unknown",
+                        provider_key or "unknown",
+                        _single_line(exc, 160),
+                    )
+                    continue
+                raise
+        return None
 
     async def _llm_call(
         self,
@@ -1224,6 +1455,7 @@ class TokenBudgetMixin:
         system_prompt: str | None = None,
         timeout_key: str | None = None,
         timeout_seconds: float | None = None,
+        token_limit: int | float | None = None,
         strict_provider: bool = False,
     ) -> str | None:
         selected_provider = self._resolve_chat_provider_id(provider_id)
@@ -1253,8 +1485,18 @@ class TokenBudgetMixin:
             )
         if fallback_provider and callable(peak_router):
             fallback_provider = peak_router(fallback_provider)
-        candidates = [selected_provider]
-        if fallback_provider:
+        token_routed, _, estimated_tokens = self._model_token_limit_route_for_call(
+            task=task_key,
+            primary_provider_id=selected_provider,
+            fallback_provider_id=fallback_provider,
+            provider_key=provider_key or str(timeout_key or ""),
+            prompt=prompt,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+            token_limit=token_limit,
+        )
+        candidates = ([fallback_provider] if token_routed else [selected_provider])
+        if not token_routed and fallback_provider:
             candidates.append(fallback_provider)
         for attempt_index, attempt_provider in enumerate(candidates):
             start = time.time()
@@ -1305,13 +1547,13 @@ class TokenBudgetMixin:
                                 resp=resp,
                                 budget_exempt=budget_exempt,
                             )
-                            if attempt_index == 0 and fallback_provider:
+                            if attempt_index + 1 < len(candidates):
                                 logger.warning(
                                     "[PrivateCompanion] 主模型返回 Provider 错误响应,尝试卡片备用模型: task=%s card=%s primary=%s fallback=%s kind=%s",
                                     _single_line(task_key, 80) or "unknown",
                                     provider_key or "unknown",
                                     _single_line(attempt_provider, 120),
-                                    _single_line(fallback_provider, 120),
+                                    _single_line(candidates[attempt_index + 1], 120),
                                     failure_code,
                                 )
                             else:
@@ -1332,12 +1574,13 @@ class TokenBudgetMixin:
                             resp=resp,
                             budget_exempt=budget_exempt,
                         )
-                        if attempt_index > 0:
+                        if attempt_index > 0 or token_routed:
                             logger.info(
-                                "[PrivateCompanion] 主模型失败后备用模型调用成功: task=%s card=%s provider=%s",
+                                "[PrivateCompanion] 备用模型调用成功: task=%s card=%s provider=%s estimated_tokens=%s",
                                 _single_line(task_key, 80) or "unknown",
                                 provider_key or "unknown",
                                 _single_line(attempt_provider, 120),
+                                estimated_tokens,
                             )
                         return completion
                 self._record_llm_usage(
@@ -1351,13 +1594,13 @@ class TokenBudgetMixin:
                     resp=resp,
                     budget_exempt=budget_exempt,
                 )
-                if attempt_index == 0 and fallback_provider:
+                if attempt_index + 1 < len(candidates):
                     logger.warning(
                         "[PrivateCompanion] 主模型返回空结果,尝试卡片备用模型: task=%s card=%s primary=%s fallback=%s",
                         _single_line(task_key, 80) or "unknown",
                         provider_key or "unknown",
                         _single_line(attempt_provider, 120),
-                        _single_line(fallback_provider, 120),
+                        _single_line(candidates[attempt_index + 1], 120),
                     )
             except Exception as e:
                 self._record_llm_usage(
@@ -1370,13 +1613,13 @@ class TokenBudgetMixin:
                     error=str(e),
                     budget_exempt=budget_exempt,
                 )
-                if attempt_index == 0 and fallback_provider:
+                if attempt_index + 1 < len(candidates):
                     logger.warning(
                         "[PrivateCompanion] 主模型调用失败,尝试卡片备用模型: task=%s card=%s primary=%s fallback=%s error=%s",
                         _single_line(task_key, 80) or "unknown",
                         provider_key or "unknown",
                         _single_line(attempt_provider, 120) or "default",
-                        _single_line(fallback_provider, 120),
+                        _single_line(candidates[attempt_index + 1], 120),
                         _single_line(e, 160),
                     )
                     continue

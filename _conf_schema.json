@@ -4483,6 +4483,12 @@
     "default": "{}",
     "invisible": true
   },
+  "model_token_limit_overrides": {
+    "description": "Legacy flat config: 模型卡片单次 Token 上限",
+    "type": "text",
+    "default": "{}",
+    "invisible": true
+  },
   "model_fallback_overrides": {
     "description": "Legacy flat config: 模型卡片备用 Provider",
     "type": "text",

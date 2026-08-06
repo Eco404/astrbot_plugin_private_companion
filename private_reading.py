@@ -796,6 +796,32 @@ class PrivateReadingMixin:
             for attempt_index, (provider_id, provider) in enumerate(providers):
                 start = time.time()
                 try:
+                    token_skip_getter = getattr(self, "_model_token_limit_should_skip_primary", None)
+                    if callable(token_skip_getter) and token_skip_getter(
+                        task="private_reading_vision",
+                        provider_id=provider_id,
+                        primary_provider_id=primary_provider_id,
+                        fallback_provider_id=fallback_provider_id,
+                        provider_key=provider_key,
+                        prompt=prompt,
+                        max_tokens=900,
+                        image_count=len(image_urls),
+                    ):
+                        self._record_llm_usage(
+                            provider_id=provider_id,
+                            task="private_reading_vision",
+                            prompt=prompt,
+                            completion="",
+                            elapsed_ms=0,
+                            success=False,
+                            error="model_token_limit_exceeded",
+                        )
+                        logger.info(
+                            "[PrivateCompanion] 夹层阅读主视觉模型预估超出 Token 上限，跳过并继续备用模型: primary=%s fallback=%s",
+                            _single_line(provider_id, 120),
+                            _single_line(fallback_provider_id, 120),
+                        )
+                        continue
                     timeout_getter = getattr(self, "_model_timeout_seconds_for_call", None)
                     timeout = (
                         timeout_getter(

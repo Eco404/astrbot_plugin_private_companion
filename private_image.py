@@ -1478,7 +1478,17 @@ class PrivateImageMixin:
         attempts = 0
         errors: list[str] = []
         saw_uncertain = False
-        for provider_id, provider_source, _configured_prompt in self._private_image_visual_provider_candidates(umo):
+        visual_candidates = self._private_image_visual_provider_candidates(umo)
+        primary_visual_id = next(
+            (_single_line(item[0], 160) for item in visual_candidates if len(item) >= 2 and item[1] == "plugin_vision"),
+            "",
+        )
+        fallback_visual_id = next(
+            (_single_line(item[0], 160) for item in visual_candidates if len(item) >= 2 and item[1] == "plugin_vision_fallback"),
+            "",
+        )
+        visual_key = self._private_image_visual_provider_card_key()
+        for provider_id, provider_source, _configured_prompt in visual_candidates:
             provider_id = _single_line(provider_id, 160)
             if not provider_id or self._private_image_provider_in_failure_cooldown(provider_id, provider_source):
                 continue
@@ -1490,6 +1500,27 @@ class PrivateImageMixin:
             attempts += 1
             started = time.time()
             try:
+                token_skip_getter = getattr(self, "_model_token_limit_should_skip_primary", None)
+                if callable(token_skip_getter) and token_skip_getter(
+                    task="group_nsfw_image_review",
+                    provider_id=provider_id,
+                    primary_provider_id=primary_visual_id,
+                    fallback_provider_id=fallback_visual_id,
+                    provider_key=visual_key,
+                    prompt=prompt,
+                    max_tokens=80,
+                    image_count=len(image_urls),
+                ):
+                    self._record_llm_usage(
+                        provider_id=provider_id,
+                        task="group_nsfw_image_review",
+                        prompt=prompt,
+                        completion="",
+                        elapsed_ms=0,
+                        success=False,
+                        error="model_token_limit_exceeded",
+                    )
+                    continue
                 result = await asyncio.wait_for(
                     provider.text_chat(prompt=prompt, image_urls=image_urls, max_tokens=80),
                     timeout=max(3.0, min(float(getattr(self, "group_nsfw_image_review_timeout_seconds", 8.0) or 8.0), 30.0)),
@@ -2655,6 +2686,15 @@ class PrivateImageMixin:
                 f"{gif_hint}"
             )
         candidates = self._private_image_visual_provider_candidates(umo)
+        primary_visual_id = next(
+            (_single_line(item[0], 160) for item in candidates if len(item) >= 2 and item[1] == "plugin_vision"),
+            "",
+        )
+        fallback_visual_id = next(
+            (_single_line(item[0], 160) for item in candidates if len(item) >= 2 and item[1] == "plugin_vision_fallback"),
+            "",
+        )
+        visual_key = self._private_image_visual_provider_card_key()
         astrbot_prompt = next(
             (str(item[2]).strip() for item in candidates if len(item) >= 3 and str(item[2] or "").strip()),
             "",
@@ -2722,6 +2762,34 @@ class PrivateImageMixin:
                 continue
             try:
                 start = time.time()
+                token_skip_getter = getattr(self, "_model_token_limit_should_skip_primary", None)
+                if callable(token_skip_getter) and token_skip_getter(
+                    task=clean_task_name,
+                    provider_id=provider_id,
+                    primary_provider_id=primary_visual_id,
+                    fallback_provider_id=fallback_visual_id,
+                    provider_key=visual_key,
+                    prompt=prompt,
+                    max_tokens=800,
+                    image_count=len(image_urls),
+                ):
+                    self._record_llm_usage(
+                        provider_id=provider_id,
+                        task=clean_task_name,
+                        prompt=prompt,
+                        completion="",
+                        elapsed_ms=0,
+                        success=False,
+                        error="model_token_limit_exceeded",
+                        budget_exempt=True,
+                    )
+                    logger.info(
+                        "[PrivateCompanion] %s主视觉模型预估超出 Token 上限，跳过并继续备用模型: primary=%s fallback=%s",
+                        clean_log_subject,
+                        provider_id,
+                        fallback_visual_id,
+                    )
+                    continue
                 attempt_timeout = self._private_image_provider_timeout_seconds(provider_id, provider_source)
                 request_call = provider.text_chat(prompt=prompt, image_urls=image_urls)
                 result = (

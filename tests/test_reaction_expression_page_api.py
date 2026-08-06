@@ -333,6 +333,58 @@ class ReactionLibraryPageApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1, len(call_kwargs["image_urls"]))
             self.assertIn("只输出一个 JSON 数组", call_kwargs["prompt"])
 
+    async def test_background_analysis_skips_over_limit_primary_for_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            library = ReactionAssetLibrary(folder)
+            item = library.import_blobs([("001.png", self.PNG_BYTES)])['items'][0]
+            primary = SimpleNamespace(
+                text_chat=AsyncMock(
+                    return_value=SimpleNamespace(completion_text="主模型不应被调用")
+                )
+            )
+            fallback = SimpleNamespace(
+                text_chat=AsyncMock(
+                    return_value=SimpleNamespace(
+                        completion_text=json.dumps(
+                            [{
+                                "image_index": 1,
+                                "name": "备用识别",
+                                "description": "备用模型完成识别",
+                                "tags": ["备用"],
+                                "emotions": ["平静"],
+                                "intents": ["接梗"],
+                            }],
+                            ensure_ascii=False,
+                        )
+                    )
+                )
+            )
+            usage: list[dict] = []
+            plugin = SimpleNamespace(data_dir=folder)
+            plugin._private_image_visual_provider_candidates = lambda _umo: [
+                ("vision-primary", "plugin_vision", ""),
+                ("vision-fallback", "plugin_vision_fallback", ""),
+            ]
+            plugin._private_image_provider_by_id = lambda provider_id: {
+                "vision-primary": primary,
+                "vision-fallback": fallback,
+            }.get(provider_id)
+            plugin._provider_supports_image = lambda _provider: True
+            plugin._private_image_provider_timeout_seconds = lambda *_args: 0.0
+            plugin._can_run_llm_task = lambda *_args, **_kwargs: True
+            plugin._model_token_limit_should_skip_primary = lambda **kwargs: kwargs.get("provider_id") == "vision-primary"
+            plugin._record_llm_usage = lambda **kwargs: usage.append(kwargs)
+            api = PrivateCompanionPageApi(plugin)
+
+            await api._run_reaction_library_analysis_queue()
+
+            analyzed = library.list_items()["items"][0]
+            self.assertEqual("complete", analyzed["analysis_status"])
+            self.assertEqual("vision-fallback", analyzed["analysis_provider"])
+            primary.text_chat.assert_not_awaited()
+            fallback.text_chat.assert_awaited_once()
+            self.assertTrue(any(item.get("error") == "model_token_limit_exceeded" for item in usage))
+
     async def test_analyze_endpoint_requeues_completed_item(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             library = ReactionAssetLibrary(folder)

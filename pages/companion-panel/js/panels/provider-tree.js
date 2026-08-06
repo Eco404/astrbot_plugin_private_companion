@@ -39,6 +39,46 @@ window.PrivateCompanionProviderTree = (() => {
     return values;
   }
 
+  function normalizeTokenLimitValue(value) {
+    if (value === null || value === undefined || String(value).trim() === "") return "";
+    const parsed = Math.round(Number(value));
+    return Number.isFinite(parsed) && parsed >= 256 && parsed <= 2000000 ? parsed : "";
+  }
+
+  function providerTokenLimitValuesForRender(context) {
+    const { state } = context;
+    const saved = state.overview?.settings?.model_token_limit_overrides;
+    let source = saved;
+    if (typeof source === "string") {
+      try { source = JSON.parse(source || "{}"); } catch (_error) { source = {}; }
+    }
+    const values = {};
+    Object.entries(source && typeof source === "object" ? source : {}).forEach(([key, value]) => {
+      const normalized = normalizeTokenLimitValue(value);
+      if (normalized !== "") values[key] = normalized;
+    });
+    const draft = state.providerTokenLimitDraft;
+    if (draft && typeof draft === "object" && !Array.isArray(draft)) {
+      Object.entries(draft).forEach(([key, value]) => {
+        const normalized = normalizeTokenLimitValue(value);
+        if (normalized === "") delete values[key];
+        else values[key] = normalized;
+      });
+    }
+    return values;
+  }
+
+  function currentProviderTokenLimitValues(context) {
+    const { document } = context;
+    const values = providerTokenLimitValuesForRender(context);
+    document.querySelectorAll("[data-provider-token-limit]").forEach((input) => {
+      const normalized = normalizeTokenLimitValue(input.value);
+      if (normalized === "") delete values[input.dataset.providerTokenLimit];
+      else values[input.dataset.providerTokenLimit] = normalized;
+    });
+    return values;
+  }
+
   function normalizeFallbackValues(raw) {
     let source = raw;
     if (typeof source === "string") {
@@ -210,6 +250,15 @@ window.PrivateCompanionProviderTree = (() => {
     state.providerTimeoutDraft[key] = normalized;
   }
 
+  function rememberProviderTokenLimitDraft(context, input) {
+    const { state } = context;
+    const key = input.dataset.providerTokenLimit || "";
+    if (!key) return;
+    const normalized = normalizeTokenLimitValue(input.value);
+    state.providerTokenLimitDraft = { ...(state.providerTokenLimitDraft || {}) };
+    state.providerTokenLimitDraft[key] = normalized;
+  }
+
   function rememberProviderFallbackDraft(context, key) {
     const { document, state } = context;
     const input = document.querySelector(`[data-provider-fallback-key="${key}"]`);
@@ -306,6 +355,7 @@ window.PrivateCompanionProviderTree = (() => {
     const impact = providerPassiveImpactMeta[guide.passiveImpact || ""];
     const preview = [guide.purpose || "", guide.fit || ""].filter(Boolean).join(" ");
     const timeoutValue = providerTimeoutValuesForRender(context)[key] || "";
+    const tokenLimitValue = providerTokenLimitValuesForRender(context)[key] || "";
     const fallbackValue = providerFallbackValuesForRender(context)[key] || "";
     return `
       <article class="provider-card ${configured ? "configured" : "inherited"}" data-provider-card="${escapeHtml(key)}">
@@ -328,15 +378,24 @@ window.PrivateCompanionProviderTree = (() => {
             <span>Provider</span>
             ${providerSelect(context, key, selected)}
           </label>
-          <label class="provider-field provider-timeout-field">
-            <span>请求超时</span>
-            <span class="provider-timeout-control">
-              <input type="number" min="5" max="600" step="1" inputmode="numeric" data-provider-timeout="${escapeHtml(key)}" value="${escapeHtml(timeoutValue)}" placeholder="默认" aria-label="${escapeHtml(label)}请求超时秒数" />
-              <b>秒</b>
-            </span>
-          </label>
+          <div class="provider-limit-grid">
+            <label class="provider-field provider-limit-field provider-timeout-field">
+              <span>请求超时</span>
+              <span class="provider-limit-control provider-timeout-control">
+                <input type="number" min="5" max="600" step="1" inputmode="numeric" data-provider-timeout="${escapeHtml(key)}" value="${escapeHtml(timeoutValue)}" placeholder="默认" aria-label="${escapeHtml(label)}请求超时秒数" />
+                <b>秒</b>
+              </span>
+            </label>
+            <label class="provider-field provider-limit-field provider-token-limit-field">
+              <span>单次 Token 上限（预估）</span>
+              <span class="provider-limit-control provider-token-limit-control">
+                <input type="number" min="256" max="2000000" step="1" inputmode="numeric" data-provider-token-limit="${escapeHtml(key)}" value="${escapeHtml(tokenLimitValue)}" placeholder="不限制" aria-label="${escapeHtml(label)}单次 Token 上限" />
+                <b>Token</b>
+              </span>
+            </label>
+          </div>
           <label class="provider-field provider-fallback-field">
-            <span>备用模型 <small>主模型失败、超时或空响应时尝试一次</small></span>
+            <span>备用模型 <small>主模型失败、超时、Token 超限或空响应时尝试一次</small></span>
             ${providerFallbackSelect(context, key, fallbackValue)}
           </label>
           <div class="provider-current">
@@ -607,6 +666,14 @@ window.PrivateCompanionProviderTree = (() => {
         rememberProviderTimeoutDraft(context, input);
       });
     });
+    document.querySelectorAll("[data-provider-token-limit]").forEach((input) => {
+      input.addEventListener("input", () => rememberProviderTokenLimitDraft(context, input));
+      input.addEventListener("change", () => {
+        const normalized = normalizeTokenLimitValue(input.value);
+        input.value = normalized === "" ? "" : String(normalized);
+        rememberProviderTokenLimitDraft(context, input);
+      });
+    });
     document.querySelectorAll("[data-provider-test]").forEach((button) => {
       button.addEventListener("click", async () => {
         await testProvider(context, button.dataset.providerTest);
@@ -673,6 +740,7 @@ window.PrivateCompanionProviderTree = (() => {
     bindProviderToolbar,
     currentProviderValues,
     currentProviderTimeoutValues,
+    currentProviderTokenLimitValues,
     currentProviderFallbackValues,
     currentDeepseekPeakValues,
     resolveProviderId,
