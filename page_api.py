@@ -13759,6 +13759,25 @@ class PrivateCompanionPageApi(
             }
         else:
             relationship_stage = self._single_line((relationship_intimacy.get("phase") or {}).get("label"), 20) or relationship_stage
+        slowdown_count_getter = getattr(self.plugin, "_unanswered_slowdown_count", None)
+        multiplier_getter = getattr(self.plugin, "_unanswered_interval_multiplier", None)
+        unanswered_slowdown_count = 0
+        unanswered_interval_multiplier = 1.0
+        if callable(slowdown_count_getter):
+            try:
+                unanswered_slowdown_count = max(0, self._int(slowdown_count_getter(user)))
+            except Exception:
+                unanswered_slowdown_count = 0
+        if callable(multiplier_getter):
+            try:
+                unanswered_interval_multiplier = max(1.0, float(multiplier_getter(user)))
+            except Exception:
+                unanswered_interval_multiplier = 1.0
+        unanswered_slowdown_text = (
+            f"连续未回应 {self._int(user.get('ignored_streak'))} 次，最小主动间隔 ×{unanswered_interval_multiplier:.2f}"
+            if unanswered_slowdown_count > 0
+            else "未触发"
+        )
         pending_emotion_judgement = self._emotion_pending_judgement_summary(user.get("pending_emotion_judgement"))
         last_emotion_judgement = self._emotion_last_judgement_summary(user.get("last_emotion_judgement"))
         last_emotion_judgement_error = self._emotion_judgement_error_summary(user.get("last_emotion_judgement_error"))
@@ -13827,6 +13846,9 @@ class PrivateCompanionPageApi(
                 if hasattr(self.plugin, "_proactive_daily_limit_is_unlimited") and hasattr(self.plugin, "_effective_user_daily_limit")
                 else False
             ),
+            "unanswered_slowdown_count": unanswered_slowdown_count,
+            "unanswered_interval_multiplier": unanswered_interval_multiplier,
+            "unanswered_slowdown_text": unanswered_slowdown_text,
             "effective_idle_minutes": (
                 self.plugin._effective_user_idle_minutes(user)
                 if hasattr(self.plugin, "_effective_user_idle_minutes")

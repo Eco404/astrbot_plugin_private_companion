@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from astrbot_plugin_private_companion.companion_interaction_expression import (
     build_expression_decision,
@@ -69,6 +70,28 @@ class RelationshipProactiveSoftTargetTests(unittest.TestCase):
         prompt = expression_decision_prompt(decision)
         self.assertIn("柔性节奏目标", prompt)
         self.assertIn("不是必须凑满或一到即停的硬配额", prompt)
+
+    def test_unanswered_slowdown_keeps_daily_allowance_and_scales_interval(self) -> None:
+        harness = _ProactiveHarness()
+        harness.proactive_unanswered_slowdown_start = 1
+        harness.proactive_unanswered_max_interval_multiplier = 2.2
+        for ignored, expected_multiplier in ((0, 1.0), (1, 1.35), (2, 1.7), (3, 2.05), (4, 2.2)):
+            user = {
+                "relationship_role": "friend",
+                "relationship_mode": "normal",
+                "relationship_score": 120,
+                "ignored_streak": ignored,
+            }
+            self.assertEqual(8, harness._effective_user_daily_limit(user))
+            self.assertAlmostEqual(expected_multiplier, harness._unanswered_interval_multiplier(user), places=2)
+
+    def test_user_detail_explains_interval_slowdown(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        page_source = (root / "page_api.py").read_text(encoding="utf-8")
+        panel_source = (root / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('"unanswered_interval_multiplier"', page_source)
+        self.assertIn('"unanswered_slowdown_text"', page_source)
+        self.assertIn('"未回应降频"', panel_source)
 
     def test_relationship_distance_and_explicit_zeroes_remain_hard_gates(self) -> None:
         harness = _ProactiveHarness()

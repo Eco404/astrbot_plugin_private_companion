@@ -1072,6 +1072,10 @@ def test_strict_llm_provider_skips_peak_replacement_and_fallback() -> None:
             return "response_review", "cloud-fallback"
 
         @staticmethod
+        def _model_token_limit_route_for_call(**_kwargs: Any) -> tuple[bool, int | None, int]:
+            return False, None, 0
+
+        @staticmethod
         def _model_timeout_seconds_for_call(**_kwargs: Any) -> None:
             return None
 

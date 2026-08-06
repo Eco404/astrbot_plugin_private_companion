@@ -1126,8 +1126,8 @@ class ProactiveMixin(UserRestGateMixin):
         if str(interaction.get("expression_band") or "relaxed") in {"avoidant", "hurt"}:
             dynamic_limit = 0
         else:
-            ignored = _safe_int(user.get("ignored_streak"), 0, 0, 20)
-            dynamic_limit = 0 if ignored >= 2 else min(max_daily_messages, 1) if ignored == 1 else max_daily_messages
+            # 未回应只逐步放大主动间隔；不要把软降频误当成每日硬额度。
+            dynamic_limit = max_daily_messages
         return max(0, min(max_daily_messages, user_limit, dynamic_limit))
 
     def _relationship_proactive_soft_target(self, user: dict[str, Any]) -> int:

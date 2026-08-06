@@ -14078,7 +14078,7 @@ async function renderUserDetail(forceFetch = false) {
       ${renderRelationshipPanel(detail.relationship_panel)}
       ${renderUnifiedProfileCapabilityPanel(detail)}
       ${renderPortraitBridgeStatus(detail.portrait_bridge)}
-      ${detailBlock("关系和主动", detail.formatted?.relationship || "", [["角色", detail.relationship_role_label || ""], ["有效主动上限", `${detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited)} / 天`], ["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
+      ${detailBlock("关系和主动", detail.formatted?.relationship || "", [["角色", detail.relationship_role_label || ""], ["有效主动上限", `${detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited)} / 天`], ...(detail.unanswered_slowdown_count > 0 ? [["未回应降频", detail.unanswered_slowdown_text || "已逐步放慢主动间隔"]] : []), ["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
       ${renderPrivateDeliveryRoute(detail)}
       ${renderPrivateBehaviorHabits(detail)}
       ${emotionGateBlock(detail)}
