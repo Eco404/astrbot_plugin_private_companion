@@ -10,7 +10,7 @@
 | --- | --- |
 | 插件名 | <code>astrbot_plugin_private_companion</code> |
 | 显示名 | 我会永远陪着你 |
-| 版本 | <code>6.0.7a</code> |
+| 版本 | <code>6.0.8</code> |
 | AstrBot | <code>>= 4.22.0</code> |
 | 官方声明平台 | <code>aiocqhttp</code>、<code>qq_official</code> |
 | 管理入口 | AstrBot 插件拓展页中的“陪伴面板”（含纯英文路径兜底入口） |
@@ -498,8 +498,11 @@ TTS 标签会在发送前清理，模型内部判断、控制标签和工具回�
 陪伴 TTS语种 日语|中文|英语|默认
 陪伴 撤回消息
 陪伴 清空记忆
+陪伴 重置当前人格
 陪伴 重置插件
 ~~~
+
+<code>重置当前人格</code>会先把当前人格资料以 UTF-8 JSON 备份到插件数据目录下的 <code>persona_backups</code>，再重建当前人格数据；插件基础配置、多人格列表和窗口绑定保持不变。该操作只管理本插件资料，不修改 AstrBot 会话历史或外部长期记忆插件的数据。
 
 <code>重置插件</code>会清空插件状态并重建当天数据；不要把裸“重置”当作该命令。
 

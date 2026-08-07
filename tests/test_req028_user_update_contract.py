@@ -225,6 +225,38 @@ class Req028UserUpdateContractTests(unittest.TestCase):
         self.assertTrue(interaction["manual_override"])
         self.assertEqual("page_administrator", interaction["operator"])
 
+    def test_manual_interaction_correction_clears_stale_automatic_contact_boundary(self) -> None:
+        contact_values = (
+            {
+                "mode": "no_contact",
+                "active": True,
+                "no_contact": True,
+                "source": "automatic",
+                "reason_code": "explicit_user_boundary",
+            },
+            "no_contact",
+        )
+        for contact_preference in contact_values:
+            with self.subTest(contact_preference=contact_preference):
+                user = {
+                    "relationship_role": "owner",
+                    "relationship_mode": "owner_exclusive",
+                    "relationship_score": 600,
+                    "contact_preference": contact_preference,
+                }
+
+                accepted, host = self._run(user, {"current_interaction_band": "warm"})
+
+                self.assertTrue(accepted["ok"])
+                saved = host.plugin.data["users"]["10001"]
+                self.assertEqual("warm", saved["current_interaction"]["expression_band"])
+                self.assertTrue(saved["current_interaction"]["manual_override"])
+                self.assertFalse(saved["contact_preference"]["active"])
+                self.assertEqual(
+                    "administrator_manual_interaction_correction",
+                    saved["contact_preference"]["reason_code"],
+                )
+
     def test_owner_downgrade_requires_explicit_normal_relationship_selection(self) -> None:
         owner = {"relationship_role": "owner", "relationship_mode": "owner_exclusive", "relationship_score": 600}
         rejected, _ = self._run(owner, {"relationship_role": "friend"})
@@ -293,6 +325,69 @@ class Req028UserUpdateContractTests(unittest.TestCase):
             {"intent": "chat", "confidence": 0.9, "emotion_event": "hurt", "emotion_confidence": 0.9, "emotion_intensity": 95, "emotion_target": "bot"},
         )
         self.assertEqual("affectionate", host.plugin.data["users"]["10001"]["current_interaction"]["expression_band"])
+
+    def test_manual_interaction_override_clears_stale_boundary_during_settlement(self) -> None:
+        user = {
+            "relationship_role": "owner",
+            "relationship_mode": "owner_exclusive",
+            "contact_preference": {
+                "mode": "no_contact",
+                "active": True,
+                "no_contact": True,
+                "source": "automatic",
+            },
+            "current_interaction": {
+                "expression_band": "warm",
+                "source": "manual",
+                "manual_override": True,
+                "updated_at": time.time(),
+                "expires_at": 0,
+            },
+        }
+        host = _Host(user)
+        host._settle_current_interaction_from_intent = SETTLE_INTERACTION.__get__(host, _Host)
+
+        host._settle_current_interaction_from_intent(
+            host.plugin.data["users"]["10001"],
+            {"intent": "chat", "confidence": 0.9, "emotion_event": "neutral"},
+        )
+
+        settled = host.plugin.data["users"]["10001"]
+        self.assertEqual("warm", settled["current_interaction"]["expression_band"])
+        self.assertFalse(settled["contact_preference"]["active"])
+        self.assertEqual(
+            "manual_interaction_override_retained",
+            settled["contact_preference"]["reason_code"],
+        )
+
+    def test_new_explicit_boundary_can_replace_manual_interaction_override(self) -> None:
+        user = {
+            "relationship_role": "owner",
+            "relationship_mode": "owner_exclusive",
+            "current_interaction": {
+                "expression_band": "warm",
+                "source": "manual",
+                "manual_override": True,
+                "updated_at": time.time(),
+                "expires_at": 0,
+            },
+        }
+        host = _Host(user)
+        host._settle_current_interaction_from_intent = SETTLE_INTERACTION.__get__(host, _Host)
+
+        host._settle_current_interaction_from_intent(
+            host.plugin.data["users"]["10001"],
+            {
+                "intent": "boundary",
+                "confidence": 0.95,
+                "boundary_durable": True,
+                "emotion_event": "neutral",
+            },
+        )
+
+        settled = host.plugin.data["users"]["10001"]
+        self.assertEqual("avoidant", settled["current_interaction"]["expression_band"])
+        self.assertTrue(settled["contact_preference"]["active"])
 
     def test_hurt_thresholds_and_recovery_window_drive_the_unified_interaction(self) -> None:
         host = _Host({"relationship_role": "friend", "relationship_mode": "normal"})

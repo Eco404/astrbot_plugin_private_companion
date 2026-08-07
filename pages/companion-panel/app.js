@@ -18,6 +18,7 @@ const state = {
   troubleshooting: null,
   dailyReview: null,
   availableProviders: [],
+  availableEmbeddingProviders: [],
   tokenStats: null,
   tokenStatsPartial: false,
   bookshelfUnlocked: null,
@@ -268,6 +269,7 @@ const providerLabels = {
   FORWARD_MESSAGE_PROVIDER_ID: "合并消息转述",
   PLUGIN_VISION_PROVIDER_ID: "插件识图模型",
   PRIVATE_READING_VISION_PROVIDER_ID: "夹层阅读视觉模型",
+  REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID: "表情语义嵌入模型",
   NEWS_PROVIDER_ID: "新闻整理",
   WEB_EXPLORATION_PROVIDER_ID: "搜索决策/整理",
 };
@@ -1067,6 +1069,14 @@ const providerGuides = {
     fit: "必须是支持图片输入的视觉模型，最好能稳定输出 JSON，并能看懂漫画页图细节。",
     fallback: "不回退。留空或模型不可用时，不生成私密阅读批注和读后感。",
   },
+  REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID: {
+    preference: "speed",
+    passiveImpact: "conditional",
+    purpose: "把表情素材元数据和当前沟通意图转换为向量，用于补充关键词难以覆盖的语义近似召回。",
+    fit: "必须是 AstrBot 已加载且支持 Embedding 接口的 Provider；轻量、低延迟模型即可。",
+    note: "向量只参与软加分；失败、超时或未建索引时自动使用本地语义与关键词匹配。",
+    fallback: "留空时自动探测可用嵌入模型，不会回退到普通聊天模型。",
+  },
   NEWS_PROVIDER_ID: {
     preference: "speed",
     passiveImpact: "async",
@@ -1118,7 +1128,7 @@ const providerGroups = [
     id: "media",
     title: "视觉与外界信息",
     desc: "识图、新闻和主动搜索相关模型。",
-    keys: ["PRIVATE_READING_VISION_PROVIDER_ID", "NEWS_PROVIDER_ID", "WEB_EXPLORATION_PROVIDER_ID"],
+    keys: ["PRIVATE_READING_VISION_PROVIDER_ID", "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID", "NEWS_PROVIDER_ID", "WEB_EXPLORATION_PROVIDER_ID"],
   },
 ];
 
@@ -1302,10 +1312,11 @@ const featureGroups = [
   },
   {
     title: "私聊陪伴",
-    note: "回复策略、主动终审和自然表达；用户画像在“用户与好感度”统一管理，长期记忆由外部插件联动。",
+    note: "回复策略、主动计划判定、正文终审和自然表达；两个主动审核开关彼此独立，关闭正文终审不会自动关闭计划人格判定。",
     keys: [
       "enable_mai_style_integration",
       "enable_intent_emotion_analysis",
+      "enable_llm_proactive_persona_judge",
       "enable_proactive_message_review",
       "enable_passive_topic_suppression",
       "enable_relationship_analysis",
@@ -2202,6 +2213,15 @@ const configLabels = {
   reaction_expression_cooldown_seconds: "表情表达冷却秒数",
   reaction_expression_low_latency_mode: "低延迟选择模式",
   reaction_expression_candidate_limit: "表情检索说法上限",
+  reaction_expression_embedding_enabled: "启用表情语义召回",
+  REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID: "表情语义嵌入模型",
+  reaction_expression_embedding_timeout_ms: "表情嵌入超时",
+  reaction_expression_embedding_candidate_limit: "表情向量扫描上限",
+  reaction_expression_embedding_score_threshold: "表情语义相似度阈值",
+  reaction_expression_embedding_weight: "表情语义加权分",
+  reaction_expression_embedding_backfill_enabled: "后台补齐表情向量",
+  reaction_expression_embedding_backfill_batch_size: "表情补向量批量",
+  reaction_expression_embedding_backfill_interval_seconds: "表情补向量最短间隔",
   reaction_expression_semantic_trigger_enabled: "允许语义节点触发表情表达",
   enable_daily_review: "启用每日终盘巡视",
   daily_review_time: "每日巡视时间",
@@ -2244,6 +2264,15 @@ const configDescriptions = {
   reaction_expression_cooldown_seconds: "同一会话两次自动表情表达之间的最短间隔；不限制用户明确请求查找或发送图片。",
   reaction_expression_low_latency_mode: "开启时复用本地素材评分的短时缓存，适合高频对话；关闭后每次都重新按标签、情绪和沟通用途评分，不会调用额外模型。",
   reaction_expression_candidate_limit: "主模型一次最多提供多少条不同检索说法，用来补充情绪和沟通意图；无论填写多少，插件仍只执行一次图库检索。建议保持 4 到 8 条。",
+  reaction_expression_embedding_enabled: "使用可配置的 Embedding Provider 理解隐含情绪和沟通用途；未配置、未建索引或调用失败时自动回退关键词检索。",
+  REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID: "只列出 AstrBot 当前已加载且支持向量生成的 Provider；留空时自动探测第一个可用嵌入模型。",
+  reaction_expression_embedding_timeout_ms: "查询向量超过该时间会跳过语义层并回退关键词；0 表示不限制。",
+  reaction_expression_embedding_candidate_limit: "每次最多扫描多少张已建立向量的素材，不影响关键词检索。",
+  reaction_expression_embedding_score_threshold: "低于该相似度的素材不会获得语义加分，建议 0.35 到 0.55。",
+  reaction_expression_embedding_weight: "语义相似度在现有关键词、情绪、偏好排序中的软加分，不会单独决定是否发送。",
+  reaction_expression_embedding_backfill_enabled: "用小批量后台任务为新导入或元数据变更后的素材建立向量，不阻塞当前回复。",
+  reaction_expression_embedding_backfill_batch_size: "每轮后台最多处理的素材数量，越大建库越快但 Provider 调用量越高。",
+  reaction_expression_embedding_backfill_interval_seconds: "同一 Provider 两次后台缺失扫描之间的最短间隔，避免高频群聊反复扫描。",
   reaction_expression_semantic_trigger_enabled: "开启后，高置信接梗、安慰、夸奖、道歉或亲密互动节点可跳过普通概率一次；仍受语义冷却、会话冷却、重复图、素材置信度和正文完整性约束，不增加模型调用。关闭后所有自动表达只按触发概率。",
   enable_daily_review: "开启后按设定时间复盘前一完整自然日；插件错过时间会在下次启动后按顺序补跑。",
   daily_review_time: "使用 HH:MM 格式。巡视目标始终是前一完整自然日，避免当天数据尚未结束就提前下结论。",
@@ -2906,7 +2935,7 @@ const featureSettingGroups = {
   enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "proactive_generation_history_limit", "proactive_history_context_mode", "proactive_history_recent_raw_count", "proactive_history_max_chars", "enable_proactive_chat_integration", "proactive_chat_bridge_review_mode", "proactive_chat_bridge_collision_window_seconds", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily", "default_enable_configured_targets", "proactive_reply_context_hours", "enable_proactive_decorating_hooks", "enable_precise_platform_send", "max_proactive_plan_lag_minutes"],
   enable_multi_persona_mode: ["multi_persona_primary_id", "multi_persona_ids"],
   enable_reply_interception_forward: ["reply_interception_forward_target_umo", "reply_interception_forward_plugin_blocks", "reply_interception_forward_rewrites", "reply_interception_forward_proactive_blocks"],
-  enable_reaction_expression_experiment: ["reaction_expression_private_enabled", "reaction_expression_proactive_enabled", "reaction_expression_group_enabled", "reaction_expression_delivery_mode", "reaction_expression_image_format", "reaction_expression_trigger_probability", "reaction_expression_cooldown_seconds", "reaction_expression_semantic_trigger_enabled", "reaction_expression_low_latency_mode", "reaction_expression_candidate_limit"],
+  enable_reaction_expression_experiment: ["reaction_expression_private_enabled", "reaction_expression_proactive_enabled", "reaction_expression_group_enabled", "reaction_expression_delivery_mode", "reaction_expression_image_format", "reaction_expression_trigger_probability", "reaction_expression_cooldown_seconds", "reaction_expression_semantic_trigger_enabled", "reaction_expression_low_latency_mode", "reaction_expression_candidate_limit", "reaction_expression_embedding_enabled", "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID", "reaction_expression_embedding_timeout_ms", "reaction_expression_embedding_candidate_limit", "reaction_expression_embedding_score_threshold", "reaction_expression_embedding_weight", "reaction_expression_embedding_backfill_enabled", "reaction_expression_embedding_backfill_batch_size", "reaction_expression_embedding_backfill_interval_seconds"],
   enable_maslow_motivation_experiment: ["enable_maslow_schedule_influence", "maslow_motivation_strength"],
   enable_personality_iteration_experiment: ["enable_personality_iteration_auto_tune"],
   enable_humanized_states: ["enable_daily_plan", "daily_plan_time", "daily_plan_item_count", "include_schedule_in_messages", "enable_detail_enhancement", "detail_enhancement_lead_minutes", "enable_daily_diary", "daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries", "important_date_lookahead_days", "daily_plan_prompt", "enable_daily_greetings", "greeting_idle_minutes", "allow_insomnia_night_message", "humanized_state_intensity", "enable_health_state", "enable_hunger_state", "enable_qq_presence_sync", "enable_qq_custom_presence_sync", "inject_passive_states", "enable_passive_state_delta_injection", "enable_passive_state_continuity_anchor", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_busy_reply_gate", "busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes", "enable_cycle_state", ...advancedCycleSettingKeys, "enable_enhanced_dreams", "dream_afterglow_mode", "enable_mixed_dream_themes", "enable_intimate_dream_theme", "dream_theme_candidates"],
@@ -3074,11 +3103,6 @@ const featureSettingSections = {
       title: "Proactive Chat 联动",
       note: "对方保留触发频率，本插件从生成前开始加入关系、状态、表达、边界和调度互斥，并按真实平台发送结果结算。",
       keys: ["enable_proactive_chat_integration", "proactive_chat_bridge_review_mode", "proactive_chat_bridge_collision_window_seconds"],
-    },
-    {
-      title: "人格/世界观复核",
-      note: "到点后先检查这个念头是否像当前角色会说、是否越界、是否该延后。",
-      keys: ["enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes", "proactive_persona_judge_max_daily"],
     },
     {
       title: "启动与回复衔接",
@@ -3566,6 +3590,11 @@ const featureSettingSections = {
       note: "低延迟模式不调用额外选图模型；多条检索说法会合并后只查一次图库。",
       keys: ["reaction_expression_semantic_trigger_enabled", "reaction_expression_low_latency_mode", "reaction_expression_candidate_limit"],
     },
+    {
+      title: "语义召回",
+      note: "可选 Embedding 软召回；关键词、情绪和关系边界仍然保留。",
+      keys: ["reaction_expression_embedding_enabled", "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID", "reaction_expression_embedding_timeout_ms", "reaction_expression_embedding_candidate_limit", "reaction_expression_embedding_score_threshold", "reaction_expression_embedding_weight", "reaction_expression_embedding_backfill_enabled", "reaction_expression_embedding_backfill_batch_size", "reaction_expression_embedding_backfill_interval_seconds"],
+    },
   ],
   enable_emotion_simulation: [
     {
@@ -3940,6 +3969,15 @@ const featureSettingTypes = {
   reaction_expression_cooldown_seconds: { type: "number", min: 0, max: 3600, step: 10 },
   reaction_expression_low_latency_mode: { type: "checkbox" },
   reaction_expression_candidate_limit: { type: "number", min: 1, max: 16, step: 1 },
+  reaction_expression_embedding_enabled: { type: "checkbox" },
+  REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID: { type: "provider" },
+  reaction_expression_embedding_timeout_ms: { type: "number", min: 0, max: 30000, step: 500 },
+  reaction_expression_embedding_candidate_limit: { type: "number", min: 20, max: 5000, step: 20 },
+  reaction_expression_embedding_score_threshold: { type: "number", min: 0, max: 100, step: 1 },
+  reaction_expression_embedding_weight: { type: "number", min: 0, max: 1.5, step: 0.05 },
+  reaction_expression_embedding_backfill_enabled: { type: "checkbox" },
+  reaction_expression_embedding_backfill_batch_size: { type: "number", min: 1, max: 100, step: 1 },
+  reaction_expression_embedding_backfill_interval_seconds: { type: "number", min: 0, max: 86400, step: 30 },
   reaction_expression_semantic_trigger_enabled: { type: "checkbox" },
   memory_companion_context_timeout_seconds: { type: "number", min: 0.2, max: 6, step: 0.1 },
   livingmemory_tool_name: { type: "text" },
@@ -4046,6 +4084,7 @@ const featureSettingTypes = {
 
 const probabilitySettingKeys = new Set([
   "reaction_expression_trigger_probability",
+  "reaction_expression_embedding_score_threshold",
   "share_probability",
   "bilibili_share_probability",
   "news_share_probability",
@@ -6207,6 +6246,7 @@ async function loadAvailableProviders(force = false) {
   if (state.lazyLoaded.providers && !force) return state.availableProviders;
   const availableProviders = await fetchJson("/providers/available");
   state.availableProviders = availableProviders.items || [];
+  state.availableEmbeddingProviders = availableProviders.embedding_items || [];
   state.availableTtsProviders = availableProviders.tts_items || [];
   state.lazyLoaded.providers = true;
   if (state.activeTab === "models") renderProviders();
@@ -6440,14 +6480,14 @@ const setupGuideDraftDefaults = {
   generateSchedule: true,
   refineSchedule: false,
   privateIntensity: "off",
-  privateMaxDailyMessages: 0,
-  privateIdleMinutes: 0,
-  privateMinIntervalMinutes: 0,
+  privateMaxDailyMessages: 8,
+  privateIdleMinutes: 60,
+  privateMinIntervalMinutes: 120,
   privatePersonaJudgeThreshold: 62,
   privateReviewStrength: "lenient",
-  privateUnansweredSlowdownStart: 2,
-  privateUnansweredMaxIntervalMultiplier: 1.65,
-  privateFriendUnansweredMaxCooldownHours: 30,
+  privateUnansweredSlowdownStart: 1,
+  privateUnansweredMaxIntervalMultiplier: 2.2,
+  privateFriendUnansweredMaxCooldownHours: 60,
   privateDelayFactor: 0.72,
   privateIgnoreTokenSoftLimit: false,
   privateIgnoreDailyLimit: false,
@@ -7420,11 +7460,11 @@ function setupGuideDraft() {
       quietHours: String(settings.quiet_hours || setupGuideDraftDefaults.quietHours).trim() || setupGuideDraftDefaults.quietHours,
       requirePrivateOptIn: setupGuideBoolValue(settings.require_private_opt_in, setupGuideDraftDefaults.requirePrivateOptIn),
       privateIntensity: String(settings.proactive_intensity_preset || intensity.preset || setupGuideDraftDefaults.privateIntensity || "off"),
-      privateMaxDailyMessages: effective.max_daily_messages ?? configured.max_daily_messages ?? setupGuideDraftDefaults.privateMaxDailyMessages,
-      privateIdleMinutes: effective.idle_minutes ?? configured.idle_minutes ?? setupGuideDraftDefaults.privateIdleMinutes,
-      privateMinIntervalMinutes: effective.min_interval_minutes ?? configured.min_interval_minutes ?? setupGuideDraftDefaults.privateMinIntervalMinutes,
-      privatePersonaJudgeThreshold: effective.proactive_persona_judge_send_threshold ?? configured.proactive_persona_judge_send_threshold ?? setupGuideDraftDefaults.privatePersonaJudgeThreshold,
-      privateReviewStrength: effective.proactive_review_strength ?? configured.proactive_review_strength ?? setupGuideDraftDefaults.privateReviewStrength,
+      privateMaxDailyMessages: configured.max_daily_messages ?? setupGuideDraftDefaults.privateMaxDailyMessages,
+      privateIdleMinutes: configured.idle_minutes ?? setupGuideDraftDefaults.privateIdleMinutes,
+      privateMinIntervalMinutes: configured.min_interval_minutes ?? setupGuideDraftDefaults.privateMinIntervalMinutes,
+      privatePersonaJudgeThreshold: configured.proactive_persona_judge_send_threshold ?? setupGuideDraftDefaults.privatePersonaJudgeThreshold,
+      privateReviewStrength: configured.proactive_review_strength ?? setupGuideDraftDefaults.privateReviewStrength,
       privateIgnoreTokenSoftLimit: setupGuideBoolValue(effective.ignore_token_soft_limit, false),
       privateIgnoreDailyLimit: setupGuideBoolValue(effective.ignore_daily_limit, false),
       groupWakeDirectWords: String(settings.group_wakeup_direct_words || setupGuideDraftDefaults.groupWakeDirectWords),
@@ -8528,42 +8568,9 @@ function updateSetupGuideStatusViews() {
 
 function setupGuideApplyIntensityPreset(presetValue) {
   const draft = setupGuideDraft();
-  const preset = setupGuideIntensityPresets[presetValue] || setupGuideIntensityPresets.off;
-  const effects = preset.effects || {};
-  if (presetValue === "off") {
-    const configured = state.overview?.proactive_intensity?.configured || {};
-    draft.privateMaxDailyMessages = configured.max_daily_messages ?? draft.privateMaxDailyMessages;
-    draft.privateIdleMinutes = configured.idle_minutes ?? draft.privateIdleMinutes;
-    draft.privateMinIntervalMinutes = configured.min_interval_minutes ?? draft.privateMinIntervalMinutes;
-    draft.privatePersonaJudgeThreshold = configured.proactive_persona_judge_send_threshold ?? draft.privatePersonaJudgeThreshold;
-    draft.privateReviewStrength = configured.proactive_review_strength ?? draft.privateReviewStrength;
-    draft.groupWakeCooldownSeconds = configured.group_wakeup_cooldown_seconds ?? draft.groupWakeCooldownSeconds;
-    draft.groupWakeInterestProbability = setupGuidePercentValue(configured.group_wakeup_interest_probability, null, draft.groupWakeInterestProbability);
-    draft.groupWakeQuestionThreshold = configured.group_wakeup_question_threshold ?? draft.groupWakeQuestionThreshold;
-    draft.groupWakeColdGroupThreshold = configured.group_wakeup_cold_group_threshold ?? draft.groupWakeColdGroupThreshold;
-    draft.groupInterjectMinIntervalMinutes = configured.group_interject_min_interval_minutes ?? draft.groupInterjectMinIntervalMinutes;
-    draft.groupInterjectMaxDaily = configured.group_interject_max_daily ?? draft.groupInterjectMaxDaily;
-    draft.privateIgnoreTokenSoftLimit = false;
-    draft.privateIgnoreDailyLimit = false;
-    return;
-  }
-  draft.privateMaxDailyMessages = effects.max_daily_messages ?? draft.privateMaxDailyMessages;
-  draft.privateIdleMinutes = effects.idle_minutes ?? draft.privateIdleMinutes;
-  draft.privateMinIntervalMinutes = effects.min_interval_minutes ?? draft.privateMinIntervalMinutes;
-  draft.privatePersonaJudgeThreshold = effects.proactive_persona_judge_send_threshold ?? draft.privatePersonaJudgeThreshold;
-  draft.privateReviewStrength = effects.proactive_review_strength ?? draft.privateReviewStrength;
-  draft.privateUnansweredSlowdownStart = effects.unanswered_slowdown_start ?? draft.privateUnansweredSlowdownStart;
-  draft.privateUnansweredMaxIntervalMultiplier = effects.unanswered_max_interval_multiplier ?? draft.privateUnansweredMaxIntervalMultiplier;
-  draft.privateFriendUnansweredMaxCooldownHours = effects.friend_unanswered_max_cooldown_hours ?? draft.privateFriendUnansweredMaxCooldownHours;
-  draft.privateDelayFactor = effects.delay_factor ?? draft.privateDelayFactor;
+  const effects = (setupGuideIntensityPresets[presetValue] || setupGuideIntensityPresets.off).effects || {};
   draft.privateIgnoreTokenSoftLimit = Boolean(effects.ignore_token_soft_limit);
   draft.privateIgnoreDailyLimit = Boolean(effects.ignore_daily_limit);
-  draft.groupWakeCooldownSeconds = effects.group_wakeup_cooldown_seconds ?? draft.groupWakeCooldownSeconds;
-  draft.groupWakeInterestProbability = effects.group_wakeup_interest_probability ?? draft.groupWakeInterestProbability;
-  draft.groupWakeQuestionThreshold = effects.group_wakeup_question_threshold ?? draft.groupWakeQuestionThreshold;
-  draft.groupWakeColdGroupThreshold = effects.group_wakeup_cold_group_threshold ?? draft.groupWakeColdGroupThreshold;
-  draft.groupInterjectMinIntervalMinutes = effects.group_interject_min_interval_minutes ?? draft.groupInterjectMinIntervalMinutes;
-  draft.groupInterjectMaxDaily = effects.group_interject_max_daily ?? draft.groupInterjectMaxDaily;
 }
 
 function setupGuideDailyResultHtml() {
@@ -8668,7 +8675,7 @@ function setupGuidePrivateIntensityHtml() {
         ${setupGuideOption("privateIntensity", "high_group", "群聊活跃", "侧重群聊唤醒和插话，私聊轻度增强。")}
         ${setupGuideOption("privateIntensity", "live", "在线陪伴", "最高档，不省主动成本；仍受硬边界约束。")}
       </div>
-      ${setupGuideHint(`${preset.label}：${preset.description} 保存引导时会写入当前预设和下方参数。`)}
+      ${setupGuideHint(`${preset.label}：${preset.description} 预设只作为运行态覆盖，不会改写下方手动参数。`)}
     </div>
     <div class="setup-guide-question">
       <h4>私聊影响参数</h4>
@@ -8678,15 +8685,11 @@ function setupGuidePrivateIntensityHtml() {
         ${setupGuideNumber("privateMinIntervalMinutes", "两次主动最小间隔（分钟）", "75", { min: 0 })}
         ${setupGuideNumber("privatePersonaJudgeThreshold", "人格发送判断阈值", "54", { min: 0, max: 100, description: "越低越容易通过主动发送判断。" })}
         ${setupGuideSelect("privateReviewStrength", "主动复核强度", [["lenient", "宽松"], ["balanced", "标准"], ["strict", "严格"]])}
-        ${setupGuideNumber("privateDelayFactor", "主动延迟系数", "0.72", { min: 0, step: 0.01, description: "越低越不拖延。" })}
         ${setupGuideNumber("privateUnansweredSlowdownStart", "连续未回复降速起点", "2", { min: 0 })}
         ${setupGuideNumber("privateUnansweredMaxIntervalMultiplier", "未回复最大间隔倍率", "1.65", { min: 1, step: 0.05 })}
         ${setupGuideNumber("privateFriendUnansweredMaxCooldownHours", "次要用户未回复最长冷却（小时）", "30", { min: 0 })}
       </div>
-      <div class="setup-guide-choice-grid">
-        ${setupGuideCheck("privateIgnoreTokenSoftLimit", "忽略 Token 软限额降载", "只适合最高在线陪伴档；仍不会绕过每日 Token 硬限额。")}
-        ${setupGuideCheck("privateIgnoreDailyLimit", "忽略每日主动次数上限", "只影响预设运行态，不绕过免打扰、隐私和用户拒绝。")}
-      </div>
+      ${setupGuideHint(`当前预设派生：${draft.privateIgnoreTokenSoftLimit ? "忽略 Token 软限额降载" : "遵循 Token 软限额"}；${draft.privateIgnoreDailyLimit ? "不按每日主动次数封顶" : "遵循每日主动上限"}。这些值由预设决定，无需手动填写。`)}
     </div>
     <div class="setup-guide-question">
       <h4>联动影响参数</h4>
@@ -9798,7 +9801,8 @@ function renderDashboardLifeDesk(overview = {}) {
     const diaryCount = Array.isArray(life.diaries) ? life.diaries.length : 0;
     const fragmentCount = Array.isArray(life.dream_fragments) ? life.dream_fragments.length : 0;
     const memoryPlugin = livingmemory.selected_plugin_name
-      || livingmemory.memory_companion_display_name
+      || (livingmemory.memory_companion_active ? livingmemory.memory_companion_display_name : "")
+      || (livingmemory.memory_companion_detected ? `${livingmemory.memory_companion_display_name || "我会牢牢记住你"}（已检测，未就绪）` : "")
       || (livingmemory.compatible_available ? "长期记忆可用" : "未接入长期记忆");
     const rows = [
       ["worldbook", "关系", `${worldbook.enabled_member_count || 0}/${worldbook.member_count || 0} 个已启用`],
@@ -10355,7 +10359,19 @@ function livingMemoryHealthText(livingmemory) {
   if (!livingmemory) return "未读取到外部记忆插件协同状态";
   if (livingmemory.conflict_warning) return livingmemory.conflict_warning;
   const pluginName = livingmemory.selected_plugin_name || livingmemory.selected_plugin?.display_name || "";
-  if (!livingmemory.compatible_available && !livingmemory.available && !livingmemory.memory_companion_active) return "未检测到可协同记忆插件";
+  if (!livingmemory.compatible_available && !livingmemory.available && !livingmemory.memory_companion_active) {
+    if (livingmemory.memory_companion_detected) {
+      const detectedName = livingmemory.memory_companion_display_name || "我会牢牢记住你";
+      const reason = String(livingmemory.memory_companion_reason || "");
+      if (reason === "bridge_disabled") return `已检测到 ${detectedName}；Bridge 开关未启用`;
+      if (!livingmemory.memory_companion_loaded) return `已检测到 ${detectedName}；插件运行实例尚未加载`;
+      if (["capability_probe_missing", "capability_probe_exception", "capability_probe_invalid", "capability_contract_mismatch"].includes(reason)) {
+        return `已检测到 ${detectedName}；当前版本的桥接协议不兼容`;
+      }
+      return `已检测到 ${detectedName}；桥接暂未就绪`;
+    }
+    return "未检测到可协同记忆插件";
+  }
   if (!livingmemory.configured_enabled && !livingmemory.enabled) return `协同开关未启用${pluginName ? `；检测到 ${pluginName}` : ""}`;
   if (pluginName) return `当前使用：${pluginName}`;
   if (livingmemory.memory_companion_active) return `当前使用：${livingmemory.memory_companion_display_name || "我会牢牢记住你"}`;
@@ -10369,6 +10385,9 @@ function livingMemoryStatusText(livingmemory) {
   const activePlugins = Array.isArray(livingmemory.active_plugins) ? livingmemory.active_plugins : [];
   if (activePlugins.length) {
     lines.push(`检测到：${activePlugins.map((item) => item.display_name || item.name || item.type).filter(Boolean).join("、")}`);
+  } else if (livingmemory.memory_companion_detected) {
+    const version = livingmemory.memory_companion_version ? ` ${livingmemory.memory_companion_version}` : "";
+    lines.push(`检测到：${livingmemory.memory_companion_display_name || "我会牢牢记住你"}${version}`);
   }
   if (livingmemory.selected_plugin_name) {
     lines.push(`当前使用：${livingmemory.selected_plugin_name}`);
@@ -14125,6 +14144,8 @@ async function renderUserDetail(forceFetch = false) {
         </select>
       </label>
       <label>每日主动 <input name="proactive_daily_limit" type="number" min="-1" max="30" step="1" value="${escapeHtml(detail.proactive_daily_limit ?? -1)}" /></label>
+      <label>空闲门槛 <input name="proactive_idle_minutes" type="number" min="-1" step="1" value="${escapeHtml(detail.proactive_idle_minutes ?? -1)}" title="-1 跟随全局" /></label>
+      <label>最小间隔 <input name="proactive_min_interval_minutes" type="number" min="-1" step="1" value="${escapeHtml(detail.proactive_min_interval_minutes ?? -1)}" title="-1 跟随全局" /></label>
       <button type="submit">保存</button>
     </form>
     ${renderRelationshipStatus(detail)}
@@ -14139,7 +14160,7 @@ async function renderUserDetail(forceFetch = false) {
       ${renderRelationshipPanel(detail.relationship_panel)}
       ${renderUnifiedProfileCapabilityPanel(detail)}
       ${renderPortraitBridgeStatus(detail.portrait_bridge)}
-      ${detailBlock("陪伴权限与主动计划", `长期关系：${detail.relationship_stage || detail.relationship_intimacy?.phase?.label || "初识"} ｜ 当前互动：${normalizedCurrentInteraction(detail.current_interaction, detail.relationship_role === "owner").label}`, [["角色", detail.relationship_role_label || ""], ["有效主动上限", `${detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited)} / 天`], ...(detail.unanswered_slowdown_count > 0 ? [["未回应降频", detail.unanswered_slowdown_text || "已逐步放慢主动间隔"]] : []), ["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
+      ${detailBlock("陪伴权限与主动计划", `长期关系：${detail.relationship_stage || detail.relationship_intimacy?.phase?.label || "初识"} ｜ 当前互动：${normalizedCurrentInteraction(detail.current_interaction, detail.relationship_role === "owner").label}`, [["角色", detail.relationship_role_label || ""], ["有效主动上限", `${detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited)} / 天`], ["柔性节奏目标", `${Number(detail.soft_daily_target || 0).toFixed(1)} / 天（只调节节奏，不是一到即停）`], ["有效空闲门槛", `${detail.effective_idle_minutes ?? 0} 分钟`], ["有效最小间隔", `${detail.effective_min_interval_minutes ?? 0} 分钟`], ...(detail.unanswered_slowdown_count > 0 ? [["未回应降频", detail.unanswered_slowdown_text || "已逐步放慢主动间隔"]] : []), ["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
       ${renderPrivateDeliveryRoute(detail)}
       ${renderPrivateBehaviorHabits(detail)}
       ${emotionGateBlock(detail)}
@@ -15608,6 +15629,10 @@ function bindUserActions(detail) {
     };
     const proactiveDailyLimit = form.get("proactive_daily_limit");
     if (proactiveDailyLimit !== null) body.proactive_daily_limit = Number(proactiveDailyLimit || -1);
+    const proactiveIdleMinutes = form.get("proactive_idle_minutes");
+    if (proactiveIdleMinutes !== null) body.proactive_idle_minutes = Number(proactiveIdleMinutes || -1);
+    const proactiveMinIntervalMinutes = form.get("proactive_min_interval_minutes");
+    if (proactiveMinIntervalMinutes !== null) body.proactive_min_interval_minutes = Number(proactiveMinIntervalMinutes || -1);
     await runAction(() => postJson("/user/update", body), "已保存私聊对象", event.submitter);
     await refreshSelectedUserDetail();
   });
@@ -21035,6 +21060,37 @@ function moduleWorkbenchCard(item) {
   `;
 }
 
+async function resetPersonaFromPanel(button, personaId, label) {
+  const confirmed = window.confirm(
+    `确定重置当前人格“${label}”吗？\n\n旧资料会先备份；插件基础配置、多人格列表和窗口绑定会保留。外部长期记忆不会直接删除。`,
+  );
+  if (!confirmed) return;
+  button.disabled = true;
+  try {
+    const result = await postJson("/persona/reset-current", { persona_id: personaId });
+    setBookshelfUnlocked(null);
+    state.bookshelfAccessToken = "";
+    resetBookshelfSelection();
+    state.users = [];
+    state.groups = [];
+    state.selectedUserId = "";
+    state.selectedGroupId = "";
+    state.memoNotes = null;
+    state.tokenStats = null;
+    state.expressionLibrary = null;
+    state.lazyLoaded.userGroupLists = false;
+    state.lazyLoaded.memoNotes = false;
+    state.lazyLoaded.tokenStats = false;
+    const suffix = result.rebuild_error ? "，今日数据将在后续使用时继续补建" : "";
+    showToast(`当前人格已重置并进入第 ${result.generation || 1} 代${suffix}`);
+    await loadAll({ waitForLists: true });
+  } catch (error) {
+    showToast(error.message || "当前人格重置失败", "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderCurrentPersonaStatus(settings) {
   const output = document.getElementById("currentPersonaDisplay");
   if (!output) return;
@@ -21046,14 +21102,23 @@ function renderCurrentPersonaStatus(settings) {
   const host = output.parentElement;
   if (!host) return;
   host.querySelectorAll("[data-multi-persona-switcher]").forEach((node) => node.remove());
-  if (!state.multiPersona?.enabled) return;
   const current = String(state.multiPersona.current || state.multiPersona.primary || personaId || "").trim();
+  if (!state.multiPersona?.enabled) {
+    const wrapper = document.createElement("span");
+    wrapper.dataset.multiPersonaSwitcher = "true";
+    wrapper.className = "setting-inline-control";
+    wrapper.innerHTML = `<button type="button" class="danger-outline" data-reset-current-persona title="备份并重置当前人格资料">重置当前人格</button>`;
+    const resetButton = wrapper.querySelector("[data-reset-current-persona]");
+    resetButton?.addEventListener("click", () => resetPersonaFromPanel(resetButton, personaId, label));
+    host.appendChild(wrapper);
+    return;
+  }
   const options = (state.roleplayPersonas || []).filter((item) => String(item.id || "").trim());
   if (!options.length) return;
   const wrapper = document.createElement("label");
   wrapper.dataset.multiPersonaSwitcher = "true";
   wrapper.className = "setting-inline-control";
-  wrapper.innerHTML = `<span>页面查看人格</span><select aria-label="页面查看人格">${options.map((item) => `<option value="${escapeHtml(String(item.id ?? ""))}" ${String(item.id) === current ? "selected" : ""}>${escapeHtml(personaDisplayLabel(item))}</option>`).join("")}</select>`;
+  wrapper.innerHTML = `<span>页面查看人格</span><select aria-label="页面查看人格">${options.map((item) => `<option value="${escapeHtml(String(item.id ?? ""))}" ${String(item.id) === current ? "selected" : ""}>${escapeHtml(personaDisplayLabel(item))}</option>`).join("")}</select><button type="button" class="danger-outline" data-reset-current-persona title="备份并重置当前人格资料">重置</button>`;
   const select = wrapper.querySelector("select");
   select?.addEventListener("change", async () => {
     try {
@@ -21080,6 +21145,12 @@ function renderCurrentPersonaStatus(settings) {
     } catch (error) {
       showToast(error.message || "人格切换失败", "error");
     }
+  });
+  const resetButton = wrapper.querySelector("[data-reset-current-persona]");
+  resetButton?.addEventListener("click", () => {
+    const target = String(select?.value || current).trim();
+    const label = personaDisplayLabel(options.find((item) => String(item.id || "") === target) || target);
+    resetPersonaFromPanel(resetButton, target, label);
   });
   host.appendChild(wrapper);
 }
@@ -22933,7 +23004,7 @@ function proactiveIntensityCommonSettingCard(settings = {}, intensity = {}) {
   const maxDailyText = effective.max_daily_messages_text || formatProactiveLimit(effective.max_daily_messages, effective.max_daily_messages_unlimited);
   const interjectLimitText = effective.group_interject_max_daily_text || formatProactiveLimit(effective.group_interject_max_daily, effective.group_interject_max_daily_unlimited);
   const detail = enabled
-    ? `当前有效：私聊 ${formatProactiveDailyQuota(effective.max_daily_messages, effective.max_daily_messages_unlimited, maxDailyText)}，空闲 ${effective.idle_minutes ?? "-"} 分钟，群唤醒冷却 ${effective.group_wakeup_cooldown_seconds ?? "-"} 秒，兴趣唤醒 ${interestProbability}%，群插话间隔 ${effective.group_interject_min_interval_minutes ?? "-"} 分钟，群插话上限 ${interjectLimitText}${effective.ignore_token_soft_limit ? "；最高档忽略 Token 软限额降载" : ""}。`
+    ? `预设层当前有效：私聊 ${formatProactiveDailyQuota(effective.max_daily_messages, effective.max_daily_messages_unlimited, maxDailyText)}，空闲 ${effective.idle_minutes ?? "-"} 分钟，最小间隔 ${effective.min_interval_minutes ?? "-"} 分钟；用户级覆盖与未回应倍率会在私聊用户详情显示。群唤醒冷却 ${effective.group_wakeup_cooldown_seconds ?? "-"} 秒，兴趣唤醒 ${interestProbability}%，群插话间隔 ${effective.group_interject_min_interval_minutes ?? "-"} 分钟，群插话上限 ${interjectLimitText}${effective.ignore_token_soft_limit ? "；最高档忽略 Token 软限额降载" : ""}。`
     : "关闭时完全沿用手动参数，不改变私聊、群聊唤醒或群主动插话频率。";
   return `
     <section class="feature-switch-item feature-setting-inline ${enabled ? "on" : "off"}">
@@ -23537,6 +23608,14 @@ function featureRelatedSettings(key) {
       reaction_expression_cooldown_seconds: 180,
       reaction_expression_low_latency_mode: true,
       reaction_expression_candidate_limit: 6,
+      reaction_expression_embedding_enabled: false,
+      reaction_expression_embedding_timeout_ms: 5000,
+      reaction_expression_embedding_candidate_limit: 1200,
+      reaction_expression_embedding_score_threshold: 0.42,
+      reaction_expression_embedding_weight: 0.55,
+      reaction_expression_embedding_backfill_enabled: true,
+      reaction_expression_embedding_backfill_batch_size: 24,
+      reaction_expression_embedding_backfill_interval_seconds: 300,
       reaction_expression_semantic_trigger_enabled: true,
     };
     return Object.prototype.hasOwnProperty.call(defaults, name) ? defaults[name] : undefined;
@@ -23686,6 +23765,21 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
       return boolSetting("enable_llm_proactive_persona_judge");
     }
     return true;
+  }
+  if (featureKey === "enable_reaction_expression_experiment") {
+    const embeddingChildren = new Set([
+      "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID",
+      "reaction_expression_embedding_timeout_ms",
+      "reaction_expression_embedding_candidate_limit",
+      "reaction_expression_embedding_score_threshold",
+      "reaction_expression_embedding_weight",
+      "reaction_expression_embedding_backfill_enabled",
+      "reaction_expression_embedding_backfill_batch_size",
+      "reaction_expression_embedding_backfill_interval_seconds",
+    ]);
+    if (embeddingChildren.has(settingKey) && !boolSetting("reaction_expression_embedding_enabled")) return false;
+    if (["reaction_expression_embedding_backfill_batch_size", "reaction_expression_embedding_backfill_interval_seconds"].includes(settingKey)
+      && !boolSetting("reaction_expression_embedding_backfill_enabled")) return false;
   }
   if (featureKey === "enable_humanized_states") {
     const dailyPlanChildren = new Set([
@@ -24194,11 +24288,14 @@ function qweatherConsoleLinksHtml() {
 
 function featureProviderSelect(key, value, accessibility = {}) {
   const current = String(value || "").trim();
-  const known = state.availableProviders.some((item) => item.id === current);
+  const providerItems = key === "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"
+    ? state.availableEmbeddingProviders
+    : state.availableProviders;
+  const known = providerItems.some((item) => item.id === current);
   const customValue = current && !known ? current : "";
   const options = [
-    `<option value="">${key === "ADULT_CONTENT_PROVIDER_ID" ? "未配置（成人档不可用）" : "留空自动回退"}</option>`,
-    ...state.availableProviders.map((item) => {
+    `<option value="">${key === "ADULT_CONTENT_PROVIDER_ID" ? "未配置（成人档不可用）" : key === "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID" ? "留空自动探测" : "留空自动回退"}</option>`,
+    ...providerItems.map((item) => {
       const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
       return `<option value="${escapeHtml(item.id)}" ${item.id === current ? "selected" : ""}>${escapeHtml(label)}</option>`;
     }),
@@ -24362,7 +24459,7 @@ function featureDependencyLines(key) {
   }
   if (key !== "enable_group_companion" && key.startsWith("enable_group_")) dependencies.push(["依赖", "群聊总开关"]);
   if (key === "enable_group_conversation_followup") dependencies.push(["依赖", "群聊场景感知"]);
-  if (["enable_companion_memory", "enable_expression_learning", "enable_intent_emotion_analysis", "enable_passive_response_review", "enable_proactive_message_review", "enable_smart_silence", "enable_passive_topic_suppression", "enable_relationship_analysis", "enable_relationship_state_machine", "enable_emotion_simulation", "enable_dialogue_episode_memory", "enable_open_loop_tracking", "enable_food_menu_recommendation"].includes(key)) {
+  if (["enable_companion_memory", "enable_expression_learning", "enable_intent_emotion_analysis", "enable_passive_response_review", "enable_smart_silence", "enable_passive_topic_suppression", "enable_relationship_analysis", "enable_relationship_state_machine", "enable_emotion_simulation", "enable_dialogue_episode_memory", "enable_open_loop_tracking", "enable_food_menu_recommendation"].includes(key)) {
     dependencies.push(["依赖", "私聊互动策略"]);
   }
   if (["enable_bilibili_boredom_watch"].includes(key)) dependencies.push(["依赖", "B 站能力可用"]);
@@ -31710,6 +31807,11 @@ if (key === "enable_reaction_expression_experiment") {
     const cooldown = Math.max(0, Number(settings.reaction_expression_cooldown_seconds ?? 180));
     const summary = overview.reaction_expression || {};
     const librarySummary = state.reactionLibrary?.summary || summary.library || {};
+    const embeddingSummary = summary.embedding || {};
+    const embeddingEnabled = toBool(settings.reaction_expression_embedding_enabled ?? embeddingSummary.enabled ?? false);
+    const embeddingIndexed = Number(embeddingSummary.indexed || 0);
+    const embeddingTotal = Number(embeddingSummary.total || 0);
+    const embeddingProvider = String(embeddingSummary.provider_id || "").trim();
     const runtime = summary.runtime || {};
     const recent = summary.recent || {};
     const attempts = Number(runtime.attempts ?? recent.attempt_count ?? 0);
@@ -31766,8 +31868,9 @@ if (key === "enable_reaction_expression_experiment") {
       ["会话冷却", `${cooldown} 秒`],
       ["语义节点", semanticTrigger ? "高置信时优先" : "关闭"],
       ["选择路径", lowLatency ? "本地评分 + 短时缓存" : "每次重新本地评分"],
+      ["语义召回", embeddingEnabled ? `向量 ${embeddingIndexed}/${embeddingTotal || Number(librarySummary.enabled || 0)}` : "本地语义 + 关键词"],
       ["可用素材", `${Number(librarySummary.enabled || 0)} 张`],
-      ["模型调用", "仅主回复 1 次"],
+      ["模型调用", embeddingEnabled ? "主回复 1 次 + 查询向量 1 次" : "仅主回复 1 次"],
       ["检索说法", `最多 ${candidateLimit} 条，仅查一次`],
     ];
     extraHtml = `
@@ -31789,7 +31892,7 @@ if (key === "enable_reaction_expression_experiment") {
             : modelOmissions
               ? `模型已获得表达机会，其中 ${modelOmissions} 次未写隐藏意图；已有高置信语义时，插件会尝试本地兜底${localFallbacks ? `（已兜底 ${localFallbacks} 次）` : ""}。`
               : "尚未进入本地选图。只有请求前的轻量抽样命中时，模型才会看到自发表情提示；普通回复不会先查图库。"
-        }选图始终由本插件按标签、情绪和沟通用途在本地完成，不增加模型调用；低延迟模式只额外复用短时评分缓存。</div>
+        }选图始终保留标签、情绪、沟通用途和本地语义匹配；${embeddingEnabled ? `当前${embeddingProvider ? `使用 ${escapeHtml(embeddingProvider)}` : "自动探测嵌入模型"}补充软召回，查询失败会立即回退本地匹配。` : "当前未启用嵌入模型，不会产生额外向量调用。"}低延迟模式只额外复用短时评分缓存。</div>
       </div>
     `;
   } else if (key === "enable_emotion_simulation") {

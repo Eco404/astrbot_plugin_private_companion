@@ -256,11 +256,36 @@ class CoreStoreFailureSafetyTests(unittest.IsolatedAsyncioTestCase):
                     "style": "默认语气",
                     "enabled": False,
                     "relationship_role": "friend",
+                    "umo": "default:FriendMessage:group_sender",
+                    "last_seen": 20,
+                    "last_activity_at": 20,
+                    "inbound_count": 3,
+                    "relationship_score": 3,
+                    "relationship_ledger": [
+                        {"reason_code": "group_inbound", "delta": 1},
+                        {"reason_code": "group_inbound", "delta": 1},
+                    ],
+                    "identity_subject_id": "group_sender",
+                    "unified_person_id": "person_group_sender",
                     "recent_group_messages": [{"group_id": "100", "text": "群消息"}],
                     "reaction_expression": {"last_sent_at": 12},
                     "last_inbound_umo": "default:GroupMessage:100",
                 },
-            }
+            },
+            "unified_person": {
+                "identity_links": {
+                    "group-link": {
+                        "person_id": "person_group_sender",
+                        "last_operation_id": "req036.group_observation:fixture",
+                    }
+                },
+                "binding_checkpoints": {
+                    "group-checkpoint": {
+                        "person_id": "person_group_sender",
+                        "last_source_scope": "group:onebot:100",
+                    }
+                },
+            },
         }
 
         changed = harness._cleanup_orphan_reaction_expression_users()
@@ -297,13 +322,71 @@ class CoreStoreFailureSafetyTests(unittest.IsolatedAsyncioTestCase):
                     "enabled": False,
                     "relationship_role": "friend",
                 },
+                "private_auto": {
+                    "user_id": "private_auto",
+                    "nickname": "主要用户昵称",
+                    "style": "默认语气",
+                    "enabled": False,
+                    "relationship_role": "friend",
+                    "profile_origin": "private_auto",
+                    "auto_profile_created": True,
+                },
+                "manual_ledger": {
+                    "user_id": "manual_ledger",
+                    "nickname": "主要用户昵称",
+                    "style": "默认语气",
+                    "enabled": False,
+                    "relationship_role": "friend",
+                    "profile_origin": "group_observation",
+                    "relationship_score": 2,
+                    "relationship_ledger": [{"reason_code": "administrator", "delta": 2}],
+                },
             }
         }
 
         changed = harness._cleanup_orphan_reaction_expression_users()
 
         self.assertFalse(changed)
-        self.assertEqual({"private", "manual", "profiled"}, set(harness.data["users"]))
+        self.assertEqual(
+            {"private", "manual", "profiled", "private_auto", "manual_ledger"},
+            set(harness.data["users"]),
+        )
+
+    def test_reaction_only_scoped_shadow_is_removed_but_canonical_private_user_survives(self) -> None:
+        harness = _CoreHarness()
+        harness.default_nickname = "主要用户昵称"
+        harness.default_style = "默认语气"
+        harness._platform_kind_for_umo = lambda _umo: "onebot"
+        harness.data = {
+            "users": {
+                "friend": {
+                    "user_id": "friend",
+                    "nickname": "好友",
+                    "enabled": True,
+                    "manual_enabled": True,
+                    "relationship_role": "friend",
+                    "umo": "default:FriendMessage:friend",
+                    "last_inbound_umo": "default:FriendMessage:friend",
+                    "private_inbound_count": 2,
+                },
+                "onebot:friend:0123456789abcdef": {
+                    "user_id": "onebot:friend:0123456789abcdef",
+                    "nickname": "主要用户昵称",
+                    "style": "默认语气",
+                    "enabled": False,
+                    "relationship_role": "friend",
+                    "reaction_expression": {
+                        "last_sent_at": 20,
+                        "scopes": {"default:FriendMessage:friend": {"last_sent_at": 20}},
+                    },
+                },
+            }
+        }
+
+        changed = harness._cleanup_orphan_reaction_expression_users()
+
+        self.assertTrue(changed)
+        self.assertEqual(["friend"], list(harness.data["users"]))
 
 
 if __name__ == "__main__":

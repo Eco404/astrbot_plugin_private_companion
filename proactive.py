@@ -261,6 +261,8 @@ class ProactiveMixin(UserRestGateMixin):
                 "unanswered_slowdown_start": 2,
                 "unanswered_max_interval_multiplier": 1.65,
                 "friend_unanswered_max_cooldown_hours": 30,
+                "friend_idle_floor_minutes": 60,
+                "friend_min_interval_floor_minutes": 120,
                 "delay_factor": 0.72,
                 "proactive_persona_judge_send_threshold": 54,
                 "proactive_review_strength": "lenient",
@@ -284,6 +286,8 @@ class ProactiveMixin(UserRestGateMixin):
                 "unanswered_slowdown_start": 4,
                 "unanswered_max_interval_multiplier": 1.25,
                 "friend_unanswered_max_cooldown_hours": 14,
+                "friend_idle_floor_minutes": 30,
+                "friend_min_interval_floor_minutes": 60,
                 "delay_factor": 0.42,
                 "proactive_persona_judge_send_threshold": 45,
                 "proactive_review_strength": "lenient",
@@ -307,6 +311,8 @@ class ProactiveMixin(UserRestGateMixin):
                 "unanswered_slowdown_start": 2,
                 "unanswered_max_interval_multiplier": 1.8,
                 "friend_unanswered_max_cooldown_hours": 36,
+                "friend_idle_floor_minutes": 75,
+                "friend_min_interval_floor_minutes": 150,
                 "delay_factor": 0.75,
                 "proactive_persona_judge_send_threshold": 56,
                 "proactive_review_strength": "lenient",
@@ -331,6 +337,8 @@ class ProactiveMixin(UserRestGateMixin):
                 "unanswered_slowdown_start": 8,
                 "unanswered_max_interval_multiplier": 1.0,
                 "friend_unanswered_max_cooldown_hours": 8,
+                "friend_idle_floor_minutes": 5,
+                "friend_min_interval_floor_minutes": 15,
                 "delay_factor": 0.08,
                 "ignore_token_soft_limit": True,
                 "ignore_soft_daily_target": True,
@@ -1238,12 +1246,24 @@ class ProactiveMixin(UserRestGateMixin):
             maximum=1440,
         )
         if self._private_user_role(user) == "friend":
-            return max(base_idle, 180)
+            friend_floor = self._effective_proactive_int(
+                "friend_idle_floor_minutes",
+                0,
+                minimum=0,
+                maximum=1440,
+            )
+            return max(base_idle, friend_floor)
         return max(0, base_idle)
 
     def _effective_user_greeting_idle_minutes(self, user: dict[str, Any]) -> int:
         if self._private_user_role(user) == "friend":
-            return max(self.greeting_idle_minutes, 120)
+            friend_floor = self._effective_proactive_int(
+                "friend_idle_floor_minutes",
+                0,
+                minimum=0,
+                maximum=1440,
+            )
+            return max(self.greeting_idle_minutes, min(60, friend_floor))
         return max(0, self.greeting_idle_minutes)
 
     def _effective_user_min_interval_minutes(self, user: dict[str, Any]) -> int:
@@ -1257,7 +1277,13 @@ class ProactiveMixin(UserRestGateMixin):
             maximum=2880,
         )
         if self._private_user_role(user) == "friend":
-            return max(base_interval, 360)
+            friend_floor = self._effective_proactive_int(
+                "friend_min_interval_floor_minutes",
+                0,
+                minimum=0,
+                maximum=2880,
+            )
+            return max(base_interval, friend_floor)
         return max(0, base_interval)
 
     def _effective_user_photo_daily_limit(self, user: dict[str, Any] | None = None) -> int:
@@ -1446,30 +1472,22 @@ class ProactiveMixin(UserRestGateMixin):
     def _friend_unanswered_silence_reason(self, user: dict[str, Any] | None, *, now: float | None = None) -> str:
         if not isinstance(user, dict) or self._private_user_role(user) != "friend":
             return ""
-        ignored = _safe_int(user.get("ignored_streak"), 0, 0, 50)
-        if ignored <= 0:
-            user["friend_unanswered_silenced_since"] = 0
-            user["friend_unanswered_silence_note"] = ""
-            return ""
+        # 未回应只降低频率并把内容收敛为低压文字，不再把已授权用户永久停发。
+        # 明确拒绝、休息和关系边界仍由统一互动/休息闸门处理。
+        ignored = _safe_int(user.get("ignored_streak"), 0, 0, 20)
         check_now = _now_ts() if now is None else now
         awaiting_since = _safe_float(user.get("awaiting_reply_since"), 0)
         unanswered_hours = (check_now - awaiting_since) / 3600.0 if awaiting_since > 0 else 0.0
-        if ignored >= 4:
-            reason = f"次要用户连续 {ignored} 次未回应，普通主动已暂停，等待用户先恢复对话"
-        elif ignored >= 3 and unanswered_hours >= 24:
-            reason = f"次要用户连续 {ignored} 次未回应且已超过 24 小时，普通主动已暂停"
-        elif ignored >= 2 and unanswered_hours >= 48:
-            reason = f"次要用户连续未回应已超过 48 小时，普通主动已暂停"
+        if ignored >= 2 or unanswered_hours >= 24:
+            user["friend_unanswered_silence_note"] = (
+                f"次要用户连续 {ignored} 次未回应"
+                + (f"，已等待约 {unanswered_hours:.1f} 小时" if unanswered_hours > 0 else "")
+                + "；继续使用低压文字并渐进延长间隔，不自动停发"
+            )
         else:
-            reason = ""
-        if reason:
-            if _safe_float(user.get("friend_unanswered_silenced_since"), 0) <= 0:
-                user["friend_unanswered_silenced_since"] = check_now
-            user["friend_unanswered_silence_note"] = reason
-        else:
-            user["friend_unanswered_silenced_since"] = 0
             user["friend_unanswered_silence_note"] = ""
-        return reason
+        user["friend_unanswered_silenced_since"] = 0
+        return ""
 
     def _block_friend_unanswered_pending_proactive(
         self,
@@ -2046,14 +2064,20 @@ class ProactiveMixin(UserRestGateMixin):
             return 0.0
         if bool(self._proactive_intensity_effect("ignore_soft_daily_target", False)):
             return float(daily_limit)
+        role = self._private_user_role(user)
         relationship_target = min(daily_limit, self._relationship_proactive_soft_target(user))
+        if role == "owner":
+            # The configured daily limit should remain the main pacing signal for
+            # the primary user. Relationship state still controls hard boundaries
+            # through _effective_user_daily_limit and influences tone/readiness.
+            relationship_target = daily_limit
         if relationship_target <= 0:
             return 0.0
         state = self.data.get("daily_state", {})
         important_dates = self._get_relevant_important_dates()
         energy = _safe_int(state.get("energy") if isinstance(state, dict) else 70, 70, 0, 100)
         active_conditions = state.get("conditions", []) if isinstance(state, dict) else []
-        ratio = 0.68
+        ratio = 0.9 if role == "owner" else 0.68
         if energy > 80:
             ratio += 0.06
         elif energy < 40:
@@ -2062,7 +2086,7 @@ class ProactiveMixin(UserRestGateMixin):
             ratio += min(0.1, len(active_conditions) * 0.03)
         if important_dates:
             ratio += 0.1 if _safe_int(important_dates[0].get("_days_until"), 0) == 0 else 0.05
-        ratio = max(0.45, min(0.95, ratio))
+        ratio = max(0.45, min(1.0 if role == "owner" else 0.95, ratio))
         if relationship_target == 1:
             ratio = max(ratio, 0.75)
         return max(0.6, relationship_target * ratio)
@@ -2141,7 +2165,6 @@ class ProactiveMixin(UserRestGateMixin):
     ) -> tuple[float, float] | None:
         if self._private_user_role(user) != "friend":
             return None
-        now_dt = self._environment_fromtimestamp(now or _now_ts())
         sent_today = _safe_int(user.get("sent_today"), 0)
         daily_limit = self._effective_user_daily_limit(user)
         if daily_limit <= 1 or sent_today <= 0:
@@ -2153,35 +2176,27 @@ class ProactiveMixin(UserRestGateMixin):
             minimum=1.0,
             maximum=168.0,
         )
+        base_interval_hours = max(0.25, self._effective_user_min_interval_minutes(user) / 60.0)
+        unanswered_floor = 0.0
+        if ignored_slowdown > 0:
+            unanswered_floor = min(max_cooldown, 1.5 * (2 ** min(ignored_slowdown - 1, 3)))
 
         def cap_delay(delay: tuple[float, float]) -> tuple[float, float]:
             low, high = delay
             high = min(max_cooldown, high)
-            low = min(low, max(1.0, high))
+            low = min(low, max(0.25, high))
             return (low, high)
 
-        if ignored_slowdown >= 4:
-            return cap_delay((36.0, 60.0))
-        if ignored_slowdown >= 3:
-            return cap_delay((20.0, 36.0))
-        if ignored_slowdown >= 2:
-            return cap_delay((12.0, 24.0))
-        minute = now_dt.hour * 60 + now_dt.minute
+        low_multiplier, high_multiplier = (0.9, 1.6)
         if sent_today <= 1:
-            if ignored_slowdown >= 1:
-                return cap_delay((8.0, 14.0))
-            if minute < 14 * 60:
-                return self._delay_hours_until_local_window(now_dt, 14 * 60, 17 * 60)
-            if minute < 18 * 60:
-                return self._delay_hours_until_local_window(now_dt, 19 * 60, 21 * 60 + 20)
-            return (6.0, 11.0)
-        if sent_today <= 2 and daily_limit >= 3:
-            if ignored_slowdown >= 1:
-                return cap_delay((10.0, 18.0))
-            if minute < 18 * 60 + 30:
-                return self._delay_hours_until_local_window(now_dt, 18 * 60 + 40, 21 * 60 + 20)
-            return (8.0, 14.0)
-        return (10.0, 18.0)
+            low_multiplier, high_multiplier = (0.85, 1.5)
+        elif sent_today <= 2 and daily_limit >= 3:
+            low_multiplier, high_multiplier = (1.0, 1.9)
+        else:
+            low_multiplier, high_multiplier = (1.2, 2.4)
+        low = max(0.25, base_interval_hours * low_multiplier, unanswered_floor)
+        high = max(low + 0.35, base_interval_hours * high_multiplier, unanswered_floor * 1.45)
+        return cap_delay((low, high))
 
     def _delay_hours_until_local_window(
         self,
@@ -2469,29 +2484,10 @@ class ProactiveMixin(UserRestGateMixin):
     ) -> bool:
         if self._private_user_role(user) != "friend" or scheduled_at <= 0:
             return False
-        daily_limit = self._effective_user_daily_limit(user)
-        sent_today = _safe_int(user.get("sent_today"), 0)
-        if daily_limit <= 1 or sent_today <= 0:
+        last_sent = _safe_float(user.get("last_sent"), 0)
+        if last_sent <= 0:
             return False
-        ignored_streak = _safe_int(user.get("ignored_streak"), 0)
-        if ignored_streak >= 2:
-            last_sent = _safe_float(user.get("last_sent"), 0)
-            if last_sent > 0 and scheduled_at - last_sent < 12 * 3600:
-                return True
-        if ignored_streak >= 3:
-            last_sent = _safe_float(user.get("last_sent"), 0)
-            if last_sent > 0 and scheduled_at - last_sent < 20 * 3600:
-                return True
-        now_dt = self._environment_now()
-        scheduled_dt = self._environment_fromtimestamp(scheduled_at)
-        if scheduled_dt.date() != now_dt.date():
-            return False
-        minute = scheduled_dt.hour * 60 + scheduled_dt.minute
-        if sent_today >= 2 and daily_limit >= 3:
-            return minute < 18 * 60 + 30
-        if sent_today >= 1:
-            return minute < 14 * 60
-        return False
+        return scheduled_at - last_sent < self._effective_min_interval_seconds(user)
 
     def _random_proactive_impulse_context(
         self,
@@ -2523,8 +2519,10 @@ class ProactiveMixin(UserRestGateMixin):
         if low_energy or quiet_mood or any(token in note for token in ("疲惫", "困", "低电量", "收声", "慢一点", "安静")):
             reasons.append(f"状态偏低({energy}/{mood or '平稳'})")
             suggest_soft_reason = True
+        if not reasons:
+            reasons.append("当前没有更高优先级事件，可生成一个自然、具体、低压力的日常念头")
         return {
-            "allowed": bool(reasons),
+            "allowed": True,
             "reasons": reasons,
             "suggest_soft_reason": suggest_soft_reason,
         }

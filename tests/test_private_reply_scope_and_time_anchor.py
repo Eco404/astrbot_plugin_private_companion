@@ -50,6 +50,15 @@ class _TimeAnchorHarness(UserMemoryMixin):
         return datetime(2026, 7, 14, 8, 43)
 
 
+class _TopicHintHarness(UserMemoryMixin):
+    enable_passive_topic_suppression = True
+    passive_topic_memory_hours = 8
+
+    @staticmethod
+    def _format_timestamp_elapsed(_value):
+        return "刚刚"
+
+
 class PrivateReplyScopeAndTimeAnchorTests(unittest.IsolatedAsyncioTestCase):
     async def test_private_passive_llm_reply_drops_unexpected_quote_component(self):
         plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
@@ -125,6 +134,34 @@ class PrivateReplyScopeAndTimeAnchorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不要假定用户正在服药", boundary)
         self.assertIn("今天想先检查哪一项", boundary)
         self.assertEqual("", plugin._format_private_routine_check_boundary("上次例行检查结果是什么"))
+
+    def test_recent_topic_hint_does_not_expose_relative_time_openers(self):
+        harness = _TopicHintHarness()
+        hint = harness._format_recent_passive_topics_hint(
+            {
+                "recent_reply_topics": [
+                    {
+                        "ts": datetime.now().timestamp(),
+                        "text": "刚写到你喂我喝水那段了",
+                        "signature": "喝水",
+                    },
+                ]
+            }
+        )
+
+        self.assertIn("已用主题词", hint)
+        self.assertIn("喝水", hint)
+        self.assertNotIn("刚写到你喂我喝水那段了", hint)
+        self.assertNotIn("刚刚回复过", hint)
+        self.assertNotIn("刚才回复过", hint)
+
+    def test_passive_reply_policy_prioritizes_current_topic_continuity(self):
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        policy = plugin._private_passive_state_reply_policy_prompt()
+
+        self.assertIn("当前用户最后一条消息是本轮唯一的主线", policy)
+        self.assertIn("明确语义连接", policy)
+        self.assertIn("相对时间词只在用户明确提到时间", policy)
 
     def test_routine_check_segment_count_is_limited_to_two(self):
         plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)

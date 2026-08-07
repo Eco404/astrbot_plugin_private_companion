@@ -441,6 +441,11 @@ class CoreStoreMixin:
             "group_llm_reply_blocks": {},
             "reaction_expression_group_states": {},
             "cache_metrics": {},
+            "persona_lifecycle": {
+                "generation": 1,
+                "reset_at": 0,
+                "previous_backup": "",
+            },
             "balance_awareness": {},
             "qweather_location": {},
             "weather_alerts": {},
@@ -527,6 +532,13 @@ class CoreStoreMixin:
         data.setdefault("group_llm_reply_blocks", {})
         data.setdefault("reaction_expression_group_states", {})
         data.setdefault("cache_metrics", {})
+        lifecycle = data.setdefault("persona_lifecycle", {})
+        if not isinstance(lifecycle, dict):
+            lifecycle = {}
+            data["persona_lifecycle"] = lifecycle
+        lifecycle.setdefault("generation", 1)
+        lifecycle.setdefault("reset_at", 0)
+        lifecycle.setdefault("previous_backup", "")
         data.setdefault("balance_awareness", {})
         data.setdefault("qweather_location", {})
         data.setdefault("weather_alerts", {})
@@ -1433,6 +1445,28 @@ class CoreStoreMixin:
         # later same-ID event from another platform is isolated below.
         if not stored_platform and (not stored_subject or stored_subject == context.get("subject")):
             return canonical
+        # Older explicitly managed DM profiles may have a real inbound route
+        # but no adapter/bot stamps. Claim them only for the same concrete
+        # platform and subject; a different platform or any existing account
+        # marker still takes the isolated path below.
+        observed_platform = _single_line(context.get("platform"), 40).lower()
+        stored_adapter = _single_line(existing.get("identity_adapter_instance_id"), 120)
+        stored_bot_id = _single_line(existing.get("identity_bot_id"), 120)
+        explicitly_managed = bool(
+            existing.get("manual_enabled")
+            or existing.get("manual_disabled")
+            or existing.get("auto_profile_created")
+            or _safe_int(existing.get("private_inbound_count") or 0, 0) > 0
+            or _safe_float(existing.get("last_private_seen") or 0, 0.0) > 0
+        )
+        same_subject = not stored_subject or stored_subject == context.get("subject")
+        same_platform = bool(
+            stored_platform
+            and observed_platform
+            and stored_platform == observed_platform
+        )
+        if explicitly_managed and same_subject and same_platform and not stored_adapter and not stored_bot_id:
+            return canonical
         # A configured target is allowed to roll over adapter-instance
         # metadata inside its configured platform. Reuse the canonical record
         # so passive and proactive paths do not split into a disabled shadow.
@@ -2075,6 +2109,81 @@ class CoreStoreMixin:
             changed = True
         return merge_transport_identity_records() or changed
 
+    def _private_user_has_group_observation_evidence(self, user_id: str, user: dict[str, Any]) -> bool:
+        """Whether a disabled users row was materialized only from group observation."""
+        if not user_id or not isinstance(user, dict):
+            return False
+        if bool(user.get("observation_only")):
+            return True
+        if _single_line(user.get("profile_origin"), 40).lower() == "group_observation":
+            return True
+
+        subject_id = _single_line(user.get("identity_subject_id"), 160)
+        if not subject_id:
+            subject_id = self._canonical_private_user_id(str(user_id or "").strip())
+        profiles = self.data.get("worldbook_member_profiles") if isinstance(getattr(self, "data", None), dict) else {}
+        observation = profiles.get(subject_id) if isinstance(profiles, dict) else None
+        if isinstance(observation, dict) and bool(observation.get("observation_only")):
+            return True
+
+        person_id = _single_line(user.get("unified_person_id"), 80)
+        root = self.data.get("unified_person") if isinstance(getattr(self, "data", None), dict) else {}
+        if not person_id or not isinstance(root, dict):
+            return False
+        links = root.get("identity_links")
+        checkpoints = root.get("binding_checkpoints")
+        has_group_creation = any(
+            isinstance(item, dict)
+            and _single_line(item.get("person_id"), 80) == person_id
+            and _single_line(item.get("last_operation_id"), 160).startswith("req036.group_observation:")
+            for item in (links.values() if isinstance(links, dict) else [])
+        )
+        person_checkpoints = [
+            item
+            for item in (checkpoints.values() if isinstance(checkpoints, dict) else [])
+            if isinstance(item, dict) and _single_line(item.get("person_id"), 80) == person_id
+        ]
+        has_private_source = any(
+            _single_line(item.get("last_source_scope"), 160).lower() in {"private", "dm"}
+            or _single_line(item.get("last_source_scope"), 160).lower().startswith(("private:", "dm:"))
+            for item in person_checkpoints
+        )
+        return bool(has_group_creation and not has_private_source)
+
+    def _private_user_is_reaction_only_shadow(self, user_id: str, user: dict[str, Any]) -> bool:
+        """Whether a scoped row only mirrors a canonical user's reaction cache."""
+        match = re.fullmatch(r"([a-z0-9_]+):([^:]+):([0-9a-f]{16})", str(user_id or "").strip().lower())
+        if not match or not isinstance(user, dict):
+            return False
+        platform_kind, canonical_id, _digest = match.groups()
+        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else {}
+        canonical = users.get(canonical_id) if isinstance(users, dict) else None
+        if not isinstance(canonical, dict) or canonical is user:
+            return False
+        if _single_line(user.get("identity_platform_kind"), 40):
+            return False
+        if _single_line(user.get("last_inbound_umo"), 240):
+            return False
+        reaction = user.get("reaction_expression")
+        scopes = reaction.get("scopes") if isinstance(reaction, dict) else None
+        if not isinstance(scopes, dict) or not scopes:
+            return False
+        expected_marker = f":FriendMessage:{canonical_id}"
+        if any(expected_marker not in _single_line(scope, 240) for scope in scopes):
+            return False
+        canonical_umo = _single_line(canonical.get("last_inbound_umo") or canonical.get("umo"), 240)
+        if expected_marker not in canonical_umo:
+            return False
+        platform_parser = getattr(self, "_platform_kind_for_umo", None)
+        if callable(platform_parser):
+            try:
+                canonical_platform = _single_line(platform_parser(canonical_umo), 40).lower()
+            except Exception:
+                canonical_platform = ""
+            if canonical_platform not in {"", "generic", platform_kind}:
+                return False
+        return True
+
     def _private_user_has_private_footprint(self, user_id: str, user: dict[str, Any]) -> bool:
         """Whether a stored user has evidence that it belongs in private chat."""
         if not user_id or not isinstance(user, dict):
@@ -2093,8 +2202,17 @@ class CoreStoreMixin:
             return True
         if self._normalize_private_user_role(user.get("relationship_role")) == "owner":
             return True
+        profile_origin = _single_line(user.get("profile_origin"), 40).lower()
+        if profile_origin in {"manual", "administrator", "private", "private_auto"}:
+            return True
+        if bool(user.get("auto_profile_created")):
+            return True
 
-        for key in ("umo", "bound_delivery_umo", "preferred_delivery_umo"):
+        # ``umo`` alone is not proof of a DM. Legacy group observation rows
+        # were assigned a synthetic ``default:FriendMessage:<id>`` fallback
+        # before any private event was received. Inbound and bound routes are
+        # only written by real private delivery paths.
+        for key in ("last_inbound_umo", "bound_delivery_umo", "preferred_delivery_umo"):
             route = _single_line(user.get(key), 300)
             if route and ":GroupMessage:" not in route:
                 return True
@@ -2103,8 +2221,6 @@ class CoreStoreMixin:
             return True
 
         numeric_activity_keys = (
-            "last_seen",
-            "last_activity_at",
             "last_sent",
             "last_user_message_at",
             "last_companion_message_at",
@@ -2113,7 +2229,6 @@ class CoreStoreMixin:
             "last_private_activity_at",
             "last_private_reply_at",
             "private_inbound_count",
-            "inbound_count",
             "reply_count",
             "proactive_sent_count",
         )
@@ -2162,10 +2277,25 @@ class CoreStoreMixin:
 
         if any(has_structured_activity(user.get(key)) for key in structured_activity_keys):
             return True
-        aliases = user.get("alias_user_ids")
-        if isinstance(aliases, list) and any(_single_line(item, 160) for item in aliases):
+        ledger = user.get("relationship_ledger")
+        if isinstance(ledger, list) and any(
+            isinstance(item, dict)
+            and _single_line(item.get("reason_code"), 80).lower() not in {"", "group_inbound"}
+            for item in ledger
+        ):
             return True
-        if _safe_float(user.get("relationship_score"), 0.0) != 0:
+        aliases = user.get("alias_user_ids")
+        if isinstance(aliases, list) and any(
+            ":FriendMessage:" in _single_line(item, 240)
+            for item in aliases
+        ):
+            return True
+        group_only_ledger = bool(ledger) and all(
+            isinstance(item, dict)
+            and _single_line(item.get("reason_code"), 80).lower() == "group_inbound"
+            for item in ledger
+        )
+        if _safe_float(user.get("relationship_score"), 0.0) != 0 and not group_only_ledger:
             return True
 
         default_nickname = _single_line(getattr(self, "default_nickname", ""), 40)
@@ -2194,6 +2324,10 @@ class CoreStoreMixin:
             if not user_id or not isinstance(user, dict):
                 continue
             if self._is_bot_self_user_id(user_id):
+                continue
+            cleanup_evidence = self._private_user_has_group_observation_evidence(user_id, user)
+            cleanup_evidence = cleanup_evidence or self._private_user_is_reaction_only_shadow(user_id, user)
+            if not cleanup_evidence:
                 continue
             if self._private_user_has_private_footprint(user_id, user):
                 continue

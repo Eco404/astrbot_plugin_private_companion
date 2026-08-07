@@ -1763,6 +1763,167 @@ class PrivateCompanionPlugin(
             except Exception:
                 pass
 
+    def _write_persona_reset_backup_sync(
+        self,
+        persona_id: str,
+        snapshot: dict[str, Any],
+    ) -> Path:
+        pid = self._sanitize_persona_id(persona_id)
+        profile_stem = (
+            Path(self._persona_profile_filename(pid)).stem
+            if pid
+            else "single-profile"
+        )
+        data_root = Path(
+            str(getattr(self, "data_dir", "") or "").strip()
+            or Path(self._persona_profiles_dir).parent
+        )
+        backup_dir = data_root / "persona_backups" / profile_stem
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        path = backup_dir / f"{timestamp}-{uuid.uuid4().hex[:8]}.json"
+        temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        payload = {
+            "backup_version": 1,
+            "persona_id": pid,
+            "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "data": snapshot,
+        }
+        try:
+            temp.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(temp, path)
+        finally:
+            try:
+                temp.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return path
+
+    async def _reset_current_persona_store(
+        self,
+        persona_id: Any = "",
+        *,
+        rebuild_today: bool = True,
+    ) -> dict[str, Any]:
+        multi_enabled = bool(getattr(self, "enable_multi_persona_mode", False))
+        requested = self._sanitize_persona_id(persona_id)
+        active = self._sanitize_persona_id(self._active_persona_scope())
+        pid = ""
+        if multi_enabled:
+            configured = self._configured_multi_persona_ids()
+            pid = (
+                requested
+                or active
+                or self._sanitize_persona_id(getattr(self, "_page_current_persona_id", ""))
+                or self._sanitize_persona_id(getattr(self, "multi_persona_primary_id", ""))
+                or (configured[0] if configured else "")
+            )
+            if not pid or pid not in set(configured):
+                return {"ok": False, "message": "当前人格不在已启用的多人格列表中"}
+
+        token = None
+        if multi_enabled and active != pid:
+            token = self._activate_persona_id(pid)
+            if token is None:
+                return {"ok": False, "message": "无法激活要重置的人格"}
+
+        backup_path: Path | None = None
+        generation = 1
+        try:
+            await self._flush_scheduled_data_save()
+            async with self._data_lock:
+                previous = deepcopy(self.data)
+                lifecycle = previous.get("persona_lifecycle")
+                if not isinstance(lifecycle, dict):
+                    lifecycle = {}
+                try:
+                    previous_generation = max(
+                        1,
+                        int(lifecycle.get("generation", 1) or 1),
+                    )
+                except (TypeError, ValueError):
+                    previous_generation = 1
+                generation = previous_generation + 1
+                backup_path = self._write_persona_reset_backup_sync(pid, previous)
+
+                replacement = self._new_store()
+                ensure_defaults = getattr(self, "_ensure_store_defaults", None)
+                if callable(ensure_defaults):
+                    replacement = ensure_defaults(replacement)
+                replacement["persona_lifecycle"] = {
+                    "generation": generation,
+                    "reset_at": _now_ts(),
+                    "previous_backup": str(backup_path),
+                }
+                self.data = replacement
+                if bool(getattr(self, "default_enable_configured_targets", False)):
+                    sync_targets = getattr(self, "_sync_configured_targets", None)
+                    if callable(sync_targets):
+                        sync_targets()
+                try:
+                    if multi_enabled:
+                        self._save_persona_profile_sync(pid, self.data)
+                        dirty = getattr(self, "_persona_data_save_dirty", None)
+                        if isinstance(dirty, set):
+                            dirty.discard(pid)
+                    else:
+                        self._write_data_snapshot_sync(deepcopy(self.data))
+                        self._data_save_dirty = False
+                except Exception:
+                    self.data = previous
+                    if multi_enabled:
+                        self._save_persona_profile_sync(pid, previous)
+                    else:
+                        self._write_data_snapshot_sync(previous)
+                    raise
+
+            self._reset_persona_prompt_caches(pid)
+            bindings = self._persona_window_bindings() if multi_enabled else {}
+            for window, bound_persona in bindings.items():
+                if bound_persona != pid:
+                    continue
+                self._clear_persona_window_runtime_cache(window)
+                claims = getattr(self, "_persona_window_claims", None)
+                if isinstance(claims, dict):
+                    claims.pop(window, None)
+                conflicts = getattr(self, "_persona_window_conflicts", None)
+                if isinstance(conflicts, dict):
+                    conflicts.pop(window, None)
+            bookshelf_tokens = getattr(self, "_bookshelf_access_tokens", None)
+            if isinstance(bookshelf_tokens, dict):
+                bookshelf_tokens.clear()
+
+            state: dict[str, Any] = {}
+            plan: dict[str, Any] = {}
+            rebuild_error = ""
+            if rebuild_today:
+                try:
+                    state, plan, _ = await self._rebuild_today_after_reset()
+                except Exception as exc:
+                    rebuild_error = _single_line(exc, 180)
+                    logger.warning(
+                        "[PrivateCompanion] 当前人格资料已重置，但今日数据重建失败: persona=%s error=%s",
+                        pid or "single",
+                        rebuild_error,
+                        exc_info=True,
+                    )
+            return {
+                "ok": True,
+                "persona_id": pid,
+                "generation": generation,
+                "backup_path": str(backup_path or ""),
+                "state": state,
+                "plan": plan,
+                "rebuild_error": rebuild_error,
+                "external_memory_preserved": True,
+            }
+        finally:
+            if token is not None:
+                self._deactivate_persona_for_event(token)
+
     def _persona_profile_ids(self) -> list[str]:
         ids = self._configured_multi_persona_ids()
         profiles = getattr(self, "_persona_data_profiles", {})
@@ -2919,18 +3080,14 @@ class PrivateCompanionPlugin(
             reason_code=reason_code,
         )
 
-    def _req039_ensure_group_unified_user(
+    def _req039_group_observation_projection(
         self,
         event: Any,
         *,
         sender_id: str,
         sender_name: str = "",
     ) -> dict[str, Any] | None:
-        """Resolve a group speaker into the same user record used by DMs.
-
-        This creates identity/relationship state only.  It deliberately does
-        not grant either private-companion or proactive-private permission.
-        """
+        """Build a transient group-speaker projection without creating a DM user."""
         raw_sender_id = _single_line(sender_id, 160)
         normalizer = getattr(self, "_normalize_private_identity_id", None)
         normalized_sender_id = normalizer(raw_sender_id) if callable(normalizer) else raw_sender_id
@@ -2942,50 +3099,44 @@ class PrivateCompanionPlugin(
             self_id = ""
         if not normalized_sender_id or normalized_sender_id == self_id or raw_sender_id == self_id:
             return None
-        resolver = getattr(self, "_event_private_user_storage_id", None)
-        canonical = (
-            resolver(event, normalized_sender_id)
-            if callable(resolver)
-            else self._canonical_private_user_id(normalized_sender_id)
-        )
-        canonical = _single_line(canonical, 160)
+        canonical = _single_line(self._canonical_private_user_id(normalized_sender_id), 160)
         bot_checker = getattr(self, "_is_bot_self_user_id", None)
         if not canonical or (callable(bot_checker) and bot_checker(canonical)):
             return None
-        users = self.data.get("users")
-        existed_before_group_observation = isinstance(users, dict) and isinstance(users.get(canonical), dict)
-        user = self._get_user(canonical)
-        user["user_id"] = canonical
-        stamper = getattr(self, "_stamp_private_event_identity", None)
-        if callable(stamper):
-            stamper(user, event, normalized_sender_id)
-        user.setdefault("profile_origin", "group_observation")
-        if not _single_line(user.get("nickname"), 80):
-            user["nickname"] = _single_line(sender_name, 80) or canonical
-        # A group observation may create a neutral profile, but must never
-        # revoke an existing private-chat authorization merely because that
-        # person subsequently speaks in a group.
-        capabilities_missing = not isinstance(user.get("unified_profile_capabilities"), dict)
-        capabilities = req036_ensure_new_profile_capabilities(user) if capabilities_missing else user.get("unified_profile_capabilities")
-        if not isinstance(capabilities, dict):
-            return user
-        if _single_line(user.get("relationship_role"), 40) == "owner":
-            owner_status_getter = getattr(self, "_req036_owner_companion_status", None)
-            owner_status = owner_status_getter(user) if callable(owner_status_getter) else None
-            owner_enabled = bool(owner_status and all(owner_status))
-            if owner_enabled and (not existed_before_group_observation or capabilities_missing):
-                capabilities["private_companion_enabled"] = True
-                capabilities["proactive_private_enabled"] = True
-                capabilities["grant_source"] = "owner_default_enabled"
-                user["private_companion_enabled"] = True
-                user["proactive_private_enabled"] = True
-                user["enabled"] = True
-        elif not existed_before_group_observation:
-            capabilities["private_companion_enabled"] = False
-            capabilities["proactive_private_enabled"] = False
-            user["private_companion_enabled"] = False
-            user["proactive_private_enabled"] = False
-        return user
+        display_name = _single_line(sender_name, 80) or canonical
+        profiles = self.data.get("worldbook_member_profiles") if isinstance(getattr(self, "data", None), dict) else {}
+        observation = profiles.get(normalized_sender_id) if isinstance(profiles, dict) else None
+        if isinstance(observation, dict) and bool(observation.get("observation_only")):
+            display_name = _single_line(observation.get("name"), 80) or display_name
+        projection: dict[str, Any] = {
+            "user_id": canonical,
+            "nickname": display_name,
+            "enabled": False,
+            "manual_enabled": False,
+            "manual_disabled": False,
+            "relationship_role": "friend",
+            "relationship_mode": "normal",
+            "relationship_score": 0,
+            "current_interaction": {},
+            "profile_origin": "group_observation",
+            "projection_kind": "group_observation",
+            "observation_only": True,
+            "private_companion_enabled": False,
+            "proactive_private_enabled": False,
+        }
+        identity_context_getter = getattr(self, "_private_event_identity_context", None)
+        if callable(identity_context_getter):
+            try:
+                identity_context = identity_context_getter(event, normalized_sender_id)
+            except Exception:
+                identity_context = {}
+            if isinstance(identity_context, dict):
+                projection["identity_subject_id"] = _single_line(identity_context.get("subject"), 128)
+                projection["identity_platform_kind"] = _single_line(identity_context.get("platform"), 40)
+                projection["identity_adapter_instance_id"] = _single_line(identity_context.get("adapter"), 120)
+                projection["identity_bot_id"] = _single_line(identity_context.get("bot_id"), 120)
+        req036_ensure_new_profile_capabilities(projection)
+        return projection
 
     def _req036_attach_unified_profile_context(
         self,
@@ -4445,6 +4596,20 @@ class PrivateCompanionPlugin(
     ):
         """Prepare a local reaction image without weakening the text reply."""
         if self is None or not self.enabled:
+            return
+        if bool(getattr(event, "_private_companion_skip_reaction_expression", False)):
+            for attr in (
+                "_private_companion_reaction_expression_intent",
+                "_private_companion_deferred_reaction_tts",
+            ):
+                try:
+                    delattr(event, attr)
+                except (AttributeError, TypeError):
+                    pass
+            logger.debug(
+                "[PrivateCompanion] 本轮已有真实生图，跳过追加表情附件: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
             return
         intent = getattr(
             event, "_private_companion_reaction_expression_intent", None
@@ -5938,7 +6103,7 @@ class PrivateCompanionPlugin(
     @filter.on_decorating_result(priority=-19000)
     @_multi_persona_event_context
     async def suppress_empty_photo_tool_followup_before_send(self, event: AstrMessageEvent, *args, **kwargs):
-        """Stop adapter-visible placeholder glyphs after a tool already sent the photo."""
+        """Stop any adapter-visible followup after a tool already sent the photo."""
         if self is None or not self.enabled:
             return
         if not bool(getattr(event, "_private_companion_photo_tool_sent", False)):
@@ -5947,8 +6112,7 @@ class PrivateCompanionPlugin(
         if result is None:
             return
         chain = list(getattr(result, "chain", []) or [])
-        if self._photo_tool_followup_chain_has_visible_content(chain):
-            return
+        had_visible_content = self._photo_tool_followup_chain_has_visible_content(chain)
         empty_result = self._build_result_from_chain([])
         try:
             empty_result.stop_event()
@@ -5957,9 +6121,10 @@ class PrivateCompanionPlugin(
         event.set_result(empty_result)
         event.stop_event()
         logger.info(
-            "[PrivateCompanion] 已阻止图片工具成功发送后的空白占位消息: session=%s components=%s",
+            "[PrivateCompanion] 已阻止图片工具成功发送后的尾随消息: session=%s components=%s visible=%s",
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
             len(chain),
+            had_visible_content,
         )
 
     @filter.on_decorating_result(priority=300)
@@ -9735,6 +9900,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return False
         if len(cleaned) > 18:
             return False
+        weather_query_detector = getattr(self, "_user_asks_current_weather", None)
+        if callable(weather_query_detector) and weather_query_detector(cleaned):
+            return False
         outfit_change_detector = getattr(self, "_detect_dialogue_outfit_change", None)
         if callable(outfit_change_detector):
             try:
@@ -9919,6 +10087,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 "【私聊被动回复策略】",
                 "先自然回应用户当前表达；主动提供一处与 Bot 自身有关的具体细节；不要逐项汇报状态，也不要把内部素材描述成已经证实的现实事件。",
                 "不要把回复写成连续盘问；整次回复最多提出一个问题；没有必要时可以不提问。",
+                "当前用户最后一条消息是本轮唯一的主线：先接住其中的具体词、问题或情绪，再决定是否补充背景。旧话题、未完成话头和状态素材只有在与当前内容有明确语义连接时才轻轻带过；不贴合就留在背景里，不要为了连续性硬拽回来。",
+                "话题确实转向时，用当前消息里的连接点自然过渡，不要凭空写“刚刚/刚才/前面”作为转场。相对时间词只在用户明确提到时间、或有可靠事实表明确实发生在那个时间段时使用；内部提示中的时间标签不得原样出现在回复里。",
             ]
         )
 
@@ -12106,17 +12276,28 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         group_id = "" if is_private else self._extract_group_id_from_event(event)
         if not is_private and not group_id:
             return
-        try:
-            resolver = getattr(self, "_private_user_id_for_event", None)
-            sender_id = (
-                resolver(event)
-                if callable(resolver)
-                else self._canonical_private_user_id(self._safe_event_sender_id(event))
-            )
-        except Exception:
-            sender_id = ""
-        users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
-        current_user = users.get(sender_id) if sender_id and isinstance(users, dict) else None
+        raw_sender_id = self._safe_event_sender_id(event)
+        current_user = None
+        if is_private:
+            try:
+                resolver = getattr(self, "_private_user_id_for_event", None)
+                sender_id = (
+                    resolver(event)
+                    if callable(resolver)
+                    else self._canonical_private_user_id(raw_sender_id)
+                )
+            except Exception:
+                sender_id = ""
+            users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+            current_user = users.get(sender_id) if sender_id and isinstance(users, dict) else None
+        else:
+            projection_getter = getattr(self, "_req039_group_observation_projection", None)
+            if callable(projection_getter):
+                current_user = projection_getter(
+                    event,
+                    sender_id=raw_sender_id,
+                    sender_name=self._sender_display_name(event),
+                )
         if not isinstance(current_user, dict):
             return
         expression_builder = getattr(self, "_build_expression_decision_for_user", None)
@@ -12386,6 +12567,27 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 umo or "unknown",
             )
 
+    @filter.on_llm_request(priority=-250000)
+    @_multi_persona_event_context
+    async def sanitize_gif_inputs_before_provider(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        *args,
+        **kwargs,
+    ):
+        """Keep provider adapters from receiving unsupported raw GIF inputs."""
+        if self is None or req is None or not bool(getattr(self, "enabled", False)):
+            return
+        replaced, dropped = self._sanitize_provider_request_gif_inputs(req)
+        if replaced or dropped:
+            logger.info(
+                "[PrivateCompanion] Provider 请求中的 GIF 已兼容化: converted=%s dropped=%s session=%s",
+                replaced,
+                dropped,
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
+
     @filter.on_llm_request()
     @_multi_persona_event_context
     async def inject_humanized_state(self, event: AstrMessageEvent, req: ProviderRequest, *args, **kwargs):
@@ -12420,6 +12622,30 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         recovered_text, _ = await self._recover_plaintext_photo_tool_call(event, resp, original_text)
         if recovered_text != original_text:
             resp.completion_text = recovered_text
+        if bool(getattr(event, "_private_companion_photo_tool_sent", False)):
+            # pc_generate_photo 已经把 caption 与图片作为唯一可见回复发出。
+            # 不论模型是否输出静默标记，都丢弃同一轮尾随正文，避免再次分段、TTS 或触发表情附件。
+            try:
+                resp.result_chain = None
+            except Exception:
+                pass
+            resp.completion_text = ""
+            for attr in (
+                "_private_companion_reaction_expression_intent",
+                "_private_companion_deferred_reaction_tts",
+                "_private_companion_reaction_expression_expected_primary_chunks",
+                "_private_companion_reaction_expression_segmented_remainder",
+            ):
+                try:
+                    delattr(event, attr)
+                except (AttributeError, TypeError):
+                    pass
+            logger.info(
+                "[PrivateCompanion] 图片已发送，已丢弃同轮尾随模型正文: session=%s chars=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                len(recovered_text or ""),
+            )
+            return
         reaction_extractor = getattr(
             self, "_extract_reaction_expression_hidden_intent", None
         )
@@ -13390,6 +13616,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         response_image_path = ""
         response_extra_components: list[Any] = []
         deferred_actions = {
+            "重置当前人格", "当前人格重置", "重置人格",
             "重置插件", "全部重置",
             "查看提示词", "提示词", "prompt",
             "重置细化",
@@ -13434,6 +13661,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
 
         management_actions = {
+            "重置当前人格", "当前人格重置", "重置人格",
             "重置插件", "全部重置",
             "查看提示词", "提示词", "prompt",
             "重置细化", *daily_schedule_regenerate_actions, *daily_schedule_cancel_actions,
@@ -13566,6 +13794,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 response = self._explain_proactive_decision(user)
             elif action in {"能力列表", "主动能力", "工具列表"}:
                 response = self._format_proactive_ability_list_for_user(user)
+            elif action in {"重置当前人格", "当前人格重置", "重置人格"}:
+                response = "正在备份并重置当前人格资料，插件基础配置和窗口绑定会保留。"
             elif action in {"重置插件", "全部重置"}:
                 response = "正在清空插件状态,并重新生成今天的状态和日程。"
             elif action == "重置":
@@ -13771,6 +14001,30 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         if action in bookshelf_password_reset_actions:
             await self._reply(event, response)
+        if action in {"重置当前人格", "当前人格重置", "重置人格"}:
+            result = await self._reset_current_persona_store(rebuild_today=True)
+            if not result.get("ok"):
+                await self._reply(event, result.get("message") or "当前人格重置失败。")
+            else:
+                persona_label = result.get("persona_id") or "当前单人格资料"
+                generation = result.get("generation") or 1
+                rebuild_error = _single_line(result.get("rebuild_error"), 180)
+                message = (
+                    f"当前人格已重置：{persona_label}\n"
+                    f"人格资料代次：第 {generation} 代\n"
+                    "插件基础配置、多人格列表和窗口绑定均已保留。\n"
+                    "重置前资料已保存到 persona_backups。AstrBot 会话历史和外部长期记忆不在本次重置范围内。"
+                )
+                if rebuild_error:
+                    message += f"\n今日状态与日程自动重建失败：{rebuild_error}"
+                else:
+                    state = result.get("state") if isinstance(result.get("state"), dict) else {}
+                    plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
+                    if state:
+                        message += "\n\n" + self._format_state_detail(state)
+                    if plan:
+                        message += "\n\n" + self._format_daily_plan(plan)
+                await self._reply(event, message)
         if action in {"重置插件", "全部重置"}:
             await self._reset_plugin_store()
             state, plan, _ = await self._rebuild_today_after_reset()
@@ -14033,28 +14287,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 message_id=self._event_message_id(event),
                 event=event,
             )
-            ensure_unified_user = getattr(self, "_req039_ensure_group_unified_user", None)
-            unified_user = (
-                ensure_unified_user(event, sender_id=sender_id, sender_name=sender_name)
-                if callable(ensure_unified_user)
-                else None
-            )
-            if (
-                captured
-                and isinstance(unified_user, dict)
-                and bool(getattr(self, "enable_custom_relationship_stage_policy", False))
-            ):
-                received_ts = _now_ts()
-                unified_user["last_seen"] = max(_safe_float(unified_user.get("last_seen"), 0), received_ts)
-                unified_user["last_activity_at"] = max(_safe_float(unified_user.get("last_activity_at"), 0), received_ts)
-                unified_user["inbound_count"] = _safe_int(unified_user.get("inbound_count"), 0) + 1
-                self._apply_relationship_event(
-                    unified_user,
-                    1,
-                    reason_code="group_inbound",
-                    event_id=self._event_message_id(event),
-                    now=received_ts,
-                )
             if captured:
                 self._schedule_data_save()
         activity_recorder = getattr(self, "_record_c3_inbound_activity", None)
@@ -14148,22 +14380,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         if self._message_debounce_command_text(event, text):
             return
+        sender_name = self._sender_display_name(event)
         await self._capture_group_observation_event(
             event,
             group_id=group_id,
             sender_id=sender_id,
-            sender_name=self._sender_display_name(event),
+            sender_name=sender_name,
             text=text,
         )
         async with self._data_lock:
-            users = self.data.get("users", {}) if isinstance(self.data, dict) else {}
-            resolver = getattr(self, "_event_private_user_storage_id", None)
-            canonical_sender_id = (
-                resolver(event, sender_id)
-                if callable(resolver)
-                else self._canonical_private_user_id(sender_id)
+            projection_getter = getattr(self, "_req039_group_observation_projection", None)
+            observed_user = (
+                projection_getter(event, sender_id=sender_id, sender_name=sender_name)
+                if callable(projection_getter)
+                else None
             )
-            observed_user = users.get(canonical_sender_id) if isinstance(users, dict) else None
             self._req036_attach_unified_profile_context(
                 event,
                 user=observed_user if isinstance(observed_user, dict) else None,

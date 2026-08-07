@@ -5784,7 +5784,7 @@
       "enable_llm_proactive_persona_judge": {
         "description": "主动计划人格/世界观判定",
         "type": "bool",
-        "hint": "开启后，主动计划到点前会先让模型判断这个念头是否贴合当前角色、世界观和关系边界；可放行、改写、延后或丢弃。关闭后只使用本地判定。",
+        "hint": "开启后，主动计划到点前会先让模型判断这个念头是否贴合当前角色、世界观和关系边界。未回应、动机偏弱、表达温度或自然度不足等软质量问题会作为正文收敛与改写建议，不会自动降低发送频率；只有明确拒绝、休息、免打扰、隐私、串用户、内部机制、世界观冲突或无来源事实等硬风险才会延后或丢弃。关闭后只使用本地判定。",
         "default": true
       },
       "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID": {
@@ -5800,7 +5800,7 @@
       "proactive_persona_judge_send_threshold": {
         "description": "主动人格判定放行阈值",
         "type": "int",
-        "hint": "模型判定为 send 但分数低于该阈值时，会自动转为延后。越高越克制，越低越容易放行。",
+        "hint": "模型判定为 send 但分数低于该阈值时，低分仅作为正文收敛建议，并按模型给出的方向优先轻量改写；不会仅因低分自动延后或丢弃。",
         "slider": {
           "min": 0,
           "max": 100,
@@ -6505,11 +6505,8 @@
       "enable_proactive_message_review": {
         "description": "主动私聊发送前终审",
         "type": "bool",
-        "hint": "仅作用于主动私聊发送前的模型终审；可以在被动回复复核关闭时单独开启，不处理普通私聊回复或群聊消息。关闭后不调用主动终审模型，但仍保留必要的本地来源与安全校验。",
-        "default": true,
-        "condition": {
-          "enable_mai_style_integration": true
-        }
+        "hint": "仅作用于主动私聊发送前的模型终审；可以在被动回复复核关闭时单独开启，不处理普通私聊回复或群聊消息。关闭后不调用主动终审模型，未回应、低价值、表达温度或自然度不足等非硬质量检查只用于本地收敛或改写，不会阻断发送；明确拒绝、休息、免打扰、隐私、串用户及来源或安全风险仍可拦截。",
+        "default": true
       },
       "proactive_review_history_limit": {
         "description": "主动终审召回消息数",
@@ -11503,6 +11500,126 @@
         "default": 6,
         "condition": {
           "enable_reaction_expression_experiment": true
+        }
+      },
+      "reaction_expression_embedding_enabled": {
+        "description": "启用表情语义召回",
+        "type": "bool",
+        "hint": "可选。使用 Embedding Provider 为表情包的名称、描述、情绪、用途和可见文字建立向量索引，帮助理解“想安慰一下”“有点无语”这类没有直接关键词的说法；未配置或调用失败时自动回退现有关键词检索。",
+        "default": false,
+        "condition": {
+          "enable_reaction_expression_experiment": true
+        }
+      },
+      "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID": {
+        "description": "表情语义嵌入模型",
+        "type": "string",
+        "_special": "select_provider",
+        "hint": "选择 AstrBot 中支持 Embedding 的 Provider。留空时自动探测第一个可用嵌入模型；只用于表情素材的语义召回，不会改变主聊天模型。",
+        "default": "",
+        "condition": {
+          "enable_reaction_expression_experiment": true,
+          "reaction_expression_embedding_enabled": true
+        }
+      },
+      "reaction_expression_embedding_timeout_ms": {
+        "description": "表情嵌入超时毫秒",
+        "type": "int",
+        "hint": "生成查询向量超过该时间会跳过语义层并回退关键词。0 表示不限制；OpenAI 兼容服务建议 4000-8000。",
+        "default": 5000,
+        "slider": {
+          "min": 0,
+          "max": 30000,
+          "step": 500
+        },
+        "condition": {
+          "enable_reaction_expression_experiment": true,
+          "reaction_expression_embedding_enabled": true
+        }
+      },
+      "reaction_expression_embedding_candidate_limit": {
+        "description": "表情向量扫描上限",
+        "type": "int",
+        "hint": "每次最多扫描多少张已建立向量的素材。素材很多时可降低；不会影响关键词检索。",
+        "default": 1200,
+        "slider": {
+          "min": 20,
+          "max": 5000,
+          "step": 20
+        },
+        "condition": {
+          "enable_reaction_expression_experiment": true,
+          "reaction_expression_embedding_enabled": true
+        }
+      },
+      "reaction_expression_embedding_score_threshold": {
+        "description": "表情语义相似度阈值",
+        "type": "float",
+        "hint": "低于该相似度的素材不会获得语义加分。建议 0.35-0.55；过高可能漏掉隐含表达，过低会增加误召回。",
+        "default": 0.42,
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.01
+        },
+        "condition": {
+          "enable_reaction_expression_experiment": true,
+          "reaction_expression_embedding_enabled": true
+        }
+      },
+      "reaction_expression_embedding_weight": {
+        "description": "表情语义加权分",
+        "type": "float",
+        "hint": "语义相似度在现有关键词、情绪和偏好排序中的软加分。建议 0.35-0.75，不会单独决定是否发送。",
+        "default": 0.55,
+        "slider": {
+          "min": 0,
+          "max": 1.5,
+          "step": 0.05
+        },
+        "condition": {
+          "enable_reaction_expression_experiment": true,
+          "reaction_expression_embedding_enabled": true
+        }
+      },
+      "reaction_expression_embedding_backfill_enabled": {
+        "description": "后台补齐表情向量",
+        "type": "bool",
+        "hint": "开启后会在检索时用小批量后台任务为新导入或元数据变更后的素材建立向量，不阻塞当前回复。",
+        "default": true,
+        "condition": {
+          "enable_reaction_expression_experiment": true,
+          "reaction_expression_embedding_enabled": true
+        }
+      },
+      "reaction_expression_embedding_backfill_batch_size": {
+        "description": "表情补向量批量",
+        "type": "int",
+        "hint": "每轮后台最多处理多少张素材。数值越大，首次建库越快，但会增加 Embedding Provider 调用量。",
+        "default": 24,
+        "slider": {
+          "min": 1,
+          "max": 100,
+          "step": 1
+        },
+        "condition": {
+          "enable_reaction_expression_experiment": true,
+          "reaction_expression_embedding_enabled": true
+        }
+      },
+      "reaction_expression_embedding_backfill_interval_seconds": {
+        "description": "表情补向量最短间隔",
+        "type": "int",
+        "hint": "同一 Provider 两次后台缺失扫描之间的最短秒数，避免活跃群聊里反复扫描。0 表示不节流。",
+        "default": 300,
+        "slider": {
+          "min": 0,
+          "max": 86400,
+          "step": 30
+        },
+        "condition": {
+          "enable_reaction_expression_experiment": true,
+          "reaction_expression_embedding_enabled": true
         }
       },
       "reaction_expression_semantic_trigger_enabled": {

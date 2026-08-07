@@ -2,6 +2,7 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from astrbot_plugin_private_companion.daily_state import DailyStateMixin
 from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
@@ -264,6 +265,80 @@ class ProactivePersonaConsistencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.startswith("嗯…"))
         self.assertIn("完整人格::session-b::冷静、俏皮、称呼稳定", harness.captured_prompt)
         self.assertIn("不得把原文改成另一种人格", harness.captured_prompt)
+
+    async def test_disabled_review_repairs_soft_reply_air_instead_of_dropping(self):
+        harness = _ProactivePersonaHarness()
+        harness.enable_proactive_message_review = False
+        harness._llm_call = AsyncMock(side_effect=AssertionError("disabled review must not call the model"))
+        harness._proactive_reply_air_flags = lambda text, **kwargs: ProactiveMessageMixin._proactive_reply_air_flags(
+            harness,
+            text,
+            **kwargs,
+        )
+        user = {"umo": "session-b", "nickname": "阿青"}
+
+        result = await harness._review_proactive_message_stance(
+            user,
+            "好呀，今天记得早点休息。",
+            reason="quiet_care",
+            action="message",
+            motive="提醒休息",
+        )
+
+        self.assertEqual("今天记得早点休息。", result)
+        harness._llm_call.assert_not_awaited()
+
+    async def test_disabled_review_releases_non_hard_local_defer_and_drop_without_model(self):
+        for decision in ("defer", "drop"):
+            with self.subTest(decision=decision):
+                harness = _ProactivePersonaHarness()
+                harness.enable_proactive_message_review = False
+                harness._llm_call = AsyncMock(side_effect=AssertionError("disabled review must not call the model"))
+                harness._local_proactive_send_decision = lambda *_args, **_kwargs: {
+                    "decision": decision,
+                    "reason": "表达温度偏低，建议收短",
+                    "delay_minutes": 60,
+                }
+
+                result = await harness._review_proactive_message_send_decision(
+                    {"umo": "session-soft", "nickname": "阿青", "user_id": "1"},
+                    "刚把桌边散着的笔收好了，顺手来和你说一句。",
+                    reason="state_share",
+                    action="message",
+                    motive="分享眼前的小事",
+                    topic="收拾书桌",
+                )
+
+                self.assertEqual("send", result["decision"])
+                self.assertIn("跳过非安全性的本地软拦截", result["reason"])
+                harness._llm_call.assert_not_awaited()
+
+    async def test_disabled_review_keeps_hard_local_risk_blocked_without_model(self):
+        harness = _ProactivePersonaHarness()
+        harness.enable_proactive_message_review = False
+        harness._llm_call = AsyncMock(side_effect=AssertionError("hard local risk must not call the model"))
+        harness._local_proactive_send_decision = lambda *_args, **_kwargs: {
+            "decision": "defer",
+            "reason": "用户明确要求休息，继续发送会构成骚扰",
+            "delay_minutes": 180,
+            "hard": True,
+        }
+
+        result = await harness._review_proactive_message_send_decision(
+            {"umo": "session-hard", "nickname": "阿青", "user_id": "1"},
+            "再陪我聊一会吧。",
+            reason="check_in",
+            action="message",
+            motive="继续找对方聊天",
+            topic="续聊",
+        )
+
+        # A hard local risk may be represented as either defer or drop by the
+        # surrounding policy adapter; it must never be released as send.
+        self.assertIn(result["decision"], {"defer", "drop"})
+        self.assertNotEqual("send", result["decision"])
+        self.assertTrue(result["hard"])
+        harness._llm_call.assert_not_awaited()
 
     async def test_proactive_review_does_not_reuse_an_unverified_mother(self):
         harness = _ProactivePersonaHarness()

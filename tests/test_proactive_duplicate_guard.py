@@ -101,3 +101,43 @@ def test_legacy_weather_topic_is_migrated_during_cleanup():
 
     assert len(recent) == 1
     assert recent[0]["signature"] == "ordinary_weather_topic"
+
+
+def test_shared_recipient_address_does_not_make_unrelated_topics_duplicates():
+    harness = _DuplicateGuardHarness()
+    now = 1_000_100.0
+    old_text = "比折大人，刚泡的蜂蜜茶还冒着热气。"
+    candidate = "比折大人，桌腿边的球拍被斜光照亮了。"
+    user = {
+        "recent_proactive_topics": [
+            {
+                "ts": now - 60,
+                "signature": harness._proactive_topic_signature(old_text),
+                "text": old_text,
+            }
+        ]
+    }
+
+    reason = harness._recent_proactive_text_duplicate_reason(user, text=candidate, now=now)
+
+    assert reason == ""
+
+
+def test_same_scene_rephrased_with_shared_recipient_address_is_still_duplicate():
+    harness = _DuplicateGuardHarness()
+    now = 1_000_100.0
+    old_text = "比折大人，桌腿边的球拍被斜光照亮了。"
+    candidate = "比折大人，斜光正落在桌腿边的球拍上。"
+    user = {
+        "recent_proactive_topics": [
+            {
+                "ts": now - 60,
+                "signature": harness._proactive_topic_signature(old_text),
+                "text": old_text,
+            }
+        ]
+    }
+
+    reason = harness._recent_proactive_text_duplicate_reason(user, text=candidate, now=now)
+
+    assert "已发送相似主动" in reason

@@ -256,6 +256,7 @@ class PrivateCompanionPageApi(
     }
     FRACTIONAL_PERCENT_SETTING_KEYS = {
         "reaction_expression_trigger_probability",
+        "reaction_expression_embedding_score_threshold",
         "bilibili_share_probability",
         "news_share_probability",
         "external_event_self_link_probability",
@@ -779,6 +780,7 @@ class PrivateCompanionPageApi(
             ("/roleplay/personas", self.list_roleplay_personas, ["GET"], "Private Companion Page roleplay personas"),
             ("/persona/switch", self.switch_persona, ["POST"], "Private Companion Page switch persona"),
             ("/persona/migrate", self.migrate_persona_profile, ["POST"], "Private Companion Page migrate persona profile"),
+            ("/persona/reset-current", self.reset_current_persona, ["POST"], "Private Companion Page reset current persona"),
             ("/roleplay/draft_from_persona", self.generate_roleplay_draft_from_persona, ["POST"], "Private Companion Page roleplay draft from persona"),
             ("/roleplay/standardize_persona", self.standardize_persona_from_questionnaire, ["POST"], "Private Companion Page roleplay persona standardization"),
             ("/roleplay/persona_style_scenarios", self.generate_persona_style_scenarios, ["POST"], "Private Companion Page roleplay persona style scenarios"),
@@ -797,6 +799,7 @@ class PrivateCompanionPageApi(
             "/roleplay/personas",
             "/persona/switch",
             "/persona/migrate",
+            "/persona/reset-current",
         }
         for path, handler, methods, desc in routes:
             scoped_handler = (
@@ -1335,11 +1338,26 @@ class PrivateCompanionPageApi(
         try:
             library = get_reaction_asset_library(self.plugin)
             library_summary = library.summary() if library is not None else {}
+            embedding_provider_id = self._single_line(
+                getattr(self.plugin, "reaction_expression_embedding_provider_id", "")
+                or getattr(self.plugin, "_reaction_embedding_active_provider_id", ""),
+                160,
+            )
+            embedding_summary = (
+                library.embedding_status(embedding_provider_id)
+                if library is not None and embedding_provider_id
+                else {"provider_id": embedding_provider_id, "indexed": 0, "missing": 0, "total": 0}
+            )
         except Exception:
             library_summary = {}
+            embedding_summary = {}
         return {
             "enabled": bool(getattr(self.plugin, "enable_reaction_expression_experiment", False)),
             "library": library_summary,
+            "embedding": {
+                "enabled": bool(getattr(self.plugin, "reaction_expression_embedding_enabled", False)),
+                **embedding_summary,
+            },
             "runtime": runtime_payload,
             "recent": {
                 "tracked_user_count": tracked_user_count,
@@ -10976,6 +10994,24 @@ class PrivateCompanionPageApi(
         )
         return self._ok(result) if result.get("ok") else self._error(result.get("message") or "人格资料迁移失败")
 
+    async def reset_current_persona(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        persona_id = self._single_line(payload.get("persona_id"), 120)
+        resetter = getattr(self.plugin, "_reset_current_persona_store", None)
+        if not callable(resetter):
+            return self._error("当前版本不支持重置人格资料")
+        try:
+            result = await resetter(persona_id, rebuild_today=True)
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanionPage] 重置当前人格失败 persona=%s error=%s",
+                persona_id or "single",
+                self._single_line(exc, 180),
+                exc_info=True,
+            )
+            return self._exception_error("重置当前人格失败")
+        return self._ok(result) if result.get("ok") else self._error(result.get("message") or "重置当前人格失败")
+
     async def _roleplay_persona_items(self) -> list[dict[str, Any]]:
         items: dict[str, dict[str, Any]] = {
             "": {
@@ -11376,14 +11412,14 @@ class PrivateCompanionPageApi(
             "quiet_hours": text_value("quietHours", 80) or "23:00-08:30",
             "require_private_opt_in": bool_value("requirePrivateOptIn", True),
             "proactive_intensity_preset": self._single_line(draft.get("privateIntensity"), 40) or "off",
-            "max_daily_messages": number_value("privateMaxDailyMessages", 0) if proactive_private else 0,
-            "idle_minutes": number_value("privateIdleMinutes", 0),
-            "min_interval_minutes": number_value("privateMinIntervalMinutes", 0),
+            "max_daily_messages": number_value("privateMaxDailyMessages", 8) if proactive_private else 0,
+            "idle_minutes": number_value("privateIdleMinutes", 60),
+            "min_interval_minutes": number_value("privateMinIntervalMinutes", 120),
             "proactive_persona_judge_send_threshold": number_value("privatePersonaJudgeThreshold", 62),
             "proactive_review_strength": self._single_line(draft.get("privateReviewStrength"), 40) or "lenient",
-            "proactive_unanswered_slowdown_start": number_value("privateUnansweredSlowdownStart", 2),
-            "proactive_unanswered_max_interval_multiplier": number_value("privateUnansweredMaxIntervalMultiplier", 1.65),
-            "friend_unanswered_max_cooldown_hours": number_value("privateFriendUnansweredMaxCooldownHours", 30),
+            "proactive_unanswered_slowdown_start": number_value("privateUnansweredSlowdownStart", 1),
+            "proactive_unanswered_max_interval_multiplier": number_value("privateUnansweredMaxIntervalMultiplier", 2.2),
+            "friend_unanswered_max_cooldown_hours": number_value("privateFriendUnansweredMaxCooldownHours", 60),
             "group_wakeup_direct_words": text_value("groupWakeDirectWords", 1200),
             "group_wakeup_owner_direct_words": text_value("groupWakeOwnerDirectWords", 1200),
             "group_wakeup_context_words": text_value("groupWakeContextWords", 1200),
@@ -11420,9 +11456,18 @@ class PrivateCompanionPageApi(
 
         features: dict[str, bool] = {
             "enable_llm_proactive_message": proactive_private,
-            "enable_llm_proactive_persona_judge": proactive_private,
-            "enable_passive_response_review": proactive_private,
-            "enable_proactive_message_review": proactive_private,
+            "enable_llm_proactive_persona_judge": proactive_private and bool_value(
+                "enable_llm_proactive_persona_judge",
+                bool(getattr(self.plugin, "enable_llm_proactive_persona_judge", True)),
+            ),
+            "enable_passive_response_review": proactive_private and bool_value(
+                "enable_passive_response_review",
+                bool(getattr(self.plugin, "enable_passive_response_review", True)),
+            ),
+            "enable_proactive_message_review": proactive_private and bool_value(
+                "enable_proactive_message_review",
+                bool(getattr(self.plugin, "enable_proactive_message_review", True)),
+            ),
             "enable_group_companion": proactive_group,
             "enable_group_context_injection": proactive_group,
             "enable_group_injection_guard": proactive_group,
@@ -13599,11 +13644,14 @@ class PrivateCompanionPageApi(
     async def list_available_providers(self) -> dict[str, Any]:
         try:
             items = self._available_provider_items()
+            embedding_items = await self._available_embedding_provider_items()
             tts_items = self._available_tts_provider_items()
             return self._ok(
                 {
                     "items": items,
                     "total": len(items),
+                    "embedding_items": embedding_items,
+                    "embedding_total": len(embedding_items),
                     "tts_items": tts_items,
                     "tts_total": len(tts_items),
                 }
@@ -13626,29 +13674,46 @@ class PrivateCompanionPageApi(
         start = time.time()
         logger.info("[PrivateCompanionPage][test:%s][type:provider_connection] 开始执行测试", request_id)
         try:
-            text = await self.plugin._llm_call(
-                "请只回复两个字：正常",
-                max_tokens=16,
-                provider_id=provider_id,
-                task="provider_test",
-                timeout_key=key,
-                timeout_seconds=timeout_seconds,
-            )
+            if key == "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID":
+                provider = await self._embedding_provider_for_test(provider_id)
+                vector_getter = getattr(self.plugin, "_reaction_embedding_vector", None)
+                if provider is None or not callable(vector_getter):
+                    raise RuntimeError("未找到可用的 Embedding Provider")
+                vector = await vector_getter(provider, "开心 安慰 抱抱 表情语义测试")
+                text = f"{len(vector)} 维向量" if vector else ""
+                step_name = "向量生成"
+            else:
+                text = await self.plugin._llm_call(
+                    "请只回复两个字：正常",
+                    max_tokens=16,
+                    provider_id=provider_id,
+                    task="provider_test",
+                    timeout_key=key,
+                    timeout_seconds=timeout_seconds,
+                )
+                step_name = "模型调用"
             elapsed_ms = int((time.time() - start) * 1000)
             ok = bool(text)
+            embedding_test = key == "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"
             result = {
                 "ok": ok,
                 "key": key,
                 "provider_id": provider_id,
                 "elapsed_ms": elapsed_ms,
                 "sample": self._single_line(text, 80),
-                "detail": "Provider 已返回有效测试内容" if ok else "Provider 调用完成，但返回内容为空",
-                "error": "" if ok else "Provider 未返回有效内容",
+                "detail": (
+                    "Embedding Provider 已返回有效向量"
+                    if ok and embedding_test
+                    else "Provider 已返回有效测试内容"
+                    if ok
+                    else "Provider 调用完成，但返回内容为空"
+                ),
+                "error": "" if ok else ("Embedding Provider 未返回有效向量" if embedding_test else "Provider 未返回有效内容"),
                 "steps": [
                     {
-                        "name": "模型调用",
+                        "name": step_name,
                         "status": "ok" if ok else "error",
-                        "detail": "已收到非空响应" if ok else "响应为空",
+                        "detail": "已收到有效结果" if ok else "响应为空",
                         "elapsed_ms": elapsed_ms,
                     }
                 ],
@@ -13761,6 +13826,13 @@ class PrivateCompanionPageApi(
             if unanswered_slowdown_count > 0
             else "未触发"
         )
+        soft_daily_target = 0.0
+        soft_target_getter = getattr(self.plugin, "_soft_daily_target", None)
+        if callable(soft_target_getter):
+            try:
+                soft_daily_target = max(0.0, float(soft_target_getter(user)))
+            except Exception:
+                soft_daily_target = 0.0
         pending_emotion_judgement = self._emotion_pending_judgement_summary(user.get("pending_emotion_judgement"))
         last_emotion_judgement = self._emotion_last_judgement_summary(user.get("last_emotion_judgement"))
         last_emotion_judgement_error = self._emotion_judgement_error_summary(user.get("last_emotion_judgement_error"))
@@ -13829,6 +13901,7 @@ class PrivateCompanionPageApi(
                 if hasattr(self.plugin, "_proactive_daily_limit_is_unlimited") and hasattr(self.plugin, "_effective_user_daily_limit")
                 else False
             ),
+            "soft_daily_target": round(soft_daily_target, 2),
             "unanswered_slowdown_count": unanswered_slowdown_count,
             "unanswered_interval_multiplier": unanswered_interval_multiplier,
             "unanswered_slowdown_text": unanswered_slowdown_text,
@@ -16137,6 +16210,7 @@ class PrivateCompanionPageApi(
             "FORWARD_MESSAGE_PROVIDER_ID",
             "PLUGIN_VISION_PROVIDER_ID",
             "PRIVATE_READING_VISION_PROVIDER_ID",
+            "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID",
             "NEWS_PROVIDER_ID",
             "WEB_EXPLORATION_PROVIDER_ID",
         ]
@@ -17069,6 +17143,92 @@ class PrivateCompanionPageApi(
             )
         items.sort(key=lambda item: (not item["is_default"], item["name"].lower(), item["id"].lower()))
         return items
+
+    @staticmethod
+    def _is_embedding_provider(provider: Any) -> bool:
+        return any(
+            callable(getattr(provider, name, None))
+            for name in ("get_embedding", "get_embeddings", "get_embeddings_batch")
+        )
+
+    async def _available_embedding_provider_items(self) -> list[dict[str, Any]]:
+        context = getattr(self.plugin, "context", None)
+        providers: list[Any] = []
+        get_all = getattr(context, "get_all_embedding_providers", None)
+        if callable(get_all):
+            try:
+                resolved = get_all()
+                if asyncio.iscoroutine(resolved) or hasattr(resolved, "__await__"):
+                    resolved = await resolved
+                providers = list(resolved.values()) if isinstance(resolved, dict) else list(resolved or [])
+            except Exception:
+                providers = []
+        manager = getattr(context, "provider_manager", None)
+        if not providers:
+            providers = list(getattr(manager, "embedding_provider_insts", None) or [])
+        if not providers and isinstance(getattr(manager, "inst_map", None), dict):
+            providers = [
+                provider
+                for provider in manager.inst_map.values()
+                if self._is_embedding_provider(provider)
+            ]
+
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for provider in providers:
+            if not self._is_embedding_provider(provider):
+                continue
+            provider_id = self._provider_id(provider)
+            if not provider_id or provider_id in seen:
+                continue
+            seen.add(provider_id)
+            items.append(
+                {
+                    "id": provider_id,
+                    "name": self._provider_name(provider, provider_id),
+                    "type": self._provider_type(provider) or "embedding",
+                    "model": self._provider_model(provider),
+                    "is_default": False,
+                }
+            )
+        items.sort(key=lambda item: (item["name"].lower(), item["id"].lower()))
+        return items
+
+    async def _embedding_provider_for_test(self, provider_id: str) -> Any:
+        context = getattr(self.plugin, "context", None)
+        if provider_id and context is not None:
+            for getter_name in ("get_embedding_provider_by_id", "get_provider_by_id"):
+                getter = getattr(context, getter_name, None)
+                if not callable(getter):
+                    continue
+                try:
+                    provider = getter(provider_id)
+                    if asyncio.iscoroutine(provider) or hasattr(provider, "__await__"):
+                        provider = await provider
+                except Exception:
+                    provider = None
+                if self._is_embedding_provider(provider):
+                    return provider
+            manager = getattr(context, "provider_manager", None)
+            candidates = list(getattr(manager, "embedding_provider_insts", None) or [])
+            if isinstance(getattr(manager, "inst_map", None), dict):
+                candidates.extend(manager.inst_map.values())
+            for provider in candidates:
+                if self._provider_id(provider) == provider_id and self._is_embedding_provider(provider):
+                    return provider
+            return None
+        resolver = getattr(self.plugin, "_reaction_embedding_provider", None)
+        if callable(resolver):
+            resolved = resolver()
+            if asyncio.iscoroutine(resolved) or hasattr(resolved, "__await__"):
+                resolved = await resolved
+            if isinstance(resolved, tuple) and resolved and self._is_embedding_provider(resolved[0]):
+                return resolved[0]
+        manager = getattr(context, "provider_manager", None)
+        for provider in list(getattr(manager, "embedding_provider_insts", None) or []):
+            if self._is_embedding_provider(provider):
+                return provider
+        return None
 
     def _available_tts_provider_items(self) -> list[dict[str, Any]]:
         context = getattr(self.plugin, "context", None)
@@ -20205,6 +20365,7 @@ class PrivateCompanionPageApi(
             "FORWARD_MESSAGE_PROVIDER_ID": "forward_message_provider_id",
             "PLUGIN_VISION_PROVIDER_ID": "plugin_vision_provider_id",
             "PRIVATE_READING_VISION_PROVIDER_ID": "private_reading_vision_provider_id",
+            "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID": "reaction_expression_embedding_provider_id",
             "NEWS_PROVIDER_ID": "news_provider_id",
             "WEB_EXPLORATION_PROVIDER_ID": "web_exploration_provider_id",
             "DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID": "deepseek_peak_replacement_provider_id",
@@ -22078,6 +22239,7 @@ class PrivateCompanionPageApi(
         # Detect "我会牢牢记住你" (RememberYou) bridge availability
         memory_companion_active = False
         memory_companion_display_name = ""
+        memory_companion_presence: dict[str, Any] = {}
         try:
             bridge = self.plugin._memory_companion_bridge()  # type: ignore[attr-defined]
             if bridge is not None:
@@ -22087,6 +22249,19 @@ class PrivateCompanionPageApi(
                     memory_companion_display_name = "我会牢牢记住你"
         except Exception:
             pass
+        presence_getter = getattr(self.plugin, "_memory_companion_presence", None)
+        if callable(presence_getter):
+            try:
+                presence = presence_getter()
+                if isinstance(presence, dict):
+                    memory_companion_presence = dict(presence)
+            except Exception:
+                memory_companion_presence = {}
+        if not memory_companion_display_name and memory_companion_presence.get("detected"):
+            memory_companion_display_name = self._single_line(
+                memory_companion_presence.get("display_name"),
+                80,
+            ) or "我会牢牢记住你"
         configured_enabled = bool(getattr(self.plugin, "enable_livingmemory_integration", False))
         active_plugins: list[dict[str, Any]] = []
         if memory_companion_active:
@@ -22125,6 +22300,12 @@ class PrivateCompanionPageApi(
             "plugin_dir": plugin_dir,
             "status": status,
             "memory_companion_active": memory_companion_active,
+            "memory_companion_detected": bool(memory_companion_presence.get("detected")),
+            "memory_companion_loaded": bool(memory_companion_presence.get("loaded")),
+            "memory_companion_activated": bool(memory_companion_presence.get("activated")),
+            "memory_companion_reason": self._single_line(memory_companion_presence.get("reason"), 80),
+            "memory_companion_version": self._single_line(memory_companion_presence.get("version"), 40),
+            "memory_companion_plugin_dir": self._single_line(memory_companion_presence.get("plugin_dir"), 260),
             "memory_companion_display_name": memory_companion_display_name,
             "active_plugins": active_plugins,
             "selected_plugin": selected_plugin,

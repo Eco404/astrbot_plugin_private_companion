@@ -601,6 +601,46 @@ class IntegrationStatusMixin:
                 "用途：长期记忆沉淀、短上下文补充、情绪漂移、梦境碎片和跨会话连续性。\n"
                 "建议：保留本插件的生活状态/关系/群聊气氛层,把大规模长期检索交给记忆插件。"
             )
+        companion_presence: dict[str, Any] = {}
+        presence_getter = getattr(self, "_memory_companion_presence", None)
+        if callable(presence_getter):
+            try:
+                candidate = presence_getter()
+                if isinstance(candidate, dict):
+                    companion_presence = candidate
+            except Exception:
+                companion_presence = {}
+        if companion_presence.get("detected"):
+            display_name = _single_line(companion_presence.get("display_name"), 80) or "我会牢牢记住你"
+            version = _single_line(companion_presence.get("version"), 40) or "未知"
+            plugin_path = _single_line(companion_presence.get("plugin_dir"), 260)
+            reason = _single_line(companion_presence.get("reason"), 80)
+            if reason == "bridge_disabled":
+                detail = "陪伴插件侧的 MemoryCompanion Bridge 开关已关闭。"
+            elif not companion_presence.get("activated", False):
+                detail = "AstrBot 已发现插件，但插件当前未启用。"
+            elif not companion_presence.get("loaded", False):
+                detail = "已发现插件文件，但 AstrBot 尚未加载运行实例；可检查插件是否启用并在重载后刷新页面。"
+            elif reason in {
+                "capability_probe_missing",
+                "capability_probe_exception",
+                "capability_probe_invalid",
+                "capability_contract_mismatch",
+            }:
+                detail = "插件已运行，但桥接能力协议未就绪或版本不兼容；请同步更新两个插件后重载。"
+            elif reason == "optional_dependency_missing":
+                detail = "插件已运行，但桥接所需的可选模型依赖缺失，当前已临时降级。"
+            else:
+                detail = "插件已检测到，但桥接实例暂未就绪；页面会自动重新探测。"
+            lines = [
+                f"记忆插件协同：已检测到{display_name}，但当前未建立可用桥接。",
+                f"版本：{version}",
+                f"协同开关：{'开启' if self.enable_livingmemory_integration else '关闭'}",
+                detail,
+            ]
+            if plugin_path:
+                lines.insert(2, f"路径：{plugin_path}")
+            return "\n".join(lines)
         plugin_dir = self._livingmemory_plugin_dir()
         if not plugin_dir.exists():
             return (

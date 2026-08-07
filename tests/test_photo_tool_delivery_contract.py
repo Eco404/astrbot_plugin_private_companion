@@ -50,6 +50,7 @@ class _PhotoToolHarness(LlmToolActionsMixin):
         self.generation_delay = 0.0
         self.memory_calls: list[dict] = []
         self.delivery_kwargs: dict = {}
+        self.delivery_calls = 0
 
     def _photo_text_available(self) -> bool:
         return True
@@ -62,6 +63,7 @@ class _PhotoToolHarness(LlmToolActionsMixin):
         return "test-backend", self.image_path, "ok"
 
     async def _deliver_generated_image_to_event(self, *_args, **kwargs):
+        self.delivery_calls += 1
         self.delivery_kwargs = dict(kwargs)
         return dict(self.delivery)
 
@@ -595,6 +597,55 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event._private_companion_photo_tool_sent)
         self.assertIn("拍给你看啦", event._private_companion_photo_tool_sent_caption)
 
+    async def test_proactive_framework_defers_photo_to_unified_send_chain(self) -> None:
+        harness = _PhotoToolHarness()
+        harness.image_path = self.image_path
+        event = _FakeEvent()
+        event.private_companion_proactive_framework = True
+
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                event,
+                prompt="拍一张窗边的日常自拍",
+                kind="selfie",
+                caption="刚好坐到窗边，就想拍给你看看。",
+            )
+        )
+
+        self.assertEqual(payload["status"], "success")
+        self.assertTrue(payload["success"])
+        self.assertTrue(payload["generated"])
+        self.assertFalse(payload["sent"])
+        self.assertTrue(payload["delivery_deferred"])
+        self.assertEqual(harness.delivery_calls, 0)
+        self.assertTrue(event._private_companion_photo_tool_deferred)
+        self.assertEqual(event._private_companion_photo_tool_deferred_path, self.image_path)
+        self.assertEqual(
+            event._private_companion_photo_tool_deferred_caption,
+            "刚好坐到窗边，就想拍给你看看。",
+        )
+        self.assertIn(PHOTO_TOOL_SILENT_SENTINEL, payload["final_response_instruction"])
+        self.assertNotIn("delivery_error", payload)
+
+    async def test_proactive_framework_removes_status_only_photo_caption(self) -> None:
+        harness = _PhotoToolHarness()
+        harness.image_path = self.image_path
+        event = _FakeEvent()
+        event.private_companion_proactive_framework = True
+
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                event,
+                prompt="拍一张窗边的日常自拍",
+                kind="selfie",
+                caption="图生好了",
+            )
+        )
+
+        self.assertTrue(payload["delivery_deferred"])
+        self.assertEqual(event._private_companion_photo_tool_deferred_caption, "")
+        self.assertEqual(harness.delivery_calls, 0)
+
     async def test_bot_in_scene_text2img_is_promoted_to_reference_capable_selfie(self) -> None:
         harness = _PhotoToolHarness()
         harness.bot_name = "测试角色"
@@ -692,6 +743,55 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.delivery_kwargs["caption"], "今天的穿搭……就是普通的居家服啦。")
         self.assertFalse(harness.delivery_kwargs.get("reaction_image", False))
         self.assertEqual(event._private_companion_photo_tool_sent_caption, "今天的穿搭……就是普通的居家服啦。")
+
+    async def test_missing_caption_sends_image_without_receipt(self) -> None:
+        harness = _PhotoToolHarness()
+        harness.image_path = self.image_path
+
+        await harness._pc_generate_photo_impl(
+            _FakeEvent(),
+            prompt="草稿纸上的小星星",
+            kind="text2img",
+        )
+
+        self.assertEqual(harness.delivery_kwargs["caption"], "")
+
+    async def test_generic_caption_is_removed_instead_of_replaced_with_receipt(self) -> None:
+        harness = _PhotoToolHarness()
+        harness.image_path = self.image_path
+
+        await harness._pc_generate_photo_impl(
+            _FakeEvent(),
+            prompt="草稿纸上的小星星",
+            kind="text2img",
+            caption="生成好了。",
+        )
+
+        self.assertEqual(harness.delivery_kwargs["caption"], "")
+
+    def test_photo_caption_receipt_detection_keeps_only_substantive_text(self) -> None:
+        harness = _PhotoToolHarness()
+
+        for receipt in (
+            "图生好了",
+            "图片生成好了。",
+            "生图成功啦",
+            "我拍好了，给你看～",
+            "按你的要求画好了，给你看",
+            "图片已发送",
+            "已经发给你了",
+            "给你看看",
+        ):
+            with self.subTest(receipt=receipt):
+                self.assertTrue(harness._photo_caption_is_generic(receipt))
+
+        for natural_text in (
+            "窗边的光正好，拍给你看看。",
+            "今天换了你上次说好看的那件外套。",
+            "这个表情特别像你刚才吐槽我的样子。",
+        ):
+            with self.subTest(natural_text=natural_text):
+                self.assertFalse(harness._photo_caption_is_generic(natural_text))
 
     async def test_edit_with_reference_keeps_edit_workflow_kind(self) -> None:
         harness = _PhotoToolHarness()

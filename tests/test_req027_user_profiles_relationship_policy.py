@@ -345,6 +345,30 @@ class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
         self.assertEqual("bot-new", legacy["identity_bot_id"])
         self.assertEqual("123", host._private_user_id_for_event(event))
 
+    def test_managed_legacy_friend_claims_same_platform_without_creating_shadow(self) -> None:
+        host = _AutoProfileHost()
+        host.enable_auto_user_profile_creation = False
+        legacy = host._get_user("123")
+        legacy.update(
+            {
+                "enabled": True,
+                "manual_enabled": True,
+                "relationship_role": "friend",
+                "umo": "default:FriendMessage:123",
+                "last_inbound_umo": "default:FriendMessage:123",
+                "private_inbound_count": 4,
+            }
+        )
+        event = _IdentityEvent("onebot", "onebot-main", "bot-onebot")
+
+        resolved, created = host._ensure_auto_private_user_profile(event, user_id="123", now=6.0)
+
+        self.assertIs(legacy, resolved)
+        self.assertFalse(created)
+        self.assertEqual("onebot-main", legacy["identity_adapter_instance_id"])
+        self.assertEqual("bot-onebot", legacy["identity_bot_id"])
+        self.assertEqual(["123"], list(host.data["users"]))
+
     def test_configured_target_is_addressable_when_automatic_profiles_are_off(self) -> None:
         host = _AutoProfileHost()
         host.targets = ["123"]

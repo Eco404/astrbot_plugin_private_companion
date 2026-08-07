@@ -7,6 +7,7 @@ import uuid
 import asyncio
 import re
 import time
+from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
@@ -45,9 +46,22 @@ class MemoryCompanionAdapterMixin:
     _bridge_cache: Any | None = None
     _bridge_cache_ts: float = 0.0
     _BRIDGE_CACHE_TTL: float = 30.0
+    _BRIDGE_MISSING_CACHE_TTL: float = 2.0
     _bridge_dependency_failure_until: float = 0.0
     _bridge_dependency_failure_module: str = ""
     _bridge_last_status: dict[str, Any] = {}
+
+    _MEMORY_COMPANION_PLUGIN_ALIASES = frozenset(
+        {
+            "astrbot_plugin_memory_companion",
+            "astrbot_plugin_remember_you",
+            "memorycompanion",
+            "memory_companion",
+            "rememberyou",
+            "remember_you",
+            "我会牢牢记住你",
+        }
+    )
 
     @staticmethod
     def _memory_companion_coerce_bool(value: Any, default: bool = True) -> bool:
@@ -292,9 +306,14 @@ class MemoryCompanionAdapterMixin:
             return None
         if self._bridge_cache is not None and (now - self._bridge_cache_ts) < self._BRIDGE_CACHE_TTL:
             return self._bridge_cache
+        negative_cache_ttl = (
+            self._BRIDGE_MISSING_CACHE_TTL
+            if self._bridge_last_status.get("reason") == "bridge_missing"
+            else self._BRIDGE_CACHE_TTL
+        )
         if (
             self._bridge_cache is None
-            and (now - self._bridge_cache_ts) < self._BRIDGE_CACHE_TTL
+            and (now - self._bridge_cache_ts) < negative_cache_ttl
             and self._bridge_last_status.get("reason")
             in {
                 "bridge_missing",
@@ -319,6 +338,7 @@ class MemoryCompanionAdapterMixin:
         return bridge
 
     def _memory_companion_bridge_uncached(self) -> Any | None:
+        inspected_module_ids: set[int] = set()
         for module_name in (
             "data.plugins.astrbot_plugin_remember_you.main",
             "astrbot_plugin_remember_you.main",
@@ -326,10 +346,156 @@ class MemoryCompanionAdapterMixin:
             "astrbot_plugin_memory_companion.main",
         ):
             module = sys.modules.get(module_name)
+            if module is not None:
+                inspected_module_ids.add(id(module))
+            bridge = self._memory_companion_bridge_from_module(module)
+            if bridge is not None:
+                return bridge
+
+        context = getattr(self, "context", None)
+        get_all_stars = getattr(context, "get_all_stars", None)
+        if callable(get_all_stars):
+            try:
+                stars = list(get_all_stars() or [])
+            except Exception:
+                stars = []
+            for metadata in stars:
+                if not self._memory_companion_star_matches(metadata):
+                    continue
+                bridge = self._memory_companion_bridge_from_star(metadata)
+                if bridge is not None:
+                    return bridge
+                module = getattr(metadata, "module", None)
+                if module is not None:
+                    inspected_module_ids.add(id(module))
+
+        # Older AstrBot builds and some hot-reload paths may expose a different
+        # module alias. Scan only modules that identify themselves exactly as
+        # the supported memory plugin; similarly named third-party modules do
+        # not qualify.
+        for module in list(sys.modules.values()):
+            if module is None or id(module) in inspected_module_ids:
+                continue
+            if not self._memory_companion_module_matches(module):
+                continue
             bridge = self._memory_companion_bridge_from_module(module)
             if bridge is not None:
                 return bridge
         return None
+
+    @classmethod
+    def _memory_companion_identity_matches(cls, value: Any) -> bool:
+        text = str(value or "").strip().lower()
+        if not text:
+            return False
+        if text in cls._MEMORY_COMPANION_PLUGIN_ALIASES:
+            return True
+        normalized = re.sub(r"[\s\-]+", "_", text)
+        if normalized in cls._MEMORY_COMPANION_PLUGIN_ALIASES:
+            return True
+        return any(part in cls._MEMORY_COMPANION_PLUGIN_ALIASES for part in text.split("."))
+
+    @classmethod
+    def _memory_companion_module_matches(cls, module: Any | None) -> bool:
+        if module is None:
+            return False
+        module_vars = getattr(module, "__dict__", {})
+        if isinstance(module_vars, dict) and cls._memory_companion_identity_matches(module_vars.get("PLUGIN_NAME")):
+            return True
+        if cls._memory_companion_identity_matches(getattr(module, "__name__", "")):
+            return True
+        module_file = _path_text(getattr(module, "__file__", ""))
+        if module_file:
+            path_parts = re.split(r"[\\/]", module_file.lower())
+            return any(part in cls._MEMORY_COMPANION_PLUGIN_ALIASES for part in path_parts)
+        return False
+
+    @classmethod
+    def _memory_companion_star_matches(cls, metadata: Any | None) -> bool:
+        if metadata is None:
+            return False
+        values = (
+            getattr(metadata, "name", ""),
+            getattr(metadata, "display_name", ""),
+            getattr(metadata, "root_dir_name", ""),
+            getattr(metadata, "module_path", ""),
+        )
+        if any(cls._memory_companion_identity_matches(value) for value in values):
+            return True
+        return cls._memory_companion_module_matches(getattr(metadata, "module", None))
+
+    def _memory_companion_bridge_from_star(self, metadata: Any | None) -> Any | None:
+        if metadata is None or not bool(getattr(metadata, "activated", True)):
+            return None
+        instance = getattr(metadata, "star_cls", None)
+        bridge = self._memory_companion_bridge_from_object(instance)
+        if bridge is not None:
+            return bridge
+        return self._memory_companion_bridge_from_module(getattr(metadata, "module", None))
+
+    def _memory_companion_presence(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "detected": False,
+            "installed": False,
+            "loaded": False,
+            "activated": False,
+            "display_name": "我会牢牢记住你",
+            "version": "",
+            "plugin_dir": "",
+            "reason": _single_line(self._bridge_last_status.get("reason"), 80),
+        }
+        context = getattr(self, "context", None)
+        get_all_stars = getattr(context, "get_all_stars", None)
+        if callable(get_all_stars):
+            try:
+                stars = list(get_all_stars() or [])
+            except Exception:
+                stars = []
+            for metadata in stars:
+                if not self._memory_companion_star_matches(metadata):
+                    continue
+                result.update(
+                    {
+                        "detected": True,
+                        "installed": True,
+                        "loaded": getattr(metadata, "star_cls", None) is not None,
+                        "activated": bool(getattr(metadata, "activated", True)),
+                        "display_name": _single_line(getattr(metadata, "display_name", ""), 80)
+                        or "我会牢牢记住你",
+                        "version": _single_line(getattr(metadata, "version", ""), 40),
+                    }
+                )
+                root_dir_name = _single_line(getattr(metadata, "root_dir_name", ""), 120)
+                if root_dir_name:
+                    result["plugin_dir"] = str(Path(__file__).resolve().parent.parent / root_dir_name)
+                return result
+
+        plugin_root = Path(__file__).resolve().parent.parent
+        for directory_name in ("astrbot_plugin_memory_companion", "astrbot_plugin_remember_you"):
+            candidate = plugin_root / directory_name
+            if not (candidate / "main.py").exists():
+                continue
+            result.update(
+                {
+                    "detected": True,
+                    "installed": True,
+                    "plugin_dir": str(candidate),
+                }
+            )
+            metadata_path = candidate / "metadata.yaml"
+            if metadata_path.exists():
+                try:
+                    metadata_text = metadata_path.read_text(encoding="utf-8")
+                    version_match = re.search(r"(?m)^version:\s*[\"']?([^\n\"']+)", metadata_text)
+                    display_match = re.search(r"(?m)^display_name:\s*[\"']?([^\n\"']+)", metadata_text)
+                    if version_match:
+                        result["version"] = _single_line(version_match.group(1), 40)
+                    if display_match:
+                        result["display_name"] = _single_line(display_match.group(1), 80)
+                except Exception:
+                    pass
+            break
+        return result
 
     def _memory_companion_outbox(self) -> BotPersonalOutbox | None:
         current = getattr(self, "_bot_personal_outbox", None)
@@ -467,14 +633,43 @@ class MemoryCompanionAdapterMixin:
 
     def _memory_companion_bridge_from_module(self, module: Any | None) -> Any | None:
         module_vars = getattr(module, "__dict__", {}) if module is not None else {}
-        getter = module_vars.get("get_active_bridge") if isinstance(module_vars, dict) else None
-        if not callable(getter):
+        if not isinstance(module_vars, dict):
             return None
-        try:
-            return getter()
-        except Exception as exc:
-            self._memory_companion_optional_dependency_failed(exc, where="get_active_bridge")
+        for getter_name in ("get_active_bridge", "get_memory_companion_bridge"):
+            getter = module_vars.get(getter_name)
+            if not callable(getter):
+                continue
+            try:
+                bridge = getter()
+            except Exception as exc:
+                self._memory_companion_optional_dependency_failed(exc, where=getter_name)
+                continue
+            if bridge is not None:
+                return bridge
+        return self._memory_companion_bridge_from_object(module)
+
+    @staticmethod
+    def _memory_companion_bridge_from_object(candidate: Any | None) -> Any | None:
+        if candidate is None:
             return None
+        for getter_name in ("get_active_bridge", "get_memory_companion_bridge"):
+            getter = getattr(candidate, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                bridge = getter()
+            except Exception:
+                continue
+            if bridge is not None:
+                return bridge
+        for attr in ("memory_companion", "memory_companion_bridge", "bridge", "_ACTIVE_BRIDGE"):
+            try:
+                bridge = getattr(candidate, attr, None)
+            except Exception:
+                continue
+            if bridge is not None:
+                return bridge
+        return None
 
     def _memory_companion_probe_capabilities(self, bridge: Any) -> dict[str, Any]:
         try:

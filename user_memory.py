@@ -5646,6 +5646,13 @@ Local classifier result:
             (relation_enabled and inbound_intent in {"intimacy", "play"} and intent_confidence >= 0.68)
             or (emotion_enabled and emotion_event in {"apology", "comfort", "praise"} and emotion_confidence >= 0.65)
         )
+        manual_override_active = bool(
+            existing.get("manual_override")
+            and (
+                not existing.get("expires_at")
+                or _safe_float(existing.get("expires_at"), 0) > now
+            )
+        )
         if boundary_event:
             contact_active = True
             user["contact_preference"] = {
@@ -5656,20 +5663,18 @@ Local classifier result:
                 "reason_code": "explicit_user_boundary",
                 "updated_at": now,
             }
-        elif contact_active and explicit_recovery:
-            contact_active = False
-            user["contact_preference"] = {
-                "mode": "normal",
-                "active": False,
-                "no_contact": False,
-                "source": "automatic",
-                "reason_code": "explicit_user_reengagement",
-                "updated_at": now,
-            }
-
-        if not contact_active and existing.get("manual_override") and (
-            not existing.get("expires_at") or _safe_float(existing.get("expires_at"), 0) > now
-        ):
+        elif manual_override_active:
+            if contact_active and str(existing.get("expression_band") or "relaxed") != "avoidant":
+                contact_active = False
+                user["contact_preference"] = {
+                    "mode": "normal",
+                    "active": False,
+                    "no_contact": False,
+                    "backoff": False,
+                    "source": "manual",
+                    "reason_code": "manual_interaction_override_retained",
+                    "updated_at": now,
+                }
             event_recorder = getattr(self, "_record_interaction_emotion_event", None)
             if callable(event_recorder):
                 event_recorder(
@@ -5681,6 +5686,16 @@ Local classifier result:
                 )
             user["current_interaction"] = existing
             return
+        elif contact_active and explicit_recovery:
+            contact_active = False
+            user["contact_preference"] = {
+                "mode": "normal",
+                "active": False,
+                "no_contact": False,
+                "source": "automatic",
+                "reason_code": "explicit_user_reengagement",
+                "updated_at": now,
+            }
 
         band = "relaxed"
         expires_at = 0.0
@@ -8090,7 +8105,10 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                     lines.append(intent_hint)
         recent = self._format_recent_passive_topics_hint(user)
         if recent:
-            lines.append("刚用过的切口：\n" + recent)
+            lines.append(
+                "近期已用过的回复切口（仅用于避免重复，不是当前话题；除非用户主动提到，"
+                "不要在正文复述或用它开启新话题）：\n" + recent
+            )
         afterglow_formatter = getattr(self, "_format_game_afterglow_prompt", None)
         if callable(afterglow_formatter):
             afterglow = _single_line(afterglow_formatter(user), 520)
@@ -8124,9 +8142,15 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         recent = self._cleanup_recent_passive_topics(user)
         lines = []
         for item in recent[-2:]:
-            text = _single_line(item.get("text"), 48)
-            if text:
-                lines.append(f"- {self._format_timestamp_elapsed(item.get('ts'))}回复过：{text}")
+            signature = _single_line(item.get("signature"), 120)
+            anchors = [
+                token
+                for token in signature.split("|")
+                if 2 <= len(token.strip()) <= 24
+            ][:6]
+            if anchors:
+                # 只给主题锚点，不暴露相对时间和完整旧句，避免模型把避重资料复述进正文。
+                lines.append("- 已用主题词：" + "、".join(anchors))
         return "\n".join(lines)
 
     def _inbound_explicitly_requests_repeat(self, inbound_text: str) -> bool:

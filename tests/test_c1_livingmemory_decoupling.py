@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import time
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,6 +106,63 @@ def test_prefixed_or_livingmemory_modules_do_not_drive_bridge(monkeypatch):
     monkeypatch.setitem(sys.modules, module.__name__, module)
     plugin = _Plugin(True, False, None)
     assert MemoryCompanionAdapterMixin._memory_companion_bridge_uncached(plugin) is None
+
+
+def test_bridge_discovery_uses_astrbot_registered_plugin_instance():
+    bridge = _ProbeBridge()
+    module = types.ModuleType("data.plugins.custom_memory_folder.main")
+    metadata = SimpleNamespace(
+        name="astrbot_plugin_memory_companion",
+        display_name="我会牢牢记住你",
+        root_dir_name="custom_memory_folder",
+        module_path=module.__name__,
+        module=module,
+        activated=True,
+        star_cls=SimpleNamespace(memory_companion=bridge),
+        version="1.7.1",
+    )
+    plugin = _Plugin(True, False, None)
+    plugin.context = SimpleNamespace(get_all_stars=lambda: [metadata])
+
+    assert MemoryCompanionAdapterMixin._memory_companion_bridge_uncached(plugin) is bridge
+    presence = plugin._memory_companion_presence()
+    assert presence["detected"] is True
+    assert presence["loaded"] is True
+    assert presence["display_name"] == "我会牢牢记住你"
+
+
+def test_legacy_public_bridge_getter_is_supported(monkeypatch):
+    bridge = _ProbeBridge()
+    module_name = "data.plugins.astrbot_plugin_memory_companion.main"
+    module = types.ModuleType(module_name)
+    module.PLUGIN_NAME = "astrbot_plugin_memory_companion"
+    module.get_memory_companion_bridge = lambda: bridge
+    monkeypatch.setitem(sys.modules, module_name, module)
+    plugin = _Plugin(True, False, None)
+
+    assert MemoryCompanionAdapterMixin._memory_companion_bridge_uncached(plugin) is bridge
+
+
+def test_missing_bridge_negative_cache_retries_quickly():
+    bridge = _ProbeBridge()
+
+    class _LatePlugin(_Plugin):
+        def __init__(self):
+            super().__init__(True, False, None)
+            self.calls = 0
+
+        def _memory_companion_bridge_uncached(self):
+            self.calls += 1
+            return bridge if self.calls >= 2 else None
+
+    plugin = _LatePlugin()
+    assert plugin._memory_companion_bridge() is None
+    assert plugin._memory_companion_bridge() is None
+    assert plugin.calls == 1
+
+    plugin._bridge_cache_ts = time.monotonic() - plugin._BRIDGE_MISSING_CACHE_TTL - 0.1
+    assert plugin._memory_companion_bridge() is bridge
+    assert plugin.calls == 2
 
 
 def test_legacy_livingmemory_migration_entrypoint_remains():

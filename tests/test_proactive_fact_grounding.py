@@ -60,6 +60,17 @@ class _LocalRewriteDisabledHarness(_ReviewDisabledHarness):
         }
 
 
+class _SoftDeferReviewDisabledHarness(_ReviewDisabledHarness):
+    @staticmethod
+    def _local_proactive_send_decision(*_args, **_kwargs):
+        return {
+            "decision": "defer",
+            "reason": "普通主动过于泛泛",
+            "delay_minutes": 60,
+            "hard": False,
+        }
+
+
 class _ActualLocalReviewDisabledHarness(ProactiveMessageMixin):
     enable_proactive_message_review = False
     proactive_review_mode = "full"
@@ -245,6 +256,21 @@ class ProactiveFactGroundingTests(unittest.TestCase):
         self.assertEqual(decision["decision"], "rewrite")
         self.assertEqual(decision["text"], "刚写到庭院夜风那段，像在听一首很轻的歌谣。")
         self.assertIn("本地确定性改写", decision["reason"])
+        self.assertFalse(harness.rewrite_called)
+
+    def test_disabled_review_skips_non_safety_local_defer(self) -> None:
+        harness = _SoftDeferReviewDisabledHarness()
+        decision = asyncio.run(
+            harness._review_proactive_message_send_decision(
+                {"nickname": "测试用户"},
+                "刚刚想到一件小事，想顺手和你说一句。",
+                reason="check_in",
+                action="message",
+            )
+        )
+
+        self.assertEqual(decision["decision"], "send")
+        self.assertIn("跳过非安全性", decision["reason"])
         self.assertFalse(harness.rewrite_called)
 
     def test_local_only_mode_also_uses_complete_local_rewrite(self) -> None:

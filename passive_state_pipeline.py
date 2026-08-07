@@ -149,6 +149,21 @@ async def inject_humanized_state(
     else:
         await self._append_non_target_private_identity_guard_to_request(event, req)
     await self._append_daily_review_guidance_to_request(event, req)
+    weather_query_allowed = is_private_chat and private_user_active
+    weather_query_user = private_user if weather_query_allowed and isinstance(private_user, dict) else None
+    if not is_private_chat:
+        weather_group_id = self._extract_group_id_from_event(event)
+        weather_query_allowed = bool(
+            weather_group_id
+            and self._feature_enabled_or_temp_unlocked("enable_group_companion")
+            and self._group_enabled_for_event(weather_group_id)
+        )
+    if weather_query_allowed:
+        await self._append_weather_query_context_to_request(
+            event,
+            req,
+            current_user=weather_query_user,
+        )
     if not self._feature_enabled_or_temp_unlocked("inject_passive_states"):
         if is_private_chat and private_user_active:
             await self._append_reply_style_to_request(event, req, mode="private")

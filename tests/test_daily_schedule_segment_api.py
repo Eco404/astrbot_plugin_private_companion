@@ -280,6 +280,8 @@ class DailyScheduleSegmentApiTests(unittest.IsolatedAsyncioTestCase):
     def test_companion_command_normalizes_spaced_management_targets(self):
         normalize = InteractionUtilsMixin._normalize_companion_command_action
         self.assertEqual(("重置插件", ""), normalize("重置", "插件"))
+        self.assertEqual(("重置当前人格", ""), normalize("重置", "当前人格"))
+        self.assertEqual(("重置当前人格", ""), normalize("重置", "人格"))
         self.assertEqual(("重置细化", ""), normalize("重置", "细化"))
         self.assertEqual(("重置穿搭图", "红色外套"), normalize("重置", "穿搭图 红色外套"))
         self.assertEqual(("重置夹层密码", ""), normalize("重置", "夹层密码"))

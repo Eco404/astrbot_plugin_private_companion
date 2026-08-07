@@ -936,7 +936,7 @@ class DailyStateTickMixin:
                     current_for_similarity_guard["proactive_sending_started_at"] = 0
                     self._mark_planned_candidate_status(current_for_similarity_guard, "blocked", similar_note)
                     self._clear_pending_proactive_plan(current_for_similarity_guard)
-                    self._schedule_next_proactive(current_for_similarity_guard, now=_now_ts(), delay_hours=(2.0, 5.0))
+                    self._schedule_next_proactive(current_for_similarity_guard, now=_now_ts(), delay_hours=(0.5, 1.5))
                     self._update_proactive_audit(audit_id, status="cancelled", note=similar_note, text=text)
                     self._save_data_sync()
             if similar_note:

@@ -381,6 +381,30 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                         normal_interaction_band_cap=getattr(self.plugin, "normal_interaction_band_cap", "warm"),
                         now=changed_at,
                     )
+                    contact = user.get("contact_preference")
+                    contact_active = bool(
+                        (
+                            isinstance(contact, dict)
+                            and (
+                                contact.get("active")
+                                or contact.get("no_contact")
+                                or contact.get("backoff")
+                            )
+                        )
+                        or str(contact or "").strip().lower()
+                        in {"no_contact", "backoff", "avoid", "stop"}
+                    )
+                    if requested_interaction_band != "avoidant" and contact_active:
+                        user["contact_preference"] = {
+                            "mode": "normal",
+                            "active": False,
+                            "no_contact": False,
+                            "backoff": False,
+                            "source": "manual",
+                            "operator": "page_administrator",
+                            "reason_code": "administrator_manual_interaction_correction",
+                            "updated_at": changed_at,
+                        }
                     expression_voice_needs_refresh = True
                 elif role != previous_role or next_mode != previous_mode:
                     user["current_interaction"] = current_interaction_projection(

@@ -36,6 +36,9 @@ class _ResponseHarness(TtsToolSanitizerMixin):
     suppress_empty_photo_tool_followup_before_send = (
         PrivateCompanionPlugin.suppress_empty_photo_tool_followup_before_send
     )
+    attach_reaction_expression_image_before_send = (
+        PrivateCompanionPlugin.attach_reaction_expression_image_before_send
+    )
 
     @staticmethod
     def _build_result_from_chain(chain):
@@ -85,7 +88,7 @@ class TtsToolFullScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.stopped)
         self.assertEqual(event.result.chain, [])
 
-    async def test_photo_tool_real_followup_text_is_preserved(self):
+    async def test_photo_tool_real_followup_text_is_suppressed_after_delivery(self):
         harness = _ResponseHarness()
 
         class Event:
@@ -108,8 +111,41 @@ class TtsToolFullScopeTests(unittest.IsolatedAsyncioTestCase):
         event = Event()
         await harness.suppress_empty_photo_tool_followup_before_send(event)
 
-        self.assertFalse(event.stopped)
-        self.assertEqual(event.result.chain[0].text, "补充说明：参考图没有成功载入。")
+        self.assertTrue(event.stopped)
+        self.assertEqual(event.result.chain, [])
+
+    async def test_photo_delivery_discards_nonempty_llm_followup_and_reaction_state(self):
+        harness = _ResponseHarness()
+        event = SimpleNamespace(
+            unified_msg_origin="default:FriendMessage:10001",
+            _private_companion_photo_tool_sent=True,
+            _private_companion_reaction_expression_intent={"emotion": "开心"},
+            _private_companion_deferred_reaction_tts={"text": "看这里"},
+        )
+        resp = LLMResponse(
+            role="assistant",
+            completion_text="比折大人你看～我刚刚画的小星星。",
+            tools_call_name=[],
+            tools_call_args=[],
+        )
+
+        await harness.normalize_tts_enhancement_response(event, resp)
+
+        self.assertEqual(resp.completion_text, "")
+        self.assertIsNone(resp.result_chain)
+        self.assertFalse(hasattr(event, "_private_companion_reaction_expression_intent"))
+
+    async def test_real_photo_marker_skips_reaction_attachment(self):
+        harness = _ResponseHarness()
+        event = SimpleNamespace(
+            unified_msg_origin="default:FriendMessage:10001",
+            _private_companion_skip_reaction_expression=True,
+            _private_companion_reaction_expression_intent={"emotion": "开心"},
+        )
+
+        await harness.attach_reaction_expression_image_before_send(event)
+
+        self.assertFalse(hasattr(event, "_private_companion_reaction_expression_intent"))
 
     async def test_photo_silent_sentinel_is_removed_after_confirmed_delivery(self):
         harness = _ResponseHarness()

@@ -137,11 +137,15 @@ window.PrivateCompanionProviderTree = (() => {
 
   function providerSelect(context, key, value) {
     const { state, noFallbackProviderKeys, optionalNoFallbackProviderKeys, escapeHtml } = context;
-    const known = state.availableProviders.some((item) => item.id === value);
+    const embeddingProvider = key === "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID";
+    const providerItems = embeddingProvider
+      ? (state.availableEmbeddingProviders || [])
+      : state.availableProviders;
+    const known = providerItems.some((item) => item.id === value);
     const customValue = value && !known ? value : "";
     const options = [
-      `<option value="">${noFallbackProviderKeys.has(key) || optionalNoFallbackProviderKeys.has(key) ? "留空不启用" : "留空自动回退"}</option>`,
-      ...state.availableProviders.map((item) => {
+      `<option value="">${embeddingProvider ? "留空自动探测" : noFallbackProviderKeys.has(key) || optionalNoFallbackProviderKeys.has(key) ? "留空不启用" : "留空自动回退"}</option>`,
+      ...providerItems.map((item) => {
         const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
         return `<option value="${escapeHtml(item.id)}" ${item.id === value ? "selected" : ""}>${escapeHtml(label)}</option>`;
       }),
@@ -186,6 +190,7 @@ window.PrivateCompanionProviderTree = (() => {
   function resolveProviderId(context, key, values = currentProviderValues(context)) {
     const { noFallbackProviderKeys, optionalNoFallbackProviderKeys } = context;
     if (values[key]) return values[key];
+    if (key === "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID") return "";
     if (noFallbackProviderKeys.has(key)) return "";
     if (optionalNoFallbackProviderKeys.has(key)) return "";
     const mode = typeof context.currentProviderConfigMode === "function"
@@ -346,10 +351,11 @@ window.PrivateCompanionProviderTree = (() => {
     const selected = providers[key] || "";
     const resolved = resolveProviderId(context, key, providers);
     const configured = Boolean(selected);
+    const embeddingProvider = key === "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID";
     const noFallback = noFallbackProviderKeys.has(key);
     const optionalNoFallback = optionalNoFallbackProviderKeys.has(key);
     const group = providerGroupByKey[key];
-    const statusLabel = configured ? "已单独配置" : (noFallback ? "未配置" : (optionalNoFallback ? "可选未启用" : "自动回退"));
+    const statusLabel = configured ? "已单独配置" : (embeddingProvider ? "自动探测" : (noFallback ? "未配置" : (optionalNoFallback ? "可选未启用" : "自动回退")));
     const guide = providerGuides[key] || {};
     const preference = providerPreferenceMeta[guide.preference || "balanced"];
     const impact = providerPassiveImpactMeta[guide.passiveImpact || ""];
@@ -378,7 +384,7 @@ window.PrivateCompanionProviderTree = (() => {
             <span>Provider</span>
             ${providerSelect(context, key, selected)}
           </label>
-          <div class="provider-limit-grid">
+          ${embeddingProvider ? "" : `<div class="provider-limit-grid">
             <label class="provider-field provider-limit-field provider-timeout-field">
               <span>请求超时</span>
               <span class="provider-limit-control provider-timeout-control">
@@ -389,18 +395,18 @@ window.PrivateCompanionProviderTree = (() => {
             <label class="provider-field provider-limit-field provider-token-limit-field">
               <span>单次 Token 上限（预估）</span>
               <span class="provider-limit-control provider-token-limit-control">
-                <input type="number" min="256" max="2000000" step="1" inputmode="numeric" data-provider-token-limit="${escapeHtml(key)}" value="${escapeHtml(tokenLimitValue)}" placeholder="不限制" aria-label="${escapeHtml(label)}单次 Token 上限" />
+                <input type="number" min="256" max="2000000" step="256" inputmode="numeric" data-provider-token-limit="${escapeHtml(key)}" value="${escapeHtml(tokenLimitValue)}" placeholder="不限制" aria-label="${escapeHtml(label)}单次 Token 上限" />
                 <b>Token</b>
               </span>
             </label>
-          </div>
-          <label class="provider-field provider-fallback-field">
+          </div>`}
+          ${embeddingProvider ? "" : `<label class="provider-field provider-fallback-field">
             <span>备用模型 <small>主模型失败、超时、Token 超限或空响应时尝试一次</small></span>
             ${providerFallbackSelect(context, key, fallbackValue)}
-          </label>
+          </label>`}
           <div class="provider-current">
             <span>当前使用</span>
-            <b>${escapeHtml(resolved || (noFallback ? "未配置" : (optionalNoFallback ? "未启用" : "AstrBot 默认模型")))}</b>
+            <b>${escapeHtml(resolved || (embeddingProvider ? "自动探测可用嵌入模型" : (noFallback ? "未配置" : (optionalNoFallback ? "未启用" : "AstrBot 默认模型"))))}</b>
           </div>
           ${providerGuideMarkup(context, key)}
           <div class="provider-row">

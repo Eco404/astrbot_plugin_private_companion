@@ -993,7 +993,14 @@ class WorldbookMixin:
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         if not cleaned or len(cleaned) > 20:
             return None
-        if re.search(r"(我是不是|我不是|我是说|我是想|我是觉得|我是因为|我是来|我是要|我是在|我是什么|我是谁|你觉得我是)", cleaned):
+        # “我是说……” is a discourse correction, not a self-introduction.
+        # Accept spacing and punctuation variants before applying the strict
+        # self-introduction grammar below.
+        discourse_probe = re.sub(r"\s+", "", cleaned)
+        if re.search(
+            r"(我是不是|我不是|我(?:是)?说|我是想|我是觉得|我是因为|我是来|我是要|我是在|我是什么|我是谁|你觉得我是)",
+            discourse_probe,
+        ):
             return None
         if not re.search(r"^(?:我是|我叫|叫我|以后叫我|可以叫我|你可以叫我)\S{1,24}(?:\s*(?:你可以叫我|可以叫我|以后叫我|叫我)\S{1,16})?[。！？!?\s]*$", cleaned):
             return None

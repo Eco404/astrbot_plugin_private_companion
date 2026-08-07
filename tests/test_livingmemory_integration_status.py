@@ -39,6 +39,26 @@ class LivingMemoryIntegrationStatusTests(unittest.TestCase):
         self.assertIn("插件未加载或召回工具未启用", status)
         self.assertIn("当前不会注入 LivingMemory 召回提示", status)
 
+    def test_detected_memory_companion_incompatibility_is_not_reported_as_missing(self) -> None:
+        harness = _Harness(SimpleNamespace(func_list=[]))
+        harness._memory_companion_bridge = lambda: None
+        harness._memory_companion_presence = lambda: {
+            "detected": True,
+            "installed": True,
+            "loaded": True,
+            "activated": True,
+            "display_name": "我会牢牢记住你",
+            "version": "1.6.0",
+            "plugin_dir": "C:/plugins/astrbot_plugin_memory_companion",
+            "reason": "capability_contract_mismatch",
+        }
+
+        status = harness._format_livingmemory_status()
+
+        self.assertIn("已检测到我会牢牢记住你", status)
+        self.assertIn("版本不兼容", status)
+        self.assertNotIn("未检测到", status)
+
     def test_active_livingmemory_tool_is_available_and_prompt_is_guarded(self) -> None:
         tool = SimpleNamespace(
             name="recall_long_term_memory",

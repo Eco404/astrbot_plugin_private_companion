@@ -2005,9 +2005,12 @@ class ProactiveEngineMixin:
             if callable(threshold_getter)
             else _safe_int(getattr(self, "proactive_persona_judge_send_threshold", 62), 62, 0, 100)
         )
-        if decision == "send" and score > 0 and score < threshold:
-            decision = "defer"
         reason = self._normalize_legacy_proactive_text(payload.get("reason"), limit=140) or "模型人格判定"
+        if decision == "send" and score > 0 and score < threshold:
+            reason = self._normalize_legacy_proactive_text(
+                f"{reason}；分数低于建议阈值，正文生成时收敛",
+                limit=140,
+            )
         result = {
             "decision": decision,
             "score": score,
@@ -2018,6 +2021,85 @@ class ProactiveEngineMixin:
             "topic": _single_line(payload.get("topic"), 80),
             "motive": self._normalize_internal_motive_text(_single_line(payload.get("motive"), 180)),
         }
+        if decision == "rewrite" and not any(
+            _single_line(result.get(key), 180)
+            for key in ("reason_field", "action", "topic", "motive")
+        ):
+            result["decision"] = "send"
+            result["reason"] = self._normalize_legacy_proactive_text(
+                f"{reason}；未给出可应用的计划字段，交给正文生成收敛",
+                limit=140,
+            )
+        return result
+
+    def _proactive_model_judgement_requires_hard_block(
+        self,
+        user: dict[str, Any],
+        judgement: dict[str, Any],
+    ) -> bool:
+        decision = _single_line(judgement.get("decision"), 20).lower()
+        if decision not in {"defer", "drop"}:
+            return False
+        semantics = self._planned_proactive_semantics(user)
+        alignment = self._planned_proactive_persona_alignment(user)
+        if (
+            bool(semantics.get("blocker"))
+            or _safe_float(semantics.get("risk"), 0.0) >= 0.70
+            or bool(alignment.get("blocker"))
+        ):
+            return True
+        note = _single_line(judgement.get("reason"), 180)
+        hard_markers = (
+            "用户明确拒绝",
+            "对方明确拒绝",
+            "不要再发",
+            "不想收到",
+            "免打扰",
+            "用户明确休息",
+            "对方明确休息",
+            "用户正在睡",
+            "隐私泄露",
+            "关系越界",
+            "串用户",
+            "其他用户专属",
+            "内部机制",
+            "工具名",
+            "插件",
+            "提示词",
+            "后台任务",
+            "系统任务",
+            "世界观边界",
+            "无真实来源",
+            "捏造事实",
+            "虚构事实",
+            "不安全",
+        )
+        return any(marker in note for marker in hard_markers)
+
+    def _apply_proactive_model_judgement_policy(
+        self,
+        user: dict[str, Any],
+        judgement: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = dict(judgement)
+        decision = _single_line(result.get("decision"), 20).lower()
+        if decision not in {"defer", "drop"}:
+            return result
+        if self._proactive_model_judgement_requires_hard_block(user, result):
+            result["hard"] = True
+            return result
+        original_reason = _single_line(result.get("reason"), 120) or "质量建议"
+        has_rewrite = any(
+            _single_line(result.get(key), 180)
+            for key in ("reason_field", "action", "topic", "motive")
+        )
+        result["advisory_decision"] = decision
+        result["decision"] = "rewrite" if has_rewrite else "send"
+        result["delay_minutes"] = 0
+        result["reason"] = self._normalize_legacy_proactive_text(
+            f"软质量建议已交给正文生成：{original_reason}",
+            limit=140,
+        )
         return result
 
     def _format_proactive_source_model_hint(self, user: dict[str, Any]) -> str:
@@ -2096,15 +2178,17 @@ class ProactiveEngineMixin:
 判定含义：
 - send：计划自然,可以进入生成。
 - rewrite：方向有价值,但动机/话题/动作需要更贴合角色；只改 planned_reason/action/topic/motive,不要写最终聊天正文。
-- defer：现在不适合或动机不够自然,稍后再看。
-- drop：明显不符合角色/世界观/关系边界,或像系统任务、索取回应、无由头打扰。
+ - defer：只用于用户明确休息、拒绝主动或当前存在无法通过改写解决的硬时机冲突。
+ - drop：只用于关系/隐私/世界观硬越界、内部机制泄露或无真实来源且无法改写的计划。
 
 硬要求：
 - 不得放行内部机制泄露、工具名、模型、插件、提示词、后台任务。
 - 不得新增事实、现实能力或用户没给过的关系信息。
 - 次要用户关系必须普通、低频、不过度亲密；主要用户/亲近关系也要尊重休息和拒绝。
 - 世界观表达必须贴合设定；能力只能作为角色内自然动机,不能露出调用过程。
-- 如果只是“想你了/来看看/在不在/忙不忙”且没有具体由头,通常 defer 或 rewrite。
+ - 低价值、动机偏虚、人格贴合度一般或表达温度偏低都不是硬拦截理由；优先 rewrite，给出一个具体且低压力的 topic/motive。
+ - 如果只是“想你了/来看看/在不在/忙不忙”且没有具体由头,必须优先 rewrite，而不是 defer/drop。
+ - 连续未回应只影响语气和长度：改成一句低压、完整、不追问的表达，不能仅凭未回应就 defer/drop。
 
 【角色设定】
 {_single_line(persona, 1800) or "（未读取到显式人格,按自然私聊陪伴角色处理）"}
@@ -2156,6 +2240,7 @@ class ProactiveEngineMixin:
         signature = self._planned_proactive_model_judge_signature(user)
         cached = self._cached_proactive_model_judgement(user, signature=signature, now=check_now)
         if isinstance(cached, dict):
+            cached = self._apply_proactive_model_judgement_policy(user, cached)
             cached["cached"] = True
             return cached
         local_result = self._local_proactive_persona_judgement(user)
@@ -2212,6 +2297,7 @@ class ProactiveEngineMixin:
             logger.info("[PrivateCompanion] 模型人格判定无有效 JSON,降级本地判定")
             return {"decision": "send", "score": 0, "reason": "模型判定失败,降级本地"}
         result["signature"] = signature
+        result = self._apply_proactive_model_judgement_policy(user, result)
         result["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
         logger.info(
             "[PrivateCompanion] 主动模型人格判定: decision=%s score=%s reason=%s elapsed=%sms",
@@ -2234,7 +2320,7 @@ class ProactiveEngineMixin:
         user["planned_proactive_model_judge_result"] = {
             key: value
             for key, value in judgement.items()
-            if key in {"decision", "score", "reason", "delay_minutes", "reason_field", "action", "topic", "motive"}
+            if key in {"decision", "score", "reason", "hard", "delay_minutes", "reason_field", "action", "topic", "motive"}
         }
         judged_at = _now_ts() if now is None else now
         user["planned_proactive_model_judge_at"] = judged_at
@@ -3657,7 +3743,7 @@ class ProactiveEngineMixin:
             not is_troubleshooting
             and planned_impulse_id
             and window_phase == "tail"
-            and impulse_value < 0.58
+            and impulse_value < 0.28
             and not due_timer_active
             and timeliness == "routine"
         ):
@@ -3720,17 +3806,11 @@ class ProactiveEngineMixin:
             and impulse_value < 0.72
             and timeliness == "routine"
         ):
-            delay_low = 90 if self._private_user_role(user) != "friend" else 240
-            self._defer_or_replace_planned_impulse(
-                user,
-                now=now,
-                note="Bot 状态/主动表达温度偏低,这个念头先忍住: " + _single_line(inner_readiness.get("detail"), 120),
-                delay_minutes=(delay_low, delay_low + 150),
-                block_current=False,
+            logger.debug(
+                "[PrivateCompanion] Bot 表达温度偏低，交由正文提示收敛为短句而不延后: user=%s detail=%s",
+                _single_line(user.get("user_id") or user.get("umo"), 80),
+                _single_line(inner_readiness.get("detail"), 120),
             )
-            if _safe_float(user.get("next_proactive_at"), 0) <= 0:
-                self._schedule_next_proactive(user, now=now, delay_hours=(2.0, 6.0))
-            return False, "Bot 状态/主动表达温度偏低,主动念头先收住"
         social_relay_note = self._unverified_social_relay_plan_reason(
             user,
             source=planned_source,
@@ -3891,18 +3971,24 @@ class ProactiveEngineMixin:
             not is_troubleshooting
             and not due_timer_active
             and planned_source != "timer"
-            and (semantic_blocked or semantic_risk >= 0.45 or (semantic_score < 0.32 and semantic_pressure >= 0.58))
+            and (semantic_blocked or semantic_risk >= 0.70)
         ):
             replaced = self._defer_or_replace_planned_impulse(
                 user,
                 now=now,
                 note="候选语义不够自然: " + _single_line(planned_semantics.get("note"), 120),
                 delay_minutes=(90, 240),
-                block_current=semantic_blocked or semantic_risk >= 0.45,
+                block_current=semantic_blocked or semantic_risk >= 0.70,
             )
             if not replaced and _safe_float(user.get("next_proactive_at"), 0) <= 0:
                 self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
             return False, "候选语义不够自然,已重新挑选"
+        if semantic_score < 0.32 and semantic_pressure >= 0.58:
+            logger.debug(
+                "[PrivateCompanion] 候选由头偏弱且压力偏高，交由正文提示改成低压短句: user=%s note=%s",
+                _single_line(user.get("user_id") or user.get("umo"), 80),
+                _single_line(planned_semantics.get("note"), 120),
+            )
         persona_alignment = self._planned_proactive_persona_alignment(user, now=now)
         persona_fit = _safe_float(persona_alignment.get("score"), 0.55)
         persona_blocked = bool(persona_alignment.get("blocker"))
@@ -3911,7 +3997,7 @@ class ProactiveEngineMixin:
             not is_troubleshooting
             and not due_timer_active
             and planned_source != "timer"
-            and (persona_blocked or persona_fit < persona_threshold)
+            and persona_blocked
         ):
             replaced = self._defer_or_replace_planned_impulse(
                 user,
@@ -3923,6 +4009,13 @@ class ProactiveEngineMixin:
             if not replaced and _safe_float(user.get("next_proactive_at"), 0) <= 0:
                 self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
             return False, "人格/世界观贴合度不足,已重新挑选"
+        if persona_fit < persona_threshold:
+            logger.debug(
+                "[PrivateCompanion] 人格贴合度偏低，交由人格判定/正文生成修正而不延后: user=%s fit=%.2f note=%s",
+                _single_line(user.get("user_id") or user.get("umo"), 80),
+                persona_fit,
+                _single_line(persona_alignment.get("note"), 120),
+            )
         if due_timer_active:
             return True, "ok(timer)"
         ignored_streak = _safe_int(user.get("ignored_streak"), 0, 0)
@@ -3932,16 +4025,12 @@ class ProactiveEngineMixin:
             and impulse_value < (0.72 if self._private_user_role(user) == "friend" else 0.66)
             and timeliness == "routine"
         ):
-            replaced = self._defer_or_replace_planned_impulse(
-                user,
-                now=now,
-                note=f"连续 {ignored_streak} 次未回应,低压念头先不打扰",
-                delay_minutes=(90, 240),
-                block_current=True,
+            logger.debug(
+                "[PrivateCompanion] 连续未回应时保留低压候选，由提示词缩短且禁止追问: user=%s ignored=%s value=%.2f",
+                _single_line(user.get("user_id") or user.get("umo"), 80),
+                ignored_streak,
+                impulse_value,
             )
-            if not replaced and _safe_float(user.get("next_proactive_at"), 0) <= 0:
-                self._schedule_next_proactive(user, now=now, delay_hours=(2.5, 6.0))
-            return False, "连续未回应,低价值主动已收住"
         if not is_troubleshooting and not self._is_reason_allowed_now(planned_reason):
             if self._is_sticky_greeting_reason(planned_reason):
                 self._reschedule_greeting_within_window(user, planned_reason, now=now)
@@ -6574,6 +6663,8 @@ class ProactiveEngineMixin:
     def _planned_event_exceeds_daypart_cap(self, user: dict[str, Any], reason: str, scheduled_at: float) -> bool:
         if reason in {"insomnia_night", "important_date_share"}:
             return False
+        if bool(self._proactive_intensity_effect("ignore_soft_daily_target", False)):
+            return False
         if self._friend_proactive_scheduled_too_early(user, scheduled_at):
             return True
         bucket = self._proactive_daypart_bucket_for_timestamp(scheduled_at)
@@ -6581,8 +6672,6 @@ class ProactiveEngineMixin:
             return False
         counts = self._today_proactive_daypart_counts(user)
         sent_in_bucket = _safe_int(counts.get(bucket), 0, 0)
-        if self._private_user_role(user) == "friend":
-            return sent_in_bucket >= 1
         if bucket == "late_night":
             return sent_in_bucket >= 1
         return sent_in_bucket >= 2
@@ -8683,7 +8772,33 @@ class ProactiveEngineMixin:
         captured_text, captured_image_path, captured_extra_components = self._pop_framework_captured_send_payload(
             str(user.get("umo") or "")
         )
-        if "photo_text" in effective_action or planned_action == "photo_text":
+        deferred_photo = self._pop_framework_deferred_photo_payload(
+            str(user.get("umo") or "")
+        )
+        deferred_photo_path = _path_text(deferred_photo.get("path"), 1000)
+        if deferred_photo_path and os.path.exists(deferred_photo_path):
+            deferred_caption = _single_line(deferred_photo.get("caption"), 500)
+            text = deferred_caption
+            image_path = deferred_photo_path
+            extra_components = []
+            effective_action = "photo_text"
+            action_summary = f"发图：{deferred_caption}" if deferred_caption else "发送了一张图片"
+            deferred_intent_kind = _single_line(deferred_photo.get("intent_kind"), 40)
+            user["_proactive_photo_subject_owner"] = (
+                "bot"
+                if deferred_intent_kind in {"selfie", "sticker"}
+                else "scene"
+                if deferred_intent_kind == "text2img"
+                else "unknown"
+            )
+            logger.info(
+                "[PrivateCompanion] 主动消息采用 pc_generate_photo 成图并进入统一发送链: user=%s kind=%s",
+                _single_line(user.get("user_id"), 40),
+                deferred_intent_kind or "unknown",
+            )
+        if not deferred_photo_path and (
+            "photo_text" in effective_action or planned_action == "photo_text"
+        ):
             if captured_text:
                 text = captured_text
             if captured_image_path:
@@ -8691,7 +8806,7 @@ class ProactiveEngineMixin:
             if self._contains_inline_image_tag(text):
                 image_path = ""
                 extra_components = []
-        if captured_extra_components:
+        if captured_extra_components and not deferred_photo_path:
             extra_components = list(captured_extra_components)
         if "photo_text" in planned_action and self._contains_inline_image_tag(text):
             image_path = ""

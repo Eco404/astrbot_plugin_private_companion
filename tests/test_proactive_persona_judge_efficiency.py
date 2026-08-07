@@ -59,6 +59,40 @@ def _user(**updates):
 
 
 class ProactivePersonaJudgeEfficiencyTests(unittest.IsolatedAsyncioTestCase):
+    def test_soft_model_defer_does_not_reduce_frequency(self):
+        harness = _JudgeHarness()
+        normalized = harness._normalize_proactive_model_judgement(
+            {"decision": "defer", "score": 42, "reason": "表达略普通", "hard": False}
+        )
+        result = harness._apply_proactive_model_judgement_policy(_user(), normalized)
+        self.assertEqual(result["decision"], "send")
+        self.assertIn("软质量建议已交给正文生成", result["reason"])
+
+    def test_soft_model_defer_with_fields_becomes_rewrite(self):
+        harness = _JudgeHarness()
+        normalized = harness._normalize_proactive_model_judgement(
+            {
+                "decision": "defer",
+                "score": 42,
+                "reason": "切口不够具体",
+                "hard": False,
+                "topic": "刚看到窗边的晚霞",
+                "motive": "顺手分享一个具体片段",
+            }
+        )
+        result = harness._apply_proactive_model_judgement_policy(_user(), normalized)
+        self.assertEqual(result["decision"], "rewrite")
+
+    def test_hard_model_drop_remains_blocking(self):
+        harness = _JudgeHarness()
+        user = _user(alignment={"score": 0.1, "blocker": True, "note": "关系越界"})
+        normalized = harness._normalize_proactive_model_judgement(
+            {"decision": "drop", "score": 10, "reason": "明确关系边界冲突", "hard": True}
+        )
+        result = harness._apply_proactive_model_judgement_policy(user, normalized)
+        self.assertEqual(result["decision"], "drop")
+        self.assertTrue(result["hard"])
+
     def test_signature_ignores_impulse_identity(self):
         harness = _JudgeHarness()
         self.assertEqual(

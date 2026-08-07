@@ -4,6 +4,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
@@ -156,6 +157,57 @@ class ProactiveExpiryLifecycleTests(unittest.TestCase):
 
         self.assertEqual(impulses[0]["state"], "blocked")
         self.assertEqual(impulses[0]["last_note"], "潜在念头时间窗口无效")
+
+    def test_deferred_status_keeps_candidate_and_impulse_nonterminal(self) -> None:
+        harness = _LifecycleHarness()
+        now = datetime(2026, 7, 18, 12, 0, tzinfo=TZ).timestamp()
+        impulse = {
+            "id": "defer-1",
+            "state": "queued",
+            "created_ts": now - 60,
+            "updated_ts": now - 60,
+            "source": "story",
+            "reason": "state_share",
+            "action": "message",
+            "topic": "桌边刚收好的几支笔",
+            "window_start_at": now,
+            "preferred_ts": now,
+            "best_until_at": now + 3600,
+            "expire_at": now + 7200,
+        }
+        user = {
+            "user_id": "10001",
+            "planned_candidate_id": "candidate-defer-1",
+            "planned_proactive_impulse_id": "defer-1",
+            "planned_proactive_reason": "state_share",
+            "planned_proactive_action": "message",
+            "planned_proactive_source": "story",
+            "planned_proactive_topic": impulse["topic"],
+            "planned_proactive_window_start_at": now,
+            "planned_proactive_best_until_at": now + 3600,
+            "planned_proactive_expire_at": now + 7200,
+            "next_proactive_at": now,
+            "proactive_impulses": [impulse],
+        }
+        harness.data["proactive_candidate_pool"] = [
+            {
+                "id": "candidate-defer-1",
+                "user_id": "10001",
+                "status": "accepted",
+                "source": "story",
+                "reason": "state_share",
+                "created_ts": now - 60,
+                "updated_ts": now - 60,
+                "scheduled_ts": now,
+            }
+        ]
+
+        with patch("astrbot_plugin_private_companion.proactive_engine._now_ts", return_value=now):
+            harness._mark_planned_candidate_status(user, "deferred", "用户刚活跃过")
+
+        self.assertEqual("deferred", user["proactive_impulses"][0]["state"])
+        self.assertEqual("defer-1", user["planned_proactive_impulse_id"])
+        self.assertEqual("deferred", harness.data["proactive_candidate_pool"][0]["status"])
 
     def test_impossible_future_window_is_terminated_before_queueing(self) -> None:
         harness = _LifecycleHarness()

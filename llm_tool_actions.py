@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+import inspect
 import json
 import os
 import random
@@ -69,7 +70,7 @@ from .reaction_expression import (
     reserve_reaction_expression_image,
     reserve_reaction_expression_intent,
 )
-from .reaction_asset_library import get_reaction_asset_library
+from .reaction_asset_library import ReactionAssetLibrary, get_reaction_asset_library
 
 
 PHOTO_TOOL_SILENT_SENTINEL = "[[PC_PHOTO_SENT_NO_FOLLOWUP]]"
@@ -887,7 +888,7 @@ class LlmToolActionsMixin:
                 "- 每个用户请求本轮最多调用一次 `pc_generate_photo`。工具返回失败、结果取回失败或发送回执未确认后，不要在同一轮再次调用生图工具；按工具的 `message/actual_error/final_response_instruction` 回复，用户下一轮明确要求时再重试。",
                 "- 如果工具返回 `generation_completed=true` 且 `failure_stage=result_materialization`，说明上游已经完成生图但图片结果没有取回或保存成功；不要说成上游生图失败，也不要重复提交同一画面。",
                 "- 在实际调用媒体工具并得到结果前，绝对不能声称“已经发了/给你看了/图片在上面”。角色扮演不能覆盖真实工具状态。",
-                f"- `caption` 会和图片一起作为可见消息发送，必须填写用户应当直接看到、可独立成立的完整自然正文；不要写 `&&shy&&`、`[shy]`、TTS 情绪标签或任何内部控制标记。只有工具返回 `sent=true` 时才表示图片已经发出；成功后不要把最终回复留空，必须只输出内部静默标记 `{PHOTO_TOOL_SILENT_SENTINEL}`。插件会在发送前移除它；不要再写承接句、重复 caption 或额外表情。",
+                f"- `caption` 只用于随图发送用户应当直接看到、可独立成立的自然正文；不得填写“图生好了/生成成功/图片已发送/给你看”等状态回执。确实有与画面、当下感受或对话相关的内容才填写，否则留空让图片独立回复。不要写 `&&shy&&`、`[shy]`、TTS 情绪标签或任何内部控制标记。只有工具返回 `sent=true` 时才表示图片已经发出；成功后不要把最终回复留空，必须只输出内部静默标记 `{PHOTO_TOOL_SILENT_SENTINEL}`。插件会在发送前移除它；不要再写承接句、重复 caption 或额外表情。",
                 "- 工具返回 `sent=false` 时，必须按 `message/actual_error` 如实说明，绝对不能说已经发送。",
                 "- 如果工具返回 `error_code=provider_policy_refusal`，不要复述或翻译 Provider 的英文原文、政策名称、敏感词判断和链接；只用符合当前人格的一句简短中文说明这次没有生成出来，再自然询问是否换一种画面描述重试。",
             ]
@@ -919,6 +920,38 @@ class LlmToolActionsMixin:
         if callable(cue_cleaner):
             cleaned = cue_cleaner(cleaned)
         return _single_line(cleaned, max(1, int(limit or 120)))
+
+    @staticmethod
+    def _photo_caption_is_generic(value: Any) -> bool:
+        text = re.sub(
+            r"[\s。.!！?？,，；;:：、~～…\"'“”‘’（）()【】\[\]]+",
+            "",
+            str(value or ""),
+        ).casefold()
+        if not text:
+            return True
+        polite_tail = r"(?:啦|了|哦|噢|喔|呀|哈|呢)*"
+        handoff_tail = (
+            r"(?:(?:给|发|送)你(?:看|看看|了)?|"
+            r"给你看(?:看)?|请查收)?" + polite_tail
+        )
+        return any(
+            re.fullmatch(pattern, text)
+            for pattern in (
+                rf"(?:我)?(?:按(?:你|您)(?:的)?要求|按要求)?(?:这张)?"
+                rf"(?:图|图片|照片|画面)(?:已经|已|刚刚)?"
+                rf"(?:生|生成|画|绘制|改|修改|做|拍|处理|出)?"
+                rf"(?:成功|好了?|完成|完毕|出来了?){handoff_tail}",
+                rf"(?:我)?(?:按(?:你|您)(?:的)?要求|按要求)?(?:已经|已|刚刚)?"
+                rf"(?:生图|出图|生成|画|绘制|改|修改|做好|做|拍|处理)"
+                rf"(?:成功|好了?|完成|完毕|出来了?){handoff_tail}",
+                rf"(?:图|图片|照片)?(?:已经|已)?(?:发送|发出|送达)"
+                rf"(?:成功|完成|好了?)?{polite_tail}",
+                rf"(?:已经|已)?(?:发|发送|送)给你{polite_tail}",
+                rf"(?:给|发)(?:你)?(?:看|看看){polite_tail}",
+                rf"(?:完成|完成了|好了|成功){polite_tail}",
+            )
+        )
 
     @staticmethod
     def _photo_generation_policy_refusal(value: Any) -> bool:
@@ -3261,10 +3294,14 @@ class LlmToolActionsMixin:
                         self._note_command_photo_generation_attempt(user, image_path=image_path)
                         self._save_data_sync()
         sent = False
+        delivery_deferred = False
         delivery: dict[str, Any] = {}
         generation_trace_id = _single_line(generation_metadata.get("trace_id"), 80)
         if ok and send_image:
-            message = visible_caption or ("" if intent_kind == "sticker" else "生成好了。")
+            # 图片本身就是成功结果。纯状态 caption 不应成为可见回执；
+            # 只有包含实际语境信息的自然正文才随图发送。
+            usable_caption = "" if self._photo_caption_is_generic(visible_caption) else visible_caption
+            message = usable_caption
             fallback_message = _single_line(
                 generation_metadata.get("reference_fallback_message"),
                 260,
@@ -3278,31 +3315,59 @@ class LlmToolActionsMixin:
                     "delivery_started",
                     data={"caption": message, "image_path": image_path},
                 )
-            try:
-                delivery = await self._deliver_generated_image_to_event(
-                    event,
-                    image_path=image_path,
-                    caption=message,
-                )
-            except Exception as exc:
+            delivery_deferred = bool(
+                getattr(event, "private_companion_proactive_framework", False)
+            )
+            if delivery_deferred:
                 delivery = {
                     "sent": False,
-                    "destination": "error",
-                    "message": f"图片发送失败：{_single_line(exc, 180) or '未知错误'}",
+                    "destination": "proactive_framework",
+                    "message": "图片已生成，等待主动消息发送链统一投递",
+                    "deferred": True,
                 }
-                logger.warning(
-                    "[PrivateCompanion] pc_generate_photo 图片投递异常: session=%s err=%s",
+                try:
+                    setattr(event, "_private_companion_photo_tool_deferred", True)
+                    setattr(event, "_private_companion_photo_tool_deferred_path", image_path)
+                    setattr(event, "_private_companion_photo_tool_deferred_caption", message)
+                    setattr(event, "_private_companion_photo_tool_deferred_intent_kind", intent_kind)
+                except Exception:
+                    pass
+                logger.info(
+                    "[PrivateCompanion] pc_generate_photo 成图已交由主动发送链统一投递: session=%s kind=%s",
                     session_key,
-                    _single_line(exc, 180),
+                    intent_kind,
                 )
+            else:
+                try:
+                    delivery = await self._deliver_generated_image_to_event(
+                        event,
+                        image_path=image_path,
+                        caption=message,
+                    )
+                except Exception as exc:
+                    delivery = {
+                        "sent": False,
+                        "destination": "error",
+                        "message": f"图片发送失败：{_single_line(exc, 180) or '未知错误'}",
+                    }
+                    logger.warning(
+                        "[PrivateCompanion] pc_generate_photo 图片投递异常: session=%s err=%s",
+                        session_key,
+                        _single_line(exc, 180),
+                    )
             sent = bool(delivery.get("sent"))
             if callable(trace_writer):
                 trace_writer(
                     generation_trace_id,
-                    "delivery_completed" if sent else "delivery_failed",
-                    status="ok" if sent else "error",
+                    "delivery_deferred"
+                    if delivery_deferred
+                    else "delivery_completed"
+                    if sent
+                    else "delivery_failed",
+                    status="ok" if sent or delivery_deferred else "error",
                     data={
                         "sent": sent,
+                        "deferred": delivery_deferred,
                         "destination": delivery.get("destination"),
                         "message": delivery.get("message"),
                         "review_label": delivery.get("review_label"),
@@ -3343,7 +3408,7 @@ class LlmToolActionsMixin:
                     reference_used=used_reference if reference_usage_known else None,
                 )
         delivery_uncertain = bool(delivery.get("uncertain"))
-        overall_success = bool(ok and (not send_image or sent))
+        overall_success = bool(ok and (not send_image or sent or delivery_deferred))
         public_reference_plan = [
             {
                 key: value
@@ -3406,6 +3471,7 @@ class LlmToolActionsMixin:
             "final_presets": final_presets,
             "prompt_hash": _single_line(generation_metadata.get("prompt_hash"), 80),
             "sent": sent,
+            "delivery_deferred": delivery_deferred,
             "delivery_uncertain": delivery_uncertain,
             "delivery": _single_line(delivery.get("destination"), 30),
             "safety_review": _single_line(delivery.get("review_label"), 30),
@@ -3413,12 +3479,14 @@ class LlmToolActionsMixin:
             "must_not_claim_sent": not sent,
             "same_turn_retry_allowed": False,
             "final_response_instruction": (
-                f"图片和 caption 已作为本轮唯一可见回复发送。最终回复不要留空，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。"
+                f"图片及可选的自然 caption 已作为本轮唯一可见回复发送。最终回复不要留空，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。"
                 if sent
+                else f"图片已生成并交给主动发送链；只有非回执的自然 caption 才会随图发送。不要输出状态回执，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。"
+                if delivery_deferred
                 else ""
             ),
         }
-        if ok and send_image and not sent:
+        if ok and send_image and not sent and not delivery_deferred:
             delivery_error = _single_line(delivery.get("message"), 360) or "图片发送失败"
             result_payload.update(
                 {
@@ -4469,6 +4537,168 @@ class LlmToolActionsMixin:
         saver = getattr(self, "_save_data_sync", None)
         if callable(saver):
             saver()
+
+    @staticmethod
+    def _is_reaction_embedding_provider(provider: Any) -> bool:
+        return any(
+            callable(getattr(provider, name, None))
+            for name in ("get_embedding", "get_embeddings", "get_embeddings_batch")
+        )
+
+    @staticmethod
+    def _reaction_embedding_provider_runtime_id(provider: Any) -> str:
+        try:
+            meta = provider.meta() if callable(getattr(provider, "meta", None)) else None
+        except Exception:
+            meta = None
+        if isinstance(meta, dict):
+            value = meta.get("id")
+        else:
+            value = getattr(meta, "id", "") if meta is not None else ""
+        if value:
+            return _single_line(value, 160)
+        config = getattr(provider, "provider_config", None)
+        if isinstance(config, dict) and config.get("id"):
+            return _single_line(config.get("id"), 160)
+        direct = _single_line(getattr(provider, "id", "") or getattr(provider, "provider_id", ""), 160)
+        if direct:
+            return direct
+        provider_class = provider.__class__
+        return _single_line(
+            f"auto:{getattr(provider_class, '__module__', '')}.{getattr(provider_class, '__qualname__', provider_class.__name__)}",
+            160,
+        )
+
+    async def _reaction_embedding_provider(self) -> tuple[Any, str]:
+        configured = _single_line(
+            getattr(self, "reaction_expression_embedding_provider_id", ""), 160
+        )
+        context = getattr(self, "context", None)
+        if context is None:
+            return None, configured
+
+        async def resolve(getter_name: str, provider_id: str = "") -> Any:
+            getter = getattr(context, getter_name, None)
+            if not callable(getter):
+                return None
+            try:
+                value = getter(provider_id) if provider_id else getter()
+                return await value if inspect.isawaitable(value) else value
+            except Exception:
+                return None
+
+        if configured:
+            for getter_name in ("get_embedding_provider_by_id", "get_provider_by_id"):
+                provider = await resolve(getter_name, configured)
+                if self._is_reaction_embedding_provider(provider):
+                    return provider, configured
+            manager = getattr(context, "provider_manager", None)
+            candidates = list(getattr(manager, "embedding_provider_insts", []) or [])
+            if isinstance(getattr(manager, "inst_map", None), dict):
+                candidates.extend(manager.inst_map.values())
+            for provider in candidates:
+                if (
+                    self._reaction_embedding_provider_runtime_id(provider) == configured
+                    and self._is_reaction_embedding_provider(provider)
+                ):
+                    return provider, configured
+            logger.warning(
+                "[PrivateCompanion] 表情 Embedding Provider 不可用，回退关键词检索: provider_id=%s",
+                configured,
+            )
+            return None, configured
+
+        for getter_name in ("get_all_embedding_providers", "get_all_providers"):
+            providers = await resolve(getter_name)
+            provider_rows = providers.values() if isinstance(providers, dict) else providers or []
+            for provider in provider_rows:
+                if self._is_reaction_embedding_provider(provider):
+                    return provider, self._reaction_embedding_provider_runtime_id(provider) or "<auto>"
+        manager = getattr(context, "provider_manager", None)
+        for provider in (
+            list(getattr(manager, "embedding_provider_insts", []) or [])
+            + list(getattr(manager, "inst_map", {}).values() if manager is not None else [])
+        ):
+            if self._is_reaction_embedding_provider(provider):
+                return provider, self._reaction_embedding_provider_runtime_id(provider) or "<auto>"
+        return None, ""
+
+    async def _reaction_embedding_vector(self, provider: Any, text: str) -> list[float]:
+        if not self._is_reaction_embedding_provider(provider):
+            return []
+        limit = max(0, _safe_int(getattr(self, "reaction_expression_embedding_timeout_ms", 5000), 5000, 0))
+        async def wait_result(value: Any) -> Any:
+            if not inspect.isawaitable(value):
+                return value
+            if limit <= 0:
+                return await value
+            return await asyncio.wait_for(value, timeout=limit / 1000.0)
+        get_embedding = getattr(provider, "get_embedding", None)
+        if callable(get_embedding):
+            payload = await wait_result(get_embedding(_single_line(text, 1800)))
+        else:
+            get_embeddings = getattr(provider, "get_embeddings", None)
+            if callable(get_embeddings):
+                payload = await wait_result(get_embeddings([_single_line(text, 1800)]))
+            else:
+                get_batch = getattr(provider, "get_embeddings_batch", None)
+                if not callable(get_batch):
+                    return []
+                try:
+                    payload = await wait_result(get_batch([_single_line(text, 1800)], batch_size=1, tasks_limit=1, max_retries=1))
+                except TypeError:
+                    payload = await wait_result(get_batch([_single_line(text, 1800)]))
+        return ReactionAssetLibrary.normalize_embedding_vector(payload)
+
+    async def _reaction_embedding_backfill(self, library: Any, provider: Any, provider_id: str) -> None:
+        try:
+            batch_size = max(1, min(100, _safe_int(getattr(self, "reaction_expression_embedding_backfill_batch_size", 24), 24, 1)))
+            rows = await asyncio.to_thread(library.list_embedding_missing, provider_id, limit=batch_size)
+            updates: list[dict[str, Any]] = []
+            for item, text_hash in rows:
+                try:
+                    vector = await self._reaction_embedding_vector(provider, library.embedding_text(item))
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] 表情向量补齐失败: provider=%s error_type=%s", provider_id, type(exc).__name__)
+                    continue
+                if vector:
+                    updates.append({"id": item.get("id"), "text_hash": text_hash, "vector": vector})
+            if updates:
+                await asyncio.to_thread(library.upsert_embeddings, provider_id, updates)
+                logger.info("[PrivateCompanion] 已补齐表情语义向量: provider=%s count=%s", provider_id, len(updates))
+        finally:
+            inflight = getattr(self, "_reaction_embedding_backfill_inflight", set())
+            inflight.discard(provider_id)
+
+    def _schedule_reaction_embedding_backfill(self, library: Any, provider: Any, provider_id: str) -> None:
+        if not bool(getattr(self, "reaction_expression_embedding_backfill_enabled", True)):
+            return
+        inflight = getattr(self, "_reaction_embedding_backfill_inflight", None)
+        if not isinstance(inflight, set):
+            inflight = set()
+            setattr(self, "_reaction_embedding_backfill_inflight", inflight)
+        if provider_id in inflight:
+            return
+        now = time.monotonic()
+        last_runs = getattr(self, "_reaction_embedding_backfill_last_run", None)
+        if not isinstance(last_runs, dict):
+            last_runs = {}
+            setattr(self, "_reaction_embedding_backfill_last_run", last_runs)
+        interval = max(0, _safe_int(getattr(self, "reaction_expression_embedding_backfill_interval_seconds", 300), 300, 0))
+        if interval and now - _safe_float(last_runs.get(provider_id), 0.0, 0.0) < interval:
+            return
+        inflight.add(provider_id)
+        last_runs[provider_id] = now
+        coroutine = self._reaction_embedding_backfill(library, provider, provider_id)
+        creator = getattr(self, "_create_lifecycle_background_task", None)
+        try:
+            if callable(creator):
+                creator(coroutine, label=f"reaction_embedding:{provider_id[:24]}")
+            else:
+                asyncio.create_task(coroutine)
+        except Exception:
+            inflight.discard(provider_id)
+            coroutine.close()
 
     @staticmethod
     def _reaction_expression_lookup_cache_key(
@@ -5715,12 +5945,37 @@ class LlmToolActionsMixin:
                 ensure_ascii=False,
             )
 
+        embedding_provider = None
+        embedding_provider_id = ""
+        embedding_query: list[float] = []
+        if bool(getattr(self, "reaction_expression_embedding_enabled", False)):
+            try:
+                embedding_provider, embedding_provider_id = await self._reaction_embedding_provider()
+                if embedding_provider is not None and embedding_provider_id:
+                    setattr(self, "_reaction_embedding_active_provider_id", embedding_provider_id)
+                    self._schedule_reaction_embedding_backfill(
+                        library, embedding_provider, embedding_provider_id
+                    )
+                    embedding_query = await self._reaction_embedding_vector(
+                        embedding_provider,
+                        "；".join(part for part in (query_text, lookup_context) if part),
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "[PrivateCompanion] 表情查询向量生成失败，回退关键词: provider=%s error_type=%s",
+                    embedding_provider_id or "<auto>",
+                    type(exc).__name__,
+                )
+                embedding_query = []
+
         lookup_started = time.perf_counter()
         cache_hit = False
         lookup_error_type = ""
         lookup = dict(owned_lookup) if isinstance(owned_lookup, dict) else None
         if lookup is None:
             lookup_revision = self._reaction_expression_lookup_cache_revision(library)
+            if embedding_provider_id:
+                lookup_revision = f"{lookup_revision}|embedding:{embedding_provider_id}"
             if preference_revision:
                 lookup_revision = f"{lookup_revision}|preference:{preference_revision}"
             cache_key = self._reaction_expression_lookup_cache_key(
@@ -5740,13 +5995,32 @@ class LlmToolActionsMixin:
                 cache_hit = True
         if lookup is None:
             try:
+                find_kwargs = {
+                    "context": lookup_context,
+                    "scope": scope,
+                    "selection_preferences": preference_snapshot,
+                    "selection_signature": preference_signature,
+                }
+                if embedding_query and embedding_provider_id:
+                    find_kwargs.update(
+                        {
+                            "embedding_query": embedding_query,
+                            "embedding_provider_id": embedding_provider_id,
+                            "embedding_score_threshold": getattr(
+                                self, "reaction_expression_embedding_score_threshold", 0.42
+                            ),
+                            "embedding_weight": getattr(
+                                self, "reaction_expression_embedding_weight", 0.55
+                            ),
+                            "embedding_candidate_limit": getattr(
+                                self, "reaction_expression_embedding_candidate_limit", 1200
+                            ),
+                        }
+                    )
                 lookup = await asyncio.to_thread(
                     library.find,
                     query_text,
-                    context=lookup_context,
-                    scope=scope,
-                    selection_preferences=preference_snapshot,
-                    selection_signature=preference_signature,
+                    **find_kwargs,
                 )
                 if lookup is None:
                     lookup = {

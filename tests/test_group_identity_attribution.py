@@ -14,6 +14,7 @@ class _IdentityHarness(WorldbookMixin, GroupObservationMixin, MemoryCompanionAda
     worldbook_member_inject_limit = 4
 
     def __init__(self) -> None:
+        self.bot_name = "小星"
         self.data = {
             "users": {},
             "worldbook_member_profiles": {
@@ -111,6 +112,21 @@ class GroupIdentityAttributionTests(unittest.TestCase):
         )
 
         self.assertEqual({}, claim)
+
+    def test_discourse_phrase_is_not_treated_as_self_registration(self) -> None:
+        for text in (
+            "我是说……",
+            "我是说：刚才不是这个意思",
+            "我 是 说，先别记这个",
+            "我是说，我叫小明",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(self.harness._extract_worldbook_self_intro(text))
+
+        self.assertEqual(
+            {"name": "小明", "aliases": ["小明"]},
+            self.harness._extract_worldbook_self_intro("我是小明"),
+        )
 
     def test_memory_bridge_receives_stable_sender_identity(self) -> None:
         text = "我是周周"

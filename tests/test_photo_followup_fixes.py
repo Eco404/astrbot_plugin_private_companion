@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
 import time
 import unittest
 from types import SimpleNamespace
@@ -11,6 +13,7 @@ from astrbot.api.star import Context
 from astrbot_plugin_private_companion.daily_state import DailyStateMixin
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
 from astrbot_plugin_private_companion.private_image import PrivateImageMixin
+from astrbot_plugin_private_companion.proactive_engine import ProactiveEngineMixin
 from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
 
 
@@ -75,17 +78,84 @@ class _FrameworkAgentHarness(ProactiveMessageMixin):
     def __init__(self, context) -> None:
         self.context = context
         self._framework_captured_send_cache = {}
+        self._framework_deferred_photo_cache = {}
+        self.captured_tool_sends = []
 
     async def _get_current_conversation_safely(self, *_args, **_kwargs):
         return None
 
     async def _capture_framework_send_message_calls(self, *, runner_factory, **_kwargs):
-        return await runner_factory(), []
+        return await runner_factory(), list(self.captured_tool_sends)
 
 
 class _FrameworkRunner:
+    def __init__(self, completion_text: str = "原生上下文主链正常") -> None:
+        self.completion_text = completion_text
+
     def get_final_llm_resp(self):
-        return SimpleNamespace(completion_text="原生上下文主链正常")
+        return SimpleNamespace(completion_text=self.completion_text)
+
+
+class _DeferredPhotoGenerationHarness(ProactiveMessageMixin):
+    def __init__(self) -> None:
+        self.enable_llm_proactive_message = True
+        self._framework_deferred_photo_cache = {}
+        self.direct_fallback_calls = 0
+
+    def _clear_proactive_reaction_intent(self, _umo: str) -> None:
+        return None
+
+    async def _generate_proactive_message_via_framework(self, user, *_args, **_kwargs):
+        self._framework_deferred_photo_cache[str(user.get("umo") or "")] = {
+            "path": "C:/generated/image.png",
+            "caption": "",
+            "intent_kind": "sticker",
+        }
+        return ""
+
+    async def _generate_proactive_message_direct_fallback(self, *_args, **_kwargs):
+        self.direct_fallback_calls += 1
+        return "不应该出现的生成成功回执"
+
+
+class _DeferredPhotoRenderHarness(ProactiveEngineMixin, ProactiveMessageMixin):
+    def __init__(self, image_path: str) -> None:
+        self.default_nickname = "测试角色"
+        self.image_path = image_path
+        self._framework_captured_send_cache = {}
+        self._framework_deferred_photo_cache = {}
+
+    def _has_due_llm_timer(self, _user) -> bool:
+        return False
+
+    def _is_reason_allowed_now(self, _reason: str) -> bool:
+        return True
+
+    def _should_use_name_only_opener(self, *_args, **_kwargs) -> bool:
+        return False
+
+    async def _execute_proactive_action(self, *_args, **_kwargs):
+        return {
+            "success": True,
+            "context": "message：准备分享一件小事",
+            "extra_components": [],
+            "summary": "分享一件小事",
+            "effective_action": "message",
+        }
+
+    async def _narrate_action_context(self, _action: str, context: str) -> str:
+        return context
+
+    async def _generate_proactive_message_with_llm(self, user, *_args, **_kwargs):
+        self._framework_deferred_photo_cache[str(user.get("umo") or "")] = {
+            "path": self.image_path,
+            "caption": "窗边的光正好，拍给你看看。",
+            "intent_kind": "selfie",
+        }
+        return ""
+
+    async def _maybe_run_pre_message_poke(self, *_args, **_kwargs):
+        return 0, ""
 
 
 class _PrivateImageHarness(PrivateImageMixin):
@@ -340,6 +410,101 @@ class PhotoFollowupFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text, "原生上下文主链正常")
         self.assertIs(mocked_build.await_args.kwargs["plugin_context"], native_context)
         self.assertIs(mocked_build.await_args.kwargs["event"].context_obj, native_context)
+
+    async def test_framework_discards_photo_receipt_and_caches_deferred_delivery(self) -> None:
+        native_context = object.__new__(Context)
+        native_context.get_config = lambda **_kwargs: {"provider_settings": {}}
+        harness = _FrameworkAgentHarness(native_context)
+        handle = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        handle.write(b"test-image")
+        handle.close()
+        try:
+            async def build_with_deferred_photo(**kwargs):
+                event = kwargs["event"]
+                event._private_companion_photo_tool_deferred = True
+                event._private_companion_photo_tool_deferred_path = handle.name
+                event._private_companion_photo_tool_deferred_caption = "窗边的光正好，拍给你看看。"
+                event._private_companion_photo_tool_deferred_intent_kind = "selfie"
+                return SimpleNamespace(
+                    agent_runner=_FrameworkRunner("图片生成成功，已经发给你了。")
+                )
+
+            harness.captured_tool_sends = [
+                SimpleNamespace(messages=[{"type": "plain", "text": "图片已发送"}])
+            ]
+
+            with patch(
+                "astrbot_plugin_private_companion.proactive_message.build_main_agent",
+                new=AsyncMock(side_effect=build_with_deferred_photo),
+            ):
+                text = await harness._run_framework_agent_text(
+                    umo="default:FriendMessage:10001",
+                    prompt="主动消息测试",
+                    name="测试角色",
+                    label="proactive_photo_receipt_regression",
+                )
+
+            self.assertEqual(text, "窗边的光正好，拍给你看看。")
+            payload = harness._pop_framework_deferred_photo_payload(
+                "default:FriendMessage:10001"
+            )
+            self.assertEqual(payload["path"], handle.name)
+            self.assertEqual(payload["caption"], "窗边的光正好，拍给你看看。")
+            self.assertEqual(payload["intent_kind"], "selfie")
+            self.assertNotIn("生成成功", text)
+            self.assertFalse(harness._framework_captured_send_cache)
+            self.assertFalse(harness._pop_framework_deferred_photo_payload("default:FriendMessage:10001"))
+        finally:
+            if os.path.exists(handle.name):
+                os.unlink(handle.name)
+
+    async def test_captionless_deferred_photo_does_not_trigger_text_fallback(self) -> None:
+        harness = _DeferredPhotoGenerationHarness()
+        user = {
+            "user_id": "10001",
+            "umo": "default:FriendMessage:10001",
+        }
+
+        text = await harness._generate_proactive_message_with_llm(
+            user,
+            "测试角色",
+            "check_in",
+        )
+
+        self.assertEqual(text, "")
+        self.assertEqual(harness.direct_fallback_calls, 0)
+        self.assertIn(user["umo"], harness._framework_deferred_photo_cache)
+
+    async def test_render_message_promotes_deferred_photo_into_normal_delivery(self) -> None:
+        handle = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        handle.write(b"test-image")
+        handle.close()
+        try:
+            harness = _DeferredPhotoRenderHarness(handle.name)
+            user = {
+                "user_id": "10001",
+                "umo": "default:FriendMessage:10001",
+                "nickname": "测试角色",
+                "planned_proactive_reason": "check_in",
+                "planned_proactive_action": "message",
+                "planned_proactive_motive": "想分享窗边的光",
+            }
+
+            reason, text, image_path, components, summary, action = (
+                await harness._render_message(user)
+            )
+
+            self.assertEqual(reason, "check_in")
+            self.assertEqual(text, "窗边的光正好，拍给你看看。")
+            self.assertEqual(image_path, handle.name)
+            self.assertEqual(components, [])
+            self.assertEqual(summary, "发图：窗边的光正好，拍给你看看。")
+            self.assertEqual(action, "photo_text")
+            self.assertEqual(user["_proactive_photo_subject_owner"], "bot")
+            self.assertFalse(harness._framework_deferred_photo_cache)
+        finally:
+            if os.path.exists(handle.name):
+                os.unlink(handle.name)
 
     def test_archive_keeps_photo_caption(self) -> None:
         harness = _FrameworkHarness()

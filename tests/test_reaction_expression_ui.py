@@ -150,7 +150,8 @@ class ReactionExpressionUiTests(unittest.TestCase):
         self.assertIn("本地兜底", self.script)
         self.assertIn("高置信时优先", self.script)
         self.assertIn("没有足够合适的候选时保持纯文字", self.script)
-        self.assertIn('["模型调用", "仅主回复 1 次"]', self.script)
+        self.assertIn('embeddingEnabled ? "主回复 1 次 + 查询向量 1 次" : "仅主回复 1 次"', self.script)
+        self.assertIn("本地语义 + 关键词", self.script)
         self.assertIn("绝不会用图片替代正文", self.script)
         self.assertNotIn("只把合适图片追加在文字后", self.script)
         self.assertNotIn(
@@ -158,6 +159,25 @@ class ReactionExpressionUiTests(unittest.TestCase):
             self.schema["experimental_motivation_config"]["items"]
             ["enable_reaction_expression_experiment"]["hint"],
         )
+
+    def test_panel_exposes_optional_embedding_provider_with_local_fallback(self) -> None:
+        items = self.schema["experimental_motivation_config"]["items"]
+
+        self.assertFalse(items["reaction_expression_embedding_enabled"]["default"])
+        self.assertEqual("select_provider", items["REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"]["_special"])
+        self.assertEqual(0.42, items["reaction_expression_embedding_score_threshold"]["default"])
+        self.assertTrue(items["reaction_expression_embedding_backfill_enabled"]["default"])
+        for key in (
+            "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID",
+            "reaction_expression_embedding_timeout_ms",
+            "reaction_expression_embedding_candidate_limit",
+            "reaction_expression_embedding_score_threshold",
+            "reaction_expression_embedding_weight",
+        ):
+            self.assertIn(key, self.script)
+        self.assertIn("availableEmbeddingProviders", self.script)
+        self.assertIn("留空自动探测", self.script)
+        self.assertIn("自动回退关键词检索", self.script)
 
     def test_runtime_panel_initializes_trigger_mode_summary_locally(self) -> None:
         runtime_source = self.script.split(

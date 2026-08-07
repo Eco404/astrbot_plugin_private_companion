@@ -2691,6 +2691,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "也不调用除 `pc_generate_photo` 以外的其他 Private Companion 工具。\n"
             "- 当本轮主动动机、模板或当前生活场景确实适合用真实图片一起表达时，"
             "允许调用一次 `pc_generate_photo`（`send=true`）；不需要图片时只生成一句自然正文。\n"
+            "- 主动链中的 `pc_generate_photo` 成图会由插件统一发送；工具确认 `delivery_deferred=true` 后，"
+            "只输出工具要求的内部静默标记，不要补写生成成功、等待发送或图片已发送等回执。\n"
+            "- `caption` 不是工具回执栏；只在有贴合当前情境的自然正文时填写。若只能写“图生好了/给你看”，就留空只发图片。\n"
             "- 生图成功后，不要再说相机没反应、下次再拍或上游失败；生图失败时按工具返回的 "
             "`final_response_instruction` 收束，本轮不要重试。\n"
             "- 不要写“已发送/已转述/消息已发给某人/工具执行完成”等状态回执。\n"
@@ -2906,6 +2909,17 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 "结合真实由头、对方反馈和打扰感自然调整，不要求凑满或机械卡线；"
                 "内容尺度=normal。"
             )
+        model_judgement = (
+            user.get("planned_proactive_model_judge_result")
+            if isinstance(user.get("planned_proactive_model_judge_result"), dict)
+            else {}
+        )
+        model_note = _single_line(model_judgement.get("reason"), 140)
+        if model_note and any(token in model_note for token in ("软质量建议", "收敛", "改写", "偏低", "偏虚", "不自然")):
+            lines.append(
+                f"人格计划判定的表达建议：{model_note}。"
+                "这只是正文改写方向，不是取消理由；保持原计划事实边界，直接修成自然、具体、低压力的一两句。"
+            )
         afterglow = user.get("proactive_afterglow") if isinstance(user.get("proactive_afterglow"), dict) else {}
         if afterglow:
             afterglow_age = _now_ts() - _safe_float(afterglow.get("ts"), 0)
@@ -2923,11 +2937,17 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             lines.append("这次由头不算很硬或打扰压力偏高：正文要更短、更轻，最好像把一句话放下，不追问、不求回应。")
         elif semantic_score >= 0.68:
             lines.append("这次有明确由头：正文可以贴着那个由头说一个具体点，但仍然不要解释调度原因。")
+        if readiness_score < 0.36 or temperature_score < 0.34:
+            lines.append(
+                "Bot 当前开口欲或主动表达温度偏低，这只影响写法，不是取消发送的理由："
+                "用一句更安静、更短的自然话表达，不表演热情，不制造必须回应的压力。"
+            )
         unanswered_count = _safe_int(user.get("ignored_streak"), 0, 0)
         if unanswered_count >= 2:
             lines.append(
                 "对方已连续多次没有回应：只保留一个完整意思，优先改写为一句自然短句；"
-                "不要同时堆叠近况、提问和叮嘱，任何收短都必须保证句意完整，不能留下半句话。"
+                "不要同时堆叠近况、提问和叮嘱；不要用‘在吗/最近忙不忙/只是想找你’作为唯一内容，"
+                "优先贴着当前真实生活片段或计划里的具体点轻轻说一句；任何收短都必须保证句意完整，不能留下半句话。"
             )
         if reason not in {"environment_change", "weather_alert"}:
             lines.append("天气和气温只作环境底色，本轮不要把它们改写成正文话题，也不要顺手追问对方那边的天气；改用本轮明确动机、生活片段或最近真实话题。")
@@ -3510,6 +3530,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     ) -> str:
         cache_key = str(umo or "")
         self._framework_captured_send_cache.pop(cache_key, None)
+        deferred_photo_cache = getattr(self, "_framework_deferred_photo_cache", None)
+        if isinstance(deferred_photo_cache, dict):
+            deferred_photo_cache.pop(cache_key, None)
         framework_context = self._proactive_framework_context()
         if framework_context is None:
             context_value = getattr(self, "context", None)
@@ -3589,6 +3612,34 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         await _run_with_retries()
         if captured_tool_sends:
             self._framework_captured_send_cache[cache_key] = list(captured_tool_sends)
+        if bool(getattr(event, "_private_companion_photo_tool_deferred", False)):
+            deferred_path = _path_text(
+                getattr(event, "_private_companion_photo_tool_deferred_path", ""),
+                1000,
+            )
+            if deferred_path and os.path.exists(deferred_path):
+                cache = getattr(self, "_framework_deferred_photo_cache", None)
+                if not isinstance(cache, dict):
+                    cache = {}
+                    self._framework_deferred_photo_cache = cache
+                deferred_caption = self._sanitize_captured_plain_text(
+                    getattr(event, "_private_companion_photo_tool_deferred_caption", "")
+                )
+                cache[cache_key] = {
+                    "path": deferred_path,
+                    "caption": deferred_caption,
+                    "intent_kind": _single_line(
+                        getattr(event, "_private_companion_photo_tool_deferred_intent_kind", ""),
+                        40,
+                    ),
+                }
+                self._framework_captured_send_cache.pop(cache_key, None)
+                logger.info(
+                    "[PrivateCompanion] 主动主链已接收 pc_generate_photo 成图，等待统一发送: label=%s session=%s",
+                    label,
+                    _single_line(cache_key, 120),
+                )
+                return deferred_caption
         runner = getattr(result, "agent_runner", None) if result else None
         llm_resp = runner.get_final_llm_resp() if runner else None
         text = str(getattr(llm_resp, "completion_text", "") or "").strip()
@@ -4754,8 +4805,50 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         local_hard_block = bool(local.get("hard")) or self._proactive_review_hard_block_reason(_single_line(local.get("reason"), 120))
         review_enabled = bool(getattr(self, "enable_proactive_message_review", True))
         review_mode = self._effective_proactive_review_mode()
-        if not review_enabled or review_mode == "local_only":
-            local_mode_label = "仅本地检查模式" if review_enabled and review_mode == "local_only" else "主动模型终审未启用"
+        if not review_enabled:
+            local_mode_label = "主动发送前审核未启用"
+            if local_decision in {"drop", "defer"}:
+                if local_hard_block:
+                    return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+                return {
+                    "decision": "send",
+                    "text": "",
+                    "reason": f"{local_mode_label}，已跳过非安全性的本地软拦截",
+                }
+            if local_decision == "rewrite":
+                local_rewrite_text = str(local.get("text") or "").strip()
+                if local_rewrite_text:
+                    local_result = self._normalize_proactive_review_decision_policy(
+                        user,
+                        local,
+                        strength=strength,
+                        source="local",
+                    )
+                    local_result["reason"] = _single_line(
+                        f"{local_mode_label}，已采用本地确定性改写："
+                        + (_single_line(local.get("reason"), 80) or "轻量清理"),
+                        120,
+                    )
+                    return local_result
+                if not local_hard_block:
+                    return {
+                        "decision": "send",
+                        "text": "",
+                        "reason": f"{local_mode_label}，本地软建议未形成确定改写，保留原文",
+                    }
+                return {
+                    "decision": "drop",
+                    "text": "",
+                    "reason": f"{local_mode_label}，本地检查仅能提供参考意图，无法形成确定正文，已取消本轮发送",
+                    "hard": True,
+                }
+            return {
+                "decision": "send",
+                "text": "",
+                "reason": f"{local_mode_label}，本地检查允许原文发送",
+            }
+        if review_mode == "local_only":
+            local_mode_label = "仅本地检查模式"
             if local_decision in {"drop", "defer"}:
                 return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
             if local_decision == "rewrite":
@@ -5161,6 +5254,13 @@ Output:
                     extra_components.append(component)
         return "\n".join(part for part in text_parts if part).strip(), image_path, extra_components
 
+    def _pop_framework_deferred_photo_payload(self, umo: str) -> dict[str, Any]:
+        cache = getattr(self, "_framework_deferred_photo_cache", None)
+        if not isinstance(cache, dict):
+            return {}
+        payload = cache.pop(str(umo or ""), None)
+        return dict(payload) if isinstance(payload, dict) else {}
+
     def _captured_framework_message_component(self, item: dict[str, Any]) -> Any | None:
         item_type = str(item.get("type") or "").strip().lower()
         path_value = str(item.get("path") or "").strip()
@@ -5284,6 +5384,13 @@ Output:
             action=action,
             motive=motive,
         )
+        deferred_photo_cache = getattr(self, "_framework_deferred_photo_cache", None)
+        if isinstance(deferred_photo_cache, dict) and umo in deferred_photo_cache:
+            logger.info(
+                "[PrivateCompanion] 主动正文已由 pc_generate_photo caption/纯图承载，跳过文本兜底: user=%s",
+                _single_line(user.get("user_id"), 40),
+            )
+            return str(raw_text or "")
         async def finalize_candidate(candidate: str) -> tuple[str, str]:
             extractor = getattr(self, "_extract_reaction_expression_hidden_intent", None)
             visible_candidate, reaction_intent = (
@@ -5525,8 +5632,20 @@ Output:
                 _single_line(cleaned, 120),
             )
             return "", f"含未执行转述承诺：{_single_line(relay_claim_note, 80)}"
-        if self._should_drop_vague_generic_proactive(user, reason=reason, action=action, action_context=action_context, text=cleaned):
-            return "", "泛化主动缺少具体由头"
+        if self._should_drop_vague_generic_proactive(
+            user,
+            reason=reason,
+            action=action,
+            action_context=action_context,
+            text=cleaned,
+        ):
+            # 连续未回应时的泛泛措辞是表达质量问题，不是安全问题。
+            # 交给主动生成提示词收短、降压，避免在终审关闭时被本地规则直接吞掉。
+            logger.debug(
+                "[PrivateCompanion] 泛化主动由提示词收敛，不再直接拦截: user=%s text=%s",
+                _single_line(user.get("user_id") or user.get("umo"), 80),
+                _single_line(cleaned, 140),
+            )
         if self._should_drop_misstaged_proactive_text(cleaned, reason=reason, action=action):
             return "", "错接旧对话或时段"
         reviewed = await self._review_proactive_message_stance(
@@ -5616,6 +5735,34 @@ Output:
                 flags.append("claims_missing_media")
         return list(dict.fromkeys(flags))
 
+    def _repair_proactive_reply_air_locally(self, text: str, flags: list[str]) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        units = self._split_proactive_sentence_units(cleaned) or [cleaned]
+        repaired: list[str] = []
+        opener_pattern = (
+            r"^(?:好呀|好啊|可以呀|可以啊|行呀|行啊|嗯好|那就|你说呢|要不|不然|"
+            r"确实|对呀|对啊|是吧|也是|哈哈[,，\s]*我也|我也觉得|你说得对)"
+            r"[，,、。！？!?；;:\s]*"
+        )
+        stale_patterns = (
+            r"(?:刚看到|才看到|刚才看到|看到你(?:刚刚|刚才)?发|看到你说)",
+            r"你(?:刚刚|刚才|现在)?(?:叫|喊|问|说|发|来找|找|催)我",
+            r"(?:你问|你说|你刚才说|你刚刚说)[^。！？\n]{0,24}(?:我觉得|我也|确实|可以|好呀|好啊)",
+        )
+        for unit in units:
+            candidate = str(unit or "").strip()
+            if not candidate:
+                continue
+            if "reply_air_opener" in flags:
+                candidate = re.sub(opener_pattern, "", candidate, count=1).strip()
+            if any(re.search(pattern, candidate) for pattern in stale_patterns):
+                continue
+            if candidate:
+                repaired.append(self._ensure_chat_sentence_punctuation(candidate))
+        return "\n".join(repaired).strip()
+
     async def _review_proactive_message_stance(
         self,
         user: dict[str, Any],
@@ -5647,21 +5794,58 @@ Output:
         )
         if not flags:
             return cleaned
-        if not bool(getattr(self, "enable_proactive_message_review", True)):
-            logger.info(
-                "[PrivateCompanion] 主动消息疑似回复空气,主动终审关闭已丢弃: flags=%s text=%s",
-                ",".join(flags),
-                _single_line(cleaned, 120),
-            )
-            return ""
         mode = self._effective_proactive_review_mode()
-        if mode == "local_only":
-            logger.info(
-                "[PrivateCompanion] 主动消息疑似回复空气,仅本地保护已丢弃: flags=%s text=%s",
+        review_disabled = not bool(getattr(self, "enable_proactive_message_review", True))
+        if review_disabled or mode == "local_only":
+            hard_flags = {"delivery_receipt", "claims_missing_media"}
+            if hard_flags.intersection(flags):
+                # 只移除命中硬风险的句子；同一候选里若还有安全正文，继续交给
+                # 轻量主动修正，避免一条附带回执的多句消息被整条吞掉。
+                safe_units: list[str] = []
+                for unit in self._split_proactive_sentence_units(cleaned) or [cleaned]:
+                    unit_flags = self._proactive_reply_air_flags(
+                        unit,
+                        reason=reason,
+                        action=action,
+                        action_context=action_context,
+                    )
+                    if hard_flags.intersection(unit_flags):
+                        continue
+                    safe_units.append(unit)
+                cleaned = "\n".join(safe_units).strip()
+                if not cleaned:
+                    logger.info(
+                        "[PrivateCompanion] 主动消息仅剩不可用动作/内部回执,本地安全检查已丢弃: flags=%s",
+                        ",".join(flags),
+                    )
+                    return ""
+                flags = self._proactive_reply_air_flags(
+                    cleaned,
+                    reason=reason,
+                    action=action,
+                    action_context=action_context,
+                )
+            repaired = self._repair_proactive_reply_air_locally(cleaned, flags)
+            remaining_flags = self._proactive_reply_air_flags(
+                repaired,
+                reason=reason,
+                action=action,
+                action_context=action_context,
+            ) if repaired else flags
+            if repaired and not remaining_flags:
+                logger.info(
+                    "[PrivateCompanion] 主动消息疑似回复空气,已用本地轻量规则修正: flags=%s before=%s after=%s",
+                    ",".join(flags),
+                    _single_line(cleaned, 100),
+                    _single_line(repaired, 100),
+                )
+                return repaired
+            logger.warning(
+                "[PrivateCompanion] 主动消息疑似回复空气但终审未启用,本地无法可靠改写，保留原文并交由生成提示词约束: flags=%s text=%s",
                 ",".join(flags),
                 _single_line(cleaned, 120),
             )
-            return ""
+            return cleaned
         intent_hint = self._format_proactive_generation_intent_hint(
             user,
             reason=reason,

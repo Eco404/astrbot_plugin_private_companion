@@ -10,15 +10,48 @@ import json
 import hashlib
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from astrbot_plugin_private_companion.reaction_asset_library import ReactionAssetLibrary
 from astrbot_plugin_private_companion.llm_tool_actions import LlmToolActionsMixin
+from astrbot_plugin_private_companion.private_image import PrivateImageMixin
 
 
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+
+
+def _gif_bytes(*, animated: bool) -> bytes:
+    from PIL import Image
+
+    output = io.BytesIO()
+    first = Image.new("RGBA", (3, 3), (255, 0, 0, 255))
+    if animated:
+        second = Image.new("RGBA", (3, 3), (0, 255, 0, 255))
+        first.save(output, format="GIF", save_all=True, append_images=[second], duration=50, loop=0)
+    else:
+        first.save(output, format="GIF")
+    return output.getvalue()
+
+
+class _GifInputHarness(PrivateImageMixin):
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.private_image_gif_max_frames = 4
+        self.source_fallback_calls = 0
+
+    def _private_image_source_bytes_if_gif(self, _source: str) -> bytes:
+        return self.payload
+
+    @staticmethod
+    def _private_image_source_cache_key(_source: str) -> str:
+        return "gif-test"
+
+    def _private_image_source_to_model_url(self, _source: str) -> str:
+        self.source_fallback_calls += 1
+        return "data:image/gif;base64,unexpected"
 
 
 class ReactionAssetLibraryTests(unittest.TestCase):
@@ -86,6 +119,41 @@ class ReactionAssetLibraryTests(unittest.TestCase):
         self.assertEqual("你认真的？", analyzed["visible_text"])
         self.assertIn("吐槽", analyzed["intents"])
         self.assertEqual("vision-test", analyzed["analysis_provider"])
+
+    def test_gif_analysis_uses_png_preview_but_preserves_original_asset(self) -> None:
+        gif_data = _gif_bytes(animated=True)
+        item = self.library.import_blobs([("开心.gif", gif_data)])["items"][0]
+
+        preview = self.library.get_analysis_image_data(item["id"])
+        stored = self.library.get_image_data(item["id"])
+
+        self.assertIsNotNone(preview)
+        self.assertTrue(preview["data_url"].startswith("data:image/png;base64,"))
+        self.assertEqual("image/gif", stored["mime"])
+        self.assertTrue(stored["data_url"].startswith("data:image/gif;base64,"))
+
+    def test_provider_request_converts_static_and_animated_gif_to_png(self) -> None:
+        for animated in (False, True):
+            with self.subTest(animated=animated):
+                harness = _GifInputHarness(_gif_bytes(animated=animated))
+                request = SimpleNamespace(image_urls=["data:image/gif;base64,test"], images=[])
+
+                replaced, dropped = harness._sanitize_provider_request_gif_inputs(request)
+
+                self.assertEqual((1, 0), (replaced, dropped))
+                self.assertGreaterEqual(len(request.image_urls), 1)
+                self.assertTrue(all(url.startswith("data:image/png;base64,") for url in request.image_urls))
+                self.assertEqual(0, harness.source_fallback_calls)
+
+    def test_broken_gif_is_dropped_instead_of_sent_raw_to_provider(self) -> None:
+        harness = _GifInputHarness(b"GIF89a-broken")
+        request = SimpleNamespace(image_urls=["data:image/gif;base64,test"], images=[])
+
+        replaced, dropped = harness._sanitize_provider_request_gif_inputs(request)
+
+        self.assertEqual((0, 1), (replaced, dropped))
+        self.assertEqual([], request.image_urls)
+        self.assertEqual(0, harness.source_fallback_calls)
 
     def test_analysis_preserves_manual_fields_and_merges_generated_lists(self) -> None:
         item = self.library.import_blobs(
@@ -180,6 +248,40 @@ class ReactionAssetLibraryTests(unittest.TestCase):
         self.assertEqual(f"pc-local:{preferred['id']}", result["image_id"])
         self.assertIn("捂脸", result["candidate_queries"])
         self.assertIn("捂脸", result["matched_queries"])
+
+    def test_find_uses_local_semantic_equivalence_without_embedding(self) -> None:
+        happy = self.library.import_blobs(
+            [("开心.png", PNG_BYTES)],
+            metadata={"tags": ["开心"], "scopes": ["private"]},
+        )["items"][0]
+
+        result = self.library.find("高兴", scope="private")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(f"pc-local:{happy['id']}", result["image_id"])
+        self.assertEqual("keyword_semantic", result["match_basis"])
+        self.assertTrue(any(value.startswith("语义相近：") for value in result["matched_queries"]))
+
+    def test_find_local_semantic_equivalence_matches_communication_intent(self) -> None:
+        comfort = self.library.import_blobs(
+            [("抱抱.png", PNG_BYTES)],
+            metadata={"intents": ["抱抱"], "scopes": ["private"]},
+        )["items"][0]
+
+        result = self.library.find("想安慰一下", scope="private")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(f"pc-local:{comfort['id']}", result["image_id"])
+        self.assertEqual("keyword_semantic", result["match_basis"])
+
+    def test_find_local_semantic_equivalence_respects_negation_and_topic(self) -> None:
+        self.library.import_blobs(
+            [("开心.png", PNG_BYTES)],
+            metadata={"tags": ["开心"], "scopes": ["private"]},
+        )
+
+        self.assertIsNone(self.library.find("不开心", scope="private"))
+        self.assertIsNone(self.library.find("查询天气", scope="private"))
 
     def test_find_softly_rotates_recently_used_equally_relevant_assets(self) -> None:
         first = self.library.import_blobs(

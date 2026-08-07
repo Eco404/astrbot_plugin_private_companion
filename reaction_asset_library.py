@@ -23,6 +23,7 @@ MAX_SINGLE_FILE_BYTES = 20 * 1024 * 1024
 MAX_BATCH_BYTES = 120 * 1024 * 1024
 MAX_ZIP_MEMBERS = 1000
 LOOKUP_CACHE_TTL_SECONDS = 2.0
+MAX_EMBEDDING_DIMENSION = 8192
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 ANALYSIS_STATUSES = {"unprocessed", "pending", "running", "complete", "failed"}
 MIME_BY_EXTENSION = {
@@ -33,6 +34,48 @@ MIME_BY_EXTENSION = {
     ".webp": "image/webp",
     ".bmp": "image/bmp",
 }
+
+# Lightweight, local semantic equivalence used when no embedding provider is
+# available.  These are deliberately small communication-oriented clusters,
+# rather than a general thesaurus: a shared cluster only adds a soft score and
+# never replaces explicit tags or a caller-supplied intent.
+_SEMANTIC_MATCH_CLUSTERS: dict[str, tuple[str, ...]] = {
+    "开心喜悦": ("开心", "高兴", "快乐", "愉快", "喜悦", "欢喜", "兴奋", "好耶", "庆祝", "鼓掌"),
+    "安慰陪伴": ("安慰", "抱抱", "抱一抱", "陪伴", "哄哄", "哄一下", "心疼", "安抚", "鼓励", "加油", "没关系", "别难过", "别伤心"),
+    "无语无奈": ("无语", "无奈", "服了", "不想说话", "说不出话", "沉默", "叹气", "扶额", "摊手"),
+    "害羞脸红": ("害羞", "腼腆", "不好意思", "脸红", "扭捏"),
+    "难过委屈": ("难过", "伤心", "低落", "委屈", "不开心", "不高兴", "想哭", "哭哭"),
+    "惊讶意外": ("惊讶", "震惊", "意外", "吃惊", "啊这"),
+    "生气恼火": ("生气", "恼火", "气愤", "发火", "愤怒"),
+    "吐槽接梗": ("吐槽", "嫌弃", "质疑", "调侃", "接梗", "开玩笑"),
+    "赞同回应": ("赞同", "同意", "认可", "点头", "收到", "可以"),
+    "拒绝摇头": ("拒绝", "不要", "才不要", "不行", "摇头", "走开"),
+}
+_SEMANTIC_NEGATION_PATTERN = re.compile(
+    r"(?:不是|并非|不|没|未|别|莫|无)(?:太|很|怎么|再|够|那么|特别)?$"
+)
+
+
+def _semantic_features(value: Any) -> tuple[set[str], set[str]]:
+    """Return (cluster names, aliases blocked by a nearby negation)."""
+    text = re.sub(r"[\W_]+", "", str(value or "").casefold())
+    if not text:
+        return set(), set()
+    clusters: set[str] = set()
+    blocked: set[str] = set()
+    for cluster, aliases in _SEMANTIC_MATCH_CLUSTERS.items():
+        for alias in sorted(aliases, key=len, reverse=True):
+            alias_key = alias.casefold()
+            start = text.find(alias_key)
+            while start >= 0:
+                prefix = text[max(0, start - 8) : start]
+                negated = bool(_SEMANTIC_NEGATION_PATTERN.search(prefix))
+                if negated:
+                    blocked.add(alias_key)
+                else:
+                    clusters.add(cluster)
+                start = text.find(alias_key, start + max(1, len(alias_key)))
+    return clusters, blocked
 
 
 def _text_list(value: Any, *, limit: int, item_limit: int = 60) -> list[str]:
@@ -385,6 +428,143 @@ class ReactionAssetLibrary:
             "analysis_unprocessed": sum(1 for item in items if item["analysis_status"] == "unprocessed"),
         }
 
+    @staticmethod
+    def embedding_text(item: dict[str, Any]) -> str:
+        """Build a stable, metadata-only document for semantic reaction lookup."""
+        parts = [
+            item.get("name", ""),
+            item.get("description", ""),
+            item.get("visible_text", ""),
+            " ".join(item.get("tags", []) or []),
+            " ".join(item.get("emotions", []) or []),
+            " ".join(item.get("intents", []) or []),
+        ]
+        return _single_line("；".join(str(part or "") for part in parts), 1800)
+
+    @classmethod
+    def embedding_text_hash(cls, item: dict[str, Any]) -> str:
+        text = cls.embedding_text(item)
+        return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest() if text else ""
+
+    @staticmethod
+    def _coerce_embedding_vector(value: Any) -> list[float]:
+        if isinstance(value, dict):
+            for key in ("embedding", "vector", "data", "embeddings", "vectors"):
+                if key in value:
+                    result = ReactionAssetLibrary._coerce_embedding_vector(value.get(key))
+                    if result:
+                        return result
+            return []
+        if not isinstance(value, (list, tuple)):
+            return []
+        result: list[float] = []
+        for item in value:
+            try:
+                result.append(float(item))
+            except (TypeError, ValueError):
+                return ReactionAssetLibrary._coerce_embedding_vector(value[0]) if value else []
+        return result[:MAX_EMBEDDING_DIMENSION]
+
+    @classmethod
+    def normalize_embedding_vector(cls, value: Any) -> list[float]:
+        vector = cls._coerce_embedding_vector(value)
+        norm = sum(item * item for item in vector) ** 0.5
+        return [item / norm for item in vector] if norm > 0 else []
+
+    def embedding_status(self, provider_id: Any) -> dict[str, int | str]:
+        provider = _single_line(provider_id, 160)
+        indexed = 0
+        missing = 0
+        with self._lock:
+            for raw in self._load()["items"]:
+                item = self._normalize_item(raw)
+                valid = (
+                    _single_line(raw.get("embedding_provider"), 160) == provider
+                    and _single_line(raw.get("embedding_text_hash"), 80) == self.embedding_text_hash(item)
+                    and bool(self.normalize_embedding_vector(raw.get("embedding")))
+                )
+                if valid:
+                    indexed += 1
+                else:
+                    missing += 1
+        return {"provider_id": provider, "indexed": indexed, "missing": missing, "total": indexed + missing}
+
+    def list_embedding_rows(self, provider_id: Any, *, limit: int = 1200) -> list[tuple[dict[str, Any], list[float], str]]:
+        provider = _single_line(provider_id, 160)
+        safe_limit = max(1, min(5000, _safe_int(limit, 1200, 1)))
+        rows: list[tuple[dict[str, Any], list[float], str]] = []
+        with self._lock:
+            for raw in self._load()["items"]:
+                item = self._normalize_item(raw)
+                path = self._path_for(item)
+                text_hash = self.embedding_text_hash(item)
+                vector = self.normalize_embedding_vector(raw.get("embedding"))
+                if (
+                    not item["enabled"]
+                    or path is None
+                    or not path.is_file()
+                    or _single_line(raw.get("embedding_provider"), 160) != provider
+                    or _single_line(raw.get("embedding_text_hash"), 80) != text_hash
+                    or not vector
+                ):
+                    continue
+                rows.append((item, vector, text_hash))
+                if len(rows) >= safe_limit:
+                    break
+        return rows
+
+    def list_embedding_missing(self, provider_id: Any, *, limit: int = 50) -> list[tuple[dict[str, Any], str]]:
+        provider = _single_line(provider_id, 160)
+        safe_limit = max(1, min(200, _safe_int(limit, 50, 1)))
+        rows: list[tuple[dict[str, Any], str]] = []
+        with self._lock:
+            for raw in self._load()["items"]:
+                item = self._normalize_item(raw)
+                path = self._path_for(item)
+                if not item["enabled"] or path is None or not path.is_file():
+                    continue
+                text_hash = self.embedding_text_hash(item)
+                vector = self.normalize_embedding_vector(raw.get("embedding"))
+                if (
+                    _single_line(raw.get("embedding_provider"), 160) == provider
+                    and _single_line(raw.get("embedding_text_hash"), 80) == text_hash
+                    and vector
+                ):
+                    continue
+                rows.append((item, text_hash))
+                if len(rows) >= safe_limit:
+                    break
+        return rows
+
+    def upsert_embeddings(self, provider_id: Any, rows: Any) -> int:
+        provider = _single_line(provider_id, 160)
+        if not provider or not isinstance(rows, list):
+            return 0
+        updates = {str(row.get("id") or ""): row for row in rows if isinstance(row, dict) and row.get("id")}
+        changed = 0
+        with self._lock:
+            catalog = self._load()
+            for index, raw in enumerate(catalog["items"]):
+                item = self._normalize_item(raw)
+                row = updates.get(item["id"])
+                if not row:
+                    continue
+                vector = self.normalize_embedding_vector(row.get("vector"))
+                text_hash = _single_line(row.get("text_hash"), 80)
+                if not vector or text_hash != self.embedding_text_hash(item):
+                    continue
+                raw = dict(raw)
+                raw["embedding_provider"] = provider
+                raw["embedding_text_hash"] = text_hash
+                raw["embedding"] = vector
+                raw["updated_at"] = time.time()
+                catalog["items"][index] = raw
+                changed += 1
+            if changed:
+                self._save(catalog, lookup_changed=False)
+                self._selection_revision += 1
+        return changed
+
     def list_items(
         self,
         *,
@@ -683,6 +863,11 @@ class ReactionAssetLibrary:
                     mime = "image/jpeg"
                 data = output.getvalue()
         except Exception:
+            # The original asset remains available for delivery, but sending an
+            # undecoded GIF to some Gemini-compatible vision gateways fails the
+            # whole analysis batch with a provider 500.
+            if path.suffix.lower() == ".gif":
+                return None
             mime = MIME_BY_EXTENSION.get(path.suffix.lower()) or "application/octet-stream"
         return {
             "id": item["id"],
@@ -909,13 +1094,17 @@ class ReactionAssetLibrary:
         scope: str = "private",
         selection_preferences: Any = None,
         selection_signature: Any = "",
+        embedding_query: Any = None,
+        embedding_provider_id: Any = "",
+        embedding_score_threshold: float = 0.42,
+        embedding_weight: float = 0.55,
+        embedding_candidate_limit: int = 1200,
     ) -> dict[str, Any] | None:
         query_text = _single_line(query, 500)
         context_text = _single_line(context, 1000)
         scope_text = _single_line(scope, 20).casefold() or "private"
         if scope_text not in {"private", "group"}:
             return None
-        query_tokens = self._tokens(query_text)
         context_tokens = self._tokens(context_text)
         # Structured reaction intents put a few alternate lookup phrases in
         # the context. Treat them as first-class queries so a generic provider
@@ -938,6 +1127,17 @@ class ReactionAssetLibrary:
                 flags=re.IGNORECASE,
             )[0]
             candidate_queries = _query_list(candidate_text, limit=8)
+        query_semantic_clusters, _ = _semantic_features(
+            "；".join([query_text, *candidate_queries])
+        )
+        _, blocked_query_aliases = _semantic_features(query_text)
+        # Avoid turning a negated phrase such as “不开心” into a positive
+        # keyword hit merely because the shorter alias “开心” is present.
+        query_tokens = [
+            token
+            for token in self._tokens(query_text)
+            if not any(alias in token for alias in blocked_query_aliases)
+        ]
         preference_rows: list[dict[str, Any]] = []
         if isinstance(selection_preferences, dict):
             raw_rows = selection_preferences.get("assets")
@@ -973,9 +1173,30 @@ class ReactionAssetLibrary:
             # A same-intent preference has more weight, but never enough to
             # rescue a weak lexical match or overturn a clear topic mismatch.
             return max(-1.2, min(1.2, total_score * 0.06 + intent_score * 0.16))
+        embedding_provider = _single_line(embedding_provider_id, 160)
+        embedding_vector = self.normalize_embedding_vector(embedding_query)
+        embedding_threshold = max(0.0, min(0.99, _safe_float(embedding_score_threshold, 0.42, 0.0, 0.99)))
+        embedding_factor = max(0.0, min(2.0, _safe_float(embedding_weight, 0.55, 0.0, 2.0)))
+        embedding_limit = _safe_int(embedding_candidate_limit, 1200, 20, 5000)
         with self._lock:
-            candidates = [self._normalize_item(raw) for raw in self._load()["items"]]
-        ranked: list[tuple[float, float, dict[str, Any], Path, list[str], float]] = []
+            raw_items = self._load()["items"]
+            candidates = [self._normalize_item(raw) for raw in raw_items]
+            embedding_rows = sorted(
+                zip(raw_items, candidates),
+                key=lambda row: row[1]["updated_at"],
+                reverse=True,
+            )[:embedding_limit]
+            embeddings_by_id = {
+                item["id"]: self.normalize_embedding_vector(raw.get("embedding"))
+                for raw, item in embedding_rows
+                if (
+                    embedding_vector
+                    and embedding_provider
+                    and _single_line(raw.get("embedding_provider"), 160) == embedding_provider
+                    and _single_line(raw.get("embedding_text_hash"), 80) == self.embedding_text_hash(item)
+                )
+            }
+        ranked: list[tuple[float, float, dict[str, Any], Path, list[str], float, float]] = []
         now = time.time()
         for item in candidates:
             path = self._path_for(item)
@@ -992,6 +1213,9 @@ class ReactionAssetLibrary:
                 ]
             ).casefold()
             secondary = item["filename"].casefold()
+            item_semantic_clusters, _item_blocked_aliases = _semantic_features(primary)
+            shared_semantic_clusters = query_semantic_clusters & item_semantic_clusters
+            semantic_match = bool(shared_semantic_clusters)
             score = 0.0
             matched_phrases: list[str] = []
             if query_text and query_text.casefold() in primary:
@@ -1008,7 +1232,10 @@ class ReactionAssetLibrary:
                 elif token in secondary:
                     score += 0.16
             for phrase in candidate_queries:
+                _phrase_clusters, blocked_phrase_aliases = _semantic_features(phrase)
                 for token in self._tokens(phrase):
+                    if any(alias in token for alias in blocked_phrase_aliases):
+                        continue
                     if token in primary:
                         score += 0.24 if len(token) <= 2 else 0.4
                     elif token in secondary:
@@ -1018,7 +1245,29 @@ class ReactionAssetLibrary:
                     score += 0.08
             if not query_tokens and not query_text:
                 score += 0.1
-            relevance_score = score
+            # Local semantic equivalence is intentionally weaker than an
+            # explicit lexical hit. It makes “高兴” find “开心” and “安慰”
+            # find “抱抱”, while leaving unrelated assets below the floor.
+            semantic_bonus = min(0.5, 0.3 * len(shared_semantic_clusters))
+            if semantic_match:
+                matched_phrases.append(
+                    "语义相近：" + "、".join(sorted(shared_semantic_clusters))
+                )
+            embedding_score = 0.0
+            candidate_vector = embeddings_by_id.get(item["id"])
+            if embedding_vector and candidate_vector and len(candidate_vector) == len(embedding_vector):
+                embedding_score = max(
+                    -1.0,
+                    min(1.0, sum(left * right for left, right in zip(embedding_vector, candidate_vector))),
+                )
+            embedding_bonus = (
+                embedding_factor * max(0.0, (embedding_score - embedding_threshold) / max(0.01, 1.0 - embedding_threshold))
+                if embedding_score >= embedding_threshold
+                else 0.0
+            )
+            relevance_score = score + semantic_bonus + embedding_bonus
+            if embedding_bonus > 0.0 and not matched_phrases:
+                matched_phrases.append("语义相近")
             diversity_penalty = min(item["usage_count"], 20) * 0.004
             last_used_at = _safe_float(item.get("last_used_at"), 0.0, 0.0)
             if last_used_at > 0:
@@ -1038,6 +1287,7 @@ class ReactionAssetLibrary:
                     path,
                     matched_phrases,
                     learned_bias,
+                    embedding_score,
                 )
             )
         if not ranked:
@@ -1050,9 +1300,12 @@ class ReactionAssetLibrary:
         if not eligible:
             return None
         eligible.sort(key=lambda row: (row[0], row[2]["updated_at"]), reverse=True)
-        _selection_score, score, item, path, matched_phrases, learned_bias = eligible[0]
+        _selection_score, score, item, path, matched_phrases, learned_bias, embedding_score = eligible[0]
+        semantic_match = any(
+            phrase.startswith("语义相近：") for phrase in matched_phrases
+        )
         # A weak lexical match is not enough to force an image into the conversation.
-        if query_tokens and score < 0.28:
+        if query_tokens and score < 0.28 and not semantic_match and embedding_score < embedding_threshold:
             return None
         confidence = max(0.18, min(0.98, 0.3 + score / 3.2))
         return {
@@ -1067,12 +1320,24 @@ class ReactionAssetLibrary:
             "matched_queries": matched_phrases,
             "candidate_queries": candidate_queries,
             "reason": (
-                "本插件素材库按候选检索表达、标签、情绪和沟通用途匹配"
+                "本插件素材库按关键词及本地语义近似匹配"
+                if semantic_match and not embedding_score >= embedding_threshold
+                else "本插件素材库按候选检索表达、标签、情绪和沟通用途匹配"
                 if matched_phrases
                 else "本插件素材库按标签、情绪和沟通用途匹配"
             ),
             "confidence": round(confidence, 3),
             "preference_bias": round(learned_bias, 3),
+            "embedding_score": round(embedding_score, 4) if embedding_score else 0.0,
+            "match_basis": (
+                "embedding"
+                if embedding_score >= embedding_threshold and not semantic_match and score < 0.28
+                else "hybrid"
+                if embedding_score >= embedding_threshold
+                else "keyword_semantic"
+                if semantic_match
+                else "keyword"
+            ),
             "provider": "private_companion_library",
         }
 

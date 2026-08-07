@@ -63,7 +63,7 @@ class QWeatherWeatherTests(unittest.IsolatedAsyncioTestCase):
         query = parse_qs(parsed.query)
         self.assertEqual(parsed.path, "/v7/weather/now")
         self.assertEqual(query["location"], ["116.4074,39.9042"])
-        self.assertEqual(query["lang"], ["zh-Hans"])
+        self.assertEqual(query["lang"], ["zh"])
         self.assertEqual(query["unit"], ["m"])
 
     def test_legacy_alert_fields_are_runtime_fallbacks(self):
@@ -126,6 +126,27 @@ class QWeatherWeatherTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await self.harness._fetch_qweather_weather()
         self.assertEqual(result, {"prompt": "", "source": ""})
+
+    def test_richer_current_conditions_are_kept_for_passive_answers(self):
+        result = self.harness._parse_qweather_weather_payload(
+            {
+                "code": "200",
+                "now": {
+                    "text": "小雨",
+                    "temp": "21",
+                    "feelsLike": "19",
+                    "windDir": "东北风",
+                    "windScale": "3",
+                    "humidity": "82",
+                },
+            }
+        )
+
+        self.assertEqual(result["source"], "qweather")
+        self.assertEqual(
+            result["prompt"],
+            "当前天气 小雨，约 21°C，体感 19°C，东北风，风力 3级，湿度 82%。",
+        )
 
     async def test_source_dispatches_to_qweather(self):
         with patch.object(

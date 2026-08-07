@@ -1800,13 +1800,30 @@ class PrivateImageMixin:
 
         for source in sources:
             image_key = self._private_image_source_cache_key(source)
-            gif_items = self._private_image_gif_frame_model_items(source, image_key, max_frames=gif_max_frames) if gif_enhancement_enabled else []
-            if gif_items:
+            gif_data = self._private_image_source_bytes_if_gif(source)
+            if gif_data:
                 had_gif_frames = True
-                if append_item(gif_items[0]) and len(gif_items) > 1:
-                    pending_gif_frames.append(gif_items[1:])
-                if len(image_items) >= max_model_images:
-                    break
+                gif_items = (
+                    self._private_image_gif_frame_model_items(
+                        source,
+                        image_key,
+                        max_frames=gif_max_frames,
+                    )
+                    if gif_enhancement_enabled
+                    else []
+                )
+                if gif_items:
+                    if append_item(gif_items[0]) and len(gif_items) > 1:
+                        pending_gif_frames.append(gif_items[1:])
+                    if len(image_items) >= max_model_images:
+                        break
+                else:
+                    logger.warning(
+                        "[PrivateCompanion] GIF 无法转换为兼容的 PNG 帧,已跳过该视觉输入: source=%s",
+                        _single_line(source, 120),
+                    )
+                # Some Gemini-compatible gateways reject image/gif even when
+                # they advertise it. Never fall through to the original GIF.
                 continue
             url = self._private_image_source_to_model_url(source)
             if not url:
@@ -1841,14 +1858,11 @@ class PrivateImageMixin:
         try:
             from PIL import Image as PILImage, ImageSequence
         except Exception:
-            logger.debug("[PrivateCompanion] Pillow 不可用,动态 GIF 将按原图交给视觉模型")
+            logger.warning("[PrivateCompanion] Pillow 不可用,GIF 无法转换为模型兼容的 PNG 帧")
             return []
         try:
             with PILImage.open(io.BytesIO(raw)) as image:
                 frame_total = getattr(image, "n_frames", 1) or 1
-                is_animated = bool(getattr(image, "is_animated", False) or frame_total > 1)
-                if not is_animated:
-                    return []
                 indices = self._private_image_sample_gif_frame_indices(frame_total, max_frames=max_frames)
                 frames: list[tuple[str, str]] = []
                 seen_hashes: set[str] = set()
@@ -1870,11 +1884,49 @@ class PrivateImageMixin:
                         break
                 if not frames:
                     return []
-                logger.info("[PrivateCompanion] 动态 GIF 已抽帧供视觉识别: frames=%s/%s source=%s", len(frames), frame_total, _single_line(source, 120))
+                logger.info("[PrivateCompanion] GIF 已转换为 PNG 帧供视觉识别: frames=%s/%s source=%s", len(frames), frame_total, _single_line(source, 120))
                 return frames
         except Exception as exc:
             logger.debug("[PrivateCompanion] 动态 GIF 抽帧失败: %s", exc)
         return []
+
+    def _sanitize_provider_request_gif_inputs(self, req: Any) -> tuple[int, int]:
+        """Replace GIF request inputs with PNG frames before provider dispatch."""
+        replaced = 0
+        dropped = 0
+        for attr in ("image_urls", "images"):
+            current = getattr(req, attr, None)
+            if not isinstance(current, (list, tuple)) or not current:
+                continue
+            sanitized: list[Any] = []
+            changed = False
+            for item in current:
+                if not isinstance(item, str) or not self._private_image_source_bytes_if_gif(item):
+                    sanitized.append(item)
+                    continue
+                changed = True
+                frames = self._private_image_gif_frame_model_items(
+                    item,
+                    self._private_image_source_cache_key(item),
+                    max_frames=max(
+                        1,
+                        min(
+                            8,
+                            int(getattr(self, "private_image_gif_max_frames", 4) or 4),
+                        ),
+                    ),
+                )
+                if frames:
+                    sanitized.extend(url for _key, url in frames)
+                    replaced += 1
+                else:
+                    dropped += 1
+            if changed:
+                try:
+                    setattr(req, attr, sanitized)
+                except Exception:
+                    pass
+        return replaced, dropped
 
     @staticmethod
     def _private_image_sample_gif_frame_indices(frame_total: int, *, max_frames: int = 4) -> set[int]:

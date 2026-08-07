@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import tempfile
 import threading
 import unittest
@@ -278,6 +279,112 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual({}, secondary["users"])
             self.assertEqual({}, secondary["daily_plan"])
             self.assertEqual({}, secondary["bot_diaries"])
+
+    async def test_reset_current_persona_backs_up_and_only_replaces_target_profile(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            main_window = "default:FriendMessage:main-reset"
+            alt_window = "default:FriendMessage:alt-keep"
+            plugin.config["multi_persona_window_bindings"] = {
+                main_window: "main",
+                alt_window: "alt",
+            }
+            plugin._passive_state_session_cache = {
+                main_window: {"state": "old-main"},
+                alt_window: {"state": "keep-alt"},
+            }
+            plugin._persona_window_claims = {
+                main_window: "main",
+                alt_window: "alt",
+            }
+            main = plugin._ensure_persona_profile("main")
+            alt = plugin._ensure_persona_profile("alt")
+            main["users"] = {"用户甲": {"note": "旧人格记忆"}}
+            main["daily_plan"] = {"marker": "旧人格日程"}
+            main["persona_lifecycle"] = {"generation": 3}
+            alt["users"] = {"用户乙": {"note": "必须保留"}}
+            config_before = json.loads(json.dumps(plugin.config, ensure_ascii=False))
+
+            result = await plugin._reset_current_persona_store(
+                "main",
+                rebuild_today=False,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual("main", result["persona_id"])
+            self.assertEqual(4, result["generation"])
+            self.assertEqual({}, plugin._ensure_persona_profile("main")["users"])
+            self.assertEqual({}, plugin._ensure_persona_profile("main")["daily_plan"])
+            self.assertEqual(
+                {"用户乙": {"note": "必须保留"}},
+                plugin._ensure_persona_profile("alt")["users"],
+            )
+            self.assertEqual(config_before, plugin.config)
+            self.assertNotIn(main_window, plugin._passive_state_session_cache)
+            self.assertEqual(
+                {"state": "keep-alt"},
+                plugin._passive_state_session_cache[alt_window],
+            )
+            self.assertNotIn(main_window, plugin._persona_window_claims)
+            self.assertEqual("alt", plugin._persona_window_claims[alt_window])
+
+            backup_path = Path(result["backup_path"])
+            self.assertTrue(backup_path.is_file())
+            backup = json.loads(backup_path.read_text(encoding="utf-8"))
+            self.assertEqual("main", backup["persona_id"])
+            self.assertEqual("旧人格记忆", backup["data"]["users"]["用户甲"]["note"])
+            stored = json.loads(plugin._persona_profile_path("main").read_text(encoding="utf-8"))
+            self.assertEqual(4, stored["persona_lifecycle"]["generation"])
+            self.assertEqual({}, stored["users"])
+
+    async def test_reset_current_persona_page_uses_selected_persona(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            plugin._rebuild_today_after_reset = AsyncMock(
+                return_value=({"date": "2026-08-07"}, {"date": "2026-08-07"}, None)
+            )
+            plugin._ensure_persona_profile("alt")["users"] = {
+                "旧用户": {"note": "需要清除"}
+            }
+            api = PrivateCompanionPageApi(plugin)
+            app = Quart(__name__)
+
+            async with app.test_request_context(
+                "/persona/reset-current",
+                method="POST",
+                json={"persona_id": "alt"},
+            ):
+                response = await api.reset_current_persona()
+
+            self.assertTrue(response["success"])
+            self.assertEqual("alt", response["data"]["persona_id"])
+            self.assertEqual({}, plugin._ensure_persona_profile("alt")["users"])
+            self.assertEqual("旧用户", plugin._ensure_persona_profile("main")["users"]["legacy"]["name"])
+            plugin._rebuild_today_after_reset.assert_awaited_once()
+
+    async def test_reset_current_persona_supports_single_persona_mode(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            plugin.enable_multi_persona_mode = False
+            plugin.data_dir = root
+            plugin._data_default = {
+                "users": {"旧用户": {"note": "单人格旧资料"}},
+                "daily_plan": {"marker": "旧日程"},
+                "persona_lifecycle": {"generation": 2},
+            }
+            stored: dict[str, object] = {}
+            plugin._write_data_snapshot_sync = lambda snapshot: stored.update(snapshot)
+
+            result = await plugin._reset_current_persona_store(rebuild_today=False)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual("", result["persona_id"])
+            self.assertEqual(3, result["generation"])
+            self.assertEqual({}, plugin.data["users"])
+            self.assertEqual({}, plugin.data["daily_plan"])
+            self.assertEqual(3, stored["persona_lifecycle"]["generation"])
+            backup = json.loads(Path(result["backup_path"]).read_text(encoding="utf-8"))
+            self.assertEqual("单人格旧资料", backup["data"]["users"]["旧用户"]["note"])
 
     async def test_private_and_group_events_keep_concurrent_profiles_isolated(self):
         with tempfile.TemporaryDirectory() as root:

@@ -654,6 +654,33 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
     self.reaction_expression_candidate_limit = self._cfg_int(
         c, "reaction_expression_candidate_limit", 6, 1, 16
     )
+    self.reaction_expression_embedding_enabled = self._cfg_bool(
+        c, "reaction_expression_embedding_enabled", False
+    )
+    self.reaction_expression_embedding_provider_id = self._cfg_str(
+        c, "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID", ""
+    )
+    self.reaction_expression_embedding_timeout_ms = self._cfg_int(
+        c, "reaction_expression_embedding_timeout_ms", 5000, 0, 30000
+    )
+    self.reaction_expression_embedding_candidate_limit = self._cfg_int(
+        c, "reaction_expression_embedding_candidate_limit", 1200, 20, 5000
+    )
+    self.reaction_expression_embedding_score_threshold = self._cfg_unit_interval(
+        c, "reaction_expression_embedding_score_threshold", 0.42, 0.0
+    )
+    self.reaction_expression_embedding_weight = self._cfg_float(
+        c, "reaction_expression_embedding_weight", 0.55, 0.0
+    )
+    self.reaction_expression_embedding_backfill_enabled = self._cfg_bool(
+        c, "reaction_expression_embedding_backfill_enabled", True
+    )
+    self.reaction_expression_embedding_backfill_batch_size = self._cfg_int(
+        c, "reaction_expression_embedding_backfill_batch_size", 24, 1, 100
+    )
+    self.reaction_expression_embedding_backfill_interval_seconds = self._cfg_int(
+        c, "reaction_expression_embedding_backfill_interval_seconds", 300, 0, 86400
+    )
     self.reaction_expression_semantic_trigger_enabled = self._cfg_bool(
         c, "reaction_expression_semantic_trigger_enabled", True
     )
@@ -1568,6 +1595,7 @@ def initialize_plugin_runtime(self: Any) -> None:
     self._persona_data_save_dirty: set[str] = set()
     self._maintenance_failure_cooldowns: dict[str, dict[str, Any]] = {}
     self._framework_captured_send_cache: dict[str, list[Any]] = {}
+    self._framework_deferred_photo_cache: dict[str, dict[str, Any]] = {}
     self._segmented_reply_remainder_locks: dict[str, asyncio.Lock] = {}
     self._last_input_status_at: dict[str, float] = {}
     self._passive_input_status_tasks: dict[str, asyncio.Task] = {}
