@@ -19,6 +19,18 @@ class _Event:
         return self.private
 
 
+class _ReplyEvent:
+    def __init__(self) -> None:
+        self.sent: list[object] = []
+
+    @staticmethod
+    def plain_result(text: str) -> tuple[str, str]:
+        return ("plain", text)
+
+    async def send(self, result: object) -> None:
+        self.sent.append(result)
+
+
 class _PermissionHarness(InteractionUtilsMixin):
     def __init__(self) -> None:
         self.target_user_ids = ["configured-target"]
@@ -103,6 +115,27 @@ class InteractionPermissionTests(unittest.TestCase):
                 _Event("123", scoped_id="qq_official:123:isolated")
             )
         )
+
+
+class InteractionReplyStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reply_reports_cancelled_and_sent_states(self) -> None:
+        plugin = _PermissionHarness()
+        event = _ReplyEvent()
+
+        async def cancelled(_event: object) -> str:
+            return "missing-message"
+
+        plugin._should_cancel_reply_for_missing_or_recalled_trigger = cancelled
+        plugin._group_current_reply_quote_message_id = lambda *_args, **_kwargs: ""
+        self.assertFalse(await plugin._reply(event, "拒绝文本"))
+        self.assertEqual([], event.sent)
+
+        async def allowed(_event: object) -> str:
+            return ""
+
+        plugin._should_cancel_reply_for_missing_or_recalled_trigger = allowed
+        self.assertTrue(await plugin._reply(event, "拒绝文本"))
+        self.assertEqual([("plain", "拒绝文本")], event.sent)
 
 
 if __name__ == "__main__":

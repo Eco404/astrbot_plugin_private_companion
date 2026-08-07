@@ -606,7 +606,13 @@ class ProactiveMixin(UserRestGateMixin):
                     return False
             except Exception:
                 return False
-        if user.get("enabled") is False or user.get("manual_disabled"):
+        if user.get("manual_disabled"):
+            return False
+        capabilities = user.get("unified_profile_capabilities")
+        if isinstance(capabilities, dict):
+            if capabilities.get("private_companion_enabled") is not True:
+                return False
+        elif user.get("enabled") is False:
             return False
         return self._is_target_private_user(user_id, user)
 
@@ -1588,7 +1594,10 @@ class ProactiveMixin(UserRestGateMixin):
                 self._clear_pending_proactive_plan(user)
                 continue
             capabilities = user.get("unified_profile_capabilities")
-            if not isinstance(capabilities, dict):
+            migrator = getattr(self, "_req036_migrate_configured_target_capability", None)
+            migrated = bool(migrator(user_id, user)) if callable(migrator) else False
+            capabilities = user.get("unified_profile_capabilities")
+            if not isinstance(capabilities, dict) and not migrated:
                 # ``target_user_ids`` is an administrator-managed legacy
                 # permission source, not an inbound-DM signal.  Convert it
                 # once when materializing a target record; future syncs only
@@ -1627,7 +1636,13 @@ class ProactiveMixin(UserRestGateMixin):
                 continue
             raw_user_id = str(raw_user.get("user_id") or "")
             if not self._user_enabled_for_proactive(raw_user_id, raw_user):
-                raw_user["enabled"] = False
+                capabilities = raw_user.get("unified_profile_capabilities")
+                private_enabled = (
+                    capabilities.get("private_companion_enabled") is True
+                    if isinstance(capabilities, dict)
+                    else bool(raw_user.get("enabled")) and self._is_target_private_user(raw_user_id, raw_user)
+                )
+                raw_user["enabled"] = bool(private_enabled and not raw_user.get("manual_disabled"))
                 self._clear_pending_proactive_plan(raw_user)
                 changed = True
                 continue

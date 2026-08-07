@@ -70,3 +70,12 @@ def test_plugin_page_token_compat_shim_is_scoped_to_companion_pages() -> None:
     assert 'token_plugin_name == "astrbot_plugin_private_companion"' in source
     assert 'request_plugin_name == "astrbot_plugin_private_companion"' in source
     assert 'page_aliases = {"陪伴面板", "companion-panel"}' in source
+
+
+def test_first_setup_proactive_test_exposes_save_and_test_progress() -> None:
+    source = (ROOT / "pages" / "companion-panel" / "app.js").read_text(encoding="utf-8")
+
+    assert 'status === "applying"' in source
+    assert '正在保存当前配置，保存完成后会自动预约主动消息链路测试。' in source
+    assert 'state.setupGuideProactiveTest = { status: "applying"' in source
+    assert '首次配置仍在保存，请稍候再测试' in source

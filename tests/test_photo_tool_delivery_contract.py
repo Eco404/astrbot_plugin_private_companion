@@ -78,6 +78,8 @@ class _StructuredPhotoToolHarness(_PhotoToolHarness):
         reference_plan: tuple[dict, ...] = (),
         prompt_path: str = "",
         reference_fallback_message: str = "",
+        generation_completed: bool = False,
+        failure_stage: str = "",
     ) -> None:
         super().__init__()
         self.structured_reference_used = reference_used
@@ -85,6 +87,8 @@ class _StructuredPhotoToolHarness(_PhotoToolHarness):
         self.structured_reference_plan = reference_plan
         self.structured_prompt_path = prompt_path
         self.structured_reference_fallback_message = reference_fallback_message
+        self.structured_generation_completed = generation_completed
+        self.structured_failure_stage = failure_stage
 
     async def _generate_photo_image_result(self, **kwargs):
         self.workflow_kind = str(kwargs.get("workflow_kind") or "")
@@ -97,6 +101,8 @@ class _StructuredPhotoToolHarness(_PhotoToolHarness):
             reference_plan=self.structured_reference_plan,
             prompt_path=self.structured_prompt_path,
             reference_fallback_message=self.structured_reference_fallback_message,
+            generation_completed=self.structured_generation_completed,
+            failure_stage=self.structured_failure_stage,
         )
 
 
@@ -296,6 +302,33 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["sent"])
         self.assertTrue(payload["must_not_claim_sent"])
         self.assertEqual(payload["failure_stage"], "delivery")
+
+    async def test_materialization_failure_reports_upstream_completion_without_false_send(self) -> None:
+        harness = _StructuredPhotoToolHarness(
+            reference_used=False,
+            note="生成已完成但图片结果取回失败：下载在线图片结果超时",
+            generation_completed=True,
+            failure_stage="result_materialization",
+        )
+
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                _FakeEvent(),
+                prompt="画一张测试图片",
+                send=True,
+            )
+        )
+
+        self.assertEqual(payload["status"], "result_retrieval_failed")
+        self.assertFalse(payload["success"])
+        self.assertFalse(payload["generated"])
+        self.assertTrue(payload["generation_completed"])
+        self.assertTrue(payload["upstream_generated"])
+        self.assertFalse(payload["sent"])
+        self.assertEqual(payload["failure_stage"], "result_materialization")
+        self.assertFalse(payload["retryable"])
+        self.assertFalse(payload["same_turn_retry_allowed"])
+        self.assertIn("不要再次调用 pc_generate_photo", payload["final_response_instruction"])
 
     async def test_provider_policy_refusal_is_not_exposed_to_the_reply_model(self) -> None:
         provider_error = (
@@ -917,6 +950,9 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         instruction = harness._photo_generation_tool_instruction()
         self.assertIn("只有工具返回 `sent=true`", instruction)
         self.assertIn("工具返回 `sent=false`", instruction)
+        self.assertIn("本轮最多调用一次 `pc_generate_photo`", instruction)
+        self.assertIn("`failure_stage=result_materialization`", instruction)
+        self.assertIn("不要重复提交同一画面", instruction)
         self.assertIn("绝对不能声称", instruction)
         self.assertIn(PHOTO_TOOL_SILENT_SENTINEL, instruction)
         self.assertIn("不要把最终回复留空", instruction)

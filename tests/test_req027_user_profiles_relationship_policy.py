@@ -103,6 +103,7 @@ CORE_METHODS = _load_class_methods(
         ) if str(value).strip() else default,
         "_safe_float": lambda value, default=0.0: float(value or default),
         "_now_ts": lambda: 123.0,
+        "ensure_legacy_profile_capabilities": _load_unified_profile_service().ensure_legacy_profile_capabilities,
         "ensure_new_profile_capabilities": _load_unified_profile_service().ensure_new_profile_capabilities,
     },
 )
@@ -318,6 +319,66 @@ class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
         self.assertIsNot(isolated, other)
         self.assertNotEqual(isolated["user_id"], other["user_id"])
         self.assertEqual("qq_official", other.get("identity_platform_kind"))
+
+    def test_configured_target_adapter_rollover_reuses_the_proactive_profile(self) -> None:
+        host = _AutoProfileHost()
+        host.targets = ["123"]
+        host.target_platform = "onebot"
+        host.enable_auto_user_profile_creation = False
+
+        legacy = host._get_user("123")
+        legacy.update(
+            {
+                "identity_subject_id": "123",
+                "identity_platform_kind": "onebot",
+                "identity_adapter_instance_id": "onebot-main",
+                "identity_bot_id": "bot-old",
+                "umo": "onebot-main:FriendMessage:123",
+            }
+        )
+        event = _IdentityEvent("onebot", "onebot-rollover", "bot-new")
+        resolved, created = host._ensure_auto_private_user_profile(event, user_id="123", now=5.0)
+
+        self.assertIs(legacy, resolved)
+        self.assertFalse(created)
+        self.assertEqual("onebot-rollover", legacy["identity_adapter_instance_id"])
+        self.assertEqual("bot-new", legacy["identity_bot_id"])
+        self.assertEqual("123", host._private_user_id_for_event(event))
+
+    def test_configured_target_is_addressable_when_automatic_profiles_are_off(self) -> None:
+        host = _AutoProfileHost()
+        host.targets = ["123"]
+        host.target_platform = "onebot"
+        host.enable_auto_user_profile_creation = False
+        event = _IdentityEvent("onebot", "onebot-main", "bot-onebot")
+
+        user, created = host._ensure_auto_private_user_profile(event, user_id="123", now=6.0)
+
+        self.assertIsNotNone(user)
+        self.assertFalse(created)
+        self.assertEqual("123", user["user_id"])
+        self.assertEqual("123", user["identity_subject_id"])
+        self.assertIn("123", host.data["users"])
+
+    def test_existing_legacy_friend_is_reconciled_on_direct_private_entry(self) -> None:
+        host = _AutoProfileHost()
+        host.enable_auto_user_profile_creation = False
+        host.data["users"]["123"] = {
+            "user_id": "123",
+            "enabled": True,
+            "relationship_role": "friend",
+            "proactive_daily_limit": 2,
+        }
+        event = _IdentityEvent("onebot", "onebot-main", "bot-onebot")
+
+        user, created = host._ensure_auto_private_user_profile(event, user_id="123", now=6.0)
+
+        self.assertIsNotNone(user)
+        self.assertFalse(created)
+        capabilities = user["unified_profile_capabilities"]
+        self.assertTrue(capabilities["private_companion_enabled"])
+        self.assertTrue(capabilities["proactive_private_enabled"])
+        self.assertEqual("legacy_effective_migration", capabilities["grant_source"])
 
     def test_unversioned_legacy_profile_is_claimed_once_then_isolated(self) -> None:
         host = _AutoProfileHost()

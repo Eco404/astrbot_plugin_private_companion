@@ -107,6 +107,14 @@ class ProactiveHistoryContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("limit=5", generation_source)
         self.assertNotIn("limit=10", review_source)
 
+    def test_generation_tool_boundary_allows_only_proactive_photo_tool(self):
+        generation_source = inspect.getsource(ProactiveMessageMixin._build_framework_proactive_prompt)
+
+        self.assertIn("允许调用一次 `pc_generate_photo`", generation_source)
+        self.assertIn("除 `pc_generate_photo` 以外的其他 Private Companion 工具", generation_source)
+        self.assertIn("`final_response_instruction`", generation_source)
+        self.assertNotIn("或生图发送工具", generation_source)
+
     def test_schema_exposes_all_history_context_settings(self):
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         generation_items = schema["proactive_generation_config"]["items"]

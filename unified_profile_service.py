@@ -10,6 +10,7 @@ from .unified_profile_contract import build_capability_summary, normalize_portra
 
 CAPABILITY_SCHEMA_VERSION = 1
 MIGRATION_KEY = "req036_capability_migration"
+DEFAULT_CLOSED_REPAIR_OPERATION_ID = "req036-default-closed-compat-v3"
 DEFAULT_UNAUTHORIZED_PRIVATE_REPLY = "老大不让我跟陌生人说话哦。"
 _MIGRATION_SNAPSHOT_FIELDS = (
     "unified_profile_capabilities",
@@ -52,6 +53,102 @@ def _legacy_proactive_enabled(user: dict[str, Any], private_enabled: bool) -> bo
         return private_enabled and int(user.get("proactive_daily_limit") or 0) > 0
     except (TypeError, ValueError, OverflowError):
         return False
+
+
+def _legacy_positive_daily_limit(user: dict[str, Any]) -> bool:
+    try:
+        return int(user.get("proactive_daily_limit") or 0) > 0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _latest_explicit_capability_decision(user: dict[str, Any], capability: str) -> bool | None:
+    audit = user.get("unified_profile_capability_audit")
+    if not isinstance(audit, list):
+        return None
+    for entry in reversed(audit):
+        if not isinstance(entry, dict):
+            continue
+        changed = entry.get("changed")
+        change = changed.get(capability) if isinstance(changed, dict) else None
+        if not isinstance(change, dict) or type(change.get("to")) is not bool:
+            continue
+        actor = _text(entry.get("actor_id"), 120).lower()
+        reason = _text(entry.get("reason_code"), 80).lower()
+        if actor in {"compatibility_migration", "startup_migration"} or any(
+            token in reason for token in ("legacy_", "migration", "compatibility", "reconciliation")
+        ):
+            continue
+        return change["to"]
+    return None
+
+
+def _default_closed_repair_plan(
+    user: dict[str, Any],
+    *,
+    legacy_snapshot: Any = None,
+) -> dict[str, Any] | None:
+    """Recover only legacy permission evidence overwritten by default-closed migration."""
+    existing = user.get("unified_profile_capabilities")
+    if not isinstance(existing, dict):
+        return None
+    try:
+        if int(existing.get("schema_version") or 0) != CAPABILITY_SCHEMA_VERSION:
+            return None
+    except (TypeError, ValueError, OverflowError):
+        return None
+    grant_source = _text(existing.get("grant_source"), 80).lower()
+    if grant_source not in {"", "default_closed"}:
+        return None
+    if (
+        bool(user.get("manual_disabled"))
+        or bool(user.get("auto_profile_created"))
+        or _text(user.get("profile_origin"), 80).lower() == "private_auto"
+    ):
+        return None
+
+    private_decision = _latest_explicit_capability_decision(user, "private_companion_enabled")
+    proactive_decision = _latest_explicit_capability_decision(user, "proactive_private_enabled")
+    private_enabled = _bool(existing.get("private_companion_enabled"))
+    proactive_enabled = _bool(existing.get("proactive_private_enabled"))
+    snapshot_private_enabled = False
+    if isinstance(legacy_snapshot, dict):
+        snapshot_private_enabled = _bool(legacy_snapshot.get("private_companion_enabled"))
+        if not snapshot_private_enabled:
+            present_fields = legacy_snapshot.get("_present_fields")
+            enabled_was_present = (
+                "enabled" in present_fields
+                if isinstance(present_fields, list)
+                else "enabled" in legacy_snapshot
+            )
+            snapshot_private_enabled = enabled_was_present and _bool(legacy_snapshot.get("enabled"))
+    private_evidence = private_decision is True or any(
+        _bool(user.get(key))
+        for key in (
+            "private_companion_enabled",
+            "proactive_private_enabled",
+            "manual_enabled",
+            "auto_enabled",
+        )
+    ) or snapshot_private_enabled
+    repaired_private = private_enabled or (private_decision is not False and private_evidence)
+    proactive_evidence = (
+        proactive_decision is True
+        or _bool(user.get("proactive_private_enabled"))
+        or _legacy_positive_daily_limit(user)
+    )
+    repaired_proactive = proactive_enabled or (
+        repaired_private
+        and proactive_decision is not False
+        and proactive_evidence
+    )
+    if repaired_private == private_enabled and repaired_proactive == proactive_enabled:
+        return None
+    return {
+        "private_companion_enabled": repaired_private,
+        "proactive_private_enabled": repaired_proactive,
+        "grant_source": "legacy_default_closed_repair",
+    }
 
 
 def _migration_snapshot_presence(snapshot: Any) -> tuple[bool, set[str] | None]:
@@ -129,6 +226,60 @@ def ensure_new_profile_capabilities(user: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def ensure_legacy_profile_capabilities(user: dict[str, Any]) -> dict[str, Any]:
+    """Materialize durable legacy permission evidence for an existing profile."""
+    if not isinstance(user, dict):
+        return default_capabilities(grant_source="legacy_effective_migration")
+    existing = user.get("unified_profile_capabilities")
+    if isinstance(existing, dict):
+        normalized = normalize_capabilities(existing)
+        repair = _default_closed_repair_plan(user)
+        if repair is not None:
+            normalized["private_companion_enabled"] = repair["private_companion_enabled"]
+            normalized["proactive_private_enabled"] = repair["proactive_private_enabled"]
+            normalized["grant_source"] = repair["grant_source"]
+            normalized["updated_at"] = _now()
+    else:
+        private_decision = _latest_explicit_capability_decision(user, "private_companion_enabled")
+        proactive_decision = _latest_explicit_capability_decision(user, "proactive_private_enabled")
+        manually_disabled = _bool(user.get("manual_disabled"))
+        if private_decision is not None:
+            private_enabled = private_decision
+        else:
+            private_enabled = _legacy_private_enabled(user) or any(
+                _bool(user.get(key))
+                for key in ("manual_enabled", "auto_enabled")
+            )
+            if _text(user.get("relationship_role"), 40).lower() == "owner":
+                private_enabled = True
+        if manually_disabled:
+            private_enabled = False
+        if proactive_decision is not None:
+            proactive_enabled = proactive_decision
+        else:
+            proactive_enabled = _legacy_proactive_enabled(user, private_enabled)
+            if private_enabled and _text(user.get("relationship_role"), 40).lower() == "owner":
+                proactive_enabled = True
+        proactive_enabled = bool(private_enabled and proactive_enabled and not manually_disabled)
+        normalized = normalize_capabilities(
+            {
+                "private_companion_enabled": private_enabled,
+                "proactive_private_enabled": proactive_enabled,
+                "portrait_mode": "disabled",
+                "grant_source": "legacy_effective_migration",
+            },
+            default_source="legacy_effective_migration",
+        )
+    if _bool(user.get("manual_disabled")):
+        normalized["private_companion_enabled"] = False
+        normalized["proactive_private_enabled"] = False
+    user["unified_profile_capabilities"] = normalized
+    user["private_companion_enabled"] = normalized["private_companion_enabled"]
+    user["proactive_private_enabled"] = normalized["proactive_private_enabled"]
+    user["enabled"] = normalized["private_companion_enabled"]
+    return normalized
+
+
 def capability_summary(
     user: Any,
     *,
@@ -202,19 +353,21 @@ def update_capabilities(
         else:
             current["portrait_mode"] = normalize_portrait_mode(requested_mode)
             current["portrait_mode_override"] = "explicit"
-    current["grant_source"] = _text(grant_source, 80) or "admin"
-    current["updated_at"] = _now()
+    changed = {
+        key: {"from": previous.get(key), "to": current.get(key)}
+        for key in previous
+        if previous.get(key) != current.get(key)
+    }
+    if any(key in changed for key in ("private_companion_enabled", "proactive_private_enabled")):
+        current["grant_source"] = _text(grant_source, 80) or "admin"
+    if changed:
+        current["updated_at"] = _now()
     user["unified_profile_capabilities"] = current
     user["private_companion_enabled"] = current["private_companion_enabled"]
     user["proactive_private_enabled"] = current["proactive_private_enabled"]
     # Keep the historical aggregate field compatible without treating it as a
     # future authority source.
     user["enabled"] = current["private_companion_enabled"]
-    changed = {
-        key: {"from": previous.get(key), "to": current.get(key)}
-        for key in previous
-        if previous.get(key) != current.get(key)
-    }
     if changed:
         audit = user.setdefault("unified_profile_capability_audit", [])
         if not isinstance(audit, list):
@@ -356,6 +509,129 @@ def migrate_legacy_capabilities(data: dict[str, Any], *, operation_id: str, dry_
     }
 
 
+def default_closed_repair_preview(data: Any, *, operation_id: str = "") -> dict[str, Any]:
+    root = data if isinstance(data, dict) else {}
+    users = root.get("users") if isinstance(root.get("users"), dict) else {}
+    migration = root.get(MIGRATION_KEY) if isinstance(root.get(MIGRATION_KEY), dict) else {}
+    operations = migration.get("operations") if isinstance(migration.get("operations"), dict) else {}
+    legacy_operation = operations.get("req036-capability-v1")
+    legacy_snapshots = (
+        legacy_operation.get("snapshots")
+        if isinstance(legacy_operation, dict) and isinstance(legacy_operation.get("snapshots"), dict)
+        else {}
+    )
+    planned: list[dict[str, Any]] = []
+    for raw_user_id, user in users.items():
+        if not isinstance(raw_user_id, str) or not raw_user_id or not isinstance(user, dict):
+            continue
+        repair = _default_closed_repair_plan(
+            user,
+            legacy_snapshot=legacy_snapshots.get(raw_user_id),
+        )
+        if repair is None:
+            continue
+        planned.append({"user_id": raw_user_id, **repair})
+    return {
+        "ok": True,
+        "code": "default_closed_repair_dry_run",
+        "operation_id": _text(operation_id, 120),
+        "write_count": 0,
+        "planned": planned,
+        "count": len(planned),
+    }
+
+
+def repair_default_closed_capabilities(
+    data: dict[str, Any],
+    *,
+    operation_id: str = DEFAULT_CLOSED_REPAIR_OPERATION_ID,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    operation_id = _text(operation_id, 120)
+    if not isinstance(data, dict) or not operation_id:
+        return {"ok": False, "code": "invalid_request", "count": 0}
+    preview = default_closed_repair_preview(data, operation_id=operation_id)
+    if dry_run:
+        return preview
+
+    migration = data.get(MIGRATION_KEY)
+    if not isinstance(migration, dict):
+        migration = {}
+        data[MIGRATION_KEY] = migration
+    operations = migration.get("operations")
+    if not isinstance(operations, dict):
+        operations = {}
+        migration["operations"] = operations
+    prior_exists = operation_id in operations
+    prior = operations.get(operation_id)
+    recovered_corrupt_operation = False
+    if prior_exists:
+        if isinstance(prior, dict) and _migration_snapshots_valid(prior.get("snapshots")):
+            snapshots = prior["snapshots"]
+            replay_count = len(snapshots)
+            migration["version"] = CAPABILITY_SCHEMA_VERSION
+            if type(prior.get("count")) is not int or prior.get("count") != replay_count:
+                prior["count"] = replay_count
+            return {
+                "ok": True,
+                "code": "migration_idempotent_replay",
+                "operation_id": operation_id,
+                "count": replay_count,
+            }
+        if not preview["planned"]:
+            return {
+                "ok": False,
+                "code": "migration_corrupt",
+                "operation_id": operation_id,
+                "count": 0,
+            }
+        operations.pop(operation_id, None)
+        recovered_corrupt_operation = True
+
+    migration["version"] = CAPABILITY_SCHEMA_VERSION
+    users = data.get("users") if isinstance(data.get("users"), dict) else {}
+    legacy_operation = operations.get("req036-capability-v1")
+    legacy_snapshots = (
+        legacy_operation.get("snapshots")
+        if isinstance(legacy_operation, dict) and isinstance(legacy_operation.get("snapshots"), dict)
+        else {}
+    )
+    snapshots: dict[str, Any] = {}
+    for raw_user_id, user in users.items():
+        if not isinstance(raw_user_id, str) or not raw_user_id or not isinstance(user, dict):
+            continue
+        repair = _default_closed_repair_plan(
+            user,
+            legacy_snapshot=legacy_snapshots.get(raw_user_id),
+        )
+        if repair is None:
+            continue
+        snapshots[raw_user_id] = {
+            "unified_profile_capabilities": deepcopy(user.get("unified_profile_capabilities")),
+            "private_companion_enabled": deepcopy(user.get("private_companion_enabled")),
+            "proactive_private_enabled": deepcopy(user.get("proactive_private_enabled")),
+            "enabled": deepcopy(user.get("enabled")),
+            "_present_fields": [key for key in _MIGRATION_SNAPSHOT_FIELDS if key in user],
+        }
+        state = normalize_capabilities(user.get("unified_profile_capabilities"))
+        state["private_companion_enabled"] = repair["private_companion_enabled"]
+        state["proactive_private_enabled"] = repair["proactive_private_enabled"]
+        state["grant_source"] = repair["grant_source"]
+        state["updated_at"] = _now()
+        user["unified_profile_capabilities"] = state
+        user["private_companion_enabled"] = state["private_companion_enabled"]
+        user["proactive_private_enabled"] = state["proactive_private_enabled"]
+        user["enabled"] = state["private_companion_enabled"]
+    operations[operation_id] = {"count": len(snapshots), "snapshots": snapshots, "at": _now()}
+    return {
+        "ok": True,
+        "code": "default_closed_repair_applied",
+        "operation_id": operation_id,
+        "count": len(snapshots),
+        "recovered_corrupt_operation": recovered_corrupt_operation,
+    }
+
+
 def rollback_legacy_capabilities(data: dict[str, Any], *, operation_id: str) -> dict[str, Any]:
     operation_id = _text(operation_id, 120)
     migration = data.get(MIGRATION_KEY) if isinstance(data, dict) else None
@@ -399,7 +675,8 @@ def rollback_legacy_capabilities(data: dict[str, Any], *, operation_id: str) -> 
 
 
 __all__ = [name for name in globals() if name.isupper() or name in {
-    "capability_summary", "default_capabilities", "ensure_new_profile_capabilities", "migrate_legacy_capabilities",
-    "migration_preview", "normalize_capabilities", "private_companion_gate", "proactive_private_gate",
-    "rollback_legacy_capabilities", "update_capabilities",
+    "capability_summary", "default_capabilities", "default_closed_repair_preview", "ensure_legacy_profile_capabilities", "ensure_new_profile_capabilities",
+    "migrate_legacy_capabilities", "migration_preview", "normalize_capabilities", "private_companion_gate",
+    "proactive_private_gate", "repair_default_closed_capabilities", "rollback_legacy_capabilities",
+    "update_capabilities",
 }]

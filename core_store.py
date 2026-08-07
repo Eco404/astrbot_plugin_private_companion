@@ -126,7 +126,13 @@ from .relationship_ledger import (
 )
 from .storage.store_manager import StoreManager
 from .person_context_contract import empty_person_store, ensure_person_store
-from .unified_profile_service import ensure_new_profile_capabilities, migrate_legacy_capabilities
+from .unified_profile_service import (
+    DEFAULT_CLOSED_REPAIR_OPERATION_ID,
+    ensure_legacy_profile_capabilities,
+    ensure_new_profile_capabilities,
+    migrate_legacy_capabilities,
+    repair_default_closed_capabilities,
+)
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -542,6 +548,16 @@ class CoreStoreMixin:
         migrate_legacy_capabilities(
             data,
             operation_id="req036-capability-v1",
+            dry_run=False,
+        )
+        # PR #110 could recreate an already observed legacy identity with a
+        # schema-v1 default-closed document.  Reconcile only durable legacy
+        # enable evidence; new/automatic and explicitly disabled profiles
+        # remain closed.  The operation id is versioned so installs that ran
+        # the previous compatibility pass still receive this pass once.
+        repair_default_closed_capabilities(
+            data,
+            operation_id=DEFAULT_CLOSED_REPAIR_OPERATION_ID,
             dry_run=False,
         )
         return data
@@ -1417,6 +1433,34 @@ class CoreStoreMixin:
         # later same-ID event from another platform is isolated below.
         if not stored_platform and (not stored_subject or stored_subject == context.get("subject")):
             return canonical
+        # A configured target is allowed to roll over adapter-instance
+        # metadata inside its configured platform. Reuse the canonical record
+        # so passive and proactive paths do not split into a disabled shadow.
+        # Unconfigured identities still take the isolated digest path below.
+        try:
+            configured_ids = {
+                self._canonical_private_user_id(str(item or "").strip())
+                for item in self._configured_target_ids()
+                if str(item or "").strip()
+            }
+        except Exception:
+            configured_ids = set()
+        if canonical in configured_ids:
+            configured_raw = _single_line(getattr(self, "target_platform", ""), 80).lower()
+            configured_kind = self._normalize_platform_kind(configured_raw) if configured_raw else "generic"
+            observed_kind = _single_line(context.get("platform"), 40).lower()
+            compatible = True
+            if configured_kind != "generic" and observed_kind not in {"", "generic", configured_kind}:
+                compatible = False
+            elif configured_kind != "generic" and observed_kind == "generic" and configured_raw:
+                adapter = _single_line(context.get("adapter"), 120).lower()
+                if adapter and configured_raw not in {adapter, adapter.split(":", 1)[0]}:
+                    compatible = False
+            elif configured_kind == "generic" and configured_raw:
+                adapter = _single_line(context.get("adapter"), 120).lower()
+                compatible = not adapter or configured_raw in {adapter, adapter.split(":", 1)[0]}
+            if compatible:
+                return canonical
         # A conflicting platform/account never inherits the existing record.
         digest = hashlib.sha256(
             f"{context.get('platform','generic')}|{context.get('adapter','')}|{context.get('bot_id','')}|{canonical}".encode("utf-8")
@@ -2403,7 +2447,7 @@ class CoreStoreMixin:
         alias_migration_changed = False
         if original_user_id and original_user_id != user_id and original_user_id in users:
             target_created = user_id not in users
-            target = users.setdefault(user_id, deepcopy(_DEFAULT_USER_TEMPLATE))
+            target = users.setdefault(user_id, {})
             target["user_id"] = user_id
             source = users.pop(original_user_id)
             if isinstance(source, dict):
@@ -2431,6 +2475,13 @@ class CoreStoreMixin:
             aliases = user.setdefault("alias_user_ids", [])
             if isinstance(aliases, list) and original_user_id not in aliases:
                 aliases.append(original_user_id)
+        if not created:
+            # Capture legacy permission while the record still contains only
+            # persisted evidence. The default template intentionally supports
+            # old installs and must not manufacture an enabled signal here.
+            # This also repairs a late-imported default-closed document when
+            # its manual/automatic legacy grant remains present.
+            ensure_legacy_profile_capabilities(user)
         for key, default_value in _DEFAULT_USER_TEMPLATE.items():
             if key not in user:
                 user[key] = deepcopy(default_value)
@@ -2438,17 +2489,16 @@ class CoreStoreMixin:
         relationship_changed = self._ensure_relationship_user_state(user, created=created)
         user.setdefault("manual_enabled", False)
         user.setdefault("manual_disabled", False)
-        if (
-            not created
-            and str(user_id) in set(self._configured_target_ids())
-            and user.get("enabled") is False
-            and not user.get("manual_enabled")
-        ):
-            user["manual_disabled"] = True
         if created:
             user["enabled"] = self._is_target_private_user(user_id, user)
         elif user.get("manual_disabled"):
             user["enabled"] = False
+        elif isinstance(user.get("unified_profile_capabilities"), dict):
+            # ``enabled`` is a compatibility mirror of the private capability,
+            # never a second authority.  In particular, proactive scheduling
+            # must not turn a privately authorized user off merely because its
+            # proactive budget is currently exhausted or disabled.
+            user["enabled"] = user["unified_profile_capabilities"].get("private_companion_enabled") is True
         elif not self._is_target_private_user(user_id, user):
             user["enabled"] = False
         if not user.get("nickname"):
@@ -2519,9 +2569,30 @@ class CoreStoreMixin:
             # A legacy/migrated profile remains addressable even when automatic
             # creation is disabled.  Its REQ-036 capability state, not a DM,
             # decides whether the conversation may proceed.
-            if isinstance(existing.get("unified_profile_capabilities"), dict):
-                ensure_new_profile_capabilities(existing)
+            ensure_legacy_profile_capabilities(existing)
             return existing, False
+        # Configured targets are an administrator-owned permission source.  A
+        # platform/adapter identity rollover may produce a new scoped storage
+        # key, but it must still materialize that target record even when
+        # automatic profiles for ordinary users are disabled.  The capability
+        # migrator below decides whether this scoped record is actually open;
+        # this branch only makes the exact target addressable.
+        target_checker = getattr(self, "_is_target_private_user", None)
+        is_configured_target = False
+        if callable(target_checker):
+            for candidate in (normalized_user_id, raw_user_id, canonical_user_id):
+                try:
+                    if candidate and bool(target_checker(candidate, None)):
+                        is_configured_target = True
+                        break
+                except Exception:
+                    continue
+        if is_configured_target:
+            user = self._get_user(canonical_user_id)
+            stamper = getattr(self, "_stamp_private_event_identity", None)
+            if callable(stamper):
+                stamper(user, event, normalized_user_id or raw_user_id)
+            return user, False
         if not bool(getattr(self, "enable_auto_user_profile_creation", False)):
             return None, False
 

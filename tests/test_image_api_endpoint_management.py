@@ -149,6 +149,16 @@ class ImageApiEndpointManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("上游生图服务临时失败", note)
         self.assertIn("自动短暂重试一次", note)
 
+    def test_download_retry_classifier_skips_deterministic_failures(self) -> None:
+        harness = ImageDiagnosticHarness()
+
+        self.assertTrue(harness._external_image_download_failure_is_retryable("下载在线图片结果超时"))
+        self.assertTrue(harness._external_image_download_failure_is_retryable("下载图片失败：HTTP 503"))
+        self.assertTrue(harness._external_image_download_failure_is_retryable("Server disconnected"))
+        self.assertFalse(harness._external_image_download_failure_is_retryable("图片地址为空"))
+        self.assertFalse(harness._external_image_download_failure_is_retryable("下载图片过大（超过 32 MB）"))
+        self.assertFalse(harness._external_image_download_failure_is_retryable("下载图片失败：HTTP 403"))
+
     async def test_generation_accepts_data_uri_in_url_field(self) -> None:
         harness = ImageDiagnosticHarness()
         calls: list[dict[str, object]] = []
@@ -249,6 +259,191 @@ class ImageApiEndpointManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path, "C:/temp/private-companion-result.png")
         self.assertEqual(note, "ok")
         self.assertEqual(harness.saved_image, (generated, "invalid-b64-fallback", ".png"))
+
+    async def test_generated_url_download_retries_before_backup_generation(self) -> None:
+        harness = ImageDiagnosticHarness()
+        calls: list[dict[str, object]] = []
+        responses = [
+            SequenceResponse(200, {"data": [{"url": "https://cdn.example.test/generated.png"}]}),
+        ]
+        endpoints = [
+            {
+                "name": "主用",
+                "enabled": True,
+                "platform": "openai",
+                "base_url": "https://primary.example.test/v1",
+                "api_key": "primary-key",
+                "model": "gpt-image-2",
+                "size": "1024x1024",
+                "timeout_seconds": 30,
+                "custom_headers": "",
+            },
+            {
+                "name": "备用",
+                "enabled": True,
+                "platform": "openai",
+                "base_url": "https://backup.example.test/v1",
+                "api_key": "backup-key",
+                "model": "gpt-image-2",
+                "size": "1024x1024",
+                "timeout_seconds": 30,
+                "custom_headers": "",
+            },
+        ]
+        harness._external_image_api_endpoint_queue = lambda **_kwargs: endpoints
+
+        def session_factory(**kwargs):
+            return SequenceSession(responses, calls, **kwargs)
+
+        download_attempts: list[tuple[str, str]] = []
+
+        async def download_once(url: str, *, session_key: str) -> tuple[str, str]:
+            download_attempts.append((url, session_key))
+            if len(download_attempts) == 1:
+                return "", "下载在线图片结果超时（30 秒内未完成）"
+            return "C:/temp/retried-download.png", "ok"
+
+        async def no_sleep(_delay: float) -> None:
+            return None
+
+        harness._download_external_image_url_once = download_once
+        with patch("aiohttp.ClientSession", new=session_factory), patch(
+            "astrbot_plugin_private_companion.proactive_message.asyncio.sleep",
+            new=no_sleep,
+        ):
+            path, note = await harness._run_external_photo_generation_serial(
+                "a short test prompt",
+                session_key="download-retry-primary",
+            )
+
+        self.assertEqual(path, "C:/temp/retried-download.png")
+        self.assertIn("主用", note)
+        self.assertEqual(len(download_attempts), 2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["endpoint"], "https://primary.example.test/v1/images/generations")
+
+    async def test_generated_url_download_failure_does_not_charge_backup_generation(self) -> None:
+        harness = ImageDiagnosticHarness()
+        calls: list[dict[str, object]] = []
+        responses = [
+            SequenceResponse(200, {"data": [{"url": "https://cdn.example.test/generated.png"}]}),
+        ]
+        endpoints = [
+            {
+                "name": "主用",
+                "enabled": True,
+                "platform": "openai",
+                "base_url": "https://primary.example.test/v1",
+                "api_key": "primary-key",
+                "model": "gpt-image-2",
+                "size": "1024x1024",
+                "timeout_seconds": 30,
+                "custom_headers": "",
+            },
+            {
+                "name": "备用",
+                "enabled": True,
+                "platform": "openai",
+                "base_url": "https://backup.example.test/v1",
+                "api_key": "backup-key",
+                "model": "gpt-image-2",
+                "size": "1024x1024",
+                "timeout_seconds": 30,
+                "custom_headers": "",
+            },
+        ]
+        harness._external_image_api_endpoint_queue = lambda **_kwargs: endpoints
+
+        def session_factory(**kwargs):
+            return SequenceSession(responses, calls, **kwargs)
+
+        download_attempts: list[tuple[str, str]] = []
+
+        async def download_once(url: str, *, session_key: str) -> tuple[str, str]:
+            download_attempts.append((url, session_key))
+            return "", "下载在线图片结果超时（30 秒内未完成）"
+
+        async def no_sleep(_delay: float) -> None:
+            return None
+
+        harness._download_external_image_url_once = download_once
+        with patch("aiohttp.ClientSession", new=session_factory), patch(
+            "astrbot_plugin_private_companion.proactive_message.asyncio.sleep",
+            new=no_sleep,
+        ):
+            path, note = await harness._run_external_photo_generation_serial(
+                "a short test prompt",
+                session_key="download-retry-backup",
+            )
+
+        self.assertEqual(path, "")
+        self.assertIn("生成已完成但图片结果取回失败", note)
+        self.assertIn("主用", note)
+        self.assertEqual(len(download_attempts), 2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["endpoint"], "https://primary.example.test/v1/images/generations")
+
+    async def test_request_level_502_still_falls_back_to_backup_endpoint(self) -> None:
+        harness = ImageDiagnosticHarness()
+        calls: list[dict[str, object]] = []
+        generated = base64.b64encode(b"\x89PNG\r\n\x1a\nbackup-image").decode("ascii")
+        responses = [
+            SequenceResponse(502, "primary unavailable"),
+            SequenceResponse(502, "primary unavailable"),
+            SequenceResponse(200, {"data": [{"b64_json": generated}]}),
+        ]
+        endpoints = [
+            {
+                "name": "主用",
+                "enabled": True,
+                "platform": "openai",
+                "base_url": "https://primary.example.test/v1",
+                "api_key": "primary-key",
+                "model": "gpt-image-2",
+                "size": "1024x1024",
+                "timeout_seconds": 30,
+                "custom_headers": "",
+            },
+            {
+                "name": "备用",
+                "enabled": True,
+                "platform": "openai",
+                "base_url": "https://backup.example.test/v1",
+                "api_key": "backup-key",
+                "model": "gpt-image-2",
+                "size": "1024x1024",
+                "timeout_seconds": 30,
+                "custom_headers": "",
+            },
+        ]
+        harness._external_image_api_endpoint_queue = lambda **_kwargs: endpoints
+
+        def session_factory(**kwargs):
+            return SequenceSession(responses, calls, **kwargs)
+
+        async def no_sleep(_delay: float) -> None:
+            return None
+
+        with patch("aiohttp.ClientSession", new=session_factory), patch(
+            "astrbot_plugin_private_companion.proactive_message.asyncio.sleep",
+            new=no_sleep,
+        ):
+            path, note = await harness._run_external_photo_generation_serial(
+                "a short test prompt",
+                session_key="request-fallback",
+            )
+
+        self.assertEqual(path, "C:/temp/private-companion-result.png")
+        self.assertIn("备用", note)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(
+            [call["endpoint"] for call in calls],
+            [
+                "https://primary.example.test/v1/images/generations",
+                "https://primary.example.test/v1/images/generations",
+                "https://backup.example.test/v1/images/generations",
+            ],
+        )
 
     async def test_inline_image_rejects_invalid_base64_and_oversize_payload(self) -> None:
         harness = ImageDiagnosticHarness()

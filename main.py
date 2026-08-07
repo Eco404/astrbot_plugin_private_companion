@@ -2632,6 +2632,19 @@ class PrivateCompanionPlugin(
             user,
             getattr(self, "private_companion_disabled_reply", DEFAULT_UNAUTHORIZED_PRIVATE_REPLY),
         )
+        if isinstance(user, dict) and bool(user.get("manual_disabled")):
+            gate["allowed"] = False
+            gate["code"] = "private_companion_manually_disabled"
+            gate["reply"] = _single_line(
+                getattr(self, "private_companion_disabled_reply", DEFAULT_UNAUTHORIZED_PRIVATE_REPLY),
+                480,
+            ) or DEFAULT_UNAUTHORIZED_PRIVATE_REPLY
+            capabilities = gate.get("capabilities")
+            if isinstance(capabilities, dict):
+                capabilities["private_companion_enabled"] = False
+                capabilities["proactive_private_enabled"] = False
+                capabilities["effective_proactive_private_enabled"] = False
+            return gate
         owner_status = self._req036_owner_companion_status(user)
         if owner_status is None:
             return gate
@@ -2661,46 +2674,170 @@ class PrivateCompanionPlugin(
         return gate
 
     def _req036_migrate_configured_target_capability(self, user_id: Any, user: Any) -> bool:
-        """Materialize the one-time legacy target grant without reopening an explicit decision."""
-        if not isinstance(user, dict) or isinstance(user.get("unified_profile_capabilities"), dict):
+        """Repair migration-only false gates for configured targets and legacy owners."""
+        if not isinstance(user, dict):
             return False
         if bool(user.get("manual_disabled")):
             return False
         canonicalizer = getattr(self, "_canonical_private_user_id", None)
-        raw_user_id = _single_line(user_id, 120)
-        if callable(canonicalizer):
-            try:
-                raw_user_id = _single_line(canonicalizer(raw_user_id), 120)
-            except Exception:
-                return False
-        if not raw_user_id:
-            return False
+        identity_normalizer = getattr(self, "_normalize_private_identity_id", None)
+
+        def normalized_identity(value: Any) -> str:
+            candidate = _single_line(value, 160)
+            if callable(identity_normalizer):
+                try:
+                    candidate = _single_line(identity_normalizer(candidate), 160) or candidate
+                except Exception:
+                    return ""
+            if callable(canonicalizer):
+                try:
+                    candidate = _single_line(canonicalizer(candidate), 160)
+                except Exception:
+                    return ""
+            return candidate
+
         configured_targets = getattr(self, "_configured_target_ids", None)
-        if not callable(configured_targets):
-            return False
+        target_ids: set[str] = set()
         try:
-            target_ids = set()
-            for target in configured_targets():
-                target_id = _single_line(target, 120)
-                if callable(canonicalizer):
-                    target_id = _single_line(canonicalizer(target_id), 120)
-                if target_id:
-                    target_ids.add(target_id)
+            if callable(configured_targets):
+                target_ids = {
+                    target_id
+                    for target_id in (normalized_identity(target) for target in configured_targets())
+                    if target_id
+                }
         except Exception:
             return False
-        if raw_user_id not in target_ids:
+
+        identity_candidates = {
+            candidate
+            for candidate in (
+                normalized_identity(user_id),
+                normalized_identity(user.get("user_id")),
+                normalized_identity(user.get("identity_subject_id")),
+            )
+            if candidate
+        }
+        aliases = user.get("alias_user_ids")
+        if isinstance(aliases, list):
+            identity_candidates.update(
+                candidate
+                for candidate in (normalized_identity(alias) for alias in aliases[:32])
+                if candidate
+            )
+        configured_match = bool(target_ids.intersection(identity_candidates))
+
+        # A bare numeric/openid target must not grant the same identifier on a
+        # different platform. Adapter instance changes inside the configured
+        # platform remain compatible and are handled by the scoped profile.
+        if configured_match:
+            platform_normalizer = getattr(self, "_normalize_platform_kind", None)
+            configured_platform_raw = _single_line(getattr(self, "target_platform", ""), 80).lower()
+            observed_platform = _single_line(user.get("identity_platform_kind"), 40).lower()
+            configured_platform = ""
+            if callable(platform_normalizer) and configured_platform_raw:
+                try:
+                    configured_platform = _single_line(platform_normalizer(configured_platform_raw), 40).lower()
+                except Exception:
+                    configured_platform = ""
+            if (
+                configured_platform
+                and configured_platform != "generic"
+                and observed_platform
+                and observed_platform != "generic"
+                and configured_platform != observed_platform
+            ):
+                configured_match = False
+            elif configured_platform == "generic" and configured_platform_raw:
+                observed_adapter = _single_line(user.get("identity_adapter_instance_id"), 120).lower()
+                if observed_adapter and configured_platform_raw not in {observed_adapter, observed_adapter.split(":", 1)[0]}:
+                    configured_match = False
+
+        owner_status_getter = getattr(self, "_req036_owner_companion_status", None)
+        owner_status = owner_status_getter(user) if callable(owner_status_getter) else None
+        owner_match = bool(owner_status and all(owner_status))
+        if not configured_match and not owner_match:
             return False
+
+        capabilities = user.get("unified_profile_capabilities")
+        if isinstance(capabilities, dict) and capabilities.get("private_companion_enabled") is True:
+            return False
+        grant_source = (
+            _single_line(capabilities.get("grant_source"), 80).lower()
+            if isinstance(capabilities, dict)
+            else ""
+        )
+        explicit_sources = {
+            "admin",
+            "administrator",
+            "manual",
+            "page_administrator",
+            "page_administrator_update",
+        }
+        if grant_source in explicit_sources or "administrator" in grant_source:
+            return False
+
+        # Audit provenance is authoritative even when an older writer failed
+        # to keep grant_source synchronized.
+        audit = user.get("unified_profile_capability_audit")
+        if isinstance(audit, list):
+            for entry in reversed(audit[-64:]):
+                if not isinstance(entry, dict):
+                    continue
+                changed = entry.get("changed")
+                private_change = changed.get("private_companion_enabled") if isinstance(changed, dict) else None
+                if not isinstance(private_change, dict) or "to" not in private_change:
+                    continue
+                if private_change.get("to") is True:
+                    break
+                actor = _single_line(entry.get("actor_id"), 80).lower()
+                reason = _single_line(entry.get("reason_code"), 80).lower()
+                compatibility_change = any(
+                    token in f"{actor} {reason}"
+                    for token in ("migration", "compatibility", "reconciliation", "startup")
+                )
+                if private_change.get("to") is False and not compatibility_change:
+                    return False
+                break
+
+        repairable_sources = {
+            "",
+            "default_closed",
+            "group_observation",
+            "legacy_effective_migration",
+            "legacy_configured_target_migration",
+            "owner_default_enabled",
+        }
+        if (
+            isinstance(capabilities, dict)
+            and grant_source not in repairable_sources
+            and not bool(user.get("manual_enabled"))
+        ):
+            return False
+
+        proactive_enabled = bool(
+            owner_match
+            or (isinstance(capabilities, dict) and capabilities.get("proactive_private_enabled") is True)
+            or user.get("proactive_private_enabled") is True
+            or _safe_int(user.get("proactive_daily_limit"), 0, 0) > 0
+        )
+        source = (
+            "owner_capability_reconciliation"
+            if owner_match and not configured_match
+            else "configured_target_capability_reconciliation"
+            if isinstance(capabilities, dict)
+            else "legacy_configured_target_migration"
+        )
         result = req036_update_capabilities(
             user,
             {
                 "private_companion_enabled": True,
-                "proactive_private_enabled": _safe_int(user.get("proactive_daily_limit"), 0, 0) > 0,
+                "proactive_private_enabled": proactive_enabled,
             },
             actor_authorized=True,
-            grant_source="legacy_configured_target_migration",
+            grant_source=source,
             actor_id="compatibility_migration",
-            target_identity=raw_user_id,
-            reason_code="legacy_configured_target_migration",
+            target_identity=normalized_identity(user.get("identity_subject_id")) or normalized_identity(user_id),
+            reason_code=source,
         )
         return bool(result.get("ok"))
 
@@ -2712,6 +2849,15 @@ class PrivateCompanionPlugin(
             global_portrait_mode=getattr(self, "portrait_global_mode", "disabled"),
             portrait_backend_available=portrait_backend_available,
         )
+        if isinstance(user, dict) and bool(user.get("manual_disabled")):
+            summary["private_companion_enabled"] = False
+            summary["proactive_private_enabled"] = False
+            summary["effective_proactive_private_enabled"] = False
+            reasons = list(summary.get("blocked_reasons") or [])
+            if "private_companion_manually_disabled" not in reasons:
+                reasons.append("private_companion_manually_disabled")
+            summary["blocked_reasons"] = reasons[:8]
+            return summary
         owner_status = self._req036_owner_companion_status(user)
         if owner_status is None:
             return summary
@@ -2733,6 +2879,8 @@ class PrivateCompanionPlugin(
         return summary
 
     def _req036_proactive_private_allowed(self, user: Any) -> bool:
+        if isinstance(user, dict) and bool(user.get("manual_disabled")):
+            return False
         owner_status = self._req036_owner_companion_status(user)
         if owner_status is not None:
             global_enabled, user_enabled = owner_status
@@ -2925,13 +3073,105 @@ class PrivateCompanionPlugin(
 
     async def _req036_reject_unauthorized_private_event(self, event: Any, gate: dict[str, Any]) -> None:
         """Reply before any LLM, bridge, tool, portrait, or relationship path."""
+        inbound_checker = getattr(self, "_event_is_inbound_chat_message", None)
+        if callable(inbound_checker) and not inbound_checker(event):
+            return
+        if bool(getattr(event, "private_companion_req036_denied", False)):
+            try:
+                event.stop_event()
+            except Exception:
+                pass
+            return
         try:
             setattr(event, "private_companion_req036_denied", True)
             setattr(event, "private_companion_req036_denial_code", str(gate.get("code") or "private_companion_disabled"))
         except Exception:
             pass
-        event.stop_event()
-        await self._reply(event, str(gate.get("reply") or DEFAULT_UNAUTHORIZED_PRIVATE_REPLY))
+        try:
+            event.stop_event()
+        except Exception:
+            pass
+
+        # Adapter redelivery can reconstruct the same genuine message as a
+        # different event object.  Deduplicate only by its stable platform
+        # message identity; this is not a time-based user rate limit.
+        message_id = ""
+        message_id_getter = getattr(self, "_event_message_id", None)
+        if callable(message_id_getter):
+            try:
+                message_id = _single_line(message_id_getter(event), 120)
+            except Exception:
+                message_id = ""
+        denial_cache_key = ""
+        denial_cache: dict[str, float] | None = None
+        denial_cache_stamp = time.monotonic()
+        if message_id:
+            try:
+                sender_id = _single_line(event.get_sender_id(), 120)
+            except Exception:
+                sender_id = ""
+            platform_getter = getattr(self, "_platform_kind_for_event", None)
+            try:
+                platform = _single_line(platform_getter(event), 80) if callable(platform_getter) else ""
+            except Exception:
+                platform = ""
+            scope_getter = getattr(self, "_event_req036_scope", None)
+            try:
+                denial_scope = _single_line(scope_getter(event), 480) if callable(scope_getter) else ""
+            except Exception:
+                denial_scope = ""
+            denial_scope = denial_scope or f"{platform or 'unknown'}:{sender_id or 'unknown'}"
+            denial_cache_key = f"{denial_scope}:{message_id}"
+            denial_cache = getattr(self, "_req036_recent_denial_message_ids", None)
+            if not isinstance(denial_cache, dict):
+                denial_cache = {}
+                self._req036_recent_denial_message_ids = denial_cache
+            for cache_key, cached_at in list(denial_cache.items()):
+                age = denial_cache_stamp - _safe_float(cached_at, 0.0)
+                if age < 0 or age > 180.0:
+                    denial_cache.pop(cache_key, None)
+            if denial_cache_key in denial_cache:
+                logger.debug(
+                    "[PrivateCompanion] 已忽略重复的未授权私聊拒绝: sender=%s message_id=%s",
+                    sender_id or "-",
+                    message_id,
+                )
+                return
+            denial_cache[denial_cache_key] = denial_cache_stamp
+        reply_text = str(gate.get("reply") or DEFAULT_UNAUTHORIZED_PRIVATE_REPLY)
+        echo_entry = None
+        echo_remember = getattr(self, "_remember_req036_denial_echo", None)
+        if callable(echo_remember):
+            try:
+                echo_entry = echo_remember(event, reply_text)
+            except Exception:
+                echo_entry = None
+
+        def release_reply_reservations() -> None:
+            if denial_cache is not None and denial_cache_key and denial_cache.get(denial_cache_key) == denial_cache_stamp:
+                denial_cache.pop(denial_cache_key, None)
+            echo_forget = getattr(self, "_forget_req036_denial_echo", None)
+            if callable(echo_forget) and echo_entry is not None:
+                try:
+                    echo_forget(echo_entry)
+                except Exception:
+                    pass
+
+        try:
+            reply_result = await self._reply(event, reply_text)
+        except Exception:
+            release_reply_reservations()
+            raise
+        if reply_result is False:
+            release_reply_reservations()
+            logger.debug("[PrivateCompanion] 未授权私聊拒绝未发送，已释放回流与消息去重占位")
+            return
+        echo_confirm = getattr(self, "_confirm_req036_denial_echo", None)
+        if callable(echo_confirm) and echo_entry is not None:
+            try:
+                echo_confirm(echo_entry)
+            except Exception:
+                pass
 
     @staticmethod
     def _req036_group_portrait_query_kind(text: Any) -> str:
@@ -7073,7 +7313,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             caption(string): 发送图片时附带的短文字。
             scene_preset(string): 可选场景预设建议，如 角色自拍/COS自拍/日常穿搭/镜前穿搭/头像特写/房间日常/可拍画面/表情包场景；不会覆盖用户原话或参考图强约束。
         """
-        if self is None or self._proactive_only_blocks_passive_event(event, "pc_tools"):
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_generate_photo"):
             return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用 Private Companion 工具。"}'
         inbound_text = str(getattr(event, "message_str", "") or "")
         reaction_kind = _single_line(kind, 24).casefold() in {
@@ -11441,14 +11681,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return "已临时放行：\n" + "\n".join(f"- {self._proactive_only_unlock_label(item)}" for item in sorted(target_keys))
 
     def _proactive_only_blocks_passive_event(self, event: AstrMessageEvent | None, feature: str = "") -> bool:
-        if feature == "pc_tools" and bool(getattr(event, "private_companion_proactive_framework", False)):
+        proactive_framework = bool(getattr(event, "private_companion_proactive_framework", False))
+        allow_proactive_photo = feature == "pc_generate_photo"
+        effective_feature = "pc_tools" if allow_proactive_photo else feature
+        if effective_feature == "pc_tools" and proactive_framework and not allow_proactive_photo:
             return True
         if not bool(getattr(self, "enable_proactive_only_mode", False)):
             self._clear_proactive_only_temp_unlocks_if_mode_off()
             return False
-        if bool(getattr(event, "private_companion_proactive_framework", False)):
+        if proactive_framework:
             return False
-        return not self._proactive_only_temp_unlock_allows(feature)
+        return not self._proactive_only_temp_unlock_allows(effective_feature)
 
     async def _record_proactive_only_private_feedback(
         self,
@@ -11759,6 +12002,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if not bool(event.is_private_chat()):
                 return
         except Exception:
+            return
+        inbound_checker = getattr(self, "_event_is_inbound_chat_message", None)
+        if callable(inbound_checker) and not inbound_checker(event):
             return
         already_denied = bool(getattr(event, "private_companion_req036_denied", False))
         try:
@@ -13658,6 +13904,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     async def guard_req036_private_capability_early(self, event: AstrMessageEvent, *args, **kwargs):
         """Reject an unauthorized private event before any normal message plugin runs."""
         if self is None or bool(getattr(event, "private_companion_req036_denied", False)):
+            return
+        inbound_checker = getattr(self, "_event_is_inbound_chat_message", None)
+        if callable(inbound_checker) and not inbound_checker(event):
+            logger.debug("[PrivateCompanion] 非入站聊天事件跳过私聊权限闸门")
             return
         try:
             user_id = str(event.get_sender_id())

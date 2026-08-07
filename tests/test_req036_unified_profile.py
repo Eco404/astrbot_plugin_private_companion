@@ -4,10 +4,12 @@ import ast
 import asyncio
 import copy
 import hashlib
+import re
 import sys
 import time
 import types
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -30,13 +32,18 @@ from req036_companion.unified_profile_contract import (
     validate_profile_dto,
 )
 from req036_companion.unified_profile_service import (
+    DEFAULT_CLOSED_REPAIR_OPERATION_ID,
     DEFAULT_UNAUTHORIZED_PRIVATE_REPLY,
     MIGRATION_KEY,
     capability_summary,
     default_capabilities,
+    default_closed_repair_preview,
+    ensure_legacy_profile_capabilities,
+    ensure_new_profile_capabilities,
     migrate_legacy_capabilities,
     private_companion_gate,
     proactive_private_gate,
+    repair_default_closed_capabilities,
     rollback_legacy_capabilities,
     update_capabilities,
 )
@@ -81,7 +88,9 @@ def _load_method(name: str) -> Any:
             info=lambda *_args, **_kwargs: None,
             warning=lambda *_args, **_kwargs: None,
         ),
+        "time": time,
         "_now_ts": lambda: 100.0,
+        "_safe_float": lambda value, default=0.0: float(value or default),
         "_single_line": lambda value, limit=240: str(value or "").strip()[:limit],
     }
     exec(compile(module, str(ROOT / "main.py"), "exec"), namespace)
@@ -118,6 +127,44 @@ def _load_async_function(path: Path, name: str) -> Any:
 
 
 REQ036_PRIVATE_HANDLER = _load_async_function(ROOT / "message_pipeline.py", "handle_private_message")
+
+
+def _load_event_dispatch_method(name: str) -> Any:
+    source = (ROOT / "event_dispatch.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    owner = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "EventDispatchMixin")
+    method = next(node for node in owner.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    method = copy.deepcopy(method)
+    module = ast.Module(body=[method], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace: dict[str, Any] = {
+        "Any": Any,
+        "AstrMessageEvent": Any,
+        "Mapping": Mapping,
+        "logger": types.SimpleNamespace(
+            debug=lambda *_args, **_kwargs: None,
+            info=lambda *_args, **_kwargs: None,
+            warning=lambda *_args, **_kwargs: None,
+        ),
+        "re": re,
+        "time": time,
+        "_now_ts": lambda: 100.0,
+        "_safe_float": lambda value, default=0.0: float(value or default),
+        "_single_line": lambda value, limit=240: str(value or "").strip()[:limit],
+    }
+    exec(compile(module, str(ROOT / "event_dispatch.py"), "exec"), namespace)
+    return namespace[name]
+
+
+EVENT_RAW_PAYLOAD = _load_event_dispatch_method("_event_raw_payload")
+EVENT_REQ036_VISIBLE_TEXT = _load_event_dispatch_method("_event_req036_visible_text")
+EVENT_REQ036_SCOPE = _load_event_dispatch_method("_event_req036_scope")
+EVENT_REQ036_HAS_MEDIA = _load_event_dispatch_method("_event_req036_has_media")
+EVENT_REQ036_COMPONENT_SHAPE = _load_event_dispatch_method("_event_req036_component_shape")
+EVENT_REMEMBER_REQ036_DENIAL_ECHO = _load_event_dispatch_method("_remember_req036_denial_echo")
+EVENT_FORGET_REQ036_DENIAL_ECHO = _load_event_dispatch_method("_forget_req036_denial_echo")
+EVENT_IS_RECENT_REQ036_DENIAL_ECHO = _load_event_dispatch_method("_event_is_recent_req036_denial_echo")
+EVENT_IS_INBOUND_CHAT_MESSAGE = _load_event_dispatch_method("_event_is_inbound_chat_message")
 
 
 def _method_priority(name: str) -> int:
@@ -219,9 +266,19 @@ REQ036_USER_LIST = _load_user_list_method()
 
 
 class _PrivateEvent:
-    def __init__(self, message_str: str = "") -> None:
+    def __init__(
+        self,
+        message_str: str = "",
+        *,
+        raw_message: dict[str, Any] | None = None,
+        message_id: str = "",
+    ) -> None:
         self.stopped = False
         self.message_str = message_str
+        raw = dict(raw_message or {})
+        if message_id and "message_id" not in raw:
+            raw["message_id"] = message_id
+        self.message_obj = types.SimpleNamespace(raw_message=raw, message_id=message_id)
 
     @staticmethod
     def is_private_chat() -> bool:
@@ -235,7 +292,28 @@ class _PrivateEvent:
         self.stopped = True
 
 
-class _GateHost:
+class _EventIngressHost:
+    _event_raw_payload = EVENT_RAW_PAYLOAD
+    _event_req036_visible_text = EVENT_REQ036_VISIBLE_TEXT
+    _event_req036_scope = EVENT_REQ036_SCOPE
+    _event_req036_has_media = EVENT_REQ036_HAS_MEDIA
+    _event_req036_component_shape = EVENT_REQ036_COMPONENT_SHAPE
+    _remember_req036_denial_echo = EVENT_REMEMBER_REQ036_DENIAL_ECHO
+    _forget_req036_denial_echo = EVENT_FORGET_REQ036_DENIAL_ECHO
+    _event_is_recent_req036_denial_echo = EVENT_IS_RECENT_REQ036_DENIAL_ECHO
+    _event_is_inbound_chat_message = EVENT_IS_INBOUND_CHAT_MESSAGE
+
+    @staticmethod
+    def _event_scope_key(_event: Any) -> str:
+        return "private:u-1"
+
+    @staticmethod
+    def _confirm_req036_denial_echo(entry: Any) -> None:
+        if isinstance(entry, dict):
+            entry["state"] = "sent"
+
+
+class _GateHost(_EventIngressHost):
     def __init__(self) -> None:
         self.data = {"users": {"u-1": {"unified_profile_capabilities": default_capabilities()}}}
         self.replies: list[str] = []
@@ -261,7 +339,7 @@ class _CommandEvent(_PrivateEvent):
     message_str = "陪伴 状态"
 
 
-class _CommandGateHost:
+class _CommandGateHost(_EventIngressHost):
     def __init__(self) -> None:
         self._data_lock = asyncio.Lock()
         self.user = {"unified_profile_capabilities": default_capabilities()}
@@ -297,7 +375,7 @@ class _CommandGateHost:
         self.qzone_calls += 1
 
 
-class _EarlyGateHost:
+class _EarlyGateHost(_EventIngressHost):
     def __init__(self) -> None:
         self._data_lock = asyncio.Lock()
         self.data: dict[str, Any] = {"users": {}}
@@ -344,6 +422,37 @@ class _RejectRaisesHost:
     @staticmethod
     async def _reply(_event: Any, _text: str) -> None:
         raise RuntimeError("transport unavailable")
+
+
+class _RejectRecorderHost(_EventIngressHost):
+    def __init__(self, *, fail_first: bool = False) -> None:
+        self.replies: list[str] = []
+        self.attempts = 0
+        self.fail_first = fail_first
+        self._req036_recent_denial_message_ids: dict[str, float] = {}
+
+    @staticmethod
+    def _event_message_id(event: Any) -> str:
+        return str(getattr(getattr(event, "message_obj", None), "message_id", "") or "")
+
+    @staticmethod
+    def _platform_kind_for_event(_event: Any) -> str:
+        return "onebot"
+
+    async def _reply(self, _event: Any, text: str) -> None:
+        self.attempts += 1
+        if self.fail_first and self.attempts == 1:
+            raise RuntimeError("transport unavailable")
+        self.replies.append(text)
+
+
+class _RejectSilentCancelHost(_RejectRecorderHost):
+    async def _reply(self, _event: Any, text: str) -> bool:
+        self.attempts += 1
+        if self.attempts == 1:
+            return False
+        self.replies.append(text)
+        return True
 
 
 class _GroupEvent:
@@ -426,9 +535,17 @@ class _ConfiguredTargetHost:
 
 
 class _LegacyTargetMigrationHost:
+    target_platform = "aiocqhttp"
+
     @staticmethod
     def _canonical_private_user_id(value: str) -> str:
         return str(value or "").strip()
+
+    @staticmethod
+    def _normalize_platform_kind(value: Any) -> str:
+        return {"aiocqhttp": "onebot", "onebot": "onebot", "telegram": "telegram"}.get(
+            str(value or "").strip().lower(), "generic"
+        )
 
     @staticmethod
     def _configured_target_ids() -> list[str]:
@@ -535,6 +652,212 @@ class Req036CompanionTests(unittest.TestCase):
         self.assertEqual("migration_idempotent_replay", migrate_legacy_capabilities(data, operation_id="req036-test", dry_run=False)["code"])
         self.assertEqual("migration_rolled_back", rollback_legacy_capabilities(data, operation_id="req036-test")["code"])
         self.assertEqual(before, {"users": data["users"]})
+
+    def test_existing_profile_materializes_legacy_permission_without_default_template_evidence(self) -> None:
+        legacy = {
+            "enabled": True,
+            "proactive_daily_limit": 2,
+            "relationship_role": "friend",
+        }
+        state = ensure_legacy_profile_capabilities(legacy)
+        self.assertTrue(state["private_companion_enabled"])
+        self.assertTrue(state["proactive_private_enabled"])
+        self.assertEqual("legacy_effective_migration", state["grant_source"])
+
+        unknown = {"relationship_role": "friend"}
+        unknown_state = ensure_legacy_profile_capabilities(unknown)
+        self.assertFalse(unknown_state["private_companion_enabled"])
+        self.assertFalse(unknown_state["proactive_private_enabled"])
+
+        late_import = {
+            "enabled": False,
+            "manual_enabled": True,
+            "proactive_daily_limit": 2,
+            "unified_profile_capabilities": default_capabilities(),
+        }
+        imported_state = ensure_legacy_profile_capabilities(late_import)
+        self.assertTrue(imported_state["private_companion_enabled"])
+        self.assertTrue(imported_state["proactive_private_enabled"])
+        self.assertEqual("legacy_default_closed_repair", imported_state["grant_source"])
+
+    def test_existing_owner_legacy_permission_respects_explicit_disable_audit(self) -> None:
+        owner = {
+            "enabled": False,
+            "relationship_role": "owner",
+            "unified_profile_capability_audit": [{
+                "actor_id": "page_administrator",
+                "reason_code": "page_administrator_update",
+                "changed": {
+                    "private_companion_enabled": {"from": True, "to": False},
+                    "proactive_private_enabled": {"from": True, "to": False},
+                },
+            }],
+        }
+        state = ensure_legacy_profile_capabilities(owner)
+        self.assertFalse(state["private_companion_enabled"])
+        self.assertFalse(state["proactive_private_enabled"])
+
+        enabled_state = default_capabilities(grant_source="administrator")
+        enabled_state["private_companion_enabled"] = True
+        enabled_state["proactive_private_enabled"] = True
+        manually_disabled = {
+            "manual_disabled": True,
+            "unified_profile_capabilities": enabled_state,
+        }
+        disabled_state = ensure_legacy_profile_capabilities(manually_disabled)
+        self.assertFalse(disabled_state["private_companion_enabled"])
+        self.assertFalse(disabled_state["proactive_private_enabled"])
+
+    def test_default_closed_compatibility_repair_restores_legacy_evidence_once(self) -> None:
+        state = default_capabilities()
+        state["portrait_mode"] = "use_existing"
+        state["portrait_mode_override"] = "explicit"
+        state.pop("grant_source")
+        data: dict[str, Any] = {
+            "users": {
+                "legacy-enabled": {
+                    "enabled": True,
+                    "manual_enabled": True,
+                    "private_companion_enabled": False,
+                    "proactive_private_enabled": False,
+                    "proactive_daily_limit": 2,
+                    "unified_profile_capabilities": state,
+                }
+            }
+        }
+        before = copy.deepcopy(data["users"])
+        preview = default_closed_repair_preview(data, operation_id=DEFAULT_CLOSED_REPAIR_OPERATION_ID)
+        self.assertEqual("default_closed_repair_dry_run", preview["code"])
+        self.assertEqual(1, preview["count"])
+        self.assertEqual(before, data["users"])
+
+        applied = repair_default_closed_capabilities(
+            data,
+            operation_id=DEFAULT_CLOSED_REPAIR_OPERATION_ID,
+            dry_run=False,
+        )
+        self.assertEqual("default_closed_repair_applied", applied["code"])
+        self.assertEqual(1, applied["count"])
+        repaired = data["users"]["legacy-enabled"]["unified_profile_capabilities"]
+        self.assertTrue(repaired["private_companion_enabled"])
+        self.assertTrue(repaired["proactive_private_enabled"])
+        self.assertEqual("legacy_default_closed_repair", repaired["grant_source"])
+        self.assertEqual("use_existing", repaired["portrait_mode"])
+        self.assertEqual("explicit", repaired["portrait_mode_override"])
+        self.assertEqual(
+            "migration_idempotent_replay",
+            repair_default_closed_capabilities(
+                data,
+                operation_id=DEFAULT_CLOSED_REPAIR_OPERATION_ID,
+                dry_run=False,
+            )["code"],
+        )
+
+        self.assertEqual(
+            "migration_rolled_back",
+            rollback_legacy_capabilities(data, operation_id=DEFAULT_CLOSED_REPAIR_OPERATION_ID)["code"],
+        )
+        self.assertEqual(before, data["users"])
+
+    def test_default_closed_repair_does_not_open_new_or_explicitly_disabled_profiles(self) -> None:
+        explicit_audit = [{
+            "actor_id": "page_administrator",
+            "reason_code": "page_administrator_update",
+            "changed": {"private_companion_enabled": {"from": True, "to": False}},
+        }]
+        data: dict[str, Any] = {
+            "users": {
+                "manual-disabled": {
+                    "enabled": True,
+                    "manual_disabled": True,
+                    "proactive_daily_limit": 3,
+                    "unified_profile_capabilities": default_capabilities(),
+                },
+                "administrator-disabled": {
+                    "enabled": True,
+                    "proactive_daily_limit": 3,
+                    "unified_profile_capability_audit": explicit_audit,
+                    "unified_profile_capabilities": default_capabilities(),
+                },
+                "automatic-new-profile": {
+                    "enabled": True,
+                    "auto_profile_created": True,
+                    "profile_origin": "private_auto",
+                    "proactive_daily_limit": 3,
+                    "unified_profile_capabilities": default_capabilities(),
+                },
+                "no-private-evidence": {
+                    "enabled": False,
+                    "proactive_daily_limit": 3,
+                    "unified_profile_capabilities": default_capabilities(),
+                },
+            }
+        }
+        before = copy.deepcopy(data["users"])
+        result = repair_default_closed_capabilities(
+            data,
+            operation_id="req036-default-closed-test-no-open",
+            dry_run=False,
+        )
+        self.assertEqual("default_closed_repair_applied", result["code"])
+        self.assertEqual(0, result["count"])
+        self.assertEqual(before, data["users"])
+
+    def test_default_closed_repair_uses_exact_legacy_snapshot_when_aliases_were_overwritten(self) -> None:
+        data: dict[str, Any] = {
+            "users": {
+                "legacy-shadow": {
+                    "enabled": False,
+                    "private_companion_enabled": False,
+                    "proactive_private_enabled": False,
+                    "proactive_daily_limit": 2,
+                    "unified_profile_capabilities": default_capabilities(),
+                }
+            },
+            MIGRATION_KEY: {
+                "operations": {
+                    "req036-capability-v1": {
+                        "count": 1,
+                        "snapshots": {
+                            "legacy-shadow": {
+                                "unified_profile_capabilities": None,
+                                "private_companion_enabled": None,
+                                "proactive_private_enabled": None,
+                                "enabled": True,
+                            }
+                        },
+                    }
+                }
+            },
+        }
+        result = repair_default_closed_capabilities(
+            data,
+            operation_id="req036-default-closed-snapshot-test",
+            dry_run=False,
+        )
+        self.assertEqual(1, result["count"])
+        state = data["users"]["legacy-shadow"]["unified_profile_capabilities"]
+        self.assertTrue(state["private_companion_enabled"])
+        self.assertTrue(state["proactive_private_enabled"])
+
+    def test_portrait_only_update_preserves_permission_provenance(self) -> None:
+        user = {
+            "unified_profile_capabilities": default_capabilities(
+                grant_source="legacy_default_closed_repair"
+            )
+        }
+        before_updated_at = user["unified_profile_capabilities"]["updated_at"]
+        result = update_capabilities(
+            user,
+            {"portrait_mode": "use_existing"},
+            actor_authorized=True,
+            grant_source="administrator",
+        )
+        self.assertTrue(result["ok"])
+        state = user["unified_profile_capabilities"]
+        self.assertEqual("legacy_default_closed_repair", state["grant_source"])
+        self.assertEqual("use_existing", state["portrait_mode"])
+        self.assertEqual(before_updated_at, state["updated_at"])
 
     def test_capability_migration_fails_closed_for_manual_disable_and_infinite_limits(self) -> None:
         data: dict[str, Any] = {
@@ -850,16 +1173,322 @@ class Req036CompanionTests(unittest.TestCase):
                 self.assertGreater(priority, 0)
                 self.assertGreater(priority, enrichment_priority)
 
-    def test_empty_poke_shaped_private_event_is_rejected_by_early_guard(self) -> None:
-        host = _EarlyGateHost()
-        event = _PrivateEvent("")
-        event.is_poke_notice = True
-        asyncio.run(REQ036_EARLY_GATE(host, event))
-        self.assertTrue(event.stopped)
-        self.assertTrue(event.private_companion_req036_denied)
+    def test_non_chat_events_are_left_for_dedicated_handlers(self) -> None:
+        payloads = (
+            {"post_type": "notice", "notice_type": "notify", "sub_type": "input_status"},
+            {"post_type": "notice", "notice_type": "notify", "sub_type": "poke"},
+            {"post_type": "request", "request_type": "friend"},
+            {"post_type": "message_sent", "message_type": "private"},
+            {"post_type": "meta_event", "meta_event_type": "heartbeat"},
+        )
+        for raw_message in payloads:
+            with self.subTest(raw_message=raw_message):
+                host = _EarlyGateHost()
+                event = _PrivateEvent("", raw_message=raw_message)
+                asyncio.run(REQ036_EARLY_GATE(host, event))
+                self.assertFalse(event.stopped)
+                self.assertFalse(getattr(event, "private_companion_req036_denied", False))
+                self.assertEqual([], host.replies)
+                self.assertEqual(0, host.profile_checks)
+                self.assertEqual({}, host.data["users"])
+
+    def test_real_text_and_empty_image_messages_still_enter_early_guard(self) -> None:
+        events = (
+            _PrivateEvent("你好", raw_message={"post_type": "message", "message_type": "private"}),
+            _PrivateEvent(
+                "",
+                raw_message={
+                    "post_type": "message",
+                    "message_type": "private",
+                    "message": [{"type": "image", "data": {"file": "a.jpg"}}],
+                },
+            ),
+        )
+        for event in events:
+            with self.subTest(raw_message=event.message_obj.raw_message):
+                host = _EarlyGateHost()
+                asyncio.run(REQ036_EARLY_GATE(host, event))
+                self.assertTrue(event.stopped)
+                self.assertTrue(event.private_companion_req036_denied)
+                self.assertEqual(["固定拒绝文本"], host.replies)
+                self.assertEqual(1, host.profile_checks)
+
+    def test_event_classification_keeps_real_empty_media_and_old_adapter_messages(self) -> None:
+        ingress = _EventIngressHost()
+        cases = (
+            ({"post_type": "message", "message_type": "private"}, True),
+            ({"post_type": "message", "message_type": "private", "message": [{"type": "image"}]}, True),
+            ({"post_type": "notice", "notice_type": "notify", "sub_type": "input_status"}, False),
+            ({"post_type": "notice", "notice_type": "notify", "sub_type": "poke"}, False),
+            ({"post_type": "request", "request_type": "friend"}, False),
+            ({"post_type": "message_sent", "message_type": "private"}, False),
+            ({"post_type": "meta_event", "meta_event_type": "heartbeat"}, False),
+            ({"post_type": "third_party_message", "message_type": "private"}, True),
+            ({"message_type": "private"}, True),
+            ({"notice_type": "notify"}, False),
+            ({}, True),
+        )
+        for raw_message, expected in cases:
+            with self.subTest(raw_message=raw_message):
+                self.assertEqual(expected, ingress._event_is_inbound_chat_message(_PrivateEvent(raw_message=raw_message)))
+
+    def test_outbound_message_markers_are_not_inbound_even_when_sender_is_recipient(self) -> None:
+        ingress = _EventIngressHost()
+        payloads = (
+            {"post_type": "message", "message_type": "private", "is_self": True},
+            {"post_type": "message", "message_type": "private", "is_outbound": "true"},
+            {"post_type": "message", "message_type": "private", "direction": "outgoing"},
+            {"post_type": "message", "message_type": "private", "status": "sent"},
+            {"post_type": "outbound", "message_type": "private"},
+            {"post_type": "send", "message_type": "private"},
+            {"post_type": "message", "message_type": "private", "user_id": "bot-1", "self_id": "bot-1"},
+        )
+        for raw_message in payloads:
+            with self.subTest(raw_message=raw_message):
+                event = _PrivateEvent("", raw_message=raw_message)
+                self.assertFalse(ingress._event_is_inbound_chat_message(event))
+
+    def test_outbound_markers_on_event_or_message_object_are_not_inbound(self) -> None:
+        ingress = _EventIngressHost()
+        event = _PrivateEvent("", raw_message={"post_type": "message", "message_type": "private"})
+        event.is_outbound = True
+        self.assertFalse(ingress._event_is_inbound_chat_message(event))
+
+        event = _PrivateEvent("", raw_message={"post_type": "message", "message_type": "private"})
+        event.message_obj.from_self = True
+        self.assertFalse(ingress._event_is_inbound_chat_message(event))
+
+        mapping_event = types.SimpleNamespace(
+            message_obj={
+                "post_type": "message",
+                "message_type": "private",
+                "is_outbound": True,
+            }
+        )
+        self.assertFalse(ingress._event_is_inbound_chat_message(mapping_event))
+
+    def test_outbound_events_skip_early_and_llm_private_gates(self) -> None:
+        raw_message = {
+            "post_type": "message",
+            "message_type": "private",
+            "is_outbound": True,
+            "user_id": "recipient-1",
+        }
+        early_host = _EarlyGateHost()
+        early_event = _PrivateEvent("", raw_message=raw_message)
+        asyncio.run(REQ036_EARLY_GATE(early_host, early_event))
+        self.assertFalse(early_event.stopped)
+        self.assertEqual([], early_host.replies)
+        self.assertEqual(0, early_host.profile_checks)
+
+        llm_host = _GateHost()
+        llm_event = _PrivateEvent("", raw_message=raw_message)
+        req = types.SimpleNamespace(system_prompt="keep", prompt="keep", contexts=["keep"])
+        asyncio.run(REQ036_LLM_GATE(llm_host, llm_event, req))
+        self.assertFalse(llm_event.stopped)
+        self.assertEqual([], llm_host.replies)
+        self.assertEqual("keep", req.system_prompt)
+
+    def test_sender_self_echo_skips_llm_gate_without_post_type_message_sent(self) -> None:
+        host = _GateHost()
+        event = _PrivateEvent(
+            "",
+            raw_message={
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": "bot-1",
+                "self_id": "bot-1",
+            },
+        )
+        req = types.SimpleNamespace(system_prompt="keep", prompt="keep", contexts=["keep"])
+        asyncio.run(REQ036_LLM_GATE(host, event, req))
+        self.assertFalse(event.stopped)
+        self.assertEqual([], host.replies)
+        self.assertEqual("keep", req.system_prompt)
+
+    def test_unmarked_denial_reply_echo_is_consumed_once_by_scope_and_text(self) -> None:
+        host = _RejectRecorderHost()
+        inbound = _PrivateEvent("你好", raw_message={"post_type": "message", "message_type": "private"})
+        asyncio.run(REQ036_REJECT(host, inbound, {"code": "disabled", "reply": "固定拒绝文本"}))
         self.assertEqual(["固定拒绝文本"], host.replies)
-        self.assertEqual(1, host.profile_checks)
-        self.assertEqual({}, host.data["users"])
+
+        echo = _PrivateEvent(
+            "固定拒绝文本",
+            raw_message={"post_type": "message", "message_type": "private"},
+            message_id="echo-1",
+        )
+        self.assertFalse(host._event_is_inbound_chat_message(echo))
+        self.assertFalse(host._event_is_inbound_chat_message(echo))
+
+        duplicate_echo = _PrivateEvent(
+            "固定拒绝文本",
+            raw_message={"post_type": "message", "message_type": "private"},
+            message_id="echo-1",
+        )
+        self.assertFalse(host._event_is_inbound_chat_message(duplicate_echo))
+
+        user_repeat = _PrivateEvent(
+            "固定拒绝文本",
+            raw_message={"post_type": "message", "message_type": "private"},
+            message_id="user-2",
+        )
+        self.assertTrue(host._event_is_inbound_chat_message(user_repeat))
+
+    def test_unmarked_empty_echo_does_not_hide_real_media_message(self) -> None:
+        host = _RejectRecorderHost()
+        inbound = _PrivateEvent("你好", raw_message={"post_type": "message", "message_type": "private"})
+        asyncio.run(REQ036_REJECT(host, inbound, {"code": "disabled", "reply": "固定拒绝文本"}))
+
+        empty_echo = _PrivateEvent(
+            "",
+            raw_message={"post_type": "message", "message_type": "private", "message": []},
+        )
+        self.assertFalse(host._event_is_inbound_chat_message(empty_echo))
+
+        asyncio.run(REQ036_REJECT(host, _PrivateEvent("再试一次"), {"code": "disabled", "reply": "固定拒绝文本"}))
+        image_message = _PrivateEvent(
+            "",
+            raw_message={
+                "post_type": "message",
+                "message_type": "private",
+                "message": [{"type": "image", "data": {"file": "a.jpg"}}],
+            },
+        )
+        self.assertTrue(host._event_is_inbound_chat_message(image_message))
+
+    def test_denial_echo_guard_keeps_non_text_components_and_mixed_media(self) -> None:
+        host = _RejectRecorderHost()
+        asyncio.run(
+            REQ036_REJECT(
+                host,
+                _PrivateEvent("你好", raw_message={"post_type": "message", "message_type": "private"}),
+                {"code": "disabled", "reply": "固定拒绝文本"},
+            )
+        )
+        for kind in ("marketface", "mface", "json", "xml", "share", "location", "music"):
+            with self.subTest(kind=kind):
+                event = _PrivateEvent(
+                    "",
+                    raw_message={
+                        "post_type": "message",
+                        "message_type": "private",
+                        "message": [{"type": kind, "data": {"id": "asset-1"}}],
+                    },
+                )
+                self.assertTrue(host._event_is_inbound_chat_message(event))
+
+        mixed = _PrivateEvent(
+            "固定拒绝文本",
+            raw_message={
+                "post_type": "message",
+                "message_type": "private",
+                "message": [
+                    {"type": "text", "data": {"text": "固定拒绝文本"}},
+                    {"type": "image", "data": {"file": "a.jpg"}},
+                ],
+            },
+        )
+        self.assertTrue(host._event_is_inbound_chat_message(mixed))
+
+    def test_denial_echo_scope_isolated_by_persona_adapter_and_bot(self) -> None:
+        host = _RejectRecorderHost()
+        host._private_event_identity_context = lambda event, _subject: {
+            "platform": "onebot",
+            "adapter": getattr(event, "adapter_instance_id", ""),
+            "bot_id": getattr(event, "bot_id", ""),
+        }
+
+        sent = _PrivateEvent("你好", raw_message={"post_type": "message", "message_type": "private"})
+        sent.private_companion_persona_id = "persona-a"
+        sent.adapter_instance_id = "adapter-a"
+        sent.bot_id = "bot-a"
+        asyncio.run(REQ036_REJECT(host, sent, {"code": "disabled", "reply": "固定拒绝文本"}))
+
+        other_persona = _PrivateEvent("固定拒绝文本", raw_message={"post_type": "message", "message_type": "private"})
+        other_persona.private_companion_persona_id = "persona-b"
+        other_persona.adapter_instance_id = "adapter-a"
+        other_persona.bot_id = "bot-a"
+        self.assertTrue(host._event_is_inbound_chat_message(other_persona))
+
+        other_adapter = _PrivateEvent("固定拒绝文本", raw_message={"post_type": "message", "message_type": "private"})
+        other_adapter.private_companion_persona_id = "persona-a"
+        other_adapter.adapter_instance_id = "adapter-b"
+        other_adapter.bot_id = "bot-a"
+        self.assertTrue(host._event_is_inbound_chat_message(other_adapter))
+
+        same_scope = _PrivateEvent("固定拒绝文本", raw_message={"post_type": "message", "message_type": "private"})
+        same_scope.private_companion_persona_id = "persona-a"
+        same_scope.adapter_instance_id = "adapter-a"
+        same_scope.bot_id = "bot-a"
+        self.assertFalse(host._event_is_inbound_chat_message(same_scope))
+
+    def test_non_chat_events_do_not_enter_private_pipeline_or_llm_gate(self) -> None:
+        raw_message = {"post_type": "notice", "notice_type": "notify", "sub_type": "input_status"}
+        pipeline_host = _PrivatePipelineGateHost()
+        pipeline_event = _PrivateEvent(raw_message=raw_message)
+        asyncio.run(REQ036_PRIVATE_HANDLER(pipeline_host, pipeline_event))
+        self.assertFalse(pipeline_event.stopped)
+        self.assertEqual([], pipeline_host.replies)
+        self.assertEqual([], pipeline_host.attached_sources)
+        llm_host = _GateHost()
+        llm_event = _PrivateEvent(raw_message=raw_message)
+        req = types.SimpleNamespace(system_prompt="keep", prompt="keep", contexts=["keep"])
+        asyncio.run(REQ036_LLM_GATE(llm_host, llm_event, req))
+        self.assertFalse(llm_event.stopped)
+        self.assertEqual([], llm_host.replies)
+        self.assertEqual("keep", req.system_prompt)
+
+    def test_real_private_messages_are_rejected_once_and_duplicate_ids_are_idempotent(self) -> None:
+        host = _RejectRecorderHost()
+        first = _PrivateEvent("你好", raw_message={"post_type": "message", "message_type": "private"}, message_id="m-1")
+        second = _PrivateEvent("你好", raw_message={"post_type": "message", "message_type": "private"}, message_id="m-1")
+        third = _PrivateEvent("你好", raw_message={"post_type": "message", "message_type": "private"}, message_id="m-2")
+        asyncio.run(REQ036_REJECT(host, first, {"code": "disabled", "reply": "固定拒绝文本"}))
+        asyncio.run(REQ036_REJECT(host, first, {"code": "disabled", "reply": "固定拒绝文本"}))
+        asyncio.run(REQ036_REJECT(host, second, {"code": "disabled", "reply": "固定拒绝文本"}))
+        asyncio.run(REQ036_REJECT(host, third, {"code": "disabled", "reply": "固定拒绝文本"}))
+        self.assertTrue(first.stopped and second.stopped and third.stopped)
+        self.assertEqual(2, len(host.replies))
+        self.assertEqual(2, host.attempts)
+
+    def test_rejection_without_message_id_is_not_time_rate_limited(self) -> None:
+        host = _RejectRecorderHost()
+        for _ in range(2):
+            event = _PrivateEvent("你好", raw_message={"post_type": "message", "message_type": "private"})
+            asyncio.run(REQ036_REJECT(host, event, {"code": "disabled", "reply": "固定拒绝文本"}))
+            self.assertTrue(event.stopped)
+        self.assertEqual(2, len(host.replies))
+
+    def test_failed_rejection_can_retry_same_message_id(self) -> None:
+        host = _RejectRecorderHost(fail_first=True)
+        first = _PrivateEvent("你好", raw_message={"post_type": "message", "message_type": "private"}, message_id="retry-1")
+        with self.assertRaisesRegex(RuntimeError, "transport unavailable"):
+            asyncio.run(REQ036_REJECT(host, first, {"code": "disabled", "reply": "固定拒绝文本"}))
+        second = _PrivateEvent("你好", raw_message={"post_type": "message", "message_type": "private"}, message_id="retry-1")
+        asyncio.run(REQ036_REJECT(host, second, {"code": "disabled", "reply": "固定拒绝文本"}))
+        self.assertEqual(1, len(host.replies))
+        self.assertEqual(2, host.attempts)
+
+    def test_silently_cancelled_rejection_releases_echo_and_message_id_reservations(self) -> None:
+        host = _RejectSilentCancelHost()
+        first = _PrivateEvent(
+            "你好",
+            raw_message={"post_type": "message", "message_type": "private"},
+            message_id="cancel-1",
+        )
+        asyncio.run(REQ036_REJECT(host, first, {"code": "disabled", "reply": "固定拒绝文本"}))
+        self.assertEqual([], host.replies)
+        self.assertEqual([], getattr(host, "_req036_denial_echo_cache", []))
+        self.assertEqual({}, host._req036_recent_denial_message_ids)
+
+        second = _PrivateEvent(
+            "你好",
+            raw_message={"post_type": "message", "message_type": "private"},
+            message_id="cancel-1",
+        )
+        asyncio.run(REQ036_REJECT(host, second, {"code": "disabled", "reply": "固定拒绝文本"}))
+        self.assertEqual(["固定拒绝文本"], host.replies)
+        self.assertEqual(2, host.attempts)
 
     def test_rejection_stops_event_even_when_reply_transport_fails(self) -> None:
         event = _PrivateEvent()
@@ -1068,6 +1697,67 @@ class Req036CompanionTests(unittest.TestCase):
         )
         self.assertFalse(REQ036_CONFIGURED_TARGET_MIGRATION(host, "legacy-target", user))
         self.assertFalse(user["unified_profile_capabilities"]["private_companion_enabled"])
+
+    def test_configured_target_reconciles_migrated_false_scoped_profile(self) -> None:
+        host = _LegacyTargetMigrationHost()
+        user = {
+            "user_id": "onebot:legacy-target:scope",
+            "identity_subject_id": "legacy-target",
+            "identity_platform_kind": "onebot",
+            "enabled": False,
+            "unified_profile_capabilities": {
+                **default_capabilities(grant_source="legacy_effective_migration"),
+                "private_companion_enabled": False,
+                "proactive_private_enabled": False,
+            },
+            "proactive_daily_limit": 1,
+        }
+        self.assertTrue(REQ036_CONFIGURED_TARGET_MIGRATION(host, "onebot:legacy-target:scope", user))
+        self.assertTrue(user["unified_profile_capabilities"]["private_companion_enabled"])
+        self.assertTrue(user["unified_profile_capabilities"]["proactive_private_enabled"])
+        self.assertEqual("configured_target_capability_reconciliation", user["unified_profile_capabilities"]["grant_source"])
+        self.assertTrue(user["enabled"])
+
+    def test_scoped_reconciliation_keeps_platforms_and_manual_disables_isolated(self) -> None:
+        host = _LegacyTargetMigrationHost()
+        other_platform = {
+            "user_id": "telegram:legacy-target:scope",
+            "identity_subject_id": "legacy-target",
+            "identity_platform_kind": "telegram",
+            "unified_profile_capabilities": default_capabilities(grant_source="legacy_effective_migration"),
+        }
+        self.assertFalse(REQ036_CONFIGURED_TARGET_MIGRATION(host, "telegram:legacy-target:scope", other_platform))
+        self.assertFalse(other_platform["unified_profile_capabilities"]["private_companion_enabled"])
+
+        manually_disabled = {
+            "user_id": "legacy-target",
+            "identity_subject_id": "legacy-target",
+            "identity_platform_kind": "onebot",
+            "manual_disabled": True,
+            "unified_profile_capabilities": default_capabilities(grant_source="legacy_effective_migration"),
+        }
+        self.assertFalse(REQ036_CONFIGURED_TARGET_MIGRATION(host, "legacy-target", manually_disabled))
+        self.assertFalse(manually_disabled["unified_profile_capabilities"]["private_companion_enabled"])
+
+    def test_owner_reconciliation_restores_legacy_false_without_reopening_admin_state(self) -> None:
+        class OwnerHost(_LegacyTargetMigrationHost):
+            @staticmethod
+            def _configured_target_ids() -> list[str]:
+                return []
+
+            @staticmethod
+            def _req036_owner_companion_status(_user: Any) -> tuple[bool, bool]:
+                return True, True
+
+        host = OwnerHost()
+        user = {
+            "user_id": "owner-shadow",
+            "relationship_role": "owner",
+            "unified_profile_capabilities": default_capabilities(grant_source="legacy_effective_migration"),
+        }
+        self.assertTrue(REQ036_CONFIGURED_TARGET_MIGRATION(host, "owner-shadow", user))
+        self.assertTrue(user["unified_profile_capabilities"]["private_companion_enabled"])
+        self.assertEqual("owner_capability_reconciliation", user["unified_profile_capabilities"]["grant_source"])
 
     def test_user_list_keeps_permission_sources_visible(self) -> None:
         result = asyncio.run(REQ036_USER_LIST(_UserListHost()))

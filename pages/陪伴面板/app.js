@@ -8809,7 +8809,7 @@ function setupGuideWorldbookDraftHtml() {
 
 function setupGuideProactiveTestPassed() {
   const current = state.setupGuideProactiveTest;
-  if (current && ["starting", "waiting", "polling", "error"].includes(current.status || "")) {
+  if (current && ["applying", "starting", "waiting", "polling", "error"].includes(current.status || "")) {
     const currentResult = current.result || {};
     return Boolean(current.status === "ok" && currentResult.ok && !currentResult.pending);
   }
@@ -8846,6 +8846,7 @@ function setupGuideProactiveTestHtml() {
     result.elapsed_ms ? `${result.elapsed_ms}ms` : "",
   ].filter(Boolean).join(" · ");
   const message = (() => {
+    if (status === "applying") return "正在保存当前配置，保存完成后会自动预约主动消息链路测试。";
     if (status === "starting") return "正在预约 15 秒后的主动消息链路测试。";
     if (status === "waiting") {
       const countdown = Number(testState.countdown || 0);
@@ -8866,8 +8867,8 @@ function setupGuideProactiveTestHtml() {
           <span>${escapeHtml(message)}</span>
           ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
         </div>
-        <button type="button" data-setup-guide-proactive-test ${["starting", "waiting", "polling"].includes(status) ? "disabled" : ""}>
-          ${passed ? "重新测试主动消息" : status === "idle" || status === "error" ? "测试主动消息" : "测试中..."}
+        <button type="button" data-setup-guide-proactive-test ${applying || ["applying", "starting", "waiting", "polling"].includes(status) ? "disabled" : ""}>
+          ${applying || status === "applying" ? "保存中..." : passed ? "重新测试主动消息" : status === "idle" || status === "error" ? "测试主动消息" : "测试中..."}
         </button>
       </header>
       ${troubleshootingChainStepsMarkup(result.steps)}
@@ -9338,13 +9339,23 @@ async function runSetupGuideProactiveTest(control = null) {
     showToast("主动消息测试需要先开启私聊主动", "error");
     return;
   }
+  state.setupGuideProactiveTest = { status: "applying", countdown: 0, result: null };
+  rerenderSetupGuideOverlayPreserveScroll();
   const savedForTest = await applySetupGuide({
     close: false,
     control,
     applyingMessage: "正在保存当前配置以运行主动消息测试...",
     successMessage: "配置已保存，开始主动消息测试",
   });
-  if (!savedForTest) return;
+  if (!savedForTest) {
+    state.setupGuideProactiveTest = {
+      status: "error",
+      error: "当前配置未保存，主动消息测试未启动。",
+      result: null,
+    };
+    rerenderSetupGuideOverlayPreserveScroll();
+    return;
+  }
   clearSetupGuideProactivePoll();
   state.setupGuideProactiveTest = { status: "starting", countdown: 15, result: null };
   rerenderSetupGuideOverlayPreserveScroll();
@@ -9422,7 +9433,10 @@ function setupGuideApplyPayload() {
 }
 
 async function applySetupGuide({ close = true, advanced = false, control = null, applyingMessage = "正在保存首次配置...", successMessage = "" } = {}) {
-  if (state.setupGuideApplying) return false;
+  if (state.setupGuideApplying) {
+    showToast("首次配置仍在保存，请稍候再测试", "error");
+    return false;
+  }
   state.setupGuideApplying = true;
   if (control instanceof HTMLButtonElement) setActionBusy(control, true);
   rerenderSetupGuideOverlayPreserveScroll();

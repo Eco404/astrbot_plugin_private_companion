@@ -884,6 +884,8 @@ class LlmToolActionsMixin:
         lines.extend(
             [
                 "- 默认 `send=true`；如果只想拿路径再决定，可传 `send=false`。",
+                "- 每个用户请求本轮最多调用一次 `pc_generate_photo`。工具返回失败、结果取回失败或发送回执未确认后，不要在同一轮再次调用生图工具；按工具的 `message/actual_error/final_response_instruction` 回复，用户下一轮明确要求时再重试。",
+                "- 如果工具返回 `generation_completed=true` 且 `failure_stage=result_materialization`，说明上游已经完成生图但图片结果没有取回或保存成功；不要说成上游生图失败，也不要重复提交同一画面。",
                 "- 在实际调用媒体工具并得到结果前，绝对不能声称“已经发了/给你看了/图片在上面”。角色扮演不能覆盖真实工具状态。",
                 f"- `caption` 会和图片一起作为可见消息发送，必须填写用户应当直接看到、可独立成立的完整自然正文；不要写 `&&shy&&`、`[shy]`、TTS 情绪标签或任何内部控制标记。只有工具返回 `sent=true` 时才表示图片已经发出；成功后不要把最终回复留空，必须只输出内部静默标记 `{PHOTO_TOOL_SILENT_SENTINEL}`。插件会在发送前移除它；不要再写承接句、重复 caption 或额外表情。",
                 "- 工具返回 `sent=false` 时，必须按 `message/actual_error` 如实说明，绝对不能说已经发送。",
@@ -1793,7 +1795,7 @@ class LlmToolActionsMixin:
             if isinstance(called_names, (list, tuple, set)) and "pc_generate_photo" in {str(item) for item in called_names}:
                 recovery["status"] = "already_called"
                 return cleaned, recovery
-            if self._proactive_only_blocks_passive_event(event, "pc_tools"):
+            if self._proactive_only_blocks_passive_event(event, "pc_generate_photo"):
                 recovery["status"] = "blocked"
                 return cleaned, recovery
         except Exception:
@@ -3196,6 +3198,12 @@ class LlmToolActionsMixin:
                 "reference_fulfilled_roles": list(getattr(generation_output, "reference_fulfilled_roles", ()) or ()),
                 "reference_missing_roles": list(getattr(generation_output, "reference_missing_roles", ()) or ()),
                 "reference_fallback_message": _single_line(getattr(generation_output, "reference_fallback_message", ""), 260),
+                # A provider may have accepted and generated the image while
+                # its result URL could not be materialized locally. Keep that
+                # state separate from ``generated`` (which means a usable
+                # local file) so the reply model receives an accurate receipt.
+                "generation_completed": bool(getattr(generation_output, "generation_completed", False)),
+                "failure_stage": _single_line(getattr(generation_output, "failure_stage", ""), 40),
             }
         else:
             backend_name, image_path, note = generation_output
@@ -3205,6 +3213,8 @@ class LlmToolActionsMixin:
                     image_path=image_path,
                     session_key=generation_session_key,
                 ) or {}
+        generation_completed = bool(generation_metadata.get("generation_completed"))
+        failure_stage = _single_line(generation_metadata.get("failure_stage"), 40)
         reference_usage_known = "reference_used" in generation_metadata
         actual_reference_path = _path_text(
             generation_metadata.get("reference_path") or reference_path,
@@ -3351,15 +3361,23 @@ class LlmToolActionsMixin:
                 if ok and send_image and delivery_uncertain
                 else "delivery_failed"
                 if ok
+                else "result_retrieval_failed"
+                if generation_completed and failure_stage == "result_materialization"
                 else "error"
             ),
             "success": overall_success,
             "generated": ok,
+            "generation_completed": generation_completed,
+            "failure_stage": failure_stage,
             "send_requested": send_image,
             "message": (
                 _single_line(delivery.get("message"), 220)
                 if ok and send_image and delivery
-                else ("图片已生成但按请求未发送" if ok and not send_image else (_single_line(note, 220) or "生图失败"))
+                else ("图片已生成但按请求未发送" if ok and not send_image else (
+                    "上游已完成生图，但图片结果没有成功取回，未发送。"
+                    if generation_completed and failure_stage == "result_materialization"
+                    else (_single_line(note, 220) or "生图失败")
+                ))
             ),
             "backend": _single_line(backend_name, 80),
             "kind": workflow_kind,
@@ -3393,6 +3411,7 @@ class LlmToolActionsMixin:
             "safety_review": _single_line(delivery.get("review_label"), 30),
             "note": _single_line(note, 220),
             "must_not_claim_sent": not sent,
+            "same_turn_retry_allowed": False,
             "final_response_instruction": (
                 f"图片和 caption 已作为本轮唯一可见回复发送。最终回复不要留空，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。"
                 if sent
@@ -3455,6 +3474,32 @@ class LlmToolActionsMixin:
                         "actionable_hint": hint,
                         "do_not_claim_timeout": "超时" not in note_text and "timeout" not in lowered_note,
                         "must_not_claim_sent": True,
+                    }
+                )
+            if generation_completed and failure_stage == "result_materialization":
+                retrieval_message = (
+                    "上游已经完成生图，但返回的图片结果未能取回或保存到本地；"
+                    "本轮没有发送图片，也不要再次提交同一生图请求。"
+                )
+                result_payload.update(
+                    {
+                        "status": "result_retrieval_failed",
+                        "message": retrieval_message,
+                        "note": retrieval_message,
+                        "failure_reason": retrieval_message,
+                        "actual_error": note_text,
+                        "failure_stage": "result_materialization",
+                        "upstream_generated": True,
+                        "retryable": False,
+                        "same_turn_retry_allowed": False,
+                        "actionable_hint": (
+                            "如实说明上游已生成但图片结果取回失败，未发送；"
+                            "不要说成上游生图请求失败，也不要在本轮再次调用 pc_generate_photo。"
+                        ),
+                        "final_response_instruction": (
+                            "本轮不要再次调用 pc_generate_photo。简短说明图片结果取回失败、没有发送；"
+                            "不要声称用户已经收到图片。用户下一轮明确要求时再重试。"
+                        ),
                     }
                 )
         known_private_paths: list[Any] = [

@@ -22,6 +22,10 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
     """记录私聊互动、图片防抖、用户画像和主动陪伴反馈。"""
     if self is None:
         return
+    inbound_checker = getattr(self, "_event_is_inbound_chat_message", None)
+    if callable(inbound_checker) and not inbound_checker(event):
+        logger.debug("[PrivateCompanion] 非入站聊天事件跳过私聊陪伴链路")
+        return
     if bool(getattr(event, "private_companion_req036_denied", False)):
         return
     received_ts = _now_ts()

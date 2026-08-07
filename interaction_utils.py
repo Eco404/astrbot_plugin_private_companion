@@ -300,15 +300,16 @@ class InteractionUtilsMixin:
             "优先直接填写用户 ID；误粘贴私聊 UMO 时会尝试提取 FriendMessage 后面的用户 ID。身份别名只用于归并记忆，不授予管理或跨用户查询权限。不要填写 UID、default、平台名或群聊会话串。"
         )
 
-    async def _reply(self, event: AstrMessageEvent, text: str, *, quote_current: bool = True):
+    async def _reply(self, event: AstrMessageEvent, text: str, *, quote_current: bool = True) -> bool:
         recalled_message_id = await self._should_cancel_reply_for_missing_or_recalled_trigger(event)
         if recalled_message_id:
-            return
+            return False
         quote_message_id = self._group_current_reply_quote_message_id(event, text_or_chain=text) if quote_current else ""
         if quote_message_id and text:
             await event.send(event.chain_result(self._with_optional_reply([Plain(text)], quote_message_id, event=event)))
-            return
+            return True
         await event.send(event.plain_result(text))
+        return True
 
     async def _reply_with_optional_media(
         self,

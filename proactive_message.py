@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+from contextvars import ContextVar
 import gc
 import hashlib
 import html
@@ -209,7 +210,16 @@ from .photo_wardrobe_decision import (
 )
 
 _EXTERNAL_IMAGE_MAX_BYTES = 32 * 1024 * 1024
+_EXTERNAL_IMAGE_DOWNLOAD_MAX_ATTEMPTS = 2
+_EXTERNAL_IMAGE_DOWNLOAD_RETRY_DELAY_SECONDS = 0.8
+_EXTERNAL_IMAGE_DOWNLOAD_TOTAL_TIMEOUT_SECONDS = 75.0
+_EXTERNAL_IMAGE_DOWNLOAD_ATTEMPT_TIMEOUT_SECONDS = 35.0
 _MINIMAX_REFERENCE_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+
+_EXTERNAL_IMAGE_DOWNLOAD_TIMEOUT_OVERRIDE: ContextVar[float | None] = ContextVar(
+    "private_companion_external_image_download_timeout_override",
+    default=None,
+)
 
 DEFAULT_NEWS_SOURCES = "\n".join(
     [
@@ -372,6 +382,8 @@ class PhotoGenerationResult:
     reference_fulfilled_roles: tuple[str, ...] = ()
     reference_missing_roles: tuple[str, ...] = ()
     reference_fallback_message: str = ""
+    generation_completed: bool = False
+    failure_stage: str = ""
 
     @property
     def success(self) -> bool:
@@ -385,6 +397,46 @@ class PhotoGenerationResult:
 
     def as_legacy_tuple(self) -> tuple[str, str, str]:
         return self.backend, self.image_path, self.note
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _ExternalPhotoGenerationOutcome:
+    """Internal result state that preserves the legacy ``(path, note)`` API."""
+
+    image_path: str = ""
+    note: str = ""
+    generation_completed: bool = False
+    failure_stage: str = ""
+
+    def as_legacy_tuple(self) -> tuple[str, str]:
+        return self.image_path, self.note
+
+    def __iter__(self):
+        yield self.image_path
+        yield self.note
+
+    def __len__(self) -> int:
+        return 2
+
+    def __getitem__(self, index: int) -> str:
+        return self.as_legacy_tuple()[index]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _ExternalPhotoGenerationOutcome):
+            return (
+                self.image_path,
+                self.note,
+                self.generation_completed,
+                self.failure_stage,
+            ) == (
+                other.image_path,
+                other.note,
+                other.generation_completed,
+                other.failure_stage,
+            )
+        if isinstance(other, (tuple, list)) and len(other) == 2:
+            return self.as_legacy_tuple() == (other[0], other[1])
+        return NotImplemented
 
 
 class SyntheticPrivateWakeEvent(AstrMessageEvent):
@@ -2635,7 +2687,12 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             prompt = f"{prompt.rstrip()}\n\n{deferred_share_tense_hint}"
         tool_boundary_hint = (
             "【主动生成工具边界】\n"
-            "- 这一轮只生成要发给当前私聊对象的一句正文，不调用任何转述、私聊发送、群发、QQ空间或生图发送工具。\n"
+            "- 这一轮只面向当前私聊对象，不调用任何转述、私聊发送、群发、QQ空间，"
+            "也不调用除 `pc_generate_photo` 以外的其他 Private Companion 工具。\n"
+            "- 当本轮主动动机、模板或当前生活场景确实适合用真实图片一起表达时，"
+            "允许调用一次 `pc_generate_photo`（`send=true`）；不需要图片时只生成一句自然正文。\n"
+            "- 生图成功后，不要再说相机没反应、下次再拍或上游失败；生图失败时按工具返回的 "
+            "`final_response_instruction` 收束，本轮不要重试。\n"
             "- 不要写“已发送/已转述/消息已发给某人/工具执行完成”等状态回执。\n"
             "- 如果本轮 Provider/API 返回英文报错、内容策略拒绝、敏感词提示或政策链接，那是内部失败，不是给用户的正文；"
             "不要复述、翻译或润色，直接停止输出，交给插件稍后重试。\n"
@@ -9248,6 +9305,8 @@ Output:
         residual_conflict_details: list[dict[str, Any]] | None = None,
         suggested_scene_preset: str = "",
         prompt_format: str = "",
+        generation_completed: bool = False,
+        failure_stage: str = "",
     ) -> None:
         try:
             reference_candidate = reference_candidate or {}
@@ -9284,6 +9343,8 @@ Output:
                 "kind": _single_line(workflow_kind, 30),
                 "backend": _single_line(backend, 80),
                 "ok": bool(ok),
+                "generation_completed": bool(generation_completed),
+                "failure_stage": _single_line(failure_stage, 60),
                 "prompt_format": (
                     self._normalize_photo_generation_prompt_format(prompt_format)
                     if prompt_format
@@ -11492,6 +11553,8 @@ Output:
             *,
             reference_submitted: bool = False,
             structured_reference_submitted: bool = False,
+            generation_completed: bool = False,
+            failure_stage: str = "",
         ) -> tuple[str, str, str]:
             elapsed_ms = int((time.time() - started) * 1000)
             image_path = _path_text(image_path, 1000)
@@ -11567,6 +11630,8 @@ Output:
                         effective_submitted_reference_ids
                     ),
                     "reference_used": reference_used,
+                    "generation_completed": bool(generation_completed),
+                    "failure_stage": _single_line(failure_stage, 60),
                 },
             )
             self._record_recent_photo_generation(
@@ -11610,6 +11675,8 @@ Output:
                 residual_conflict_details=residual_conflict_details,
                 suggested_scene_preset=suggested_scene_preset,
                 prompt_format=prompt_format,
+                generation_completed=generation_completed,
+                failure_stage=failure_stage,
             )
             self._append_photo_generation_trace_event(
                 trace_id,
@@ -11622,6 +11689,8 @@ Output:
                     "elapsed_ms": elapsed_ms,
                     "reference_used": reference_used,
                     "output_exists": output_exists,
+                    "generation_completed": bool(generation_completed),
+                    "failure_stage": _single_line(failure_stage, 60),
                 },
                 context={"backend": backend},
             )
@@ -11757,19 +11826,33 @@ Output:
         if preferred == "external":
             if not self._external_photo_available():
                 return finish("在线图片 API", "", "在线图片 API 后端不可用或未配置")
-            image_path, note = await self._run_external_photo_generation(
-                prompt_text,
-                session_key=session_key,
-                reference_image_path=reference_image_path,
-                reference_image_paths=reference_image_paths,
-                image_size=image_size,
+            external_outcome = self._coerce_external_photo_generation_outcome(
+                await self._run_external_photo_generation(
+                    prompt_text,
+                    session_key=session_key,
+                    reference_image_path=reference_image_path,
+                    reference_image_paths=reference_image_paths,
+                    image_size=image_size,
+                )
             )
+            image_path, note = external_outcome
             if image_path:
                 return finish(
                     "在线图片 API",
                     image_path,
                     note,
                     reference_submitted=bool(reference_image_path),
+                    generation_completed=external_outcome.generation_completed,
+                    failure_stage=external_outcome.failure_stage,
+                )
+            if self._external_photo_generation_result_retrieval_failed(external_outcome):
+                return finish(
+                    "在线图片 API",
+                    "",
+                    note,
+                    reference_submitted=bool(reference_image_path),
+                    generation_completed=True,
+                    failure_stage="result_materialization",
                 )
             can_fallback = self._comfyui_photo_available() or (not reference_image_path and self._sdgen_photo_available())
             if not can_fallback:
@@ -11779,19 +11862,33 @@ Output:
         if preferred == "external":
             external_note = note
         elif self._external_photo_available():
-            image_path, note = await self._run_external_photo_generation(
-                prompt_text,
-                session_key=session_key,
-                reference_image_path=reference_image_path,
-                reference_image_paths=reference_image_paths,
-                image_size=image_size,
+            external_outcome = self._coerce_external_photo_generation_outcome(
+                await self._run_external_photo_generation(
+                    prompt_text,
+                    session_key=session_key,
+                    reference_image_path=reference_image_path,
+                    reference_image_paths=reference_image_paths,
+                    image_size=image_size,
+                )
             )
+            image_path, note = external_outcome
             if image_path:
                 return finish(
                     "在线图片 API",
                     image_path,
                     note,
                     reference_submitted=bool(reference_image_path),
+                    generation_completed=external_outcome.generation_completed,
+                    failure_stage=external_outcome.failure_stage,
+                )
+            if self._external_photo_generation_result_retrieval_failed(external_outcome):
+                return finish(
+                    "在线图片 API",
+                    "",
+                    note,
+                    reference_submitted=bool(reference_image_path),
+                    generation_completed=True,
+                    failure_stage="result_materialization",
                 )
             external_note = note
             logger.info("[PrivateCompanion] 生图后端回退: trace=%s backend=external note=%s", trace_id, _single_line(note, 180))
@@ -11919,6 +12016,8 @@ Output:
                 if _single_line(role, 40)
             ),
             reference_fallback_message=_single_line(fallback_metadata.get("message"), 260),
+            generation_completed=bool(metadata.get("generation_completed")),
+            failure_stage=_single_line(metadata.get("failure_stage"), 60),
         )
 
     async def _build_photo_scene_prompt(
@@ -15410,7 +15509,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         *,
         session_key: str,
         success_note: str = "ok",
-    ) -> tuple[str, str]:
+    ) -> _ExternalPhotoGenerationOutcome:
         if isinstance(image_value, dict):
             image_value = (
                 image_value.get("url")
@@ -15428,24 +15527,43 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             )
         raw = str(image_value or "").strip()
         if not raw:
-            return "", "图片结果为空"
+            return _ExternalPhotoGenerationOutcome("", "图片结果为空")
+        materialized: Any
         if raw.lower().startswith("data:image") and "," in raw:
             header, encoded = raw.split(",", 1)
             if not re.fullmatch(r"data:image/[a-z0-9.+-]+;base64", header.strip(), flags=re.I):
-                return "", "图片 data URI 格式无效"
-            return await self._materialize_external_image_base64(
+                return _ExternalPhotoGenerationOutcome(
+                    "",
+                    "生成已完成但图片结果取回失败：图片 data URI 格式无效",
+                    generation_completed=True,
+                    failure_stage="result_materialization",
+                )
+            materialized = await self._materialize_external_image_base64(
                 encoded,
                 session_key=session_key,
                 success_note=success_note,
             )
-        if re.fullmatch(r"[A-Za-z0-9+/=\\s]+", raw) and len(raw) > 128:
-            return await self._materialize_external_image_base64(
+        elif re.fullmatch(r"[A-Za-z0-9+/=\\s]+", raw) and len(raw) > 128:
+            materialized = await self._materialize_external_image_base64(
                 raw,
                 session_key=session_key,
                 success_note=success_note,
             )
-        saved, note = await self._download_external_image_url(raw, session_key=session_key)
-        return saved, success_note if saved else note
+        else:
+            saved, note = await self._download_external_image_url(raw, session_key=session_key)
+            materialized = (saved, success_note if saved else note)
+        outcome = self._coerce_external_photo_generation_outcome(materialized)
+        if not outcome.image_path:
+            detail = outcome.note or "图片结果解析失败"
+            failure_kind = "落盘失败" if "保存" in detail else "取回失败"
+            if not detail.startswith("生成已完成但图片结果"):
+                detail = f"生成已完成但图片结果{failure_kind}：{detail}"
+            outcome = replace(outcome, note=detail)
+        return replace(
+            outcome,
+            generation_completed=True,
+            failure_stage="" if outcome.image_path else "result_materialization",
+        )
 
     @staticmethod
     def _external_image_extension_from_bytes(image_bytes: bytes) -> str:
@@ -15480,7 +15598,14 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         ext = self._external_image_extension_from_bytes(image_bytes)
         if not ext:
             return "", "在线图片数据不是受支持的 PNG、JPEG 或 WebP 图片"
-        saved = await self._save_external_generated_image(image_bytes, session_key=session_key, ext=ext)
+        try:
+            saved = await self._save_external_generated_image(
+                image_bytes,
+                session_key=session_key,
+                ext=ext,
+            )
+        except Exception as exc:
+            return "", f"保存在线图片失败：{self._external_image_diagnostic_text(exc, 160)}"
         return saved, success_note if saved else "保存在线图片失败"
 
     async def _materialize_external_openai_image_item(
@@ -15489,7 +15614,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         *,
         session_key: str,
         success_note: str,
-    ) -> tuple[str, str]:
+    ) -> _ExternalPhotoGenerationOutcome:
         b64_value = str(item.get("b64_json") or "").strip()
         url_value = str(item.get("url") or "").strip()
         candidates: list[tuple[str, str]] = []
@@ -15501,7 +15626,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         if url_value and url_value != b64_value:
             candidates.append(("url", url_value))
         if not candidates:
-            return "", "在线图片 API 未返回 url 或 b64_json"
+            return _ExternalPhotoGenerationOutcome("", "在线图片 API 未返回 url 或 b64_json")
 
         last_note = "图片结果为空"
         for index, (source, candidate) in enumerate(candidates):
@@ -15511,7 +15636,11 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 success_note=success_note,
             )
             if saved:
-                return saved, note
+                return _ExternalPhotoGenerationOutcome(
+                    saved,
+                    note,
+                    generation_completed=True,
+                )
             last_note = note
             if index + 1 < len(candidates):
                 logger.info(
@@ -15519,7 +15648,15 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     source,
                     self._external_image_diagnostic_text(note, 180),
                 )
-        return "", last_note
+        failure_note = last_note or "图片结果解析失败"
+        if not failure_note.startswith("生成已完成但图片结果"):
+            failure_note = f"生成已完成但图片结果取回失败：{failure_note}"
+        return _ExternalPhotoGenerationOutcome(
+            "",
+            failure_note,
+            generation_completed=True,
+            failure_stage="result_materialization",
+        )
 
     def _external_image_model_misconfiguration_note_for_values(
         self,
@@ -15923,13 +16060,93 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         if session is not None and not session.closed:
             await session.close()
 
+    @staticmethod
+    def _external_image_download_failure_is_retryable(note: Any) -> bool:
+        """Classify failures that may resolve while reusing the same generated URL."""
+        text = str(note or "").strip()
+        if not text:
+            return False
+        if text == "图片地址为空" or "下载图片过大" in text:
+            return False
+        status_match = re.search(r"HTTP\s+(\d{3})", text, flags=re.I)
+        if status_match:
+            try:
+                status = int(status_match.group(1))
+            except (TypeError, ValueError):
+                return False
+            return status in {408, 425, 429, 500, 502, 503, 504}
+        return True
+
     async def _download_external_image_url(self, url: str, *, session_key: str) -> tuple[str, str]:
+        attempts = max(1, int(_EXTERNAL_IMAGE_DOWNLOAD_MAX_ATTEMPTS))
+        last_path, last_note = "", ""
+        configured_timeout = _safe_int(
+            getattr(self, "external_image_api_timeout_seconds", 180),
+            180,
+            20,
+            600,
+        )
+        total_budget = min(
+            float(configured_timeout),
+            float(_EXTERNAL_IMAGE_DOWNLOAD_TOTAL_TIMEOUT_SECONDS),
+        )
+        deadline = time.monotonic() + max(1.0, total_budget)
+        deadline_token = _EXTERNAL_IMAGE_DOWNLOAD_TIMEOUT_OVERRIDE.set(None)
+        try:
+            for attempt in range(1, attempts + 1):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                remaining_attempts = max(1, attempts - attempt + 1)
+                if attempts == 1:
+                    attempt_timeout = max(1.0, remaining)
+                else:
+                    attempt_timeout = min(
+                        float(_EXTERNAL_IMAGE_DOWNLOAD_ATTEMPT_TIMEOUT_SECONDS),
+                        max(1.0, remaining / remaining_attempts),
+                    )
+                timeout_token = _EXTERNAL_IMAGE_DOWNLOAD_TIMEOUT_OVERRIDE.set(attempt_timeout)
+                try:
+                    last_path, last_note = await self._download_external_image_url_once(
+                        url,
+                        session_key=session_key,
+                    )
+                finally:
+                    _EXTERNAL_IMAGE_DOWNLOAD_TIMEOUT_OVERRIDE.reset(timeout_token)
+                if last_path or attempt >= attempts or not self._external_image_download_failure_is_retryable(last_note):
+                    return last_path, last_note
+                logger.info(
+                    "[PrivateCompanion] 在线图片结果下载失败，复用同一 URL 重试: attempt=%s/%s note=%s url=%s",
+                    attempt + 1,
+                    attempts,
+                    self._external_image_diagnostic_text(last_note, 180),
+                    self._external_image_diagnostic_text(url, 180),
+                )
+                try:
+                    await self._close_external_image_download_session()
+                except Exception as exc:
+                    logger.debug(
+                        "[PrivateCompanion] 刷新在线图片下载 session 失败，将继续重试: %s",
+                        _single_line(exc, 120),
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(float(_EXTERNAL_IMAGE_DOWNLOAD_RETRY_DELAY_SECONDS), remaining))
+        finally:
+            _EXTERNAL_IMAGE_DOWNLOAD_TIMEOUT_OVERRIDE.reset(deadline_token)
+        return last_path, last_note
+
+    async def _download_external_image_url_once(self, url: str, *, session_key: str) -> tuple[str, str]:
         target = str(url or "").strip()
         if not target:
             return "", "图片地址为空"
         configured_timeout = _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 20, 600)
         # Keep URL retrieval independent from the longer image-generation request.
         download_timeout = min(configured_timeout, 75)
+        timeout_override = _EXTERNAL_IMAGE_DOWNLOAD_TIMEOUT_OVERRIDE.get()
+        if timeout_override is not None:
+            download_timeout = max(1.0, min(float(timeout_override), 75.0))
         max_bytes = _EXTERNAL_IMAGE_MAX_BYTES
         started_at = time.perf_counter()
         temporary_path: Path | None = None
@@ -16571,9 +16788,26 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 elif "webp" in lowered_mime:
                     ext = ".webp"
                 image_bytes = base64.b64decode(encoded)
-                saved = await self._save_external_generated_image(image_bytes, session_key=session_key, ext=ext)
+                try:
+                    saved = await self._save_external_generated_image(
+                        image_bytes,
+                        session_key=session_key,
+                        ext=ext,
+                    )
+                except Exception as exc:
+                    return _ExternalPhotoGenerationOutcome(
+                        "",
+                        f"生成已完成但图片结果落盘失败：{self._external_image_diagnostic_text(exc, 160)}",
+                        generation_completed=True,
+                        failure_stage="result_materialization",
+                    )
                 note = "ok；已使用本地人设参考图" if used_reference else "ok"
-                return saved, note if saved else "保存 Gemini 图片失败"
+                return _ExternalPhotoGenerationOutcome(
+                    saved,
+                    note if saved else "生成已完成但图片结果落盘失败：保存 Gemini 图片失败",
+                    generation_completed=True,
+                    failure_stage="" if saved else "result_materialization",
+                )
             for image_value in self._external_payload_image_values(data):
                 return await self._materialize_external_image_value(
                     image_value,
@@ -16603,7 +16837,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         reference_image_path: str = "",
         reference_image_paths: Any = (),
         image_size: str = "",
-    ) -> tuple[str, str]:
+    ) -> _ExternalPhotoGenerationOutcome:
         lock = getattr(self, "_external_image_api_runtime_lock", None)
         if lock is None:
             lock = asyncio.Lock()
@@ -16617,16 +16851,21 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     _single_line(session_key, 80),
                     waited_ms,
                 )
-            image_path, note = await self._run_external_photo_generation_serial(
+            outcome = self._coerce_external_photo_generation_outcome(
+                await self._run_external_photo_generation_serial(
                 prompt_text,
                 session_key=session_key,
                 reference_image_path=reference_image_path,
                 reference_image_paths=reference_image_paths,
                 image_size=image_size,
+                )
             )
             if waited_ms > 500:
-                note = f"{note}；在线图片 API 排队等待 {waited_ms}ms"
-            return image_path, note
+                outcome = replace(
+                    outcome,
+                    note=f"{outcome.note}；在线图片 API 排队等待 {waited_ms}ms",
+                )
+            return outcome
 
     def _parse_custom_headers(self, raw: str) -> dict[str, str]:
         """Parse custom HTTP headers from multi-line 'Key: Value' text."""
@@ -16685,6 +16924,25 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             return name
         model = _single_line(endpoint.get("model"), 60) if isinstance(endpoint, dict) else ""
         return f"在线 API #{index + 1}" + (f"({model})" if model else "")
+
+    @staticmethod
+    def _coerce_external_photo_generation_outcome(value: Any) -> _ExternalPhotoGenerationOutcome:
+        if isinstance(value, _ExternalPhotoGenerationOutcome):
+            return value
+        if isinstance(value, (tuple, list)):
+            image_path = str(value[0] or "").strip() if len(value) > 0 else ""
+            note = str(value[1] or "").strip() if len(value) > 1 else ""
+            return _ExternalPhotoGenerationOutcome(image_path, note)
+        return _ExternalPhotoGenerationOutcome("", _single_line(value, 240))
+
+    @staticmethod
+    def _external_photo_generation_result_retrieval_failed(
+        outcome: _ExternalPhotoGenerationOutcome,
+    ) -> bool:
+        return bool(
+            outcome.generation_completed
+            and outcome.failure_stage == "result_materialization"
+        )
 
     def _external_image_api_endpoint_signature(self, endpoint: dict[str, Any]) -> tuple[str, str, str, str]:
         return (
@@ -16775,7 +17033,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         reference_image_path: str = "",
         reference_image_paths: Any = (),
         image_size: str = "",
-    ) -> tuple[str, str]:
+    ) -> _ExternalPhotoGenerationOutcome:
         endpoints = self._external_image_api_endpoint_queue(include_incomplete=True)
         if not endpoints:
             return "", "在线图片 API 未配置完整"
@@ -16796,18 +17054,25 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 _single_line(endpoint.get("platform"), 30) or "auto",
                 _single_line(endpoint.get("model"), 80) or "-",
             )
-            image_path, note = await self._run_external_photo_generation_with_endpoint(
-                endpoint,
-                prompt_text,
-                session_key=session_key,
-                reference_image_path=reference_image_path,
-                reference_image_paths=reference_image_paths,
-                image_size=image_size,
+            outcome = self._coerce_external_photo_generation_outcome(
+                await self._run_external_photo_generation_with_endpoint(
+                    endpoint,
+                    prompt_text,
+                    session_key=session_key,
+                    reference_image_path=reference_image_path,
+                    reference_image_paths=reference_image_paths,
+                    image_size=image_size,
+                )
             )
-            if image_path:
-                return image_path, f"{note}；已使用{label}"
-            notes.append(f"{label}失败：{_single_line(note, 220)}")
-        return "", "；".join(notes[-6:]) or "在线图片 API 未返回可用图片"
+            if outcome.image_path:
+                return replace(outcome, note=f"{outcome.note}；已使用{label}")
+            if self._external_photo_generation_result_retrieval_failed(outcome):
+                return replace(outcome, note=f"{outcome.note}；已使用{label}")
+            notes.append(f"{label}失败：{_single_line(outcome.note, 220)}")
+        return _ExternalPhotoGenerationOutcome(
+            "",
+            "；".join(notes[-6:]) or "在线图片 API 未返回可用图片",
+        )
 
     async def _run_external_photo_generation_with_backup(
         self,
@@ -16817,7 +17082,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         reference_image_path: str = "",
         reference_image_paths: Any = (),
         image_size: str = "",
-    ) -> tuple[str, str]:
+    ) -> _ExternalPhotoGenerationOutcome:
         return await self._run_external_photo_generation_with_endpoint(
             self._legacy_external_image_api_endpoint(backup=True),
             prompt_text,
@@ -16836,7 +17101,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         reference_image_path: str = "",
         reference_image_paths: Any = (),
         image_size: str = "",
-    ) -> tuple[str, str]:
+    ) -> _ExternalPhotoGenerationOutcome:
         raw_paths = reference_image_paths
         if isinstance(raw_paths, str):
             raw_paths = (raw_paths,)
@@ -16866,18 +17131,23 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         old_values = {key: getattr(self, key, None) for key in self._external_image_api_runtime_keys()}
         try:
             self._apply_external_image_api_endpoint_runtime(endpoint)
-            image_path, note = await self._run_external_photo_generation_once(
-                endpoint_prompt_text,
-                session_key=session_key,
-                reference_image_path=endpoint_paths[0] if endpoint_paths else "",
-                reference_image_paths=tuple(endpoint_paths),
-                image_size=image_size,
-            )
-            if image_path and planned_paths:
-                note = (
-                    f"{note}；实际提交 {len(endpoint_paths)}/{len(planned_paths)} 张参考图"
+            outcome = self._coerce_external_photo_generation_outcome(
+                await self._run_external_photo_generation_once(
+                    endpoint_prompt_text,
+                    session_key=session_key,
+                    reference_image_path=endpoint_paths[0] if endpoint_paths else "",
+                    reference_image_paths=tuple(endpoint_paths),
+                    image_size=image_size,
                 )
-            return image_path, note
+            )
+            if outcome.image_path and planned_paths:
+                outcome = replace(
+                    outcome,
+                    note=(
+                        f"{outcome.note}；实际提交 {len(endpoint_paths)}/{len(planned_paths)} 张参考图"
+                    ),
+                )
+            return outcome
         finally:
             for key, value in old_values.items():
                 setattr(self, key, value)
@@ -16967,17 +17237,19 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     first = items[0] if isinstance(items, list) and items else None
                     if not isinstance(first, dict):
                         return "", "Agnes Image 未返回图片数据"
-                    saved, note = await self._materialize_external_image_value(
-                        first,
-                        session_key=session_key,
-                        success_note="ok",
+                    materialized = self._coerce_external_photo_generation_outcome(
+                        await self._materialize_external_image_value(
+                            first,
+                            session_key=session_key,
+                            success_note="ok",
+                        )
                     )
-                    if saved:
+                    if materialized.image_path:
                         detail = f"ok；Agnes Image {size}{('/' + ratio) if ratio else ''}"
                         if reference_image_path:
                             detail += "；已使用参考图"
-                        return saved, detail
-                    return "", note
+                        return replace(materialized, note=detail)
+                    return materialized
             return "", last_error or "Agnes Image 未返回数据"
         except asyncio.TimeoutError:
             return "", self._external_image_timeout_note(reference=bool(reference_image_path))
@@ -17207,17 +17479,29 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     success_note = "ok"
                     if reference_image_path:
                         success_note += "；已使用本地人设参考图"
+                    last_materialized: _ExternalPhotoGenerationOutcome | None = None
                     for candidate in candidates:
-                        saved, note = await self._materialize_external_image_value(
-                            candidate,
-                            session_key=session_key,
-                            success_note=success_note,
+                        materialized = self._coerce_external_photo_generation_outcome(
+                            await self._materialize_external_image_value(
+                                candidate,
+                                session_key=session_key,
+                                success_note=success_note,
+                            )
                         )
-                        if saved:
+                        last_materialized = materialized
+                        if materialized.image_path:
                             if retried:
-                                note += "；上游短暂错误后重试成功"
-                            return saved, note
-                        last_note = note
+                                materialized = replace(
+                                    materialized,
+                                    note=f"{materialized.note}；上游短暂错误后重试成功",
+                                )
+                            return materialized
+                        last_note = materialized.note
+                    if last_materialized is not None:
+                        return replace(
+                            last_materialized,
+                            note=last_note or "MiniMax 图片结果解析失败",
+                        )
                     return "", last_note or "MiniMax 图片结果解析失败"
             return "", last_note or "MiniMax 图片接口未返回数据"
         except asyncio.TimeoutError:
@@ -17269,14 +17553,19 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             multimodal_first = bool(reference_image_path) or self._bailian_prefers_multimodal()
             bailian_note = ""
             if multimodal_first:
-                image_path, note = await self._run_bailian_multimodal_photo_generation(
-                    prompt_text,
-                    session_key=session_key,
-                    reference_image_path=reference_image_path,
-                    image_size=image_size,
+                multimodal_outcome = self._coerce_external_photo_generation_outcome(
+                    await self._run_bailian_multimodal_photo_generation(
+                        prompt_text,
+                        session_key=session_key,
+                        reference_image_path=reference_image_path,
+                        image_size=image_size,
+                    )
                 )
+                image_path, note = multimodal_outcome
                 if image_path:
-                    return image_path, note
+                    return multimodal_outcome
+                if self._external_photo_generation_result_retrieval_failed(multimodal_outcome):
+                    return multimodal_outcome
                 bailian_note = note
                 if reference_image_path:
                     logger.info(
@@ -17290,38 +17579,49 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 )
                 if "超时" in str(note or ""):
                     return "", note
-            image_path, note = await self._run_bailian_async_photo_generation(
-                prompt_text,
-                session_key=session_key,
-                image_size=image_size,
+            async_outcome = self._coerce_external_photo_generation_outcome(
+                await self._run_bailian_async_photo_generation(
+                    prompt_text,
+                    session_key=session_key,
+                    image_size=image_size,
+                )
             )
+            image_path, note = async_outcome
             if image_path:
-                return image_path, note
+                return async_outcome
+            if self._external_photo_generation_result_retrieval_failed(async_outcome):
+                return async_outcome
             if bailian_note:
                 return "", f"{note}；多模态回退原因：{_single_line(bailian_note, 120)}"
             return "", note
         if platform == "modelscope":
             if reference_image_path:
                 return "", "魔搭社区文生图接口暂不支持参考图输入，请改用 OpenAI 兼容参考图接口或 ComfyUI images=1 工作流"
-            return await self._run_modelscope_photo_generation(
-                prompt_text,
-                session_key=session_key,
-                image_size=image_size,
+            return self._coerce_external_photo_generation_outcome(
+                await self._run_modelscope_photo_generation(
+                    prompt_text,
+                    session_key=session_key,
+                    image_size=image_size,
+                )
             )
         if platform == "doubao":
             if reference_image_path:
                 return "", "豆包/火山方舟文生图接口暂不支持参考图输入，请改用 Gemini、OpenAI 兼容参考图接口或 ComfyUI images=1 工作流"
-            return await self._run_doubao_photo_generation(
-                prompt_text,
-                session_key=session_key,
-                image_size=image_size,
+            return self._coerce_external_photo_generation_outcome(
+                await self._run_doubao_photo_generation(
+                    prompt_text,
+                    session_key=session_key,
+                    image_size=image_size,
+                )
             )
         if platform == "gemini":
-            return await self._run_gemini_photo_generation(
-                prompt_text,
-                session_key=session_key,
-                reference_image_path=reference_image_path,
-                image_size=image_size,
+            return self._coerce_external_photo_generation_outcome(
+                await self._run_gemini_photo_generation(
+                    prompt_text,
+                    session_key=session_key,
+                    reference_image_path=reference_image_path,
+                    image_size=image_size,
+                )
             )
         if platform == "minimax":
             minimax_reference_path = reference_image_path
@@ -17333,18 +17633,22 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     minimax_reference_path = _path_text(raw_path, 1000)
                     if minimax_reference_path:
                         break
-            return await self._run_minimax_photo_generation(
-                prompt_text,
-                session_key=session_key,
-                reference_image_path=minimax_reference_path,
-                image_size=image_size,
+            return self._coerce_external_photo_generation_outcome(
+                await self._run_minimax_photo_generation(
+                    prompt_text,
+                    session_key=session_key,
+                    reference_image_path=minimax_reference_path,
+                    image_size=image_size,
+                )
             )
         if platform == "agnes":
-            return await self._run_agnes_photo_generation(
-                prompt_text,
-                session_key=session_key,
-                reference_image_path=reference_image_path,
-                image_size=image_size,
+            return self._coerce_external_photo_generation_outcome(
+                await self._run_agnes_photo_generation(
+                    prompt_text,
+                    session_key=session_key,
+                    reference_image_path=reference_image_path,
+                    image_size=image_size,
+                )
             )
         if platform == "sensenova" and reference_image_path:
             return "", "SenseNova U1 Fast 官方接口不支持参考图输入，请使用纯文生图或切换其他参考图后端"
@@ -17359,15 +17663,20 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 _single_line(reference_image_path, 160),
                 _single_line(prompt_text, 180),
             )
-            image_path, note = await self._run_external_photo_edit_generation(
-                prompt_text,
-                session_key=session_key,
-                reference_image_path=reference_image_path,
-                reference_image_paths=reference_image_paths,
-                image_size=image_size,
+            edit_outcome = self._coerce_external_photo_generation_outcome(
+                await self._run_external_photo_edit_generation(
+                    prompt_text,
+                    session_key=session_key,
+                    reference_image_path=reference_image_path,
+                    reference_image_paths=reference_image_paths,
+                    image_size=image_size,
+                )
             )
+            image_path, note = edit_outcome
             if image_path:
-                return image_path, note
+                return edit_outcome
+            if self._external_photo_generation_result_retrieval_failed(edit_outcome):
+                return edit_outcome
             logger.info(
                 "[PrivateCompanion] 在线图片 API 参考图生图失败,停止纯文回退: %s",
                 self._external_image_diagnostic_text(note, 180),
@@ -17458,14 +17767,17 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     "[PrivateCompanion] 在线图片 API 生图返回: %s",
                     self._external_image_diagnostic_text(image_value, 180),
                 )
-                saved, note = await self._materialize_external_openai_image_item(
+                materialized = await self._materialize_external_openai_image_item(
                     first,
                     session_key=session_key,
                     success_note="ok",
                 )
-                if saved and retried_after_upstream_error:
-                    note = f"{note}；上游短暂错误后重试成功"
-                return saved, note
+                if retried_after_upstream_error:
+                    materialized = replace(
+                        materialized,
+                        note=f"{materialized.note}；上游短暂错误后重试成功",
+                    )
+                return materialized
             return "", "在线图片 API 未返回 url 或 b64_json"
         except asyncio.TimeoutError:
             note = self._external_image_timeout_note()
@@ -17656,7 +17968,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     "[PrivateCompanion] 在线图片 API 参考图返回: %s",
                     self._external_image_diagnostic_text(image_value, 180),
                 )
-                saved, note = await self._materialize_external_openai_image_item(
+                materialized = await self._materialize_external_openai_image_item(
                     first,
                     session_key=session_key,
                     success_note=(
@@ -17665,11 +17977,17 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                         else f"ok；已使用 {len(image_payloads)} 张参考图"
                     ),
                 )
-                if saved and retried_after_upstream_error:
-                    note += "；上游短暂错误后重试成功"
-                if saved and len(image_payloads) < planned_reference_count:
-                    note += f"；当前端点仅支持 {len(image_payloads)}/{planned_reference_count} 张参考图"
-                return saved, note
+                if retried_after_upstream_error:
+                    materialized = replace(
+                        materialized,
+                        note=f"{materialized.note}；上游短暂错误后重试成功",
+                    )
+                if len(image_payloads) < planned_reference_count:
+                    materialized = replace(
+                        materialized,
+                        note=f"{materialized.note}；当前端点仅支持 {len(image_payloads)}/{planned_reference_count} 张参考图",
+                    )
+                return materialized
             return "", "参考图接口未返回 url 或 b64_json"
         except asyncio.TimeoutError:
             note = self._external_image_timeout_note(reference=True)

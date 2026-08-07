@@ -8,7 +8,7 @@ import tempfile
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from astrbot.api.message_components import Image, Plain
 from astrbot_plugin_private_companion.llm_tool_actions import (
@@ -2714,6 +2714,94 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(photo["sent"])
         legacy_lookup.assert_awaited_once()
         generated_photo.assert_awaited_once()
+
+    async def test_proactive_framework_allows_photo_tool_but_keeps_other_pc_tools_blocked(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        harness.enable_proactive_only_mode = False
+        harness._clear_proactive_only_temp_unlocks_if_mode_off = Mock()
+        harness._proactive_only_blocks_passive_event = (
+            PrivateCompanionPlugin._proactive_only_blocks_passive_event.__get__(harness)
+        )
+        generated_photo = AsyncMock(return_value='{"status":"success","sent":true}')
+        viewed_feed = AsyncMock(return_value='{"status":"unexpected"}')
+        harness._pc_generate_photo_impl = generated_photo
+        harness._pc_qzone_view_feed_impl = viewed_feed
+        event = _FakeEvent()
+        event.message_str = "请生成一张清晨厨房自拍"
+        event.private_companion_proactive_framework = True
+
+        payload = json.loads(
+            await PrivateCompanionPlugin.pc_generate_photo(
+                harness,
+                event,
+                prompt="清晨厨房，端着两个刚煎好的荷包蛋，自拍视角",
+                kind="selfie",
+                send=True,
+            )
+        )
+        blocked_payload = json.loads(
+            await PrivateCompanionPlugin.pc_qzone_view_feed(harness, event)
+        )
+
+        self.assertEqual("success", payload["status"])
+        self.assertEqual("disabled", blocked_payload["status"])
+        generated_photo.assert_awaited_once()
+        viewed_feed.assert_not_awaited()
+        self.assertFalse(harness._proactive_only_blocks_passive_event(event, "pc_generate_photo"))
+        self.assertTrue(harness._proactive_only_blocks_passive_event(event, "pc_tools"))
+
+    async def test_proactive_framework_plaintext_photo_recovery_reaches_generator(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        harness.enable_proactive_only_mode = False
+        harness._clear_proactive_only_temp_unlocks_if_mode_off = Mock()
+        harness._proactive_only_blocks_passive_event = (
+            PrivateCompanionPlugin._proactive_only_blocks_passive_event.__get__(harness)
+        )
+        generated_photo = AsyncMock(return_value='{"status":"success","success":true,"sent":true}')
+        harness._pc_generate_photo_impl = generated_photo
+        event = _FakeEvent()
+        event.message_str = "请生成一张清晨厨房自拍"
+        event.private_companion_proactive_framework = True
+        leaked_call = (
+            '{"name":"pc_generate_photo","parameters":'
+            '{"prompt":"清晨厨房自拍","kind":"selfie"}}'
+        )
+
+        cleaned, recovery = await harness._recover_plaintext_photo_tool_call(
+            event,
+            SimpleNamespace(tools_call_name=[]),
+            leaked_call,
+        )
+
+        self.assertEqual("", cleaned)
+        self.assertTrue(recovery["sent"])
+        generated_photo.assert_awaited_once()
+
+    def test_photo_feature_keeps_passive_pc_tools_unlock_semantics(self) -> None:
+        harness = _ReactionHarness(_FakeSmartImageAPI(self.image_path))
+        harness.enable_proactive_only_mode = True
+        harness._proactive_only_temp_unlock_allows = Mock(return_value=True)
+        event = _FakeEvent()
+
+        blocked = PrivateCompanionPlugin._proactive_only_blocks_passive_event(
+            harness,
+            event,
+            "pc_generate_photo",
+        )
+
+        self.assertFalse(blocked)
+        harness._proactive_only_temp_unlock_allows.assert_called_once_with("pc_tools")
+
+        harness._proactive_only_temp_unlock_allows.reset_mock(return_value=True)
+        harness._proactive_only_temp_unlock_allows.return_value = False
+        self.assertTrue(
+            PrivateCompanionPlugin._proactive_only_blocks_passive_event(
+                harness,
+                event,
+                "pc_generate_photo",
+            )
+        )
+        harness._proactive_only_temp_unlock_allows.assert_called_once_with("pc_tools")
 
     def test_feedback_targets_are_isolated_by_conversation(self) -> None:
         user: dict = {}

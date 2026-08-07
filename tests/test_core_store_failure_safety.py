@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from astrbot_plugin_private_companion.core_store import CoreStoreMixin
+from astrbot_plugin_private_companion.unified_profile_service import default_capabilities
 
 
 class _AsyncConfig:
@@ -102,6 +103,59 @@ class _IdentityCoreHarness(CoreStoreMixin):
 
 
 class CoreStoreFailureSafetyTests(unittest.IsolatedAsyncioTestCase):
+    def test_existing_legacy_private_profile_keeps_permission_before_defaults_fill(self) -> None:
+        harness = _IdentityCoreHarness()
+        harness.data["users"]["legacy"] = {
+            "user_id": "legacy",
+            "enabled": True,
+            "relationship_role": "friend",
+            "proactive_daily_limit": 2,
+        }
+
+        user = harness._get_user("legacy")
+
+        capabilities = user["unified_profile_capabilities"]
+        self.assertTrue(capabilities["private_companion_enabled"])
+        self.assertTrue(capabilities["proactive_private_enabled"])
+        self.assertTrue(user["enabled"])
+        self.assertEqual("legacy_effective_migration", capabilities["grant_source"])
+
+    def test_existing_legacy_manual_disable_stays_closed(self) -> None:
+        harness = _IdentityCoreHarness()
+        harness.data["users"]["legacy"] = {
+            "user_id": "legacy",
+            "enabled": True,
+            "manual_disabled": True,
+            "relationship_role": "friend",
+            "proactive_daily_limit": 2,
+        }
+
+        user = harness._get_user("legacy")
+
+        capabilities = user["unified_profile_capabilities"]
+        self.assertFalse(capabilities["private_companion_enabled"])
+        self.assertFalse(capabilities["proactive_private_enabled"])
+        self.assertFalse(user["enabled"])
+
+    def test_late_imported_manual_grant_repairs_default_closed_capability(self) -> None:
+        harness = _IdentityCoreHarness()
+        harness.data["users"]["legacy"] = {
+            "user_id": "legacy",
+            "enabled": False,
+            "manual_enabled": True,
+            "relationship_role": "friend",
+            "proactive_daily_limit": 2,
+            "unified_profile_capabilities": default_capabilities(),
+        }
+
+        user = harness._get_user("legacy")
+
+        capabilities = user["unified_profile_capabilities"]
+        self.assertTrue(capabilities["private_companion_enabled"])
+        self.assertTrue(capabilities["proactive_private_enabled"])
+        self.assertTrue(user["enabled"])
+        self.assertEqual("legacy_default_closed_repair", capabilities["grant_source"])
+
     def test_official_full_umo_parses_identity_after_long_transport_prefix(self) -> None:
         openid = "openid-owner-with-stable-suffix"
         full_umo = f"official-{'x' * 160}:friendmessage:{openid}"
