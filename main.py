@@ -6435,6 +6435,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             and isinstance(deferred_reaction_tts, dict)
             and bool(deferred_reaction_tts)
         )
+        plugin_tts_plain_fallback = (
+            bool(getattr(event, "_private_companion_tts_request_applied", False))
+            and bool(chain)
+            and all(isinstance(comp, Plain) for comp in chain)
+        )
         if is_llm_result and await self._should_defer_segmenting_to_astrbot_tts(event, result, chain):
             logger.debug(
                 "[PrivateCompanion] 当前 LLM 结果交由 AstrBot 官方 TTS 与原生分段处理: session=%s",
@@ -6445,6 +6450,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             not is_llm_result
             and not external_proactive
             and not plugin_owned_reaction_text
+            and not plugin_tts_plain_fallback
             and not self._friend_private_plain_result_allows_segmenting(event, chain)
         ):
             return
