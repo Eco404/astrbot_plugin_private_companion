@@ -234,7 +234,7 @@ from .memory_companion_adapter import MemoryCompanionAdapterMixin
 from .p5_attestation import P5AttestationError, REASON_CODES as P5_ATTESTATION_REASON_CODES
 from .p5_source_observer import evaluate_source
 from .message_pipeline import handle_group_message, handle_private_message
-from .tool_history_sanitizer import sanitize_openai_tool_history
+from .tool_history_sanitizer import sanitize_history_image_blocks, sanitize_openai_tool_history
 from .forward_message import ForwardMessageMixin
 from .private_image import PrivateImageMixin
 from .prompt_surface import PromptSurface
@@ -9306,7 +9306,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             prompt_user["_game_current_umo"] = current_umo
 
         current_state_memory_needed = bool(
-            re.search(
+            self._user_asks_bot_current_state_or_activity(inbound_text)
+            or re.search(
                 r"(你|星缘|bot|机器人).{0,8}(在干嘛|在做什么|做什么|穿什么|穿的?什么|衣服|衣服颜色|什么颜色|吃了什么|吃的?什么|几点吃|什么时候吃|吃饭|进食|在哪里|在哪儿|当前位置|今天状态|现在状态)",
                 inbound_text,
             )
@@ -10072,11 +10073,18 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if direct
             else "本轮状态素材触发原因：Bot 自身模拟状态发生变化。"
         )
+        guidance = (
+            "用户正在直接问 Bot 此刻在做什么或当前状态：先正面回答拟人化日程素材中的当前活动，"
+            "它高于旧对话、旧记忆和临场发挥。不得否认素材中明确的忙碌/专注状态，也不得另编素材未提供的动作、地点、饮食或娱乐活动。"
+            "如果素材本身较笼统，就按原有粒度自然转述，例如只说正在专心处理手头的事；不要为了显得具体而补造细节。"
+            if direct
+            else "只用于语气、长短、节奏和轻微接话；不要把它改写成用户做过的事或现实已经发生的事件。"
+        )
         return "\n".join(
             [
                 "【Bot 自身模拟状态更新】",
                 "以下只描述 Bot 的拟人化内部状态/场景素材，不是用户事实、不是现实证据，也不要写入长期记忆。",
-                "只用于语气、长短、节奏和轻微接话；不要把它改写成用户做过的事或现实已经发生的事件。",
+                guidance,
                 usage + " " + "；".join(pieces) + "。",
             ]
         )
@@ -10204,7 +10212,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         fingerprint = self._private_passive_state_fingerprint(state, current_user)
         previous = cache.get(session_key) if isinstance(cache.get(session_key), dict) else {}
         changed = previous.get("fingerprint") != fingerprint
-        direct_state_request = self._user_asks_recent_bot_activity(inbound_text) or bool(
+        direct_state_request = self._user_asks_bot_current_state_or_activity(inbound_text) or self._user_asks_recent_bot_activity(inbound_text) or bool(
             re.search(r"(状态|日程|精力|心情|情绪|在干嘛|做什么|忙什么|近况)", str(inbound_text or ""))
         )
         now_ts = _now_ts()
@@ -12566,6 +12574,32 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 _single_line(settings.get("websearch_provider"), 80) or "unknown",
                 umo or "unknown",
             )
+
+    @filter.on_llm_request(priority=-249000)
+    @_multi_persona_event_context
+    async def sanitize_historical_image_blocks_before_provider(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        *args,
+        **kwargs,
+    ):
+        """Keep legacy multimodal history compatible with text-only chat endpoints."""
+        if self is None or req is None or not bool(getattr(self, "enabled", False)):
+            return
+        cleaned, stats = sanitize_history_image_blocks(getattr(req, "contexts", None))
+        if not stats.get("changed"):
+            return
+        try:
+            req.contexts = cleaned
+        except Exception:
+            return
+        logger.info(
+            "[PrivateCompanion] 已兼容化历史图片消息: session=%s messages=%s image_blocks=%s",
+            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            stats.get("messages_changed", 0),
+            stats.get("image_blocks_replaced", 0),
+        )
 
     @filter.on_llm_request(priority=-250000)
     @_multi_persona_event_context

@@ -117,6 +117,7 @@ from .planning import (
     normalize_story_plan,
     pick_detail_segment,
 )
+from .proactive_routes import PROACTIVE_ROUTE_REGISTRY
 
 
 DEFAULT_AI_DAILY_NEWS_SOURCE = "B站 AI早报|bilibili:285286947"
@@ -560,7 +561,17 @@ class ProactiveEngineMixin:
             r"(?:你|bot|机器人)(?:现在|这会儿|今天)?(?:状态|情况)?(?:怎么样|咋样|如何|还好吗|还好不|累不累|困不困|忙不忙|饿不饿)$",
             r"(?:你|bot|机器人)(?:现在|这会儿)?(?:什么状态|啥状态)$",
         )
-        return any(re.fullmatch(pattern, compact, flags=re.I) for pattern in direct_patterns)
+        if any(re.fullmatch(pattern, compact, flags=re.I) for pattern in direct_patterns):
+            return True
+        # 私聊里常见的口语问法会带承接词或观察性前缀，例如
+        # “那你现在在干啥呢”“好像你在忙的样子，忙啥呢”。
+        return bool(
+            re.search(
+                r"(?:你|bot|机器人).{0,16}(?:在)?(?:干嘛|干啥|做什么|做啥|忙什么|忙啥)(?:呢|呀|啊|吗|嘛|没)?$",
+                compact,
+                flags=re.I,
+            )
+        )
 
     def _proactive_item_is_state_share_for_current_status_question(self, item: dict[str, Any] | None) -> bool:
         if not isinstance(item, dict):
@@ -681,6 +692,9 @@ class ProactiveEngineMixin:
         return any(token in text for token in weather_tokens) or any(token in text for token in location_tokens)
 
     def _proactive_impulse_signature(self, item: dict[str, Any]) -> str:
+        route_key = _single_line(item.get("route_dedupe_key"), 160)
+        if route_key:
+            return route_key
         return self._proactive_topic_signature(
             item.get("reason"),
             item.get("source"),
@@ -688,20 +702,16 @@ class ProactiveEngineMixin:
             item.get("motive"),
         )
 
-    def _proactive_impulse_default_window_seconds(self, reason: str) -> tuple[float, float]:
-        if reason in {"morning_greeting", "noon_greeting", "evening_greeting"}:
-            return 70 * 60.0, 35 * 60.0
-        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share", "environment_change", "weather_alert"}:
-            return 45 * 60.0, 60 * 60.0
-        if reason in {"quiet_care", "check_in", "state_share"}:
-            return 55 * 60.0, 80 * 60.0
-        return 50 * 60.0, 70 * 60.0
+    def _proactive_impulse_default_window_seconds(self, reason: str, *, source: str = "") -> tuple[float, float]:
+        route = self._proactive_route_for(reason=reason, source=source)
+        return float(route.active_window_seconds), float(route.grace_window_seconds)
 
     def _event_time_window_bounds(
         self,
         event: dict[str, Any],
         *,
         reason: str,
+        source: str = "",
         now: float | None = None,
     ) -> tuple[float, float, float, float]:
         check_now = _now_ts() if now is None else now
@@ -730,7 +740,14 @@ class ProactiveEngineMixin:
             preferred_ts = start_ts if start_ts > 0 else check_now + 60
         if start_ts <= 0:
             start_ts = preferred_ts
-        active_span, grace_span = self._proactive_impulse_default_window_seconds(reason)
+        route = self._proactive_route_for(
+            reason=reason,
+            source=source or event.get("source"),
+            semantic_kind=event.get("semantic_kind"),
+            kind=event.get("kind"),
+        )
+        active_span = float(route.active_window_seconds)
+        grace_span = float(route.grace_window_seconds)
         if end_ts <= 0:
             end_ts = max(start_ts + 60.0, preferred_ts + active_span)
         expire_at = max(end_ts + grace_span, preferred_ts + 5 * 60.0)
@@ -808,6 +825,7 @@ class ProactiveEngineMixin:
             window_start_at, preferred_ts, best_until_at, expire_at = self._event_time_window_bounds(
                 prepared,
                 reason=reason,
+                source=source,
                 now=now,
             )
         time_exempt = source in {"timer", "troubleshooting", "simulation"}
@@ -960,12 +978,24 @@ class ProactiveEngineMixin:
             trigger_message_id=trigger_message_id,
             trigger_ts=trigger_ts,
         )
+        proactive_kind = self._proactive_message_kind(
+            reason=impulse_reason,
+            source=source,
+            semantic_kind=semantics.get("kind"),
+        )
+        kind_policy = self._proactive_kind_policy(proactive_kind)
+        quota_policy = self._proactive_quota_policy(user)
         return {
             "id": uuid.uuid4().hex[:12],
             "created_ts": _now_ts(),
             "updated_ts": _now_ts(),
             "state": "queued",
             "source": _single_line(source, 40) or "random",
+            "kind": proactive_kind,
+            "kind_label": _single_line(kind_policy.get("label"), 40),
+            "response_expectation": _single_line(kind_policy.get("response_expectation"), 24),
+            "quota_tier": _safe_int(quota_policy.get("tier"), 0, 0, 5),
+            "quota_tier_label": _single_line(quota_policy.get("label"), 40),
             "reason": impulse_reason,
             "action": impulse_action,
             "topic": impulse_topic,
@@ -1259,6 +1289,12 @@ class ProactiveEngineMixin:
         if callable(disabled) and disabled(user):
             return None
         check_now = _now_ts() if now is None else now
+        candidate = self._prepare_proactive_route_candidate(
+            user,
+            candidate,
+            source=source,
+            now=check_now,
+        )
         reason = _single_line(candidate.get("reason"), 40) or "check_in"
         action = _single_line(candidate.get("action"), 40) or "message"
         motive = _single_line(candidate.get("motive"), 180)
@@ -1275,7 +1311,7 @@ class ProactiveEngineMixin:
         preferred_ts = _safe_float(prepared.get("preferred_ts"), 0)
         best_until_at = _safe_float(prepared.get("best_until_at"), 0)
         expire_at = _safe_float(prepared.get("expire_at"), 0)
-        return self._build_proactive_impulse(
+        impulse = self._build_proactive_impulse(
             user,
             reason=reason,
             action=action,
@@ -1303,6 +1339,23 @@ class ProactiveEngineMixin:
             ),
             origin_event_id=_single_line(prepared.get("origin_event_id"), 80),
         )
+        for key in (
+            "kind",
+            "kind_label",
+            "route_version",
+            "route_dedupe_key",
+            "route_review_profile",
+            "route_retry_profile",
+            "route_cancel_if_new_inbound",
+            "route_recent_chat_policy",
+            "route_allow_automatic_followup",
+            "route_disable_segmenting",
+            "response_expectation",
+            "quota_tier",
+        ):
+            if key in prepared:
+                impulse[key] = prepared[key]
+        return impulse
 
     def _impulse_ready_now(self, impulse: dict[str, Any], *, now: float | None = None) -> bool:
         check_now = _now_ts() if now is None else now
@@ -1320,6 +1373,14 @@ class ProactiveEngineMixin:
         now: float | None = None,
     ) -> float:
         check_now = _now_ts() if now is None else now
+        proactive_kind = _single_line(impulse.get("kind"), 40) or self._proactive_message_kind(
+            reason=impulse.get("reason"),
+            source=impulse.get("source"),
+            semantic_kind=impulse.get("semantic_kind"),
+        )
+        impulse["kind"] = proactive_kind
+        kind_policy = self._proactive_kind_policy(proactive_kind)
+        quota_policy = self._proactive_quota_policy(user)
         created = _safe_float(impulse.get("created_ts"), check_now)
         preferred_ts = _safe_float(impulse.get("preferred_ts"), _safe_float(impulse.get("window_start_at"), check_now))
         best_until_at = _safe_float(impulse.get("best_until_at"), preferred_ts)
@@ -1329,6 +1390,11 @@ class ProactiveEngineMixin:
             + _safe_float(impulse.get("urgency"), 0.3) * 0.9
             + _safe_float(impulse.get("warmth"), 0.3) * 0.7
         )
+        score += _safe_float(kind_policy.get("score_bias"), 0.0)
+        score += _safe_float(quota_policy.get("candidate_score_bias"), 0.0)
+        quota_tier = _safe_int(quota_policy.get("tier"), 0, 0, 5)
+        if quota_tier >= 4 and proactive_kind in {"self_life", "content_share"}:
+            score += 0.05
         score -= age_hours * _safe_float(impulse.get("decay_per_hour"), 0.08)
         if preferred_ts > 0:
             score -= min(0.55, abs(check_now - preferred_ts) / 3600.0 * 0.14)
@@ -1401,7 +1467,10 @@ class ProactiveEngineMixin:
         if hesitation_count > 0:
             score += min(0.12, hesitation_count * 0.035)
         if _safe_int(user.get("ignored_streak"), 0, 0) >= 2:
-            score -= 0.08
+            unanswered_penalty = _safe_float(kind_policy.get("unanswered_score_penalty"), 0.08, 0.0)
+            if quota_tier >= 4 and proactive_kind in {"self_life", "content_share"}:
+                unanswered_penalty = 0.0
+            score -= unanswered_penalty
         return score
 
     def _proactive_persona_alignment(
@@ -2169,6 +2238,12 @@ class ProactiveEngineMixin:
         inner_voice = self._format_persona_voice_channel_prompt("inner") if callable(getattr(self, "_format_persona_voice_channel_prompt", None)) else ""
         role = self._private_user_role(user)
         nickname = _single_line(user.get("nickname"), 40) or self.default_nickname
+        planned_route = PROACTIVE_ROUTE_REGISTRY.route_for(
+            reason=user.get("planned_proactive_reason"),
+            source=user.get("planned_proactive_source"),
+            semantic_kind=user.get("planned_proactive_semantic_kind"),
+            kind=user.get("planned_proactive_kind"),
+        )
         return f"""
 你是“主动消息人格/世界观判定器”。只判断这个主动计划是否像当前角色会自然产生的念头,不要写最终聊天正文。
 
@@ -2189,6 +2264,7 @@ class ProactiveEngineMixin:
  - 低价值、动机偏虚、人格贴合度一般或表达温度偏低都不是硬拦截理由；优先 rewrite，给出一个具体且低压力的 topic/motive。
  - 如果只是“想你了/来看看/在不在/忙不忙”且没有具体由头,必须优先 rewrite，而不是 defer/drop。
  - 连续未回应只影响语气和长度：改成一句低压、完整、不追问的表达，不能仅凭未回应就 defer/drop。
+ - 当前完整产生/发送路线是 {planned_route.key}（{planned_route.label}）。rewrite 只能优化这条路线内部的 action/topic/motive；不要把 planned_reason 改成另一类路线，也不要把事务、安全或续聊改写成普通关怀。
 
 【角色设定】
 {_single_line(persona, 1800) or "（未读取到显式人格,按自然私聊陪伴角色处理）"}
@@ -2214,6 +2290,7 @@ class ProactiveEngineMixin:
 - Bot 当前开口欲/主动表达温度：{_safe_float(inner_readiness.get("score"), 0.55):.2f}｜{_single_line(inner_readiness.get("label"), 60)}｜{_single_line(inner_readiness.get("detail"), 180)}
 
 【当前主动计划】
+- route：{planned_route.key}（{planned_route.label}）
 - source：{self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40) or "unknown"}
 - reason：{self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40) or "check_in"}
 - action：{_single_line(user.get("planned_proactive_action"), 40) or "message"}
@@ -2345,6 +2422,20 @@ class ProactiveEngineMixin:
         new_motive = self._normalize_internal_motive_text(_single_line(judgement.get("motive"), 180))
         current_reason = self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40)
         current_action = self._normalize_legacy_proactive_text(user.get("planned_proactive_action"), limit=40)
+        if new_reason:
+            current_route = PROACTIVE_ROUTE_REGISTRY.route_for(
+                reason=current_reason,
+                source=user.get("planned_proactive_source"),
+                semantic_kind=user.get("planned_proactive_semantic_kind"),
+                kind=user.get("planned_proactive_kind"),
+            )
+            rewritten_route = PROACTIVE_ROUTE_REGISTRY.route_for(
+                reason=new_reason,
+                source=user.get("planned_proactive_source"),
+                semantic_kind=user.get("planned_proactive_semantic_kind"),
+            )
+            if rewritten_route.key != current_route.key:
+                new_reason = ""
         if new_reason and new_reason != current_reason:
             user["planned_proactive_reason"] = new_reason
             changed = True
@@ -2369,6 +2460,20 @@ class ProactiveEngineMixin:
             user["planned_proactive_action"] = sanitized["action"]
             user["planned_proactive_topic"] = sanitized["topic"]
             user["planned_proactive_motive"] = sanitized["motive"]
+        if changed:
+            route_store = getattr(self, "_store_planned_proactive_route_fields", None)
+            if callable(route_store):
+                route_store(
+                    user,
+                    {
+                        "source": user.get("planned_proactive_source"),
+                        "reason": user.get("planned_proactive_reason"),
+                        "action": user.get("planned_proactive_action"),
+                        "topic": user.get("planned_proactive_topic"),
+                        "motive": user.get("planned_proactive_motive"),
+                        "origin_event_id": user.get("planned_proactive_origin_event_id"),
+                    },
+                )
         return changed
 
     def _planned_proactive_impulse(self, user: dict[str, Any]) -> dict[str, Any] | None:
@@ -2887,6 +2992,12 @@ class ProactiveEngineMixin:
             return self._materialize_best_proactive_impulse(user, now=check_now)
         candidate = {
             "source": self._normalize_legacy_proactive_text(selected.get("source"), limit=40) or "impulse",
+            "kind": _single_line(selected.get("kind"), 40) or self._proactive_message_kind(
+                reason=selected.get("reason"),
+                source=selected.get("source"),
+                semantic_kind=selected.get("semantic_kind"),
+            ),
+            "quota_tier": _safe_int(self._proactive_quota_policy(user).get("tier"), 0, 0, 5),
             "reason": self._normalize_legacy_proactive_text(selected.get("reason"), limit=40) or "check_in",
             "action": self._normalize_legacy_proactive_text(selected.get("action"), limit=40) or "message",
             "scheduled_ts": max(review_at, _safe_float(selected.get("window_start_at"), review_at)),
@@ -2914,6 +3025,8 @@ class ProactiveEngineMixin:
         user["planned_proactive_reason"] = self._normalize_legacy_proactive_text(candidate["reason"], limit=40) or "check_in"
         user["planned_proactive_action"] = self._normalize_legacy_proactive_text(candidate["action"], limit=40) or "message"
         user["planned_proactive_source"] = self._normalize_legacy_proactive_text(candidate["source"], limit=40) or "impulse"
+        user["planned_proactive_kind"] = _single_line(candidate.get("kind"), 40)
+        self._store_planned_proactive_route_fields(user, selected)
         user["planned_proactive_motive"] = self._normalize_internal_motive_text(candidate["motive"])
         user["planned_proactive_topic"] = candidate["topic"]
         if user["planned_proactive_reason"] == "birthday_curiosity":
@@ -2973,6 +3086,14 @@ class ProactiveEngineMixin:
         if callable(disabled) and disabled(target_user):
             return {}
         now = _now_ts()
+        source_hint = _single_line(candidate.get("source"), 40) or "unknown"
+        if isinstance(target_user, dict):
+            candidate = self._prepare_proactive_route_candidate(
+                target_user,
+                candidate,
+                source=source_hint,
+                now=now,
+            )
         topic = _single_line(candidate.get("topic"), 80)
         motive = _single_line(candidate.get("motive"), 160)
         action = _single_line(candidate.get("action"), 40) or "message"
@@ -3008,6 +3129,12 @@ class ProactiveEngineMixin:
             "semantic_need_score_bias": _safe_float(semantics.get("need_score_bias"), 0.0),
             "semantic_need_pressure_bias": _safe_float(semantics.get("need_pressure_bias"), 0.0),
         }
+        proactive_kind = _single_line(candidate.get("kind"), 40) or self._proactive_message_kind(
+            reason=reason,
+            source=source,
+            semantic_kind=semantic_fields.get("semantic_kind"),
+        )
+        quota_policy = self._proactive_quota_policy(target_user if isinstance(target_user, dict) else {})
         pool = self._cleanup_proactive_candidate_pool(now=now)
         if status in {"blocked", "accepted"}:
             for existing in reversed(pool):
@@ -3067,6 +3194,21 @@ class ProactiveEngineMixin:
                     if incoming_value > 0:
                         existing[key] = incoming_value
                 existing["source"] = source or _single_line(existing.get("source"), 40)
+                existing["kind"] = proactive_kind
+                existing["quota_tier"] = _safe_int(quota_policy.get("tier"), 0, 0, 5)
+                for route_key in (
+                    "route_version",
+                    "route_dedupe_key",
+                    "route_review_profile",
+                    "route_retry_profile",
+                    "route_cancel_if_new_inbound",
+                    "route_recent_chat_policy",
+                    "route_allow_automatic_followup",
+                    "route_disable_segmenting",
+                    "response_expectation",
+                ):
+                    if route_key in candidate:
+                        existing[route_key] = candidate[route_key]
                 existing["reason"] = reason or _single_line(existing.get("reason"), 40)
                 existing["action"] = action or _single_line(existing.get("action"), 40)
                 existing["topic"] = topic or _single_line(existing.get("topic"), 80)
@@ -3089,6 +3231,18 @@ class ProactiveEngineMixin:
             "origin_event_id": origin_event_id,
             "user_id": str(user_id),
             "source": source,
+            "kind": proactive_kind,
+            "kind_label": _single_line(self._proactive_kind_policy(proactive_kind).get("label"), 40),
+            "quota_tier": _safe_int(quota_policy.get("tier"), 0, 0, 5),
+            "route_version": _safe_int(candidate.get("route_version"), 0, 0),
+            "route_dedupe_key": _single_line(candidate.get("route_dedupe_key"), 180),
+            "route_review_profile": _single_line(candidate.get("route_review_profile"), 40),
+            "route_retry_profile": _single_line(candidate.get("route_retry_profile"), 40),
+            "route_cancel_if_new_inbound": bool(candidate.get("route_cancel_if_new_inbound", True)),
+            "route_recent_chat_policy": _single_line(candidate.get("route_recent_chat_policy"), 40),
+            "route_allow_automatic_followup": bool(candidate.get("route_allow_automatic_followup", True)),
+            "route_disable_segmenting": bool(candidate.get("route_disable_segmenting", False)),
+            "response_expectation": _single_line(candidate.get("response_expectation"), 24),
             "reason": reason,
             "action": action,
             "topic": topic,
@@ -3107,6 +3261,15 @@ class ProactiveEngineMixin:
         return item
 
     def _proactive_candidate_repeated(self, user: dict[str, Any], candidate: dict[str, Any]) -> bool:
+        candidate_kind = _single_line(candidate.get("kind"), 40) or self._proactive_message_kind(
+            reason=candidate.get("reason"),
+            source=candidate.get("source"),
+            semantic_kind=candidate.get("semantic_kind"),
+        )
+        # Deterministic event routes own their lifecycle and evidence identity;
+        # generic topic similarity must not suppress a new reminder or alert.
+        if candidate_kind in {"transactional", "safety_event"}:
+            return False
         signature = self._proactive_topic_signature(
             candidate.get("topic"),
             candidate.get("motive"),
@@ -3121,6 +3284,13 @@ class ProactiveEngineMixin:
             if str(item.get("user_id") or "") != user_id:
                 continue
             if str(item.get("status") or "") not in {"accepted", "sent"}:
+                continue
+            item_kind = _single_line(item.get("kind"), 40) or self._proactive_message_kind(
+                reason=item.get("reason"),
+                source=item.get("source"),
+                semantic_kind=item.get("semantic_kind"),
+            )
+            if item_kind != candidate_kind:
                 continue
             if now - _safe_float(item.get("created_ts"), 0) > 8 * 3600:
                 continue
@@ -3293,6 +3463,12 @@ class ProactiveEngineMixin:
         user["planned_proactive_reason"] = self._normalize_legacy_proactive_text(candidate.get("reason"), limit=40) or "check_in"
         user["planned_proactive_action"] = self._normalize_legacy_proactive_text(action, limit=40) or "message"
         user["planned_proactive_source"] = self._normalize_legacy_proactive_text(source, limit=40) or "proactive"
+        user["planned_proactive_kind"] = _single_line(impulse.get("kind"), 40) or self._proactive_message_kind(
+            reason=candidate.get("reason"),
+            source=source,
+            semantic_kind=impulse.get("semantic_kind"),
+        )
+        self._store_planned_proactive_route_fields(user, impulse)
         user["planned_proactive_motive"] = self._normalize_internal_motive_text(
             _single_line(candidate.get("motive"), 180)
         )
@@ -3453,7 +3629,10 @@ class ProactiveEngineMixin:
         user["planned_proactive_topic"] = _single_line(event.get("topic"), 60)
         user["planned_proactive_impulse_id"] = ""
         user["planned_proactive_window_start_at"] = scheduled_ts
-        active_span, grace_span = self._proactive_impulse_default_window_seconds(user["planned_proactive_reason"])
+        active_span, grace_span = self._proactive_impulse_default_window_seconds(
+            user["planned_proactive_reason"],
+            source="timer",
+        )
         user["planned_proactive_best_until_at"] = scheduled_ts + active_span
         user["planned_proactive_expire_at"] = scheduled_ts + active_span + grace_span
         semantics = self._planned_proactive_semantics(user)
@@ -3476,6 +3655,7 @@ class ProactiveEngineMixin:
             umo=_single_line(event.get("trigger_umo"), 160),
             created_at=_safe_float(event.get("trigger_ts"), 0),
         )
+        self._store_planned_proactive_route_fields(user, {**event, "source": "timer"})
         return True
 
     def _promote_upcoming_llm_timer_plan(self, user: dict[str, Any], *, now: float | None = None) -> bool:
@@ -3498,7 +3678,10 @@ class ProactiveEngineMixin:
         user["planned_proactive_topic"] = _single_line(event.get("topic"), 60)
         user["planned_proactive_impulse_id"] = ""
         user["planned_proactive_window_start_at"] = scheduled_ts
-        active_span, grace_span = self._proactive_impulse_default_window_seconds(user["planned_proactive_reason"])
+        active_span, grace_span = self._proactive_impulse_default_window_seconds(
+            user["planned_proactive_reason"],
+            source="timer",
+        )
         user["planned_proactive_best_until_at"] = scheduled_ts + active_span
         user["planned_proactive_expire_at"] = scheduled_ts + active_span + grace_span
         semantics = self._planned_proactive_semantics(user)
@@ -3521,6 +3704,7 @@ class ProactiveEngineMixin:
             umo=_single_line(event.get("trigger_umo"), 160),
             created_at=_safe_float(event.get("trigger_ts"), 0),
         )
+        self._store_planned_proactive_route_fields(user, {**event, "source": "timer"})
         return True
 
     def _should_send(self, user: dict[str, Any]) -> tuple[bool, str]:
@@ -3566,6 +3750,46 @@ class ProactiveEngineMixin:
         now = _now_ts()
         due_timer_active = self._has_due_llm_timer(user, now=now)
         timeliness = self._planned_proactive_timeliness_level(user)
+        if not is_troubleshooting:
+            route_preflight_getter = getattr(self, "_planned_proactive_route_preflight", None)
+            if callable(route_preflight_getter):
+                route_preflight = route_preflight_getter(user, now=now)
+            else:
+                route = PROACTIVE_ROUTE_REGISTRY.route_for(
+                    reason=planned_reason,
+                    source=planned_source,
+                    semantic_kind=user.get("planned_proactive_semantic_kind"),
+                    kind=user.get("planned_proactive_kind"),
+                )
+                route_preflight = route.preflight(
+                    user,
+                    {
+                        "reason": planned_reason,
+                        "source": planned_source,
+                        "trigger_message_id": user.get("planned_proactive_trigger_message_id"),
+                        "trigger_inbound_count": user.get("planned_proactive_trigger_inbound_count"),
+                        "private_inbound_count": user.get("private_inbound_count"),
+                        "expire_at": user.get("planned_proactive_expire_at"),
+                    },
+                    now=now,
+                )
+            user["planned_proactive_route_preflight_action"] = _single_line(route_preflight.action, 32)
+            user["planned_proactive_route_preflight_note"] = _single_line(route_preflight.reason, 180)
+            if not route_preflight.allowed:
+                note = _single_line(route_preflight.reason, 160) or "主动路线准入未通过"
+                if route_preflight.action == "defer":
+                    delay = route_preflight.defer_minutes
+                    self._defer_or_replace_planned_impulse(
+                        user,
+                        now=now,
+                        note=note,
+                        delay_minutes=delay if delay != (0.0, 0.0) else (30.0, 90.0),
+                        block_current=False,
+                    )
+                else:
+                    self._mark_planned_candidate_status(user, "blocked", note)
+                    self._clear_pending_proactive_plan(user)
+                return False, note
         if (
             not is_troubleshooting
             and not due_timer_active
@@ -4168,6 +4392,7 @@ class ProactiveEngineMixin:
             "planned_proactive_reason",
             "planned_proactive_action",
             "planned_proactive_source",
+            "planned_proactive_kind",
             "planned_proactive_motive",
             "planned_proactive_topic",
             "planned_proactive_semantic_kind",
@@ -4794,6 +5019,23 @@ class ProactiveEngineMixin:
             "status": _single_line(status, 32) or "unknown",
             "note": self._proactive_audit_safe_note(note, limit=180),
             "source": self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40) or "proactive",
+            "route_kind": _single_line(user.get("planned_proactive_kind"), 40) or (
+                self._proactive_message_kind(
+                    reason=reason or user.get("planned_proactive_reason"),
+                    source=user.get("planned_proactive_source"),
+                    semantic_kind=user.get("planned_proactive_semantic_kind"),
+                )
+                if callable(getattr(self, "_proactive_message_kind", None))
+                else PROACTIVE_ROUTE_REGISTRY.route_for(
+                    reason=reason or user.get("planned_proactive_reason"),
+                    source=user.get("planned_proactive_source"),
+                    semantic_kind=user.get("planned_proactive_semantic_kind"),
+                ).key
+            ),
+            "route_version": _safe_int(user.get("planned_proactive_route_version"), 0, 0),
+            "route_dedupe_key": _single_line(user.get("planned_proactive_route_dedupe_key"), 180),
+            "route_review_profile": _single_line(user.get("planned_proactive_route_review_profile"), 40),
+            "route_retry_profile": _single_line(user.get("planned_proactive_route_retry_profile"), 40),
             "reason": self._normalize_legacy_proactive_text(reason or user.get("planned_proactive_reason"), limit=40),
             "action": _single_line(action or user.get("planned_proactive_action"), 60) or "message",
             "topic": _single_line(user.get("planned_proactive_topic"), 100),
@@ -5059,7 +5301,10 @@ class ProactiveEngineMixin:
         scheduled_ts = _safe_float(user.get("next_proactive_at"), now)
         user["planned_proactive_impulse_id"] = ""
         user["planned_proactive_window_start_at"] = scheduled_ts
-        active_span, grace_span = self._proactive_impulse_default_window_seconds(user["planned_proactive_reason"])
+        active_span, grace_span = self._proactive_impulse_default_window_seconds(
+            user["planned_proactive_reason"],
+            source="simulation",
+        )
         user["planned_proactive_best_until_at"] = scheduled_ts + active_span
         user["planned_proactive_expire_at"] = scheduled_ts + active_span + grace_span
         semantics = self._planned_proactive_semantics(user)
@@ -5073,6 +5318,7 @@ class ProactiveEngineMixin:
         user["planned_opener_mode"] = ""
         user["planned_followup_kind"] = ""
         user["planned_proactive_quota_exempt"] = bool(current.get("_free_screen_peek"))
+        self._store_planned_proactive_route_fields(user, {**current, "source": "simulation"})
 
     def _consume_simulation_event(self, user: dict[str, Any]) -> None:
         sim = user.get("simulation_mode")
@@ -5094,6 +5340,7 @@ class ProactiveEngineMixin:
         user["planned_proactive_reason"] = ""
         user["planned_proactive_action"] = ""
         user["planned_proactive_source"] = ""
+        user["planned_proactive_kind"] = ""
         user["planned_proactive_motive"] = ""
         user["planned_proactive_topic"] = ""
         user["planned_proactive_impulse_id"] = ""
@@ -8671,7 +8918,12 @@ class ProactiveEngineMixin:
             probability += 0.12
         if important_dates:
             probability += 0.1 if _safe_int(important_dates[0].get("_days_until"), 0) == 0 else 0.05
-        probability -= min(0.18, ignored_streak * 0.07)
+        unanswered_weight = _safe_float(
+            self._proactive_quota_policy(user).get("unanswered_interval_weight"),
+            1.0,
+            0.0,
+        )
+        probability -= min(0.18, ignored_streak * 0.07) * min(1.0, unanswered_weight)
         probability *= self._daily_intensity_factor(user)
         probability = max(0.12, min(0.9, probability))
         return random.random() < probability

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 
@@ -103,3 +104,68 @@ def sanitize_openai_tool_history(contexts: Any) -> tuple[Any, dict[str, int]]:
     if not stats["changed"]:
         return contexts, stats
     return kept, stats
+
+
+def sanitize_history_image_blocks(contexts: Any) -> tuple[Any, dict[str, int]]:
+    """Replace historical image blocks without touching current request images."""
+    stats = {
+        "changed": 0,
+        "messages_changed": 0,
+        "image_blocks_replaced": 0,
+    }
+    if not isinstance(contexts, list) or not contexts:
+        return contexts, stats
+
+    cleaned: list[Any] = []
+    for item in contexts:
+        if isinstance(item, dict):
+            message = copy.deepcopy(item)
+        else:
+            dump = getattr(item, "model_dump", None)
+            if not callable(dump):
+                cleaned.append(item)
+                continue
+            try:
+                message = dump()
+            except Exception:
+                cleaned.append(item)
+                continue
+            if not isinstance(message, dict):
+                cleaned.append(item)
+                continue
+
+        content = message.get("content")
+        if not isinstance(content, list):
+            cleaned.append(item)
+            continue
+
+        retained: list[Any] = []
+        removed = 0
+        for part in content:
+            part_data = part
+            if not isinstance(part_data, dict):
+                dump = getattr(part_data, "model_dump", None)
+                if callable(dump):
+                    try:
+                        part_data = dump()
+                    except Exception:
+                        part_data = part
+            part_type = str(part_data.get("type") or "").strip().lower() if isinstance(part_data, dict) else ""
+            if part_type in {"image_url", "image"}:
+                removed += 1
+                continue
+            retained.append(copy.deepcopy(part_data))
+
+        if removed <= 0:
+            cleaned.append(item)
+            continue
+        retained.append({"type": "text", "text": "[历史图片]"})
+        message["content"] = retained
+        cleaned.append(message)
+        stats["changed"] = 1
+        stats["messages_changed"] += 1
+        stats["image_blocks_replaced"] += removed
+
+    if not stats["changed"]:
+        return contexts, stats
+    return cleaned, stats

@@ -411,6 +411,21 @@ class OverallDebugRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("unsupported action", note)
         self.assertEqual(1, len(client.calls))
 
+    async def test_custom_presence_failure_is_submitted_only_once(self) -> None:
+        harness = _ComponentSendHarness()
+        harness.enable_qq_custom_presence_sync = True
+        client = _SnowLumaPresenceClient(
+            {"status": "failed", "retcode": 1404, "message": "unsupported action"}
+        )
+        harness._resolve_aiocqhttp_client = lambda: client
+
+        ok, note = await harness._set_qq_custom_presence("写题中")
+
+        self.assertFalse(ok)
+        self.assertIn("unsupported action", note)
+        self.assertEqual(1, len(client.calls))
+        self.assertEqual("set_diy_online_status", client.calls[0][0])
+
 
 if __name__ == "__main__":
     unittest.main()

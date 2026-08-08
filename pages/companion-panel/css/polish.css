@@ -3321,3 +3321,486 @@ small {
     grid-row: 3;
   }
 }
+
+/* Keep the redesigned workspaces in the same visual family as Today Overview. */
+#panel-roleplay,
+#panel-private {
+  --ortto-canvas: var(--surface);
+  --ortto-paper: var(--panel);
+  --ortto-ink: var(--ink);
+  --ortto-muted: var(--muted);
+  --ortto-line: var(--line-soft);
+  --ortto-blue: var(--accent);
+  --ortto-blue-soft: var(--accent-soft);
+  --ortto-coral: var(--red);
+}
+
+.world-workspace,
+.user-workspace,
+.world-knowledge-brief,
+.persona-import-panel,
+.pc-dialog,
+.memory-view-overview,
+.memory-module,
+.user-detail-header {
+  border: 1px solid color-mix(in srgb, var(--line) 76%, var(--panel));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--panel) 92%, var(--surface));
+  box-shadow: 0 12px 28px color-mix(in srgb, var(--ink) 8%, transparent), var(--shadow-ring);
+}
+
+.world-workspace,
+.user-workspace,
+.pc-dialog,
+.memory-view-overview,
+.memory-module,
+.user-detail-header {
+  position: relative;
+}
+
+.world-workspace::before,
+.user-workspace::before,
+.pc-dialog::before,
+.memory-view-overview::before,
+.memory-module::before,
+.user-detail-header::before {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  inset: 0 0 auto;
+  height: 4px;
+  background: linear-gradient(90deg, var(--red), var(--gold), var(--accent), var(--blue));
+  pointer-events: none;
+}
+
+.world-workspace,
+.user-workspace { border-radius: var(--radius); }
+.world-outline { border-radius: calc(var(--radius) - 1px) 0 0 calc(var(--radius) - 1px); background: color-mix(in srgb, var(--surface) 78%, var(--panel)); }
+.world-editor .persona-card,
+.world-editor .world-blueprint,
+.world-editor .roleplay-user-card,
+.world-source-section { border-color: color-mix(in srgb, var(--line) 76%, var(--panel)); border-radius: var(--radius); background: color-mix(in srgb, var(--panel) 94%, var(--surface)); box-shadow: var(--shadow-ring); }
+.world-knowledge-brief,
+.persona-import-panel { border-radius: var(--radius); }
+.world-knowledge-brief section { background: color-mix(in srgb, var(--panel) 94%, var(--surface)); }
+
+.user-roster { background: color-mix(in srgb, var(--surface) 76%, var(--panel)); }
+.user-roster-item { border-radius: var(--radius); }
+.user-detail-shell { background: color-mix(in srgb, var(--panel) 88%, var(--accent-soft)); }
+.user-detail-header { overflow: hidden; padding: 15px; background: color-mix(in srgb, var(--panel) 90%, var(--accent-soft)); }
+.user-detail-summary { margin: 0 0 15px; border: 1px solid color-mix(in srgb, var(--line) 76%, var(--panel)); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); padding: 10px 15px; background: color-mix(in srgb, var(--panel) 95%, var(--surface)); }
+.user-detail-tabs { border-color: var(--line-soft); background: color-mix(in srgb, var(--panel) 94%, transparent); }
+
+.memory-view-overview {
+  overflow: hidden;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--panel) 90%, var(--plum-soft));
+}
+.memory-view-overview > div:first-child .eyebrow { display: none; }
+.memory-view-overview h3 { position: relative; margin: 0 0 0 34px; color: var(--ink); font-size: 19px; }
+.memory-view-overview h3::before { content: ""; position: absolute; top: 8px; left: -34px; width: 8px; height: 8px; border-radius: 999px; background: var(--red); box-shadow: 13px 0 0 color-mix(in srgb, var(--gold) 78%, var(--panel)), 26px 0 0 color-mix(in srgb, var(--accent) 70%, var(--panel)); }
+.memory-view-stats span { border-color: color-mix(in srgb, var(--line) 74%, var(--panel)); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--panel) 88%, var(--surface)); color: var(--muted); }
+.memory-view-stats b { color: var(--accent-strong); }
+
+.memory-module {
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--panel) 92%, var(--surface));
+}
+.memory-module:hover { border-color: color-mix(in srgb, var(--accent) 34%, var(--line)); box-shadow: 0 18px 36px color-mix(in srgb, var(--ink) 10%, transparent), var(--shadow-ring); }
+.memory-module-title .eyebrow { display: none; }
+.memory-module-mark { width: 8px; height: 8px; border-radius: 999px; background: var(--red); color: transparent; font-size: 0; box-shadow: 13px 0 0 color-mix(in srgb, var(--gold) 78%, var(--panel)), 26px 0 0 color-mix(in srgb, var(--accent) 70%, var(--panel)); }
+.portrait-sync-module .memory-module-mark,
+.dialogue-episode-module .memory-module-mark { background: var(--red); color: transparent; }
+.memory-module-title > div { margin-left: 26px; }
+.memory-module-title h2 { color: var(--ink); font-size: 19px; }
+.memory-module-title p { color: var(--muted); }
+.memory-module-head .danger-outline { border-color: color-mix(in srgb, var(--red) 28%, var(--line)); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--panel) 86%, var(--red-soft)); color: var(--red); }
+.memory-module-head .danger-outline:hover { border-color: var(--red); background: var(--red-soft); }
+
+.memory-empty-state,
+.memory-meta-grid,
+.habit-signal-item { border-color: color-mix(in srgb, var(--line) 78%, var(--panel)); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--surface) 76%, var(--panel)); }
+.habit-signal-item > div span { color: var(--accent-strong); }
+.habit-signal-item:hover { border-color: color-mix(in srgb, var(--accent) 36%, var(--line)); }
+.portrait-summary-list span { border-color: color-mix(in srgb, var(--accent) 24%, var(--line)); background: color-mix(in srgb, var(--panel) 68%, var(--accent-soft)); color: var(--accent-strong); }
+.memory-status-pill { background: color-mix(in srgb, var(--panel) 68%, var(--accent-soft)); color: var(--accent-strong); }
+.memory-status-pill.is-muted { background: color-mix(in srgb, var(--surface) 82%, var(--panel)); color: var(--muted); }
+.memory-count-pill { background: color-mix(in srgb, var(--panel) 68%, var(--red-soft)); color: var(--red); }
+.dialogue-episode-list::before { background: color-mix(in srgb, var(--red) 26%, var(--line)); }
+.dialogue-episode-index { border-color: color-mix(in srgb, var(--red) 28%, var(--line)); background: color-mix(in srgb, var(--panel) 72%, var(--red-soft)); color: var(--red); }
+
+.pc-dialog { border-radius: var(--radius); background: var(--panel); }
+
+@media (max-width: 780px) {
+  .world-workspace,
+  .user-workspace,
+  .pc-dialog { border-radius: var(--radius); }
+}
+
+/* Give every redesigned user view and world section the Overview visual grammar. */
+.user-detail-view {
+  display: grid;
+  gap: 12px;
+  padding-top: 14px;
+}
+
+.user-detail-view.is-hidden { display: none; }
+
+.user-view-overview {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(330px, .78fr);
+  gap: 18px;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 76%, var(--panel));
+  border-radius: var(--radius);
+  padding: 16px 17px;
+  background: color-mix(in srgb, var(--panel) 90%, var(--accent-soft));
+  box-shadow: 0 12px 28px color-mix(in srgb, var(--ink) 8%, transparent), var(--shadow-ring);
+}
+
+.user-view-overview::before,
+.world-editor [data-world-panel]::before {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  inset: 0 0 auto;
+  height: 4px;
+  background: linear-gradient(90deg, var(--red), var(--gold), var(--accent), var(--blue));
+  pointer-events: none;
+}
+
+.user-view-heading { min-width: 0; }
+.user-view-heading h3 {
+  position: relative;
+  margin: 0 0 5px 34px;
+  color: var(--ink);
+  font-size: 19px;
+}
+.user-view-heading h3::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  left: -34px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--red);
+  box-shadow: 13px 0 0 color-mix(in srgb, var(--gold) 78%, var(--panel)), 26px 0 0 color-mix(in srgb, var(--accent) 70%, var(--panel));
+}
+.user-view-heading p { max-width: 62ch; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+
+.user-view-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+.user-view-stats span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 74%, var(--panel));
+  border-radius: var(--radius-sm);
+  padding: 9px 10px;
+  background: color-mix(in srgb, var(--panel) 90%, var(--surface));
+}
+.user-view-stats small { color: var(--muted); font-size: 10px; }
+.user-view-stats b { overflow: hidden; color: var(--accent-strong); font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+
+.user-detail-view > .detail-block,
+.user-detail-view > .companion-intimacy-card,
+.user-detail-view > .private-dialogue-section,
+.user-detail-view .private-dialogue-section > .detail-block,
+.user-detail-view > .memory-module {
+  position: relative;
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 76%, var(--panel));
+  border-radius: var(--radius);
+  padding: 16px;
+  background: color-mix(in srgb, var(--panel) 94%, var(--surface));
+  box-shadow: var(--shadow-soft), var(--shadow-ring);
+  transition: border-color 180ms var(--ease), box-shadow 180ms var(--ease), transform 180ms var(--ease);
+}
+.user-detail-view > .detail-block:hover,
+.user-detail-view > .companion-intimacy-card:hover,
+.user-detail-view > .memory-module:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  box-shadow: 0 16px 32px color-mix(in srgb, var(--ink) 9%, transparent), var(--shadow-ring);
+}
+
+.user-detail-view .detail-block h2,
+.user-detail-view .companion-intimacy-head h3,
+.user-detail-view .current-interaction-head h3 { color: var(--ink); font-size: 17px; }
+.user-detail-view .detail-block > h2,
+.user-detail-view .detail-block-head h2,
+.user-detail-view .user-worldbook-head h2,
+.user-detail-view .emotion-diagnostic-head h2 {
+  position: relative;
+  margin-left: 34px;
+}
+.user-detail-view .detail-block > h2::before,
+.user-detail-view .detail-block-head h2::before,
+.user-detail-view .user-worldbook-head h2::before,
+.user-detail-view .emotion-diagnostic-head h2::before {
+  content: "";
+  position: absolute;
+  top: 7px;
+  left: -34px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--red);
+  box-shadow: 13px 0 0 color-mix(in srgb, var(--gold) 78%, var(--panel)), 26px 0 0 color-mix(in srgb, var(--accent) 70%, var(--panel));
+}
+
+.user-profile-form {
+  margin: 0;
+  border-color: color-mix(in srgb, var(--line) 76%, var(--panel));
+  border-radius: var(--radius);
+  padding: 13px;
+  background: color-mix(in srgb, var(--surface) 72%, var(--panel));
+  box-shadow: var(--shadow-ring);
+}
+.user-profile-form label { color: var(--muted); }
+.user-profile-form input,
+.user-profile-form select { border-color: var(--line); border-radius: var(--radius-sm); background: var(--panel); }
+.user-detail-view > .visual-strip { margin: 0; }
+.user-detail-view dl { border-top: 1px solid var(--line-soft); padding-top: 10px; }
+.user-detail-view dt { font-size: 12px; }
+.user-detail-view dd { color: var(--ink); }
+
+.companion-intimacy-card { gap: 14px; background: color-mix(in srgb, var(--panel) 90%, var(--plum-soft)); }
+.current-interaction-card { border-color: color-mix(in srgb, var(--line) 76%, var(--panel)); }
+.relationship-stage-segment i,
+.interaction-stage-segment i { background: color-mix(in srgb, var(--line) 78%, var(--panel)); }
+.relationship-stage-segment.is-current i,
+.interaction-stage-segment.is-current i { background: var(--accent); }
+.relationship-expression-status span,
+.current-interaction-meta span { border-radius: var(--radius-sm); background: color-mix(in srgb, var(--surface) 76%, var(--panel)); }
+.relationship-expression-status span { padding: 8px 9px; }
+.current-interaction-meta span { padding: 5px 8px; }
+.companion-intimacy-advanced { border-color: var(--line-soft); }
+
+.emotion-diagnostic-memory-note,
+.emotion-trace-status,
+.emotion-trace-timeline,
+.open-loop-item,
+.user-worldbook-memory-list p {
+  border-color: var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 76%, var(--panel));
+}
+.emotion-diagnostic-actions button { border-radius: var(--radius-sm); }
+.user-danger-actions { margin-top: 0; border-radius: var(--radius); background: color-mix(in srgb, var(--panel) 84%, var(--red-soft)); }
+.user-more-actions { margin-top: 0; }
+
+.world-editor [data-world-panel] {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 76%, var(--panel));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--panel) 94%, var(--surface));
+  box-shadow: var(--shadow-soft), var(--shadow-ring);
+  animation: ortto-view-in 260ms var(--ease) both;
+}
+.world-editor [data-world-panel].is-hidden { display: none; }
+.world-editor .persona-card-head,
+.world-editor .blueprint-head,
+.world-editor .roleplay-knowledge-head,
+.world-editor .roleplay-user-card > div:first-child { border-color: var(--line-soft); }
+.world-editor .persona-card-head h3,
+.world-editor .blueprint-head h3,
+.world-editor .roleplay-knowledge-head h4,
+.world-editor .roleplay-user-card h3 { color: var(--ink); font-size: 18px; }
+.world-editor .persona-avatar { border-radius: var(--radius-sm); background: var(--accent); }
+.world-editor .roleplay-standard label,
+.world-editor .roleplay-textarea,
+.world-editor .translation-collapsible,
+.world-editor .roleplay-visual-identity-extra {
+  border-color: color-mix(in srgb, var(--line) 78%, var(--panel));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 74%, var(--panel));
+}
+.world-editor input,
+.world-editor textarea,
+.world-editor select { border-color: var(--line); border-radius: var(--radius-sm); background: var(--panel); }
+.world-outline-item { border-radius: var(--radius-sm); }
+.world-outline-item.is-active { background: var(--accent-soft); color: var(--accent-strong); box-shadow: inset 3px 0 0 var(--accent); }
+.persona-import-panel > summary { background: color-mix(in srgb, var(--panel) 92%, var(--surface)); }
+.persona-import-panel[open] > summary { border-color: var(--line-soft); }
+.pc-dialog .eyebrow { display: none; }
+
+@media (max-width: 980px) {
+  .user-view-overview { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 620px) {
+  .user-view-overview { padding: 14px; }
+  .user-view-stats { grid-template-columns: 1fr; }
+  .user-view-stats span { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+  .user-view-stats b { text-align: right; }
+  .user-detail-view > .detail-block,
+  .user-detail-view > .companion-intimacy-card,
+  .user-detail-view > .private-dialogue-section,
+  .user-detail-view .private-dialogue-section > .detail-block,
+  .user-detail-view > .memory-module { padding: 13px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .user-view-overview,
+  .user-detail-view > .detail-block,
+  .user-detail-view > .companion-intimacy-card,
+  .user-detail-view > .memory-module,
+  .world-editor [data-world-panel] { animation: none !important; transition: none !important; transform: none !important; }
+}
+
+/* World knowledge information architecture: compact common fields, nest optional depth. */
+.world-workspace {
+  grid-template-columns: 176px minmax(0, 1fr);
+  gap: 0 18px;
+  padding-right: 18px;
+  padding-bottom: 18px;
+}
+.world-workspace > .module-card-head { display: none; }
+.world-workspace > .roleplay-mode-switch { margin-top: 18px; justify-self: start; }
+.world-editor { margin-top: 2px; }
+.world-outline { min-height: 360px; padding: 20px 12px; }
+.world-outline-label { padding-inline: 9px; }
+.world-outline-item { padding-inline: 9px; }
+
+.world-knowledge-brief section { min-height: 74px; padding: 13px 14px; }
+.world-knowledge-brief section b { font-size: 12px; }
+.world-knowledge-brief section span { margin-top: 4px; font-size: 11px; line-height: 1.45; }
+.persona-import-panel > summary { min-height: 68px; padding-block: 12px; }
+
+.persona-standard-grid,
+.blueprint-standard-grid { grid-template-columns: 1fr; gap: 10px; }
+
+.roleplay-field-group {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 76%, var(--panel));
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: color-mix(in srgb, var(--surface) 74%, var(--panel));
+}
+.roleplay-field-group legend {
+  padding: 0 6px;
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 800;
+}
+.roleplay-identity-group { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.roleplay-character-group,
+.roleplay-world-foundation-group { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.roleplay-field-group label,
+.world-editor .roleplay-field-group label {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+.roleplay-field-group .wide-field { grid-column: 1 / -1; }
+
+.world-editor .roleplay-appearance-group {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--line));
+  padding: 12px;
+  background: color-mix(in srgb, var(--panel) 76%, var(--accent-soft));
+}
+.world-editor .roleplay-appearance-group label {
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+.world-editor .roleplay-standard textarea { min-height: 58px; padding: 8px 9px; line-height: 1.45; }
+
+.roleplay-deep-setting {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, var(--panel));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 76%, var(--panel));
+}
+.roleplay-deep-setting > summary {
+  display: flex;
+  align-items: center;
+  min-height: 50px;
+  padding: 9px 12px;
+  cursor: pointer;
+  list-style: none;
+  transition: background 160ms var(--ease), color 160ms var(--ease);
+}
+.roleplay-deep-setting > summary::-webkit-details-marker { display: none; }
+.roleplay-deep-setting > summary::after { content: "+"; margin-left: auto; color: var(--accent-strong); font-size: 18px; }
+.roleplay-deep-setting[open] > summary::after { content: "−"; }
+.roleplay-deep-setting > summary:hover { background: var(--accent-soft); }
+.roleplay-deep-setting > summary span { display: grid; gap: 2px; min-width: 0; }
+.roleplay-deep-setting > summary b { color: var(--ink); font-size: 13px; }
+.roleplay-deep-setting > summary small { color: var(--muted); font-size: 11px; font-weight: 500; }
+.roleplay-deep-setting-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  border-top: 1px solid var(--line-soft);
+  padding: 12px;
+}
+.world-editor .roleplay-deep-setting-grid label { border: 0; padding: 0; background: transparent; }
+.roleplay-deep-setting-grid .wide-field { grid-column: 1 / -1; }
+
+.roleplay-visual-identity-extra { margin-top: 0; }
+.world-save-button { position: static; }
+
+@media (max-width: 1180px) {
+  .roleplay-identity-group,
+  .world-editor .roleplay-appearance-group { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .world-workspace { padding-right: 12px; }
+  .world-workspace > .roleplay-mode-switch { margin-top: 12px; }
+  .roleplay-identity-group,
+  .roleplay-character-group,
+  .roleplay-world-foundation-group,
+  .world-editor .roleplay-appearance-group,
+  .roleplay-deep-setting-grid { grid-template-columns: 1fr; }
+  .world-save-button { position: static; width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .roleplay-deep-setting > summary { transition: none !important; }
+}
+
+/* Keep the member rail complete while long detail views scroll. */
+.user-roster {
+  height: calc(100vh - 104px);
+  height: calc(100dvh - 104px);
+  min-height: min(560px, calc(100dvh - 104px));
+  max-height: none;
+  overflow: hidden;
+}
+.user-roster-footer {
+  position: relative;
+  z-index: 2;
+  background: color-mix(in srgb, var(--panel) 94%, var(--surface));
+  box-shadow: 0 -10px 24px color-mix(in srgb, var(--ink) 5%, transparent);
+}
+
+@media (max-width: 780px) {
+  .user-roster { height: auto; min-height: 0; max-height: none; overflow: visible; }
+  .user-roster-footer { box-shadow: none; }
+}
+
+/* World knowledge text follows its content instead of creating nested scroll areas. */
+#roleplayProfileForm textarea {
+  height: auto;
+  max-height: none;
+  overflow-y: hidden;
+  resize: none;
+}

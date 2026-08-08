@@ -96,7 +96,7 @@
       to { opacity: 1; transform: scaleX(1); transform-origin: left; }
     }
   </style>
-  <link rel="stylesheet" href="./app.css?v=20260807-v608-provider-token-limit-v1" />
+  <link rel="stylesheet" href="./app.css?v=20260808-world-users-overview-v6" />
   <!-- Keep the structured roleplay form readable while a WebUI asset is being refreshed. -->
   <style id="roleplay-layout-fallback">
     .roleplay-form,
@@ -163,7 +163,7 @@
   </style>
   <link rel="stylesheet" href="./css/header-tools.css?v=20260713-font-options" />
   <link rel="stylesheet" href="./css/qzone-mobile.css?v=20260711-qzone-image-preview" />
-  <link rel="stylesheet" href="./css/polish.css?v=20260804-expression-batch-review-v1" />
+  <link rel="stylesheet" href="./css/polish.css?v=20260808-world-users-overview-v6" />
   <script>
     (function () {
       try {
@@ -385,7 +385,12 @@
         <div class="section-head">
           <div>
             <h2>世界知识</h2>
-            <span class="muted">维护陪伴插件使用的背景资料；真正决定聊天人格的是 AstrBot 主回复人格。</span>
+            <span class="muted">整理角色和世界背景，作为陪伴行为的稳定参考。</span>
+          </div>
+          <div class="world-page-actions">
+            <span class="world-save-state" id="worldSaveState">已同步</span>
+            <button type="button" class="ghost-button" id="worldPreviewToggle" aria-expanded="false">预览</button>
+            <button type="submit" form="roleplayProfileForm" class="primary-button">保存</button>
           </div>
         </div>
         <div class="world-knowledge-brief" aria-label="人格与世界知识区别">
@@ -442,7 +447,14 @@
             <div id="roleplayPersonaDraftPanel" class="persona-draft-panel" hidden></div>
           </div>
         </details>
-        <article class="roleplay-studio module-card" data-roleplay-mode="standard">
+        <article class="roleplay-studio module-card world-workspace" data-roleplay-mode="standard">
+          <aside class="world-outline" aria-label="世界知识章节">
+            <span class="world-outline-label">知识目录</span>
+            <button type="button" class="world-outline-item is-active" data-world-section="persona"><span>01</span>角色设定</button>
+            <button type="button" class="world-outline-item" data-world-section="world"><span>02</span>世界设定</button>
+            <button type="button" class="world-outline-item" data-world-section="sources"><span>03</span>引用资料</button>
+            <button type="button" class="world-outline-item" data-world-section="advanced"><span>04</span>关系资料</button>
+          </aside>
           <div class="module-card-head">
             <div>
               <h2>世界知识工作台</h2>
@@ -454,8 +466,8 @@
             <button type="button" data-roleplay-mode="freeform">旧版文案</button>
             <button type="button" class="is-active" data-roleplay-mode="standard">标准化填写</button>
           </div>
-          <form id="roleplayProfileForm" class="roleplay-form">
-            <section class="persona-card">
+          <form id="roleplayProfileForm" class="roleplay-form world-editor">
+            <section class="persona-card is-active" data-world-panel="persona">
               <div class="persona-card-head">
                 <span class="persona-avatar" aria-hidden="true">设</span>
                 <div>
@@ -485,10 +497,13 @@
 其他补充信息："></textarea>
               </label>
               <div class="roleplay-standard persona-standard-grid">
-                <label>姓名 <textarea data-roleplay-persona-part="name" rows="2"></textarea></label>
-                <label>种族 <textarea data-roleplay-persona-part="species" rows="2"></textarea></label>
-                <label>生日 <textarea data-roleplay-persona-part="age" rows="2"></textarea></label>
-                <label>性别 <textarea data-roleplay-persona-part="gender" rows="2"></textarea></label>
+                <fieldset class="roleplay-field-group roleplay-identity-group">
+                  <legend>基础身份</legend>
+                  <label>姓名 <textarea data-roleplay-persona-part="name" rows="2"></textarea></label>
+                  <label>种族 <textarea data-roleplay-persona-part="species" rows="2"></textarea></label>
+                  <label>生日 <textarea data-roleplay-persona-part="age" rows="2"></textarea></label>
+                  <label>性别 <textarea data-roleplay-persona-part="gender" rows="2"></textarea></label>
+                </fieldset>
                 <div class="roleplay-appearance-group">
                   <h4>外貌信息</h4>
                   <label>识别点 <textarea data-roleplay-persona-part="appearance" rows="2"></textarea></label>
@@ -496,22 +511,34 @@
                   <label>瞳色 <textarea data-roleplay-persona-part="eyes" rows="2"></textarea></label>
                   <label>服饰风格 <textarea data-roleplay-persona-part="clothing" rows="2"></textarea></label>
                 </div>
-                <label>职业/身份 <textarea data-roleplay-persona-part="identity" rows="2"></textarea></label>
-                <label>性格描述 <textarea data-roleplay-persona-part="personality" rows="2"></textarea></label>
-                <label>核心欲望/目标 <textarea data-roleplay-persona-part="desire" rows="2"></textarea></label>
-                <label>爱好 <textarea data-roleplay-persona-part="hobbies" rows="2"></textarea></label>
-                <label>禁忌 <textarea data-roleplay-persona-part="taboo" rows="2"></textarea></label>
-                <label>关键设定 <textarea data-roleplay-persona-part="key_lore" rows="2"></textarea></label>
-                <label class="wide-field">其他补充信息 <textarea data-roleplay-persona-part="extra" rows="2"></textarea></label>
+                <fieldset class="roleplay-field-group roleplay-character-group">
+                  <legend>性格与生活</legend>
+                  <label>职业/身份 <textarea data-roleplay-persona-part="identity" rows="2"></textarea></label>
+                  <label>性格描述 <textarea data-roleplay-persona-part="personality" rows="2"></textarea></label>
+                  <label>核心欲望/目标 <textarea data-roleplay-persona-part="desire" rows="2"></textarea></label>
+                  <label>爱好 <textarea data-roleplay-persona-part="hobbies" rows="2"></textarea></label>
+                  <label class="wide-field">禁忌 <textarea data-roleplay-persona-part="taboo" rows="2"></textarea></label>
+                </fieldset>
+                <details class="roleplay-deep-setting">
+                  <summary><span><b>深入设定（可选）</b><small>关键背景和无法归入上方字段的补充。</small></span></summary>
+                  <div class="roleplay-deep-setting-grid">
+                    <label>关键设定 <textarea data-roleplay-persona-part="key_lore" rows="3"></textarea></label>
+                    <label>其他补充信息 <textarea data-roleplay-persona-part="extra" rows="3"></textarea></label>
+                  </div>
+                </details>
               </div>
-              <label class="roleplay-textarea">图片自我识别线索
-                <textarea name="private_image_self_recognition_hint" rows="4" placeholder="只写当前角色自己的外观、头像、表情包、聊天截图昵称或二创形象线索。
-例如：常见头像、发色/瞳色、服装、代表物、表情包文字风格。
-不要写用户性别、用户职业、与用户关系。"></textarea>
-              </label>
+              <details class="roleplay-visual-identity-extra">
+                <summary>
+                  <span><b>特殊图像身份线索（可选）</b><small>只补充上方外貌字段无法表达的识别信息。</small></span>
+                </summary>
+                <label class="roleplay-textarea">头像、截图与二创识别线索
+                  <textarea name="private_image_self_recognition_hint" rows="4" placeholder="例如：常用头像的构图或标志；聊天截图中使用的昵称；OC / 二创形象的别名；表情包固定签名或水印。
+不要重复填写发色、瞳色、服装等上方已有外貌信息，也不要填写用户资料。"></textarea>
+                </label>
+              </details>
             </section>
 
-            <section class="world-blueprint">
+            <section class="world-blueprint is-hidden" data-world-panel="world">
               <div class="blueprint-head">
                 <div>
                   <span>世界蓝图</span>
@@ -548,13 +575,21 @@ QQ空间 = 公开札记
 书柜 = 行囊书匣"></textarea>
                 </label>
                 <div class="roleplay-standard blueprint-standard-grid">
-                  <label>所处世界 <textarea data-roleplay-world-part="world" rows="2"></textarea></label>
-                  <label>时代背景 <textarea data-roleplay-world-part="era" rows="2"></textarea></label>
-                  <label>基本法则/基调 <textarea data-roleplay-world-part="tone" rows="2"></textarea></label>
-                  <label>特殊规则 <textarea data-roleplay-world-part="rules" rows="2"></textarea></label>
-                  <label>主要活动场景 <textarea data-roleplay-world-part="scenes" rows="2"></textarea></label>
-                  <label>世界观关系网 <textarea data-roleplay-world-part="network" rows="2"></textarea></label>
-                  <label class="wide-field">其他补充信息 <textarea data-roleplay-world-part="extra" rows="2"></textarea></label>
+                  <fieldset class="roleplay-field-group roleplay-world-foundation-group">
+                    <legend>世界基础</legend>
+                    <label>所处世界 <textarea data-roleplay-world-part="world" rows="2"></textarea></label>
+                    <label>时代背景 <textarea data-roleplay-world-part="era" rows="2"></textarea></label>
+                    <label>基本法则/基调 <textarea data-roleplay-world-part="tone" rows="2"></textarea></label>
+                    <label>特殊规则 <textarea data-roleplay-world-part="rules" rows="2"></textarea></label>
+                  </fieldset>
+                  <details class="roleplay-deep-setting">
+                    <summary><span><b>场景与关系（按需补充）</b><small>只有设定涉及固定场景、阵营或人物网络时才需要填写。</small></span></summary>
+                    <div class="roleplay-deep-setting-grid">
+                      <label>主要活动场景 <textarea data-roleplay-world-part="scenes" rows="3"></textarea></label>
+                      <label>世界观关系网 <textarea data-roleplay-world-part="network" rows="3"></textarea></label>
+                      <label class="wide-field">其他补充信息 <textarea data-roleplay-world-part="extra" rows="3"></textarea></label>
+                    </div>
+                  </details>
                 </div>
                 <details class="roleplay-standard translation-collapsible">
                   <summary class="translation-summary">
@@ -572,7 +607,9 @@ QQ空间 = 公开札记
                   </div>
                 </details>
               </div>
-              <div class="roleplay-knowledge-panel">
+            </section>
+
+            <section class="roleplay-knowledge-panel world-source-section is-hidden" data-world-panel="sources">
                 <div class="roleplay-knowledge-head">
                   <div>
                     <h4>AstrBot 知识库参考</h4>
@@ -581,10 +618,9 @@ QQ空间 = 公开札记
                   <span id="roleplayKnowledgeCount" class="module-badge">0</span>
                 </div>
                 <div id="roleplayKnowledgeSources" class="roleplay-knowledge-list"></div>
-              </div>
             </section>
 
-            <section class="roleplay-user-card">
+            <section class="roleplay-user-card is-hidden" data-world-panel="advanced">
               <div>
                 <h3>用户与关系资料</h3>
                 <p>稳定称呼、关系和相处方式；用于理解这位用户，不会覆盖群聊里其他人的身份。</p>
@@ -612,8 +648,13 @@ QQ空间 = 公开札记
               </div>
             </section>
 
-            <button type="submit">保存世界知识</button>
+            <button type="submit" class="world-save-button">保存世界知识</button>
           </form>
+          <aside class="world-preview" id="worldPreview" hidden>
+            <div class="world-preview-head"><span>生效预览</span><button type="button" class="icon-button" id="worldPreviewClose" aria-label="关闭预览">×</button></div>
+            <p class="muted">这里显示当前章节将提供给陪伴功能的背景摘要。</p>
+            <div class="world-preview-content" id="worldPreviewContent">选择一个章节后查看摘要。</div>
+          </aside>
         </article>
       </section>
 
@@ -621,35 +662,46 @@ QQ空间 = 公开札记
         <div class="section-head">
           <div>
             <h2>用户档案</h2>
-            <p class="section-desc">管理关系角色、主动额度、行为习惯、陪伴状态和已整理的对话片段。</p>
+            <p class="section-desc">统一管理私聊用户和未来接入的群聊成员；先看状态，再进入详情调整。</p>
           </div>
-          <input id="userFilter" type="search" placeholder="筛选用户 ID / 昵称" />
+          <div class="user-page-actions">
+            <label class="user-search-wrap"><span aria-hidden="true">⌕</span><input id="userFilter" type="search" placeholder="搜索名称、ID、别名" /></label>
+            <button type="button" class="ghost-button" id="userFilterToggle">筛选</button>
+          </div>
         </div>
-        <form id="addUserForm" class="inline-form manage-form">
-          <label>用户 ID <input name="user_id" placeholder="OneBot 填 QQ；官方机器人填 openid" required /></label>
-          <label>称呼 <input name="nickname" placeholder="可选" /></label>
-          <button type="submit">新增用户</button>
-        </form>
-        <form id="privateAliasForm" class="inline-form manage-form">
-          <label>身份别名归并 <textarea name="private_user_aliases" rows="3" placeholder="临时ID=主用户ID&#10;机器人侧ID=主用户ID"></textarea></label>
-          <button type="submit">保存归并规则</button>
-        </form>
-        <div class="table-wrap private-user-list-wrap">
-          <table class="private-user-table">
-            <thead>
-              <tr>
-                <th>用户</th>
-                <th>最近</th>
-                <th>关系</th>
-                <th>互动</th>
-                <th>主动</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody id="userRows"></tbody>
-          </table>
+        <div class="user-filter-panel" id="userFilterPanel" hidden>
+          <label>来源 <select id="userScopeFilter"><option value="all">全部身份</option><option value="private">私聊用户</option><option value="group">群聊成员（即将支持）</option></select></label>
+          <label>状态 <select id="userStatusFilter"><option value="all">全部状态</option><option value="enabled">已启用</option><option value="disabled">已停用</option></select></label>
+          <span class="muted">筛选只影响左侧目录，不会改变用户数据。</span>
         </div>
-        <article class="detail" id="userDetail"></article>
+        <div class="user-workspace">
+          <aside class="user-roster" aria-label="用户目录">
+            <div class="user-roster-head"><div><span class="eyebrow">PEOPLE</span><h3>成员目录</h3></div><span id="userRosterCount" class="count-pill">0</span></div>
+            <div id="userRows" class="user-roster-list"></div>
+            <div class="user-roster-footer">
+              <button type="button" class="secondary-button" id="addUserOpen">＋ 新增用户</button>
+              <button type="button" class="text-button" id="aliasManageOpen">管理身份归并</button>
+            </div>
+          </aside>
+          <main class="user-detail-shell">
+            <article class="detail" id="userDetail"></article>
+          </main>
+        </div>
+        <dialog id="addUserDialog" class="pc-dialog">
+          <form id="addUserForm" class="stack-form" method="dialog">
+            <header><div><span class="eyebrow">NEW PERSON</span><h3>新增用户</h3><p>先建立身份，之后可以在详情中补充关系和陪伴策略。</p></div><button type="button" class="icon-button" data-dialog-close aria-label="关闭">×</button></header>
+            <label>用户 ID <input name="user_id" placeholder="QQ 号或 openid" required /></label>
+            <label>称呼 <input name="nickname" placeholder="可选" /></label>
+            <footer><button type="button" class="secondary-button" data-dialog-close>取消</button><button type="submit" class="primary-button">新增用户</button></footer>
+          </form>
+        </dialog>
+        <dialog id="aliasManageDialog" class="pc-dialog">
+          <form id="privateAliasForm" class="stack-form" method="dialog">
+            <header><div><span class="eyebrow">IDENTITY MAP</span><h3>身份归并</h3><p>将临时平台身份映射到同一个主用户。</p></div><button type="button" class="icon-button" data-dialog-close aria-label="关闭">×</button></header>
+            <label>归并规则 <textarea name="private_user_aliases" rows="5" placeholder="临时ID=主用户ID&#10;机器人侧ID=主用户ID"></textarea></label>
+            <footer><button type="button" class="secondary-button" data-dialog-close>取消</button><button type="submit" class="primary-button">保存归并规则</button></footer>
+          </form>
+        </dialog>
       </section>
 
       <section class="panel learning-page" id="panel-learning">
@@ -1538,7 +1590,7 @@ QQ空间 = 公开札记
                     <p>主动强度预设开启时会临时覆盖前三项，关闭预设后恢复这里的手动值。</p>
                   </header>
                   <div class="runtime-settings-grid">
-                    <label>每日主动上限 <input name="max_daily_messages" type="number" min="0" max="12" /></label>
+                    <label>每日主动配额 <input name="max_daily_messages" type="number" min="0" max="25" /></label>
                     <label>空闲门槛分钟 <input name="idle_minutes" type="number" min="5" /></label>
                     <label>最小主动间隔分钟 <input name="min_interval_minutes" type="number" min="10" /></label>
                     <label>后台检查间隔秒 <input name="check_interval_seconds" type="number" min="30" /></label>
@@ -1756,6 +1808,6 @@ QQ空间 = 公开札记
   <script src="./js/ui/appearance.js?v=20260713-font-options"></script>
   <script src="./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1"></script>
   <script src="./js/panels/qzone-panel.js?v=20260731-qzone-platform-support-v1"></script>
-  <script src="./app.js?v=20260807-v608-provider-token-limit-v1"></script>
+  <script src="./app.js?v=20260808-feature-group-order-v1-world-autogrow-v3"></script>
 </body>
 </html>

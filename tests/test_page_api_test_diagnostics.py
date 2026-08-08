@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
 import time
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ class PageApiTestDiagnosticTests(unittest.IsolatedAsyncioTestCase):
             config={"API_KEY": "sk-runtime-secret-123456789"},
             _format_timestamp_elapsed=lambda _value: "刚刚",
         )
+        self.api._schema_key_index_cache = None
 
     def test_success_result_gets_stable_diagnostic_contract(self) -> None:
         finished = time.time()
@@ -128,6 +130,37 @@ class PageApiTestDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["request_id"])
         self.assertTrue(result["diagnostic_entries"])
         self.assertNotIn(secret, repr(result))
+
+    async def test_visual_provider_test_uses_real_image_input(self) -> None:
+        provider = SimpleNamespace(
+            text_chat=AsyncMock(return_value=SimpleNamespace(completion_text="正常"))
+        )
+        self.api.plugin._private_image_provider_by_id = lambda _provider_id: provider
+        self.api.plugin._provider_supports_image = lambda _provider: True
+        self.api.plugin._private_image_provider_timeout_seconds = lambda *_args: 0.0
+        fake_request = SimpleNamespace(
+            get_json=AsyncMock(
+                return_value={
+                    "key": "PLUGIN_VISION_PROVIDER_ID",
+                    "provider_id": "vision-provider",
+                }
+            )
+        )
+
+        with patch("astrbot_plugin_private_companion.page_api.request", fake_request):
+            response = await self.api.test_provider()
+
+        result = response["data"]
+        self.assertTrue(result["ok"])
+        self.assertEqual("图片输入", result["steps"][0]["name"])
+        call_kwargs = provider.text_chat.await_args.kwargs
+        self.assertEqual(1, len(call_kwargs["image_urls"]))
+        self.assertTrue(call_kwargs["image_urls"][0].startswith("data:image/png;base64,"))
+
+    def test_empty_timeout_error_gets_actionable_visual_message(self) -> None:
+        text = self.api._visual_call_error_text(asyncio.TimeoutError(), timeout=12)
+
+        self.assertEqual("视觉模型图片请求超时（12 秒）", text)
 
 
 class TestDiagnosticUiTests(unittest.TestCase):

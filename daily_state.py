@@ -1886,15 +1886,13 @@ class DailyStateMixin(DailyStateTickMixin):
                 mode = "custom"
                 custom_text = custom_text or "休息中"
             else:
-                mode = "online"
-                custom_text = ""
-                custom_note = "自定义短状态未开启，已保持在线"
-        if mode in {"custom", "自定义", "自定义状态"} and not custom_text:
-            mode = "online"
+                return
         if mode in {"custom", "自定义", "自定义状态"} and not custom_sync_enabled:
-            mode = "online"
-            custom_text = ""
-            custom_note = "自定义短状态未开启，已保持在线"
+            # A disabled custom-status feature must not clear a status managed
+            # manually or by another QQ client.  Treat this plan as unchanged.
+            return
+        if mode in {"custom", "自定义", "自定义状态"} and not custom_text:
+            return
         key = str((segment or {}).get("key") or "")
         state = self.data.setdefault("qq_presence_state", {})
         if not isinstance(state, dict):
@@ -1918,10 +1916,7 @@ class DailyStateMixin(DailyStateTickMixin):
             ok, note = await self._set_qq_custom_presence(custom_text)
             mode = "custom"
             if not ok:
-                fallback_ok, fallback_note = await self._set_qq_online_presence("online")
-                ok = fallback_ok
-                note = f"{note}；已回退在线：{fallback_note}"
-                mode = "online"
+                note = f"{note}；未追加在线状态，保持账号原状态"
         else:
             ok, note = await self._set_qq_online_presence(mode)
         if custom_note:
@@ -2681,6 +2676,8 @@ class DailyStateMixin(DailyStateTickMixin):
         current_delivery_key = delivery_key_getter(user) if callable(delivery_key_getter) else ""
         retry_delivery_key = _single_line(payload.get("delivery_key"), 80)
         retry_freshness = _single_line(payload.get("freshness"), 24)
+        retry_profile = _single_line(payload.get("route_retry_profile"), 32) or "normal"
+        cancel_if_new_inbound = bool(payload.get("route_cancel_if_new_inbound", True))
         retry_fresh_until = _safe_float(payload.get("fresh_until_at"), 0)
         retry_activity_at = _safe_float(payload.get("private_activity_at"), 0)
         retry_inbound_count = _safe_int(payload.get("private_inbound_count"), 0)
@@ -2689,10 +2686,12 @@ class DailyStateMixin(DailyStateTickMixin):
         if (
             not retry_delivery_key
             or retry_delivery_key != current_delivery_key
-            or retry_freshness != "durable"
+            or (retry_profile == "normal" and retry_freshness != "durable")
             or retry_fresh_until <= current
-            or current_activity_at > retry_activity_at
-            or current_inbound_count > retry_inbound_count
+            or (
+                cancel_if_new_inbound
+                and (current_activity_at > retry_activity_at or current_inbound_count > retry_inbound_count)
+            )
         ):
             self._clear_pending_proactive_send_retry(user)
             return None
@@ -2771,6 +2770,8 @@ class DailyStateMixin(DailyStateTickMixin):
         existing = user.get("pending_proactive_send_retry")
         previous_count = _safe_int(existing.get("retry_count"), 0, 0, 10) if isinstance(existing, dict) else 0
         retry_count = previous_count + 1
+        retry_profile = _single_line(user.get("planned_proactive_route_retry_profile"), 32) or "normal"
+        retry_limit = 4 if retry_profile == "until_expiry" else 2
         clean_error = _single_line(error_text, 180)
         error_hint = ""
         if clean_error:
@@ -2783,7 +2784,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 error_hint = "平台发送失败"
             else:
                 error_hint = clean_error
-        if retry_count > 2:
+        if retry_count > retry_limit:
             self._abandon_failed_proactive_retry_candidate(
                 user,
                 note="发送失败，待重发内容连续失败，已放弃复用并重新排程",
@@ -2791,7 +2792,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 delay_hours=(12, 24),
             )
             return "发送失败，待重发内容连续失败，已放弃复用并重新排程" + (f"；原因：{error_hint}" if error_hint else "")
-        if freshness != "durable" or not delivery_key:
+        if (freshness != "durable" and retry_profile == "normal") or not delivery_key:
             self._abandon_failed_proactive_retry_candidate(
                 user,
                 note="发送失败，当前候选依赖即时语境，已放弃复用并重新编排",
@@ -2863,7 +2864,14 @@ class DailyStateMixin(DailyStateTickMixin):
                 delay_hours=(6, 12),
             )
             return "发送失败，清理后无可复用内容，已延后重新排程" + (f"；原因：{error_hint}" if error_hint else "")
-        retry_delay_seconds = 8 * 60 if retry_count <= 1 else 20 * 60
+        if retry_profile == "until_expiry":
+            retry_delay_seconds = 3 * 60 if retry_count <= 1 else 8 * 60
+        elif retry_profile == "short_lived":
+            retry_delay_seconds = 2 * 60 if retry_count <= 1 else 5 * 60
+        elif retry_profile == "while_anchor_live":
+            retry_delay_seconds = 5 * 60 if retry_count <= 1 else 12 * 60
+        else:
+            retry_delay_seconds = 8 * 60 if retry_count <= 1 else 20 * 60
         planned_expire_at = _safe_float(delivery_snapshot.get("expire_at"), 0) if isinstance(delivery_snapshot, dict) else 0
         fresh_until_at = min(current + 72 * 3600, planned_expire_at) if planned_expire_at > current else current
         if fresh_until_at <= current + retry_delay_seconds:
@@ -2890,6 +2898,10 @@ class DailyStateMixin(DailyStateTickMixin):
             "last_error": clean_error,
             "delivery_key": delivery_key,
             "freshness": freshness,
+            "route_retry_profile": retry_profile,
+            "route_cancel_if_new_inbound": bool(
+                user.get("planned_proactive_route_cancel_if_new_inbound", True)
+            ),
             "private_activity_at": self._latest_private_user_activity_ts(user),
             "private_inbound_count": _safe_int(user.get("private_inbound_count"), 0),
         }
@@ -11700,10 +11712,13 @@ class DailyStateMixin(DailyStateTickMixin):
         normalized = _single_line(text, 180)
         if not normalized:
             return False
+        direct_checker = getattr(self, "_user_asks_bot_current_state_or_activity", None)
+        if callable(direct_checker) and direct_checker(normalized):
+            return True
         return bool(
             re.search(
-                r"(最近|刚才|现在|今天|这两天|这会儿).{0,12}(在)?(干嘛|做什么|做啥|忙什么|忙啥|弄什么|写什么|写了什么|创作什么|创作了什么|玩什么|折腾什么)|"
-                r"你.{0,8}(在)?(干嘛|做什么|忙什么|写什么|写了什么|弄什么|创作什么|创作了什么)",
+                r"(最近|刚才|现在|今天|这两天|这会儿).{0,12}(在)?(干嘛|干啥|做什么|做啥|忙什么|忙啥|弄什么|写什么|写了什么|创作什么|创作了什么|玩什么|折腾什么)|"
+                r"你.{0,8}(在)?(干嘛|干啥|做什么|做啥|忙什么|忙啥|写什么|写了什么|弄什么|创作什么|创作了什么)",
                 normalized,
             )
             or re.search(
@@ -12880,28 +12895,40 @@ class DailyStateMixin(DailyStateTickMixin):
     def _format_timer_scheduling_instruction(self, user: dict[str, Any] | None = None) -> str:
         if not self.enable_llm_timer_scheduling:
             return ""
-        role = self._private_user_role(user) if isinstance(user, dict) else "owner"
+        current_user = user if isinstance(user, dict) else {}
+        role = self._private_user_role(current_user) if isinstance(user, dict) else "owner"
+        followup_policy = self._activity_followup_quota_policy(current_user)
+        tier = _safe_int(followup_policy.get("tier"), 3, 0, 5)
+        tier_label = _single_line(followup_policy.get("tier_label"), 30) or f"L{tier}"
+        max_intensity = _safe_int(followup_policy.get("max_intensity"), 1, 1, 3)
+        completion_buffer = _safe_int(followup_policy.get("completion_buffer_minutes"), 0, 0, 30)
         role_note = (
-            "当前是主要用户；只有人格资料明确支持监督、黏人或查岗倾向时，强度才可到 2，极明确时才可到 3。"
+            "当前是主要用户；强度 3 仍须人格资料明确支持监督、黏人或查岗倾向。"
             if role == "owner"
             else "当前是次要用户；动作回访强度必须为 1，只做普通朋友式轻问候。"
         )
+        timing_note = (
+            f"预约时间至少应落在预计完成后约 {completion_buffer} 分钟，给用户留出自然收尾空间。"
+            if completion_buffer > 0
+            else "预约时间可落在预计完成附近，但不能早于预计完成时间。"
+        )
         current_time = self._environment_fromtimestamp(_now_ts()).strftime("%Y-%m-%d %H:%M:%S")
-        return f"""【临时预约与动作查岗】
+        return f"""【临时预约与动作回访】
 当前本地时间：{current_time}。所有 time 都必须据此换算为未来的绝对时间。
 一、明确约定：用户明确要求稍后提醒/叫醒/回头说，或双方形成明确临时约定时，若本轮提供 AstrBot 官方 `future_task` 工具，优先调用该工具；只有没有官方工具可用时，才在回复末尾写：
 <timer>{{"time":"YYYY-MM-DD HH:MM:SS","topic":"约定内容"}}</timer>
 
 同一约定只能选择 `future_task` 或 `<timer>` 其中一种，绝对不能同时创建。用户明确说“便签/便笺/备忘/待办/帮我记一下/记下来”时，应使用 `pc_manage_memo`；带提醒时间的便签由便签自身提醒，不得再调用 `future_task` 或输出 `<timer>`。
 
-二、动作查岗：用户明确说自己暂时离开去做一个有自然结束点的具体动作（如洗澡、吃饭、拿快递、短时出门办事），即使没有主动要求提醒，也可以形成一个“忙完后想问一句”的主动念头。生成念头的同一轮必须估计合理耗时并直接预约下一次主动消息：
+二、动作回访：用户明确说自己暂时离开去做一个有自然结束点的具体动作（如洗澡、吃饭、拿快递、短时出门办事），即使没有主动要求提醒，也可以形成一个“忙完后想问一句”的主动念头。生成念头的同一轮必须估计合理耗时并直接预约下一次主动消息：
 <timer>{{"time":"YYYY-MM-DD HH:MM:SS","reason":"activity_followup","activity":"洗澡","estimated_minutes":30,"topic":"洗完澡后问问回来了没有","motive":"记得用户刚去洗澡，估计差不多结束后想自然问一句","followup_intensity":1,"style":"轻松自然"}}</timer>
 
-估时应结合动作和用户给出的线索：洗澡通常 20-40 分钟，吃饭通常 30-60 分钟，短途办事通常 45-120 分钟；用户给了时长或返回时间时以用户信息为准。睡觉、上班、上学、长时间学习、旅行等没有可靠结束点的动作，不得擅自估时查岗，除非用户给了明确时长或要求联系。
-强度 1 是轻轻问一句；2 可以更直接、更有存在感；3 仅限主要用户且当前人格和关系明确支持的轻度监督感。无论强度都不得命令、指责、施压、连续轰炸或假装看见用户现实状态。{role_note}
+估时应结合动作和用户给出的线索：洗澡通常 20-40 分钟，吃饭通常 30-60 分钟，短途办事通常 45-120 分钟；用户给了时长或返回时间时以用户信息为准。睡觉、上班、上学、长时间学习、旅行等没有可靠结束点的动作，不得擅自估时回访，除非用户给了明确时长或要求联系。用户只说“我在忙/没空/晚点聊”是在表达边界，不是可估时动作：不要创建回访，安静等待用户回来。
+当前主动配额为 L{tier}（{tier_label}）：{followup_policy.get("generation_rule")} 最大回访强度为 {max_intensity}/3；{timing_note}
+强度 1 是轻轻问一句；2 可以更直接、更有存在感；3 仅限主要用户且当前人格和关系明确支持的轻度监督感。无论强度都只发一次，不得命令、指责、施压、连续追发或假装看见用户现实状态。{role_note}
 
 改时间直接写新时间；取消同一约定时写：<timer>{{"action":"cancel"}}</timer>
-除上述动作查岗外，时间和约定不明确就不要写。标签不应出现在可见回复中，只会被转写为 AstrBot 官方一次性定时计划。"""
+        除上述动作回访外，时间和约定不明确就不要写。标签不应出现在可见回复中，只会被转写为 AstrBot 官方一次性定时计划。"""
 
     def _extract_timer_directives(self, text: str) -> tuple[str, list[dict[str, Any]]]:
         raw_text = str(text or "")
@@ -13140,19 +13167,65 @@ class DailyStateMixin(DailyStateTickMixin):
 
     def _activity_followup_intensity_for_user(self, value: Any, user: dict[str, Any]) -> int:
         intensity = self._normalize_activity_followup_intensity(value)
-        if self._private_user_role(user) != "owner" or _safe_int(user.get("ignored_streak"), 0, 0) > 0:
-            return 1
-        if intensity < 3:
-            return intensity
-        persona_text = " ".join(
-            (
-                str(getattr(self, "schedule_persona_prompt", "") or ""),
-                str(getattr(self, "persona_proactive_voice_prompt", "") or ""),
-                str(user.get("style") or ""),
+        policy = self._activity_followup_quota_policy(user)
+        return min(intensity, _safe_int(policy.get("max_intensity"), 1, 1, 3))
+
+    def _activity_followup_quota_policy(self, user: dict[str, Any] | None) -> dict[str, Any]:
+        current_user = user if isinstance(user, dict) else {}
+        quota_policy: dict[str, Any] = {}
+        policy_getter = getattr(self, "_proactive_quota_policy", None)
+        if callable(policy_getter):
+            try:
+                result = policy_getter(current_user)
+                if isinstance(result, dict):
+                    quota_policy = result
+            except Exception:
+                quota_policy = {}
+
+        tier = _safe_int(quota_policy.get("tier"), 3, 0, 5)
+        tier_label = _single_line(quota_policy.get("label"), 30) or {
+            0: "已关闭",
+            1: "克制",
+            2: "轻陪伴",
+            3: "稳定陪伴",
+            4: "亲密陪伴",
+            5: "持续在线",
+        }.get(tier, "稳定陪伴")
+        tier_rules = {
+            0: (1, 15, "主动消息已关闭，不应自行创建动作回访。"),
+            1: (1, 15, "只在动作非常具体、短时且有明确自然终点时才创建；宁可不追问。"),
+            2: (1, 8, "仅对明确的短时动作创建轻量回访，不把普通离开都变成追问。"),
+            3: (2, 3, "可对明确短时动作自然回访，语气应随关系而变化。"),
+            4: (2, 0, "可更积极承接明确短时动作，但仍只形成一次自然回访。"),
+            5: (3, 0, "明确短时动作可优先承接为回访，但不能把每次离开都解释成需要查岗。"),
+        }
+        max_intensity, buffer_minutes, generation_rule = tier_rules[tier]
+        role = self._private_user_role(current_user)
+        ignored = _safe_int(current_user.get("ignored_streak"), 0, 0)
+        if role != "owner" or ignored > 0:
+            max_intensity = 1
+        if ignored > 0:
+            buffer_minutes = max(buffer_minutes, 10)
+
+        if max_intensity >= 3:
+            persona_text = " ".join(
+                (
+                    str(getattr(self, "schedule_persona_prompt", "") or ""),
+                    str(getattr(self, "persona_proactive_voice_prompt", "") or ""),
+                    str(current_user.get("style") or ""),
+                )
             )
-        )
-        strong_markers = ("查岗", "监督", "管着", "管束", "强势", "严格", "占有", "黏人", "粘人")
-        return 3 if any(marker in persona_text for marker in strong_markers) else 2
+            strong_markers = ("查岗", "监督", "管着", "管束", "强势", "严格", "占有", "黏人", "粘人")
+            if not any(marker in persona_text for marker in strong_markers):
+                max_intensity = 2
+
+        return {
+            "tier": tier,
+            "tier_label": tier_label,
+            "max_intensity": max_intensity,
+            "completion_buffer_minutes": buffer_minutes,
+            "generation_rule": generation_rule,
+        }
 
     def _parse_timer_timestamp(self, time_text: str) -> float:
         normalized = str(time_text or "").strip()
@@ -13933,7 +14006,24 @@ class DailyStateMixin(DailyStateTickMixin):
                 source_text,
             )
             if reason == "activity_followup":
-                scheduled_ts = max(scheduled_ts, _now_ts() + 5 * 60)
+                scheduling_now = _now_ts()
+                estimated_minutes = _safe_int(payload.get("estimated_minutes"), 0, 0, 720)
+                if estimated_minutes <= 0:
+                    estimated_minutes = max(5, min(720, int(round((scheduled_ts - scheduling_now) / 60))))
+                followup_policy = self._activity_followup_quota_policy(user)
+                completion_buffer_minutes = _safe_int(
+                    followup_policy.get("completion_buffer_minutes"),
+                    0,
+                    0,
+                    30,
+                )
+                scheduled_ts = max(
+                    scheduled_ts,
+                    scheduling_now + 5 * 60,
+                    scheduling_now + (estimated_minutes + completion_buffer_minutes) * 60,
+                )
+            else:
+                estimated_minutes = 0
             action = _single_line(payload.get("action"), 24) or "message"
             if action not in {"message", "screen_peek", "photo_text", "voice", "jm_cosmos_read"}:
                 action = "message"
@@ -13977,13 +14067,6 @@ class DailyStateMixin(DailyStateTickMixin):
             existing_snapshot = deepcopy(existing) if isinstance(existing, dict) else {}
             existing_event_id = _single_line(existing_snapshot.get("id"), 40)
             activity = _single_line(payload.get("activity"), 60) if reason == "activity_followup" else ""
-            estimated_minutes = (
-                _safe_int(payload.get("estimated_minutes"), 0, 0, 720)
-                if reason == "activity_followup"
-                else 0
-            )
-            if reason == "activity_followup" and estimated_minutes <= 0:
-                estimated_minutes = max(5, min(720, int(round((scheduled_ts - _now_ts()) / 60))))
             followup_intensity = (
                 self._activity_followup_intensity_for_user(payload.get("followup_intensity"), user)
                 if reason == "activity_followup"
@@ -16354,6 +16437,19 @@ class DailyStateMixin(DailyStateTickMixin):
             "planned_proactive_reason",
             "planned_proactive_action",
             "planned_proactive_source",
+            "planned_proactive_kind",
+            "planned_proactive_route_version",
+            "planned_proactive_route_dedupe_key",
+            "planned_proactive_route_review_profile",
+            "planned_proactive_route_retry_profile",
+            "planned_proactive_route_cancel_if_new_inbound",
+            "planned_proactive_route_recent_chat_policy",
+            "planned_proactive_route_allow_automatic_followup",
+            "planned_proactive_route_disable_segmenting",
+            "planned_proactive_response_expectation",
+            "planned_proactive_origin_event_id",
+            "planned_proactive_route_preflight_action",
+            "planned_proactive_route_preflight_note",
             "planned_proactive_motive",
             "planned_proactive_topic",
             "planned_proactive_impulse_id",
@@ -16656,9 +16752,10 @@ class DailyStateMixin(DailyStateTickMixin):
 
     @staticmethod
     def _proactive_send_disables_segmenting(reason: str, *, friend_proactive: bool = False) -> bool:
-        # Long-form creative text must stay intact. External links are protected by
-        # the segmenter itself, so video/news/web shares should follow user scope.
-        return bool(friend_proactive) or normalize_legacy_tag_text(reason) == "creative_share"
+        # Friend-proactive output has already been planned by its upstream sender.
+        # All locally rendered reasons, including creative shares, should respect
+        # the user's segmentation settings; media remains atomic in the planner.
+        return bool(friend_proactive)
 
 
     async def _tick(self):

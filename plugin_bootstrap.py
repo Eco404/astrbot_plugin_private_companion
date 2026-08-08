@@ -187,7 +187,7 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
         max(1.0, self._cfg_float(c, "friend_unanswered_max_cooldown_hours", 60.0, 1.0)),
     )
     self.timer_pre_silence_minutes = self._cfg_int(c, "timer_pre_silence_minutes", 20, 0, 240)
-    self.max_daily_messages = self._cfg_int(c, "max_daily_messages", 8, 0, 12)
+    self.max_daily_messages = self._cfg_int(c, "max_daily_messages", 8, 0, 25)
     self.enable_reply_interception_forward = self._cfg_bool(c, "enable_reply_interception_forward", False)
     self.reply_interception_forward_target_umo = self._cfg_str(c, "reply_interception_forward_target_umo", "")
     self.reply_interception_forward_plugin_blocks = self._cfg_bool(c, "reply_interception_forward_plugin_blocks", True)

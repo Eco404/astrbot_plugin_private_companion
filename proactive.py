@@ -107,6 +107,7 @@ from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _
 from .relationship_policy import relationship_stage_for_score
 from .companion_interaction_expression import current_interaction_projection
 from .user_rest_gate import UserRestGateMixin
+from .proactive_routes import PROACTIVE_ROUTE_REGISTRY
 from .unified_profile_service import capability_summary as req036_capability_summary
 from .unified_profile_service import update_capabilities as req036_update_capabilities
 from .planning import (
@@ -244,6 +245,135 @@ class ProactiveMixin(UserRestGateMixin):
     """主动消息调度"""
 
     _PROACTIVE_DAILY_LIMIT_UNLIMITED = 999_999
+    _PROACTIVE_DAILY_QUOTA_MAX = 25
+    _PROACTIVE_USER_DAILY_QUOTA_MAX = 30
+
+    _PROACTIVE_QUOTA_TIER_POLICIES: dict[int, dict[str, Any]] = {
+        0: {
+            "label": "已关闭",
+            "min_quota": 0,
+            "max_quota": 0,
+            "target_ratio": 0.0,
+            "interval_cap_minutes": 0,
+            "idle_cap_minutes": 0,
+            "delay_range_hours": (0.0, 0.0),
+            "unanswered_interval_weight": 1.0,
+            "moment_probability_multiplier": 0.0,
+            "candidate_score_bias": 0.0,
+        },
+        1: {
+            "label": "克制",
+            "min_quota": 1,
+            "max_quota": 3,
+            "target_ratio": 0.78,
+            "interval_cap_minutes": 240,
+            "idle_cap_minutes": 120,
+            "delay_range_hours": (2.5, 8.0),
+            "unanswered_interval_weight": 1.0,
+            "moment_probability_multiplier": 0.82,
+            "candidate_score_bias": -0.04,
+        },
+        2: {
+            "label": "轻陪伴",
+            "min_quota": 4,
+            "max_quota": 7,
+            "target_ratio": 0.86,
+            "interval_cap_minutes": 150,
+            "idle_cap_minutes": 75,
+            "delay_range_hours": (1.25, 4.0),
+            "unanswered_interval_weight": 0.72,
+            "moment_probability_multiplier": 1.0,
+            "candidate_score_bias": 0.0,
+        },
+        3: {
+            "label": "稳定陪伴",
+            "min_quota": 8,
+            "max_quota": 12,
+            "target_ratio": 0.92,
+            "interval_cap_minutes": 90,
+            "idle_cap_minutes": 45,
+            "delay_range_hours": (0.65, 2.25),
+            "unanswered_interval_weight": 0.42,
+            "moment_probability_multiplier": 1.16,
+            "candidate_score_bias": 0.04,
+        },
+        4: {
+            "label": "亲密陪伴",
+            "min_quota": 13,
+            "max_quota": 18,
+            "target_ratio": 0.97,
+            "interval_cap_minutes": 55,
+            "idle_cap_minutes": 25,
+            "delay_range_hours": (0.38, 1.55),
+            "unanswered_interval_weight": 0.18,
+            "moment_probability_multiplier": 1.34,
+            "candidate_score_bias": 0.08,
+        },
+        5: {
+            "label": "持续在线",
+            "min_quota": 19,
+            "max_quota": None,
+            "target_ratio": 1.0,
+            "interval_cap_minutes": 35,
+            "idle_cap_minutes": 10,
+            "delay_range_hours": (0.22, 1.05),
+            "unanswered_interval_weight": 0.0,
+            "moment_probability_multiplier": 1.52,
+            "candidate_score_bias": 0.12,
+        },
+    }
+
+    _PROACTIVE_KIND_POLICIES: dict[str, dict[str, Any]] = {
+        "transactional": {
+            "label": "明确事务",
+            "interval_multiplier": 0.2,
+            "unanswered_score_penalty": 0.0,
+            "score_bias": 0.16,
+            "response_expectation": "none",
+        },
+        "continuation": {
+            "label": "对话延续",
+            "interval_multiplier": 0.65,
+            "unanswered_score_penalty": 0.04,
+            "score_bias": 0.08,
+            "response_expectation": "optional",
+        },
+        "ritual": {
+            "label": "日常仪式",
+            "interval_multiplier": 0.82,
+            "unanswered_score_penalty": 0.03,
+            "score_bias": 0.04,
+            "response_expectation": "optional",
+        },
+        "relational": {
+            "label": "关系关怀",
+            "interval_multiplier": 1.0,
+            "unanswered_score_penalty": 0.08,
+            "score_bias": 0.0,
+            "response_expectation": "optional",
+        },
+        "self_life": {
+            "label": "生活自述",
+            "interval_multiplier": 0.86,
+            "unanswered_score_penalty": 0.015,
+            "score_bias": 0.02,
+            "response_expectation": "none",
+        },
+        "content_share": {
+            "label": "内容分享",
+            "interval_multiplier": 0.9,
+            "unanswered_score_penalty": 0.015,
+            "score_bias": 0.03,
+            "response_expectation": "none",
+        },
+        "safety_event": {
+            "label": "安全与环境事件",
+            "interval_multiplier": 0.12,
+            "unanswered_score_penalty": 0.0,
+            "score_bias": 0.2,
+            "response_expectation": "none",
+        },
+    }
 
     _PROACTIVE_INTENSITY_PRESETS: dict[str, dict[str, Any]] = {
         "off": {
@@ -328,10 +458,9 @@ class ProactiveMixin(UserRestGateMixin):
         },
         "live": {
             "label": "在线陪伴",
-            "description": "最高在线陪伴档，不限制每日主动次数，也不再替用户节省主动成本；仍会尊重免打扰、休息、拒绝、隐私和硬限额。",
+            "description": "最高在线陪伴档，每日主动上限 25 条，也不再替用户节省主动成本；仍会尊重免打扰、休息、拒绝、隐私和硬限额。",
             "effects": {
-                "max_daily_messages": _PROACTIVE_DAILY_LIMIT_UNLIMITED,
-                "ignore_daily_limit": True,
+                "max_daily_messages": _PROACTIVE_DAILY_QUOTA_MAX,
                 "idle_minutes": 0,
                 "min_interval_minutes": 5,
                 "unanswered_slowdown_start": 8,
@@ -405,6 +534,210 @@ class ProactiveMixin(UserRestGateMixin):
 
     def _proactive_intensity_ignores_daily_limit(self) -> bool:
         return bool(self._proactive_intensity_effect("ignore_daily_limit", False))
+
+    @classmethod
+    def _proactive_quota_tier_for_limit(cls, value: Any) -> int:
+        quota = max(0, _safe_int(value, 0, 0))
+        if quota <= 0:
+            return 0
+        if quota <= 3:
+            return 1
+        if quota <= 7:
+            return 2
+        if quota <= 12:
+            return 3
+        if quota <= 18:
+            return 4
+        return 5
+
+    def _proactive_quota_policy(self, user: dict[str, Any] | None = None) -> dict[str, Any]:
+        limit = self._effective_user_daily_limit(user or {}) if isinstance(user, dict) else self._runtime_max_daily_messages()
+        if self._proactive_daily_limit_is_unlimited(limit):
+            limit = self._PROACTIVE_DAILY_QUOTA_MAX
+        quota = max(0, min(self._PROACTIVE_USER_DAILY_QUOTA_MAX, _safe_int(limit, 0, 0)))
+        tier = self._proactive_quota_tier_for_limit(quota)
+        policy = dict(self._PROACTIVE_QUOTA_TIER_POLICIES[tier])
+        policy.update({"tier": tier, "quota": quota})
+        return policy
+
+    def _proactive_message_kind(
+        self,
+        *,
+        reason: Any = "",
+        source: Any = "",
+        semantic_kind: Any = "",
+    ) -> str:
+        return PROACTIVE_ROUTE_REGISTRY.route_for(
+            source=source,
+            reason=reason,
+            semantic_kind=semantic_kind,
+        ).key
+
+    def _proactive_route_for(
+        self,
+        *,
+        reason: Any = "",
+        source: Any = "",
+        semantic_kind: Any = "",
+        kind: Any = "",
+    ):
+        return PROACTIVE_ROUTE_REGISTRY.route_for(
+            source=source,
+            reason=reason,
+            semantic_kind=semantic_kind,
+            kind=kind,
+        )
+
+    def _proactive_kind_policy(self, kind: Any) -> dict[str, Any]:
+        route = self._proactive_route_for(kind=kind)
+        return {
+            "label": route.label,
+            "interval_multiplier": route.interval_multiplier,
+            "unanswered_score_penalty": route.unanswered_score_penalty,
+            "score_bias": route.score_bias,
+            "response_expectation": route.response_expectation,
+        }
+
+    def _planned_proactive_kind(self, user: dict[str, Any]) -> str:
+        persisted = _single_line(user.get("planned_proactive_kind"), 40).lower()
+        if persisted in {route.key for route in PROACTIVE_ROUTE_REGISTRY.all_routes()}:
+            return persisted
+        return self._proactive_message_kind(
+            reason=user.get("planned_proactive_reason"),
+            source=user.get("planned_proactive_source"),
+            semantic_kind=user.get("planned_proactive_semantic_kind"),
+        )
+
+    def _proactive_route_prompt(self, user: dict[str, Any], *, reason: Any = "", source: Any = "") -> str:
+        kind = self._proactive_message_kind(
+            reason=reason or user.get("planned_proactive_reason"),
+            source=source or user.get("planned_proactive_source"),
+            semantic_kind=user.get("planned_proactive_semantic_kind"),
+        )
+        tier_policy = self._proactive_quota_policy(user)
+        route = self._proactive_route_for(kind=kind)
+        tier_rule = (
+            "当前属于高主动配额用户，可以自然、具体地开口，不要因为此前没有逐条回应就写得疏远；仍然避免催促和凑数。"
+            if _safe_int(tier_policy.get("tier"), 0) >= 4
+            else "按当前关系自然表达，不解释主动频率、配额、候选或调度机制。"
+        )
+        return (
+            "【本轮主动路线】\n"
+            f"- 类型：{route.label}。\n"
+            f"- 路线要求：{route.render_directive(quota_tier=_safe_int(tier_policy.get('tier'), 0))}\n"
+            f"- 终审重点：{route.review_directive()}\n"
+            f"- 配额策略：L{tier_policy.get('tier', 0)} {tier_policy.get('label', '')}。{tier_rule}"
+        )
+
+    def _prepare_proactive_route_candidate(
+        self,
+        user: dict[str, Any],
+        candidate: dict[str, Any],
+        *,
+        source: str,
+        now: float,
+    ) -> dict[str, Any]:
+        route = self._proactive_route_for(
+            reason=candidate.get("reason"),
+            source=source or candidate.get("source"),
+            semantic_kind=candidate.get("semantic_kind"),
+            kind=candidate.get("kind"),
+        )
+        prepared = route.prepare_candidate(
+            candidate,
+            source=source,
+            now=now,
+            date_key=_today_key(),
+        )
+        prepared["quota_tier"] = _safe_int(self._proactive_quota_policy(user).get("tier"), 0, 0, 5)
+        return prepared
+
+    def _planned_proactive_route(self, user: dict[str, Any]):
+        return self._proactive_route_for(
+            reason=user.get("planned_proactive_reason"),
+            source=user.get("planned_proactive_source"),
+            semantic_kind=user.get("planned_proactive_semantic_kind"),
+            kind=user.get("planned_proactive_kind"),
+        )
+
+    def _planned_proactive_route_payload(self, user: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "reason": user.get("planned_proactive_reason"),
+            "source": user.get("planned_proactive_source"),
+            "kind": self._planned_proactive_kind(user),
+            "topic": user.get("planned_proactive_topic"),
+            "motive": user.get("planned_proactive_motive"),
+            "trigger_message_id": user.get("planned_proactive_trigger_message_id"),
+            "trigger_ts": user.get("planned_proactive_trigger_ts"),
+            "trigger_inbound_count": user.get("planned_proactive_trigger_inbound_count"),
+            "private_inbound_count": user.get("private_inbound_count"),
+            "origin_event_id": user.get("planned_proactive_origin_event_id"),
+            "semantic_anchor_type": user.get("planned_proactive_anchor_type"),
+            "followup_kind": user.get("planned_followup_kind"),
+            "chain": user.get("planned_event_chain") if isinstance(user.get("planned_event_chain"), list) else [],
+            "window_start_at": user.get("planned_proactive_window_start_at"),
+            "best_until_at": user.get("planned_proactive_best_until_at"),
+            "expire_at": user.get("planned_proactive_expire_at"),
+        }
+
+    def _store_planned_proactive_route_fields(self, user: dict[str, Any], item: dict[str, Any]) -> None:
+        route = self._proactive_route_for(
+            reason=item.get("reason") or user.get("planned_proactive_reason"),
+            source=item.get("source") or user.get("planned_proactive_source"),
+            semantic_kind=item.get("semantic_kind") or user.get("planned_proactive_semantic_kind"),
+            kind=item.get("kind") or user.get("planned_proactive_kind"),
+        )
+        route_item = route.prepare_candidate(
+            {
+                **self._planned_proactive_route_payload(user),
+                **item,
+            },
+            source=_single_line(item.get("source") or user.get("planned_proactive_source"), 40),
+            now=_now_ts(),
+            date_key=_today_key(),
+        )
+        options = route.delivery_options(route_item)
+        user["planned_proactive_kind"] = route.key
+        user["planned_proactive_route_version"] = _safe_int(route_item.get("route_version"), 2, 0)
+        user["planned_proactive_route_dedupe_key"] = _single_line(route_item.get("route_dedupe_key"), 180)
+        user["planned_proactive_route_review_profile"] = _single_line(
+            route_item.get("route_review_profile") or route.review_profile,
+            40,
+        )
+        user["planned_proactive_route_retry_profile"] = _single_line(
+            route_item.get("route_retry_profile") or route.retry_profile,
+            40,
+        )
+        user["planned_proactive_route_cancel_if_new_inbound"] = bool(
+            route_item.get("route_cancel_if_new_inbound", options.get("cancel_if_new_inbound", True))
+        )
+        user["planned_proactive_route_recent_chat_policy"] = _single_line(
+            route_item.get("route_recent_chat_policy") or options.get("recent_chat_policy"),
+            40,
+        )
+        user["planned_proactive_route_allow_automatic_followup"] = bool(
+            route_item.get("route_allow_automatic_followup", route.allow_automatic_followup)
+        )
+        user["planned_proactive_route_disable_segmenting"] = bool(
+            route_item.get("route_disable_segmenting", options.get("disable_segmenting", False))
+        )
+        user["planned_proactive_response_expectation"] = _single_line(
+            route_item.get("response_expectation") or route.response_expectation,
+            24,
+        )
+        user["planned_proactive_origin_event_id"] = _single_line(route_item.get("origin_event_id"), 80)
+
+    def _planned_proactive_route_preflight(self, user: dict[str, Any], *, now: float):
+        route = self._planned_proactive_route(user)
+        return route.preflight(user, self._planned_proactive_route_payload(user), now=now)
+
+    def _planned_proactive_route_delivery_options(self, user: dict[str, Any]) -> dict[str, Any]:
+        route = self._planned_proactive_route(user)
+        return route.delivery_options(self._planned_proactive_route_payload(user))
+
+    def _planned_proactive_route_settlement(self, user: dict[str, Any]) -> dict[str, Any]:
+        route = self._planned_proactive_route(user)
+        return route.settlement(self._planned_proactive_route_payload(user))
 
     def _effective_proactive_int(self, key: str, configured: int, *, minimum: int = 0, maximum: int | None = None) -> int:
         value = configured
@@ -1113,9 +1446,13 @@ class ProactiveMixin(UserRestGateMixin):
         max_daily_messages = self._runtime_max_daily_messages()
         if max_daily_messages <= 0 or override == 0:
             return 0
-        user_limit = max_daily_messages if override is None else max(0, override)
+        user_limit = (
+            min(self._PROACTIVE_DAILY_QUOTA_MAX, max_daily_messages)
+            if override is None
+            else min(self._PROACTIVE_USER_DAILY_QUOTA_MAX, max(0, override))
+        )
         if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
-            return max(0, min(max_daily_messages, user_limit))
+            return max(0, user_limit)
         role = self._private_user_role(user)
         mode = str(user.get("relationship_mode") or "normal")
         relationship_is_distant = False
@@ -1143,8 +1480,8 @@ class ProactiveMixin(UserRestGateMixin):
             dynamic_limit = 0
         else:
             # 未回应只逐步放大主动间隔；不要把软降频误当成每日硬额度。
-            dynamic_limit = max_daily_messages
-        return max(0, min(max_daily_messages, user_limit, dynamic_limit))
+            dynamic_limit = user_limit
+        return max(0, min(user_limit, dynamic_limit))
 
     def _relationship_proactive_soft_target(self, user: dict[str, Any]) -> int:
         if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
@@ -1168,12 +1505,22 @@ class ProactiveMixin(UserRestGateMixin):
         return max(1, _safe_int(stage.get("proactive_care_limit"), 1, 0, 30))
 
     def _runtime_max_daily_messages(self) -> int:
-        runtime_value = _safe_int(getattr(self, "max_daily_messages", 8), 8, 0, 12)
+        runtime_value = _safe_int(
+            getattr(self, "max_daily_messages", 8),
+            8,
+            0,
+            self._PROACTIVE_DAILY_QUOTA_MAX,
+        )
         config = getattr(self, "config", None)
         getter = getattr(config, "get", None)
         if callable(getter):
             try:
-                configured_value = _safe_int(getter("max_daily_messages", runtime_value), runtime_value, 0, 12)
+                configured_value = _safe_int(
+                    getter("max_daily_messages", runtime_value),
+                    runtime_value,
+                    0,
+                    self._PROACTIVE_DAILY_QUOTA_MAX,
+                )
                 if configured_value != runtime_value:
                     self.max_daily_messages = configured_value
                     runtime_value = configured_value
@@ -1181,12 +1528,15 @@ class ProactiveMixin(UserRestGateMixin):
                 pass
         if runtime_value <= 0:
             return 0
-        effective_value = self._effective_proactive_int("max_daily_messages", runtime_value, minimum=0, maximum=60)
+        effective_value = self._effective_proactive_int(
+            "max_daily_messages",
+            runtime_value,
+            minimum=0,
+            maximum=self._PROACTIVE_DAILY_QUOTA_MAX,
+        )
         if effective_value <= 0:
             return 0
-        if self._proactive_intensity_ignores_daily_limit():
-            return self._PROACTIVE_DAILY_LIMIT_UNLIMITED
-        return effective_value
+        return min(self._PROACTIVE_DAILY_QUOTA_MAX, effective_value)
 
     def _proactive_generation_disabled(self, user: dict[str, Any] | None = None) -> bool:
         if self._runtime_max_daily_messages() <= 0:
@@ -1203,6 +1553,17 @@ class ProactiveMixin(UserRestGateMixin):
             "planned_proactive_reason",
             "planned_proactive_action",
             "planned_proactive_source",
+            "planned_proactive_kind",
+            "planned_proactive_route_version",
+            "planned_proactive_route_dedupe_key",
+            "planned_proactive_route_review_profile",
+            "planned_proactive_route_retry_profile",
+            "planned_proactive_route_cancel_if_new_inbound",
+            "planned_proactive_route_recent_chat_policy",
+            "planned_proactive_route_allow_automatic_followup",
+            "planned_proactive_route_disable_segmenting",
+            "planned_proactive_response_expectation",
+            "planned_proactive_origin_event_id",
             "planned_proactive_motive",
             "planned_proactive_topic",
             "planned_candidate_id",
@@ -1224,13 +1585,23 @@ class ProactiveMixin(UserRestGateMixin):
 
     def _format_daily_limit_disabled_reason(self, user: dict[str, Any]) -> str:
         override = user.get("proactive_daily_limit", -1) if isinstance(user, dict) else -1
-        runtime_value = _safe_int(getattr(self, "max_daily_messages", 0), 0, 0, 12)
+        runtime_value = _safe_int(
+            getattr(self, "max_daily_messages", 0),
+            0,
+            0,
+            self._PROACTIVE_DAILY_QUOTA_MAX,
+        )
         config_value = runtime_value
         config = getattr(self, "config", None)
         getter = getattr(config, "get", None)
         if callable(getter):
             try:
-                config_value = _safe_int(getter("max_daily_messages", runtime_value), runtime_value, 0, 12)
+                config_value = _safe_int(
+                    getter("max_daily_messages", runtime_value),
+                    runtime_value,
+                    0,
+                    self._PROACTIVE_DAILY_QUOTA_MAX,
+                )
             except Exception:
                 config_value = runtime_value
         return f"每日上限为 0（用户覆盖={override}，运行中全局={runtime_value}，配置全局={config_value}）"
@@ -1252,8 +1623,9 @@ class ProactiveMixin(UserRestGateMixin):
                 minimum=0,
                 maximum=1440,
             )
-            return max(base_idle, friend_floor)
-        return max(0, base_idle)
+            base_idle = max(base_idle, friend_floor)
+        tier_cap = _safe_int(self._proactive_quota_policy(user).get("idle_cap_minutes"), base_idle, 0, 1440)
+        return max(0, min(base_idle, tier_cap)) if tier_cap > 0 else max(0, base_idle)
 
     def _effective_user_greeting_idle_minutes(self, user: dict[str, Any]) -> int:
         if self._private_user_role(user) == "friend":
@@ -1283,8 +1655,14 @@ class ProactiveMixin(UserRestGateMixin):
                 minimum=0,
                 maximum=2880,
             )
-            return max(base_interval, friend_floor)
-        return max(0, base_interval)
+            base_interval = max(base_interval, friend_floor)
+        tier_cap = _safe_int(
+            self._proactive_quota_policy(user).get("interval_cap_minutes"),
+            base_interval,
+            0,
+            2880,
+        )
+        return max(0, min(base_interval, tier_cap)) if tier_cap > 0 else max(0, base_interval)
 
     def _effective_user_photo_daily_limit(self, user: dict[str, Any] | None = None) -> int:
         if isinstance(user, dict):
@@ -1757,12 +2135,21 @@ class ProactiveMixin(UserRestGateMixin):
             minimum=1.0,
             maximum=8.0,
         )
-        return min(max_multiplier, 1.0 + active_count * 0.35)
+        raw_multiplier = min(max_multiplier, 1.0 + active_count * 0.35)
+        weight = _safe_float(
+            self._proactive_quota_policy(user).get("unanswered_interval_weight"),
+            1.0,
+            0.0,
+        )
+        return 1.0 + max(0.0, raw_multiplier - 1.0) * min(1.0, weight)
 
-    def _effective_min_interval_seconds(self, user: dict[str, Any]) -> int:
+    def _effective_min_interval_seconds(self, user: dict[str, Any], *, kind: str = "") -> int:
+        route_kind = kind or self._planned_proactive_kind(user)
+        route_policy = self._proactive_kind_policy(route_kind)
         multiplier = (
             self._unanswered_interval_multiplier(user)
             * self._cycle_proactive_frequency_profile()["private_interval_multiplier"]
+            * _safe_float(route_policy.get("interval_multiplier"), 1.0, 0.05)
         )
         return int(self._effective_user_min_interval_minutes(user) * 60 * multiplier)
 
@@ -2066,10 +2453,11 @@ class ProactiveMixin(UserRestGateMixin):
             return float(daily_limit)
         role = self._private_user_role(user)
         relationship_target = min(daily_limit, self._relationship_proactive_soft_target(user))
-        if role == "owner":
+        explicit_quota = self._user_profile_override_int(user, "proactive_daily_limit")
+        if role == "owner" or explicit_quota is not None:
             # The configured daily limit should remain the main pacing signal for
-            # the primary user. Relationship state still controls hard boundaries
-            # through _effective_user_daily_limit and influences tone/readiness.
+            # primary users and explicit per-user quotas. Relationship state still
+            # controls hard boundaries and influences tone/readiness.
             relationship_target = daily_limit
         if relationship_target <= 0:
             return 0.0
@@ -2077,7 +2465,8 @@ class ProactiveMixin(UserRestGateMixin):
         important_dates = self._get_relevant_important_dates()
         energy = _safe_int(state.get("energy") if isinstance(state, dict) else 70, 70, 0, 100)
         active_conditions = state.get("conditions", []) if isinstance(state, dict) else []
-        ratio = 0.9 if role == "owner" else 0.68
+        quota_ratio = _safe_float(self._proactive_quota_policy(user).get("target_ratio"), 0.9, 0.0)
+        ratio = quota_ratio if role == "owner" or explicit_quota is not None else 0.68
         if energy > 80:
             ratio += 0.06
         elif energy < 40:
@@ -2086,7 +2475,7 @@ class ProactiveMixin(UserRestGateMixin):
             ratio += min(0.1, len(active_conditions) * 0.03)
         if important_dates:
             ratio += 0.1 if _safe_int(important_dates[0].get("_days_until"), 0) == 0 else 0.05
-        ratio = max(0.45, min(1.0 if role == "owner" else 0.95, ratio))
+        ratio = max(0.45, min(1.0 if role == "owner" or explicit_quota is not None else 0.95, ratio))
         if relationship_target == 1:
             ratio = max(ratio, 0.75)
         return max(0.6, relationship_target * ratio)
@@ -2114,7 +2503,15 @@ class ProactiveMixin(UserRestGateMixin):
             pressure = 0.9 if no_cost_mode else 0.5
         readiness = self._proactive_inner_readiness(user)
         inner_factor = 0.74 + _safe_float(readiness.get("score"), 0.55) * 0.55
-        return max(0.25, min(2.4 if no_cost_mode else 1.5, capacity_factor * pressure * inner_factor))
+        quota_multiplier = _safe_float(
+            self._proactive_quota_policy(user).get("moment_probability_multiplier"),
+            1.0,
+            0.0,
+        )
+        return max(
+            0.25,
+            min(2.4 if no_cost_mode else 1.8, capacity_factor * pressure * inner_factor * quota_multiplier),
+        )
 
     def _fallback_proactive_delay_hours(
         self,
@@ -2123,39 +2520,55 @@ class ProactiveMixin(UserRestGateMixin):
         now: float | None = None,
     ) -> tuple[float, float]:
         now_dt = self._environment_fromtimestamp(now or _now_ts())
+        tier_policy = self._proactive_quota_policy(user)
+        tier = _safe_int(tier_policy.get("tier"), 0, 0, 5)
+        configured_range = tier_policy.get("delay_range_hours")
+
+        def tune(delay: tuple[float, float]) -> tuple[float, float]:
+            low, high = delay
+            if tier <= 0 or not isinstance(configured_range, (list, tuple)) or len(configured_range) < 2:
+                return low, high
+            policy_low = max(0.05, _safe_float(configured_range[0], low, 0.05))
+            policy_high = max(policy_low + 0.05, _safe_float(configured_range[1], high, policy_low + 0.05))
+            if tier <= 2:
+                return max(low, policy_low), max(max(low, policy_low) + 0.05, min(high, policy_high))
+            tuned_low = max(policy_low, min(low, policy_high * 0.72))
+            tuned_high = max(tuned_low + 0.05, min(high, policy_high))
+            return tuned_low, tuned_high
+
         if self._private_user_role(user) == "friend":
             spread_delay = self._friend_proactive_spread_delay_hours(user, now=now_dt.timestamp())
             if spread_delay is not None:
-                return spread_delay
+                return tune(spread_delay)
         sent_today = _safe_int(user.get("sent_today"), 0)
         remaining_target = max(1, math.ceil(max(0.0, self._soft_daily_target(user) - sent_today)))
         readiness_score = _safe_float(self._proactive_inner_readiness(user, now=now_dt.timestamp()).get("score"), 0.55)
         if readiness_score < 0.38:
-            return (2.5, 6.0) if self._private_user_role(user) != "friend" else (8.0, 16.0)
+            return tune((2.5, 6.0) if self._private_user_role(user) != "friend" else (8.0, 16.0))
         counts = self._today_proactive_daypart_counts(user)
         current_bucket = self._proactive_daypart_bucket_for_minute(now_dt.hour * 60 + now_dt.minute)
         if current_bucket == "late_night" and _safe_int(counts.get("late_night"), 0, 0) >= 1:
-            return (7.5, 10.5)
+            return tune((7.5, 10.5))
         if current_bucket == "evening" and _safe_int(counts.get("evening"), 0, 0) >= 1 and remaining_target <= 2:
-            return (3.0, 5.0)
+            return tune((3.0, 5.0))
 
         if now_dt.hour < 12:
             if remaining_target >= 4:
-                return (0.45, 1.4)
+                return tune((0.45, 1.4))
             if remaining_target >= 3:
-                return (0.75, 2.0)
+                return tune((0.75, 2.0))
             if remaining_target >= 2:
-                return (1.0, 2.8)
-            return (1.6, 4.2)
+                return tune((1.0, 2.8))
+            return tune((1.6, 4.2))
         if now_dt.hour < 18:
             if remaining_target >= 3:
-                return (0.55, 1.8)
+                return tune((0.55, 1.8))
             if remaining_target >= 2:
-                return (0.9, 2.6)
-            return (1.8, 4.5)
+                return tune((0.9, 2.6))
+            return tune((1.8, 4.5))
         if remaining_target >= 2:
-            return (0.5, 1.6)
-        return (0.9, 2.4)
+            return tune((0.5, 1.6))
+        return tune((0.9, 2.4))
 
     def _friend_proactive_spread_delay_hours(
         self,
@@ -2387,7 +2800,10 @@ class ProactiveMixin(UserRestGateMixin):
                 user["planned_proactive_topic"] = "情绪收敛后的低压关心"
                 user["planned_proactive_impulse_id"] = ""
                 user["planned_proactive_window_start_at"] = user["next_proactive_at"]
-                active_span, grace_span = self._proactive_impulse_default_window_seconds(user["planned_proactive_reason"])
+                active_span, grace_span = self._proactive_impulse_default_window_seconds(
+                    user["planned_proactive_reason"],
+                    source="emotion_gate",
+                )
                 user["planned_proactive_best_until_at"] = user["next_proactive_at"] + active_span
                 user["planned_proactive_expire_at"] = user["next_proactive_at"] + active_span + grace_span
                 semantics = self._planned_proactive_semantics(user)
@@ -2395,6 +2811,17 @@ class ProactiveMixin(UserRestGateMixin):
                 user["planned_proactive_anchor_type"] = _single_line(semantics.get("anchor_type"), 40)
                 user["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, _safe_float(semantics.get("score"), 0.5))) * 100)
                 user["planned_proactive_semantic_note"] = _single_line(semantics.get("note"), 180)
+                self._store_planned_proactive_route_fields(
+                    user,
+                    {
+                        "source": "emotion_gate",
+                        "reason": user["planned_proactive_reason"],
+                        "action": user["planned_proactive_action"],
+                        "scheduled_ts": user["next_proactive_at"],
+                        "topic": user["planned_proactive_topic"],
+                        "motive": user["planned_proactive_motive"],
+                    },
+                )
                 item = self._record_proactive_candidate(
                     str(user.get("user_id") or user.get("id") or ""),
                     {
@@ -2717,7 +3144,7 @@ class ProactiveMixin(UserRestGateMixin):
         if vague_seek_user:
             scheduled = max(scheduled, now + random.uniform(1.5 * 3600, 3.5 * 3600))
             scheduled = self._move_timestamp_into_reason_window(scheduled, reason)
-        active_span, grace_span = self._proactive_impulse_default_window_seconds(reason)
+        active_span, grace_span = self._proactive_impulse_default_window_seconds(reason, source="random")
         impulse = self._build_proactive_impulse(
             user,
             reason=reason,
@@ -2806,7 +3233,10 @@ class ProactiveMixin(UserRestGateMixin):
                 )
                 user["planned_proactive_impulse_id"] = ""
                 user["planned_proactive_window_start_at"] = timer_scheduled
-                active_span, grace_span = self._proactive_impulse_default_window_seconds(user["planned_proactive_reason"])
+                active_span, grace_span = self._proactive_impulse_default_window_seconds(
+                    user["planned_proactive_reason"],
+                    source="timer",
+                )
                 user["planned_proactive_best_until_at"] = timer_scheduled + active_span
                 user["planned_proactive_expire_at"] = timer_scheduled + active_span + grace_span
                 semantics = self._planned_proactive_semantics(user)
@@ -2830,6 +3260,7 @@ class ProactiveMixin(UserRestGateMixin):
                 user["planned_opener_mode"] = ""
                 user["planned_followup_kind"] = ""
                 user["planned_proactive_quota_exempt"] = False
+                self._store_planned_proactive_route_fields(user, timer_event)
                 item = self._record_proactive_candidate(
                     str(user.get("user_id") or user.get("id") or ""),
                     {
@@ -2933,6 +3364,7 @@ class ProactiveMixin(UserRestGateMixin):
         user["planned_opener_mode"] = ""
         user["planned_followup_kind"] = ""
         user["planned_proactive_quota_exempt"] = bool(event.get("_free_screen_peek"))
+        self._store_planned_proactive_route_fields(user, {**event, "source": source})
         context_key = _single_line(event.get("context_key"), 60)
         context = event.get("context")
         if context_key and isinstance(context, dict):
@@ -2968,6 +3400,19 @@ class ProactiveMixin(UserRestGateMixin):
         user["planned_proactive_reason"] = ""
         user["planned_proactive_action"] = ""
         user["planned_proactive_source"] = ""
+        user["planned_proactive_kind"] = ""
+        user["planned_proactive_route_version"] = 0
+        user["planned_proactive_route_dedupe_key"] = ""
+        user["planned_proactive_route_review_profile"] = ""
+        user["planned_proactive_route_retry_profile"] = ""
+        user["planned_proactive_route_cancel_if_new_inbound"] = True
+        user["planned_proactive_route_recent_chat_policy"] = ""
+        user["planned_proactive_route_allow_automatic_followup"] = False
+        user["planned_proactive_route_disable_segmenting"] = False
+        user["planned_proactive_response_expectation"] = ""
+        user["planned_proactive_origin_event_id"] = ""
+        user["planned_proactive_route_preflight_action"] = ""
+        user["planned_proactive_route_preflight_note"] = ""
         user["planned_proactive_motive"] = ""
         user["planned_proactive_topic"] = ""
         user["planned_proactive_impulse_id"] = ""

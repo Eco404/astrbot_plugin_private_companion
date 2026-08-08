@@ -4968,6 +4968,34 @@ Bot 近期回复：
         def _visible_len(value: str) -> int:
             return len(re.sub(r"\s+", "", str(value or "")))
 
+        def _is_atomic_creative_excerpt(value: str) -> bool:
+            stripped = str(value or "").strip()
+            return bool(
+                stripped.startswith("「")
+                and stripped.endswith("」")
+                and _visible_len(stripped[1:-1])
+                >= max(1, self.segmented_proactive_min_segment_chars)
+            )
+
+        def _expand_creative_excerpt_atoms(value: str) -> list[str]:
+            expanded: list[str] = []
+            current: list[str] = []
+
+            def push_current() -> None:
+                joined = "".join(current).strip()
+                current.clear()
+                if joined:
+                    expanded.append(joined)
+
+            for chunk, protected in _protected_cleanup_chunks(str(value or "")):
+                if protected and _is_atomic_creative_excerpt(chunk):
+                    push_current()
+                    expanded.append(str(chunk).strip())
+                else:
+                    current.append(chunk)
+            push_current()
+            return expanded or [str(value or "")]
+
         def _is_soft_short_segment(value: str) -> bool:
             cleaned = _single_line(value, 60)
             if not cleaned:
@@ -5021,25 +5049,44 @@ Bot 近期回复：
             index = 0
             while index < len(segments):
                 current = segments[index]
+                if _is_atomic_creative_excerpt(current):
+                    merged.append(current)
+                    index += 1
+                    continue
                 while index + 1 < len(segments) and (
                     _visible_len(current) < min_chars
                     or _is_soft_short_segment(current)
                     or (len(merged) >= max(0, self.segmented_proactive_max_segments - 1))
-                ):
+                ) and not _is_atomic_creative_excerpt(segments[index + 1]):
                     current = _join_segment_pair(current, segments[index + 1])
                     index += 1
-                if merged and (_visible_len(current) < min_chars or _is_soft_short_segment(current)):
+                if (
+                    merged
+                    and not _is_atomic_creative_excerpt(merged[-1])
+                    and (_visible_len(current) < min_chars or _is_soft_short_segment(current))
+                ):
                     merged[-1] = _join_segment_pair(merged[-1], current)
                 else:
                     merged.append(current)
                 index += 1
             max_segments = max(1, _safe_int(getattr(self, "segmented_proactive_max_segments", 3), 3, 1))
-            if len(merged) > max_segments:
-                kept = merged[: max_segments - 1]
-                tail = merged[max_segments - 1]
-                for item in merged[max_segments:]:
-                    tail = _join_segment_pair(tail, item)
-                merged = kept + [tail]
+            while len(merged) > max_segments:
+                merge_index = next(
+                    (
+                        pos
+                        for pos in range(len(merged) - 2, -1, -1)
+                        if not _is_atomic_creative_excerpt(merged[pos])
+                        and not _is_atomic_creative_excerpt(merged[pos + 1])
+                    ),
+                    -1,
+                )
+                if merge_index < 0:
+                    break
+                merged[merge_index] = _join_segment_pair(
+                    merged[merge_index],
+                    merged[merge_index + 1],
+                )
+                del merged[merge_index + 1]
             return merged
 
         if self.segmented_proactive_split_mode == "words":
@@ -5054,9 +5101,10 @@ Bot 近期回复：
                 content = segment[0] if isinstance(segment, tuple) else segment
                 if not isinstance(content, str):
                     continue
-                cleaned = _clean_segment(content)
-                if cleaned:
-                    segments.append(cleaned)
+                for atom in _expand_creative_excerpt_atoms(content):
+                    cleaned = _clean_segment(atom)
+                    if cleaned:
+                        segments.append(cleaned)
             segments = _merge_segments(segments)
             return segments if segments and (len(segments) > 1 or self.enable_segmented_proactive_content_cleanup) else [normalized]
 
@@ -5075,9 +5123,11 @@ Bot 近期回复：
             content = segment[0] if isinstance(segment, tuple) else segment
             if not isinstance(content, str):
                 continue
-            cleaned = _restore_segmented_literals(_clean_segment(content), protected_literals)
-            if cleaned:
-                segments.append(cleaned)
+            restored = _restore_segmented_literals(content, protected_literals)
+            for atom in _expand_creative_excerpt_atoms(restored):
+                cleaned = _clean_segment(atom)
+                if cleaned:
+                    segments.append(cleaned)
         segments = _merge_segments(segments)
         return segments if segments and (len(segments) > 1 or self.enable_segmented_proactive_content_cleanup) else [normalized]
 

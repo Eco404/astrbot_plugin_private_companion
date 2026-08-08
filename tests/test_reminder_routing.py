@@ -22,6 +22,11 @@ class ReminderRoutingHarness(DailyStateMixin):
     def _environment_fromtimestamp(value: float) -> datetime:
         return datetime.fromtimestamp(float(value))
 
+    @staticmethod
+    def _proactive_quota_policy(user: dict) -> dict:
+        tier = int(user.get("test_quota_tier", 3))
+        return {"tier": tier, "label": f"测试档位{tier}"}
+
 
 class ReminderRoutingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -32,7 +37,42 @@ class ReminderRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("优先调用该工具", instruction)
         self.assertIn("只能选择 `future_task` 或 `<timer>` 其中一种", instruction)
         self.assertIn("应使用 `pc_manage_memo`", instruction)
-        self.assertIn("动作查岗", instruction)
+        self.assertIn("动作回访", instruction)
+
+    def test_activity_followup_policy_adapts_to_all_quota_tiers(self):
+        expected = {
+            1: (1, 15),
+            2: (1, 8),
+            3: (2, 3),
+            4: (2, 0),
+            5: (2, 0),
+        }
+        for tier, (max_intensity, buffer_minutes) in expected.items():
+            with self.subTest(tier=tier):
+                policy = self.plugin._activity_followup_quota_policy(
+                    {"test_quota_tier": tier, "style": "自然陪伴"}
+                )
+                self.assertEqual(max_intensity, policy["max_intensity"])
+                self.assertEqual(buffer_minutes, policy["completion_buffer_minutes"])
+
+        strong_policy = self.plugin._activity_followup_quota_policy(
+            {"test_quota_tier": 5, "style": "黏人，会轻轻查岗"}
+        )
+        self.assertEqual(3, strong_policy["max_intensity"])
+
+    def test_activity_followup_policy_stays_gentle_for_friend_or_ignored_user(self):
+        self.plugin._private_user_role = lambda _user: "friend"
+        friend_policy = self.plugin._activity_followup_quota_policy(
+            {"test_quota_tier": 5, "style": "黏人，会轻轻查岗"}
+        )
+        self.assertEqual(1, friend_policy["max_intensity"])
+
+        self.plugin._private_user_role = lambda _user: "owner"
+        ignored_policy = self.plugin._activity_followup_quota_policy(
+            {"test_quota_tier": 5, "style": "黏人，会轻轻查岗", "ignored_streak": 1}
+        )
+        self.assertEqual(1, ignored_policy["max_intensity"])
+        self.assertGreaterEqual(ignored_policy["completion_buffer_minutes"], 10)
 
     async def test_saved_memo_reminder_strips_timer_but_does_not_schedule(self):
         text = '便签记好了。<timer>{"action":"cancel"}</timer>'

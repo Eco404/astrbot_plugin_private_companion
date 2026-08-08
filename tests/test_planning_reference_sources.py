@@ -239,6 +239,44 @@ class PlanningReferenceSourceTests(unittest.TestCase):
         self.assertIn("地点必须与 summary、today_events、presence_status 和当前事项一致", prompt)
         self.assertIn("新的换装会替换旧换装", prompt)
 
+    def test_detail_prompt_preserves_custom_status_when_sync_is_disabled(self):
+        self.plugin.enable_qq_custom_presence_sync = False
+        plan = {"items": [{"time": "15:00", "activity": "写题"}]}
+        segment = {
+            "start": 15 * 60,
+            "end": 16 * 60,
+            "item": plan["items"][0],
+        }
+
+        prompt = build_detail_enhancement_prompt(
+            self.plugin,
+            segment,
+            plan,
+            self.plugin.data["daily_state"],
+        )
+
+        self.assertIn("当前未开启 QQ 自定义短状态同步", prompt)
+        self.assertIn('"presence_status": {"mode": "unchanged"', prompt)
+
+    def test_detail_prompt_allows_custom_status_when_sync_is_enabled(self):
+        self.plugin.enable_qq_custom_presence_sync = True
+        plan = {"items": [{"time": "15:00", "activity": "写题"}]}
+        segment = {
+            "start": 15 * 60,
+            "end": 16 * 60,
+            "item": plan["items"][0],
+        }
+
+        prompt = build_detail_enhancement_prompt(
+            self.plugin,
+            segment,
+            plan,
+            self.plugin.data["daily_state"],
+        )
+
+        self.assertIn("可以用 custom", prompt)
+        self.assertIn('"presence_status": {"mode": "custom"', prompt)
+
     def test_detail_model_location_is_normalized_as_structured_output(self):
         self.assertEqual(normalize_detail_location("当前位置：宿舍卧室"), "宿舍卧室")
         self.assertEqual(normalize_detail_location({"place": "办公室工位"}), "办公室工位")

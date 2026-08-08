@@ -220,6 +220,7 @@ _EXTERNAL_IMAGE_DOWNLOAD_TIMEOUT_OVERRIDE: ContextVar[float | None] = ContextVar
     "private_companion_external_image_download_timeout_override",
     default=None,
 )
+from .proactive_routes import PROACTIVE_ROUTE_REGISTRY
 
 DEFAULT_NEWS_SOURCES = "\n".join(
     [
@@ -1813,6 +1814,16 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         ]
         return "\n".join(part for part in parts if part)
 
+    @staticmethod
+    def _creative_share_excerpt_prompt_hint() -> str:
+        return (
+            "【创作分享的正文边界】\n"
+            "- 如果要把作品原文发给对方，只能从“刚写到的片段”中连续截取，不得改写、拼接或另编一段冒充原文。\n"
+            "- 把实际作品摘录完整放在一组成对的 `「...」` 中；`「」` 内只放作品原文，聊天式引入、感受、提问和收尾都放在引号外。\n"
+            "- 不要把整条聊天都包进 `「」`。如果本轮只聊创作进度、没有实际摘录作品，就不要使用 `「」`。\n"
+            "- `「...」` 会作为一个完整作品气泡发送；它前后的普通聊天仍按自然聊天节奏分段。"
+        )
+
     async def _narrate_action_context(self, action: str, action_context: str) -> str:
         if not self.narration_provider_id:
             return self._sanitize_action_context_text(action, action_context)
@@ -2645,13 +2656,36 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         }
         for key, value in replacements.items():
             prompt = prompt.replace(key, value)
-        if unanswered_count >= 2 and "连续未回应时的成文边界" not in prompt:
+        if reason == "creative_share":
+            prompt = f"{prompt.rstrip()}\n\n{self._creative_share_excerpt_prompt_hint()}"
+        route_prompt_getter = getattr(self, "_proactive_route_prompt", None)
+        if callable(route_prompt_getter):
+            route_prompt = route_prompt_getter(
+                user,
+                reason=reason,
+                source=user.get("planned_proactive_source"),
+            )
+            if route_prompt:
+                prompt = f"{prompt.rstrip()}\n\n{route_prompt}"
+        quota_policy_getter = getattr(self, "_proactive_quota_policy", None)
+        kind_getter = getattr(self, "_planned_proactive_kind", None)
+        quota_tier = _safe_int(quota_policy_getter(user).get("tier"), 0, 0, 5) if callable(quota_policy_getter) else 0
+        proactive_kind = kind_getter(user) if callable(kind_getter) else "relational"
+        relaxed_unanswered_route = quota_tier >= 4 and proactive_kind in {"self_life", "content_share"}
+        if unanswered_count >= 2 and not relaxed_unanswered_route and "连续未回应时的成文边界" not in prompt:
             prompt = (
                 f"{prompt.rstrip()}\n\n"
                 "【连续未回应时的成文边界】\n"
                 "- 这次优先只表达一个完整意思，用一句自然短句或两个紧密相连的短分句说完。\n"
                 "- 不要把近况、提问和叮嘱叠在同一条里；更适合分享后自然收住，不要求对方回复。\n"
                 "- 如果原本想说的内容较多，应重新组织成完整短句，绝不能留下主谓宾未完成的半句话。"
+            )
+        elif unanswered_count >= 2 and relaxed_unanswered_route:
+            prompt = (
+                f"{prompt.rstrip()}\n\n"
+                "【高配额生活流的未回应边界】\n"
+                "- 对方没有逐条回应不等于拒绝继续接收生活片段或可靠内容分享，不要因此突然写得疏远或只剩客套话。\n"
+                "- 本条仍应自成一件具体的事，不追问上一条、不催促、不抱怨，也不要暗示对方欠你回复。"
             )
         persona_marker = "<!-- private_companion_proactive_persona_v1 -->"
         if persona and persona_marker not in prompt:
@@ -2943,7 +2977,11 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 "用一句更安静、更短的自然话表达，不表演热情，不制造必须回应的压力。"
             )
         unanswered_count = _safe_int(user.get("ignored_streak"), 0, 0)
-        if unanswered_count >= 2:
+        quota_policy_getter = getattr(self, "_proactive_quota_policy", None)
+        kind_getter = getattr(self, "_planned_proactive_kind", None)
+        quota_tier = _safe_int(quota_policy_getter(user).get("tier"), 0, 0, 5) if callable(quota_policy_getter) else 0
+        proactive_kind = kind_getter(user) if callable(kind_getter) else "relational"
+        if unanswered_count >= 2 and not (quota_tier >= 4 and proactive_kind in {"self_life", "content_share"}):
             lines.append(
                 "对方已连续多次没有回应：只保留一个完整意思，优先改写为一句自然短句；"
                 "不要同时堆叠近况、提问和叮嘱；不要用‘在吗/最近忙不忙/只是想找你’作为唯一内容，"
@@ -3914,6 +3952,12 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             user,
             _single_line(user.get("nickname"), 40) if isinstance(user, dict) else "",
         )
+        creative_excerpt_rule = (
+            "- 若参考意图包含创作原文且决定引用，只能连续摘取来源原文，并用一组成对的 `「...」` 包住；"
+            "聊天式引入和收尾留在 `「」` 外，不得改写或另编作品片段。"
+            if "创作" in str(scene or "")
+            else ""
+        )
         prompt = f"""
 你要把一条“参考意图”改写成当前人格会自然说出的聊天正文。参考意图只说明要表达什么，不是要照抄的句子。
 
@@ -3941,6 +3985,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
 - 不要照抄参考意图里的固定说法；只保留事实和语义。
 - 不要出现“参考/兜底/模板/系统/工具/执行/已发送给用户/消息已发送”等字样。
 - 不要新增事实、承诺、动作小剧场或没有发生的状态。
+{creative_excerpt_rule}
 - 如果参考意图或模型结果包含 Provider/API 报错、内容策略拒绝、敏感词提示、政策链接或内部诊断，视为本轮失败并输出空文本；不要翻译、复述或润色这类内容。
 {"- 必须保留成功/失败/等待/完成/稍后再说等状态语义，不要把失败说成成功。" if preserve_status else "- 如果只是轻轻递一句，不要补多余解释。"}
 """.strip()
@@ -4789,6 +4834,22 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         image_path: str = "",
     ) -> dict[str, Any]:
         strength = self._proactive_review_strength()
+        route_getter = getattr(self, "_proactive_route_for", None)
+        route = (
+            route_getter(
+                reason=reason,
+                source=user.get("planned_proactive_source"),
+                semantic_kind=user.get("planned_proactive_semantic_kind"),
+                kind=user.get("planned_proactive_kind"),
+            )
+            if callable(route_getter)
+            else PROACTIVE_ROUTE_REGISTRY.route_for(
+                reason=reason,
+                source=user.get("planned_proactive_source"),
+                semantic_kind=user.get("planned_proactive_semantic_kind"),
+                kind=user.get("planned_proactive_kind"),
+            )
+        )
         review_context = _single_line(action_summary, 240)
         if image_path:
             review_context = _single_line(f"{review_context}\n真实图片文件：{image_path}", 360)
@@ -4803,6 +4864,13 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         )
         local_decision = str(local.get("decision") or "send").strip().lower()
         local_hard_block = bool(local.get("hard")) or self._proactive_review_hard_block_reason(_single_line(local.get("reason"), 120))
+        if route.key == "transactional" and local_decision in {"drop", "defer"} and not local_hard_block:
+            local = {
+                "decision": "send",
+                "text": "",
+                "reason": "事务路线保留原始提醒事实，忽略通用低价值软拦截",
+            }
+            local_decision = "send"
         review_enabled = bool(getattr(self, "enable_proactive_message_review", True))
         review_mode = self._effective_proactive_review_mode()
         if not review_enabled:
@@ -4991,6 +5059,12 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             )
             if part
         )
+        creative_excerpt_rule = (
+            self._creative_share_excerpt_prompt_hint()
+            if reason == "creative_share"
+            else ""
+        )
+        route_review_directive = route.review_directive()
         prompt = f"""
 You are the final content gate immediately before one proactive private message is sent.
 Return JSON only. You must decide exactly one of send, rewrite, or drop.
@@ -5012,6 +5086,9 @@ Rules:
 - If a user has just been discussing something and the candidate cannot naturally fit, drop it; do not defer it.
 - If the candidate or any model output contains a Provider/API error, policy refusal, sensitive-word notice, policy URL, or internal diagnostic, choose drop with an empty text; never translate, quote, or polish it.
 - When the current request context says the user explicitly requested this troubleshooting message, treat that request as a concrete reason to speak. Do not drop solely because it is late, the normal proactive interval is short, or there is no spontaneous life story. If the wording is too strong or generic, prefer a shorter, softer rewrite. Fact, safety, privacy, identity, and conversation-conflict checks still apply.
+- For a creative share, preserve any `「...」` excerpt exactly as one continuous source quote. Keep conversational introduction and closing outside it; never paraphrase or fabricate text inside the excerpt.
+
+{creative_excerpt_rule}
 
 [Recent conversation]
 {history or "(none)"}
@@ -5029,7 +5106,10 @@ Rules:
 {local_context or "local gate passed"}
 
 [Proactive source]
-reason={reason or "check_in"}; action={action or "message"}; topic={_single_line(topic, 80) or "none"}; motive={_single_line(motive, 120) or "none"}; summary={_single_line(action_summary, 80) or "none"}
+route={route.key}({route.label}); review_profile={route.review_profile}; reason={reason or "check_in"}; action={action or "message"}; topic={_single_line(topic, 80) or "none"}; motive={_single_line(motive, 120) or "none"}; summary={_single_line(action_summary, 80) or "none"}
+
+[Route-specific final gate]
+{route_review_directive}
 
 [Full persona]
 {persona[:2600] if persona else "(No explicit persona was resolved. Preserve the candidate instead of inventing a new voice.)"}
@@ -5561,9 +5641,12 @@ Output:
         reference = sanitize_relationship_source(reference, "proactive_fallback.reference")
         if not reference:
             reference = f"自然地向{name or '对方'}主动说一句低压力且无需立即回复的话。"
+        fallback_scene = f"主动开口；原因={reason or 'check_in'}；动作={action or 'message'}"
+        if reason == "creative_share":
+            fallback_scene = "主动分享自己的创作；作品原文与聊天引入必须保持清晰边界"
         return await self._rewrite_reference_reply_with_persona(
             reference,
-            scene=f"主动开口；原因={reason or 'check_in'}；动作={action or 'message'}",
+            scene=fallback_scene,
             user=user,
             fallback_text="",
             task="proactive_message_fallback",
@@ -5889,6 +5972,11 @@ Output:
             user,
             _single_line(user.get("nickname"), 40),
         )
+        creative_excerpt_rule = (
+            self._creative_share_excerpt_prompt_hint()
+            if reason == "creative_share"
+            else ""
+        )
         prompt = f"""
 把下面这条主动私聊消息改成真正的主动开口。
 它不是在回复用户刚发来的消息；聊天历史只能当背景。
@@ -5935,6 +6023,7 @@ Output:
 - 改写后仍要贴合内在约束里的候选语义；不能把分享型改成泛泛问候，也不能把低压关心改成追问
 - 只修正“回复空气”的问题；不得把原文改成另一种人格，也不得降低或升级当前关系亲密度
 - 尽量 1 到 2 句，像自然想起对方后随手说一句
+{creative_excerpt_rule}
 """.strip()
         started = time.perf_counter()
         rewritten = await self._llm_call(
@@ -7791,21 +7880,17 @@ Output:
         if not custom_text:
             return False, "自定义状态文本为空,跳过同步"
         # Avoid set_custom_online_status: some OneBot adapters disconnect on this unsupported extension API.
-        variants = (
-            ("set_diy_online_status", {"face_id": 21, "face_type": 1, "wording": custom_text}),
-            ("set_diy_online_status", {"face_id": "21", "face_type": "1", "wording": custom_text}),
-            ("set_diy_online_status", {"faceId": 21, "faceType": 1, "wording": custom_text}),
-            ("set_diy_online_status", {"id": 21, "face_type": 1, "wording": custom_text}),
-            ("set_diy_online_status", {"wording": custom_text}),
-            ("set_diy_online_status", {"face_id": 21, "text": custom_text}),
-            ("set_diy_online_status", {"faceId": 21, "text": custom_text}),
-            ("set_diy_online_status", {"id": 21, "text": custom_text}),
-            ("set_diy_online_status", {"text": custom_text}),
+        ok, error = await self._call_onebot_action_with_error(
+            client,
+            "set_diy_online_status",
+            at_most_once=True,
+            face_id=21,
+            face_type=1,
+            wording=custom_text,
         )
-        for action, params in variants:
-            if await self._call_onebot_action(client, action, **params):
-                return True, f"自定义状态：{custom_text}"
-        return False, f"平台不支持自定义状态：{custom_text}"
+        if ok:
+            return True, f"自定义状态：{custom_text}"
+        return False, f"平台不支持自定义状态：{custom_text}（{_single_line(error, 100)}）"
 
     async def _reset_stale_qq_presence_if_needed(self) -> None:
         if not self.enable_qq_presence_sync:
