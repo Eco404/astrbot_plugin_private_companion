@@ -4,3 +4,7 @@ aiohttp>=3.9,<4
 Pillow>=10,<13
 chinese-calendar>=1.9.2
 lunarcalendar>=0.0.9
+# Reality Touch routes decoded TTS audio directly to a user-selected output endpoint.
+numpy>=1.26,<3
+sounddevice>=0.5,<1
+soundfile>=0.12,<1

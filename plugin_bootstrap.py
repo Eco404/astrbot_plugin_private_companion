@@ -337,6 +337,10 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.private_user_aliases = self._parse_private_user_aliases(self._cfg_raw(c, "private_user_aliases", ""))
     self.private_user_delivery_aliases = self._parse_private_user_aliases(self._cfg_raw(c, "private_user_delivery_aliases", ""))
     self._load_tts_enhancement_config(c)
+    # Experimental local alarm: playback follows the host's default audio output.
+    self.enable_experimental_bluetooth_wakeup = self._cfg_bool(
+        c, "enable_experimental_bluetooth_wakeup", False
+    )
     self.target_platform = self._cfg_str(c, "target_platform", "aiocqhttp", "aiocqhttp")
     self.default_enable_configured_targets = self._cfg_bool(c, "default_enable_configured_targets", True)
     self.default_interaction_band = self._cfg_str(c, "default_interaction_band", "relaxed")

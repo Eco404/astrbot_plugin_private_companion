@@ -359,6 +359,7 @@ from .llm_tool_actions import LlmToolActionsMixin, PHOTO_TOOL_SILENT_SENTINEL
 from .command_handlers import CommandHandlersMixin
 from .tts_enhancement import TtsEnhancementMixin
 from .tts_tool_sanitizer import TtsToolSanitizerMixin
+from .wakeup_alarm import WakeupAlarmMixin
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -1366,6 +1367,7 @@ class PrivateCompanionPlugin(
     CommandHandlersMixin,
     TtsEnhancementMixin,
     TtsToolSanitizerMixin,
+    WakeupAlarmMixin,
     GroupWakeupMixin,
     GroupObservationMixin,
     GroupMemberSafetyMixin,
@@ -13635,6 +13637,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             *qweather_location_view_actions,
             *qweather_location_unbind_actions,
         }
+        wakeup_alarm_actions = {"现实触及", "现实触及闹钟", "现实触及起床", "起床闹钟", "起床提醒", "蓝牙起床", "蓝牙闹钟"}
         private_delivery_view_actions = {"查看主动路由", "查看主动绑定", "主动路由", "主动绑定"}
         private_delivery_unbind_actions = {"解绑主动消息", "解绑主动会话", "解绑会话"}
         private_delivery_actions = {
@@ -13717,9 +13720,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             *companion_manual_setting_actions,
             *daily_outfit_view_actions,
             *tts_language_actions,
+            *wakeup_alarm_actions,
         }
         if action in private_delivery_actions and not is_private:
             await self._reply(event, "请在需要接收主动消息的私聊窗口执行这个指令。")
+            event.stop_event()
+            return
+        if action in wakeup_alarm_actions and not is_private:
+            await self._reply(event, "现实触及只在私聊窗口设置，避免群聊误触发本机播放。")
             event.stop_event()
             return
         if action in qweather_location_actions and not self._can_manage_sensitive_location(event):
@@ -13777,6 +13785,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             else canonicalizer(fallback_user_id) if callable(canonicalizer) else fallback_user_id
         )
         user_id = _single_line(user_id, 160) or raw_user_id
+        wakeup_test_requested = False
         async with self._data_lock:
             user = self._get_user(user_id)
             stamper = getattr(self, "_stamp_private_event_identity", None)
@@ -13794,6 +13803,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 changed, response = self._unbind_private_delivery_umo(user)
                 if changed:
                     self._save_data_sync()
+            elif action in wakeup_alarm_actions:
+                response, wakeup_test_requested = self._wakeup_alarm_command(user, value)
+                feature_enabled = bool(getattr(self, "enable_experimental_bluetooth_wakeup", False))
+                if not feature_enabled:
+                    wakeup_test_requested = False
+                    response += "\n现实触及总开关仍关闭，请在插件配置中开启 enable_experimental_bluetooth_wakeup。"
             elif action in {"状态", "status"}:
                 self._reset_daily_counter_if_needed(user)
                 last_seen = self._format_timestamp_elapsed(self._latest_user_activity_ts(user))
@@ -14002,6 +14017,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 response_image_path,
                 extra_components=response_extra_components,
             )
+        if action in wakeup_alarm_actions and wakeup_test_requested:
+            self._create_lifecycle_background_task(
+                self._test_wakeup_alarm(user),
+                label="wakeup_alarm_test",
+            )
+            event.stop_event()
+            return
         if action in companion_manual_query_actions:
             await self._reply(event, await self._companion_manual_answer(event, value))
             event.stop_event()

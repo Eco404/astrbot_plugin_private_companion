@@ -897,6 +897,8 @@ class PageSettingNormalizerMixin:
             return self._normalize_bool_value(value)
         if key == "enable_experimental_motivation_model":
             return self._normalize_bool_value(value)
+        if key == "enable_experimental_bluetooth_wakeup":
+            return self._normalize_bool_value(value)
         if key == "enable_personality_iteration_experiment":
             return self._normalize_bool_value(value)
         if key == "enable_personality_iteration_auto_tune":

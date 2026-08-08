@@ -17,6 +17,10 @@ const state = {
   diagnostics: [],
   troubleshooting: null,
   dailyReview: null,
+  realityTouch: null,
+  realityTouchLoading: false,
+  realityTouchError: "",
+  realityTouchSelectedUserId: "",
   availableProviders: [],
   availableEmbeddingProviders: [],
   tokenStats: null,
@@ -230,6 +234,7 @@ const featureSwitchNotes = {
 const featureSwitchExcludedKeys = new Set([
   "enable_daily_review",
   "enable_daily_case_review_experiment",
+  "enable_experimental_bluetooth_wakeup",
   "enable_reaction_expression_experiment",
   "enable_maslow_motivation_experiment",
   "enable_experimental_motivation_model",
@@ -1270,6 +1275,7 @@ const featureMeta = {
   enable_experimental_motivation_model: ["动机调度模型", "实验性功能第二项：结合驱力、诱因和唤醒状态，对主动计划做轻量调权，并在主动排障中显示判断依据。"],
   enable_personality_iteration_experiment: ["角色贴合校准", "实验性功能第三项：基于艾森克 PEN、大五人格、依恋风格和自我决定理论，帮用户判断行为是否贴近角色，并提示该怎么调整。"],
   enable_daily_case_review_experiment: ["每日逐案复盘", "实验性功能：为普通回复、未回复、主动消息、TTS 和成员风控建立短期匿名案例，供每日巡视逐案判断。"],
+  enable_experimental_bluetooth_wakeup: ["现实触及", "把本机音频设备作为 Bot 主动能力的现实出口；可选择电脑输出设备，起床提醒只是其中一个计划场景。"],
 };
 
 const featurePublicKeyAliases = {
@@ -2234,6 +2240,7 @@ const configLabels = {
   daily_review_time: "每日巡视时间",
   daily_review_auto_apply_guidance: "自动应用低风险次日纠偏",
   enable_daily_case_review_experiment: "启用实验性逐案复盘",
+  enable_experimental_bluetooth_wakeup: "启用现实触及",
   daily_review_retention_days: "巡视报告保留天数",
 };
 
@@ -2309,6 +2316,7 @@ const configDescriptions = {
   enable_experimental_motivation_model: "实验性功能第二项。开启后，主动计划会额外按驱力、诱因和唤醒适配做轻量调权：驱力代表 Bot 内部想开口，诱因代表这个候选是否有值得说的外部价值，唤醒代表当前状态是否适合行动。默认关闭。",
   enable_personality_iteration_experiment: "实验性功能第三项。开启后，排障页会用艾森克 PEN、大五人格、依恋风格和自我决定理论检查 Bot 当前行为是否贴近角色基线：例如主动是否过强、沉默后是否焦虑追问、群聊边界是否过亲密、主动是否缺少具体由头。默认只给建议；若开启“允许自主调节参数”，会临时覆盖少量主动策略参数。",
   enable_daily_case_review_experiment: "实验性逐案复盘。开启后，每日巡视会从短期脱敏案例账本中抽取普通回复、未回复、主动消息、TTS 和成员风控案例，逐项判断相关性、完整性、语气、时机与误伤风险。默认关闭，不记录用户 ID、群号、会话 ID、消息 ID或音频路径。",
+  enable_experimental_bluetooth_wakeup: "现实触及总开关。开启后开放本机设备触及能力；每位用户仍须在私聊中手动完成知情确认。当前能力为可选择输出设备的本机主动语音，起床提醒只是一个计划模板，明确不包含摄像头。",
   enable_personality_iteration_auto_tune: "角色贴合校准的子选项。开启后，排障/实验页刷新时可根据诊断结果临时调节主动上限、空闲判定、最小间隔、主动人格放行阈值和主动复核强度；不会改写人格正文或世界知识。用户手动修改这些参数后会记录为新的手动值；关闭角色贴合校准或关闭本项时恢复到用户最后一次手动设置的值。",
   enable_maslow_schedule_influence: "需求强化功能的子选项，默认关闭。开启后，日程生成器会把需求层级当作轻量倾向，影响今天更偏休息、探索、等待、准备或低打扰互动；不会把层级术语写进日程正文。",
   maslow_motivation_strength: "控制需求强化对主动候选排序的影响。0 只记录层级不改排序；35 为温和默认；100 会更明显偏向有明确由头的关系、状态或成长类念头。",
@@ -6036,6 +6044,33 @@ async function loadDailyReview(force = false) {
   return data;
 }
 
+async function loadRealityTouch(force = false) {
+  if (state.realityTouchLoading && !force) return state.realityTouch;
+  if (state.realityTouch && !force) return state.realityTouch;
+  state.realityTouchLoading = true;
+  state.realityTouchError = "";
+  if (state.activeTab === "experimental" && state.experimentalSubpage === "enable_experimental_bluetooth_wakeup") {
+    renderExperimentalPage();
+  }
+  try {
+    const data = await fetchJson("/reality-touch");
+    state.realityTouch = data || null;
+    const users = Array.isArray(data?.users) ? data.users : [];
+    if (!users.some((item) => String(item.user_id) === String(state.realityTouchSelectedUserId))) {
+      state.realityTouchSelectedUserId = String(users[0]?.user_id || "");
+    }
+    return data;
+  } catch (error) {
+    state.realityTouchError = error.message || "读取现实触及状态失败";
+    throw error;
+  } finally {
+    state.realityTouchLoading = false;
+    if (state.activeTab === "experimental" && state.experimentalSubpage === "enable_experimental_bluetooth_wakeup") {
+      renderExperimentalPage();
+    }
+  }
+}
+
 function applyOverviewData(overview) {
   if (overview?.multi_persona?.enabled) {
     const current = selectedPagePersonaId();
@@ -6834,6 +6869,15 @@ const setupGuideAdvancedItems = {
     },
   ],
   experimental: [
+    {
+      key: "enable_experimental_bluetooth_wakeup",
+      title: "现实触及",
+      ask: "是否开放 Bot 通过本机设备主动触及现实环境的实验能力？",
+      description: "当前版本先开放本机主动语音：可选择电脑音频输出设备，并把已有主动语音动作同步到该设备；起床提醒是首个计划模板。用户仍须在私聊手动完成版本化知情确认。",
+      caution: "这是本机设备能力。当前授权仅限 local_audio，不包含摄像头；未来增加摄像头时必须再次单独确认。主机休眠、TTS 不可用或蓝牙音响未设为默认输出时不会播放。",
+      kind: "feature",
+      settings: [],
+    },
     {
       key: "enable_daily_case_review_experiment",
       title: "每日逐案复盘",
@@ -7871,7 +7915,7 @@ function setupGuideAdvancedHomeHtml() {
         <span class="info"><b>2</b> 私聊增强</span>
         <span class="info"><b>3</b> 群聊增强</span>
         <span class="warn"><b>4</b> 主动增强</span>
-        <span class="warn"><b>6</b> 实验性功能</span>
+        <span class="warn"><b>7</b> 实验性功能</span>
       </div>
       ${setupGuideHint("实验性功能放在最后逐项观察；QQ 空间发布、主动带图、本机识屏会触发外部动作，建议基础链路稳定后再开。", "warn")}
     </div>
@@ -29513,6 +29557,7 @@ function bindReactionLibraryActions() {
 }
 
 const experimentalFeatureKeys = [
+  "enable_experimental_bluetooth_wakeup",
   "enable_daily_case_review_experiment",
   "enable_maslow_motivation_experiment",
   "enable_experimental_motivation_model",
@@ -29537,6 +29582,24 @@ const dailyReviewToolMeta = {
 };
 
 const experimentalFeatureMeta = {
+  enable_experimental_bluetooth_wakeup: {
+    label: "现实触及",
+    index: "设备实验",
+    shortDesc: "把电脑音频输出设备接入 Bot 的主动能力；可同步主动语音，也可运行起床提醒等计划场景。当前不授予摄像头能力。",
+    theory: [
+      { name: "双重启用", desc: "管理员开启总开关，用户本人在私聊手动提交版本化确认。", impact: "任一条件缺失时都不会调用本机设备。" },
+      { name: "分能力授权", desc: "当前确认只写入 local_audio，camera 保持未授权。", impact: "未来摄像头能力必须使用独立确认，不能继承本次同意。" },
+      { name: "显式设备路由", desc: "管理员从电脑当前可用的输出端点中选择现实触及目标；蓝牙连接和配对仍由操作系统管理。", impact: "主动语音只发往已保存的设备，设备离线时不会偷偷回退到别的音响。" },
+    ],
+    effects: [
+      { trigger: "总开关开启且用户完成确认", behavior: "保存当前授权版本与 local_audio 能力", result: "允许用户设置并测试起床语音" },
+      { trigger: "主动引擎选择语音动作", behavior: "复用同一份 TTS 音频并路由到所选电脑输出设备", result: "Bot 的主动语音从现实设备播放" },
+      { trigger: "到达起床提醒等计划时间", behavior: "计划模板调用同一个主动语音能力", result: "所选音响按场景内容播放语音" },
+      { trigger: "撤销确认或确认版本失效", behavior: "关闭该用户闹钟并阻止设备调用", result: "已有设置也保持静默" },
+    ],
+    caution: "默认关闭。开启页面开关不等于用户授权；必须在对应私聊中完成确认。当前不调用摄像头，后续摄像头能力必须再次单独确认。",
+    runtimeHint: "开启后先选择电脑音频输出设备，再由用户私聊完成确认。可单独允许主动语音同步，并按需启用起床提醒模板；页面不能代替用户授权。",
+  },
   enable_daily_case_review_experiment: {
     label: "每日逐案复盘",
     index: "实验项",
@@ -29648,6 +29711,25 @@ const experimentalFeatureMeta = {
 
 function experimentalVisualSpec(key) {
   const specs = {
+    enable_experimental_bluetooth_wakeup: {
+      mark: "触",
+      theme: "default",
+      model: "显式同意 × 分能力授权 × 本机设备边界",
+      question: "在什么授权范围内，Bot 才能主动影响现实设备？",
+      flow: [
+        ["开放", "管理员在实验页开启现实触及总开关。"],
+        ["确认", "用户本人在私聊手动确认当前音频能力和未来摄像头需另行授权。"],
+        ["路由", "管理员选择电脑音频输出设备，并为用户开放主动语音或具体计划场景。"],
+        ["触发", "主动动作或计划模板调用 TTS；授权缺失、设备不可用或主机休眠时保持静默。"],
+      ],
+      axes: [
+        ["管理员开关", "实验页总开关", "决定系统是否开放现实触及运行能力。"],
+        ["用户授权", "版本化 local_audio", "决定对应用户是否允许本机音频调用。"],
+        ["设备路由", "电脑输出端点", "决定主动语音实际从哪个音响或耳机播放。"],
+        ["摄像头权限", "未授权", "未来实现时必须新增独立确认流程。"],
+      ],
+      verify: [["用户私聊", "private"], ["语音设置", "voice"]],
+    },
     enable_emotion_simulation: {
       mark: "情",
       theme: "emotion",
@@ -29746,6 +29828,16 @@ function experimentalVisualSpec(key) {
 }
 
 function experimentalRuntimeSignals(key) {
+  if (key === "enable_experimental_bluetooth_wakeup") {
+    const enabled = toBool((state.featureDraft || {})[key]);
+    return {
+      primary: enabled ? "已开放" : "未开放",
+      label: "总开关",
+      detail: enabled ? "等待用户私聊确认与时间设置" : "不会调用本机设备",
+      tone: enabled ? "ok" : "idle",
+      bars: [["系统开放", enabled ? 1 : 0, 1], ["摄像头授权", 0, 1]],
+    };
+  }
   if (key === "enable_reaction_expression_experiment") {
     const settings = state.overview?.settings || {};
     const summary = state.overview?.reaction_expression || {};
@@ -30069,6 +30161,9 @@ function renderExperimentalPage() {
   if (subpage && experimentalFeatureKeys.includes(subpage)) {
     root.innerHTML = renderExperimentalSubpage(subpage);
     bindExperimentalSubpageActions(subpage);
+    if (subpage === "enable_experimental_bluetooth_wakeup" && !state.realityTouch && !state.realityTouchLoading) {
+      loadRealityTouch().catch((error) => showToast(`读取现实触及状态失败：${error.message}`, "error"));
+    }
   } else if (subpage === "persona_standardization_tool") {
     const shouldLoadPersonas = !state.lazyLoaded.roleplayPersonas;
     root.innerHTML = renderPersonaStandardizationToolPage();
@@ -30274,7 +30369,8 @@ function renderExperimentalSubpage(key) {
       </header>
       ${heroHtml}
       ${meta.caution ? `<div class="exp-caution"><b>注意</b><span>${escapeHtml(meta.caution)}</span></div>` : ""}
-      <div class="exp-bottom-grid exp-priority-grid">
+      ${key === "enable_experimental_bluetooth_wakeup" ? renderRealityTouchDevicePanel() : ""}
+      <div class="exp-bottom-grid exp-priority-grid ${key === "enable_experimental_bluetooth_wakeup" ? "reality-touch-grid" : ""}">
         ${settingsHtml}
         ${runtimeHtml}
       </div>
@@ -32081,7 +32177,207 @@ function renderExperimentalTheoryVisual(key) {
   return "";
 }
 
+function selectedRealityTouchUser() {
+  const users = Array.isArray(state.realityTouch?.users) ? state.realityTouch.users : [];
+  const selectedId = String(state.realityTouchSelectedUserId || "");
+  return users.find((item) => String(item.user_id) === selectedId) || users[0] || null;
+}
+
+function realityTouchLoadingPanel(title) {
+  const detail = state.realityTouchError
+    ? `<div class="exp-settings-empty error">${escapeHtml(state.realityTouchError)}</div>`
+    : `<div class="exp-settings-empty">${state.realityTouchLoading ? "正在读取用户授权和闹钟设置..." : "暂无现实触及运行数据。"}</div>`;
+  return `<article class="exp-detail-card reality-touch-card"><h3>${escapeHtml(title)}</h3>${detail}</article>`;
+}
+
+function renderRealityTouchDevicePanel() {
+  const data = state.realityTouch;
+  if (!data) return realityTouchLoadingPanel("设备路由");
+  const audio = data.audio_output || {};
+  const devices = Array.isArray(audio.devices) ? audio.devices : [];
+  const selectedId = String(audio.selected_device_id || "system_default");
+  const options = devices.map((device) => `
+    <option value="${escapeHtml(device.id || "")}" ${String(device.id) === selectedId ? "selected" : ""}>
+      ${escapeHtml(device.name || "未命名输出")}${device.host_api ? ` · ${escapeHtml(device.host_api)}` : ""}${device.is_default && device.id !== "system_default" ? " · 当前系统默认" : ""}
+    </option>
+  `).join("");
+  const user = selectedRealityTouchUser();
+  const canTest = Boolean(data.global_enabled && user?.consent?.confirmed);
+  return `
+    <article class="exp-detail-card reality-device-card">
+      <div class="reality-touch-section-head">
+        <div><span>能力出口</span><h3>电脑音频输出设备</h3></div>
+        <span class="reality-audio-backend ${audio.backend_available ? "ready" : "limited"}">${audio.backend_available ? "设备直连可用" : "仅系统默认"}</span>
+      </div>
+      <p class="reality-device-intro">选择现实触及实际播放到的电脑输出端点。蓝牙音响需要先由 Windows 完成连接；插件不负责配对。</p>
+      <div class="reality-device-controls">
+        <label>
+          <span>输出设备</span>
+          <select data-reality-touch-device>${options || '<option value="system_default">跟随系统默认输出</option>'}</select>
+        </label>
+        <button type="button" class="primary" data-reality-touch-device-save>保存设备</button>
+        <button type="button" data-reality-touch-refresh>刷新列表</button>
+        <button type="button" data-reality-touch-test data-reality-touch-test-kind="device" ${canTest ? "" : "disabled"}>播放固定测试音频</button>
+      </div>
+      <div class="reality-device-status ${audio.selected_device_missing ? "error" : ""}">
+        <b>${audio.selected_device_missing ? "所选设备当前离线" : `当前路由：${escapeHtml(audio.label || "跟随系统默认输出")}`}</b>
+        <span>${escapeHtml(audio.error || (audio.backend_available ? "设备离线时播放会失败，不会自动改投其他设备。" : "安装音频路由依赖并重载插件后，可选择具体耳机、扬声器或蓝牙音响。"))}</span>
+      </div>
+    </article>
+  `;
+}
+
+function renderRealityTouchSettings() {
+  const data = state.realityTouch;
+  if (!data) return realityTouchLoadingPanel("主动语音与计划场景");
+  const users = Array.isArray(data.users) ? data.users : [];
+  const user = selectedRealityTouchUser();
+  if (!user) {
+    return `
+      <article id="experimentalSettings" class="exp-detail-card reality-touch-card">
+        <div class="reality-touch-section-head">
+          <div><span>用户与场景</span><h3>主动语音扩展</h3></div>
+          <button type="button" class="soft" data-reality-touch-refresh>刷新</button>
+        </div>
+        <div class="exp-settings-empty">还没有可配置的私聊用户。请先让用户与 Bot 建立一次私聊，再刷新本页。</div>
+      </article>
+    `;
+  }
+  const consent = user.consent || {};
+  const alarm = user.alarm || {};
+  const confirmed = toBool(consent.confirmed);
+  const command = String(data.confirmation_command || "");
+  const options = users.map((item) => {
+    const selected = String(item.user_id) === String(user.user_id) ? "selected" : "";
+    const suffix = item.consent?.confirmed ? " · 已确认" : " · 待确认";
+    return `<option value="${escapeHtml(item.user_id)}" ${selected}>${escapeHtml((item.label || item.user_id) + suffix)}</option>`;
+  }).join("");
+  const dayLabels = ["一", "二", "三", "四", "五", "六", "日"];
+  const activeDays = new Set(Array.isArray(alarm.days) ? alarm.days.map(Number) : [0, 1, 2, 3, 4, 5, 6]);
+  const dayChecks = dayLabels.map((label, index) => `
+    <label class="reality-day-check">
+      <input type="checkbox" name="reality_day" value="${index}" ${activeDays.has(index) ? "checked" : ""} ${confirmed ? "" : "disabled"}>
+      <span>周${label}</span>
+    </label>
+  `).join("");
+  const formDisabled = confirmed ? "" : "disabled";
+  const testDisabled = data.global_enabled && confirmed && alarm.time ? "" : "disabled";
+  return `
+    <article id="experimentalSettings" class="exp-detail-card reality-touch-card">
+      <div class="reality-touch-section-head">
+        <div><span>用户与场景</span><h3>主动语音扩展</h3></div>
+        <button type="button" class="soft" data-reality-touch-refresh>刷新状态</button>
+      </div>
+      <label class="reality-user-select">
+        <span>配置对象</span>
+        <select data-reality-touch-user>${options}</select>
+      </label>
+      <section class="reality-consent-strip ${confirmed ? "ok" : "pending"}">
+        <div>
+          <b>${confirmed ? "用户已完成知情确认" : "等待用户本人确认"}</b>
+          <span>${confirmed ? `仅授权本机音频 · 协议 v${escapeHtml(String(consent.version || data.consent_version || 1))}` : "页面不能代替用户授权。请让该用户在与 Bot 的私聊中手动发送下方完整命令。"}</span>
+        </div>
+        ${confirmed ? `<span class="reality-consent-time">${consent.confirmed_at ? escapeHtml(formatDailyReviewTime(consent.confirmed_at)) : "已记录"}</span>` : `<button type="button" data-reality-touch-copy>复制确认命令</button>`}
+      </section>
+      ${confirmed ? "" : `<div class="reality-command-box"><code>${escapeHtml(command)}</code></div>`}
+      <form class="reality-policy-form" data-reality-touch-policy-form>
+        <label class="reality-enable-field">
+          <input type="checkbox" name="reality_proactive_voice" ${user.policy?.proactive_voice_enabled ? "checked" : ""} ${formDisabled}>
+          <span><b>将 Bot 的主动语音同步到所选设备</b><small>仅当主动引擎本轮选择 voice 动作时播放；仍受主动频率、免打扰和用户授权约束。</small></span>
+        </label>
+        <button type="submit" ${formDisabled}>保存主动语音策略</button>
+      </form>
+      <div class="reality-scenario-head">
+        <div><span>计划模板</span><h4>起床提醒</h4></div>
+        <small>这是现实触及的一个使用示例，不是该能力的全部用途。</small>
+      </div>
+      <form class="reality-alarm-form" data-reality-touch-form>
+        <div class="reality-form-grid">
+          <label class="reality-field">
+            <span>起床时间</span>
+            <input type="time" name="reality_time" value="${escapeHtml(alarm.time || "07:30")}" ${formDisabled} required>
+          </label>
+          <label class="reality-field">
+            <span>重复播放</span>
+            <select name="reality_repeat_count" ${formDisabled}>
+              ${[1, 2, 3, 4, 5, 6].map((count) => `<option value="${count}" ${Number(alarm.repeat_count || 1) === count ? "selected" : ""}>${count} 次</option>`).join("")}
+            </select>
+          </label>
+          <label class="reality-field">
+            <span>重复间隔</span>
+            <input type="number" name="reality_repeat_interval" min="5" max="300" step="5" value="${escapeHtml(String(alarm.repeat_interval_seconds || 20))}" ${formDisabled}>
+            <small>5-300 秒</small>
+          </label>
+          <label class="reality-enable-field">
+            <input type="checkbox" name="reality_enabled" ${alarm.enabled ? "checked" : ""} ${formDisabled}>
+            <span><b>启用该用户的起床语音</b><small>总开关关闭时保留设置但不会触发</small></span>
+          </label>
+        </div>
+        <fieldset class="reality-days" ${formDisabled}>
+          <legend>重复日期</legend>
+          <div>${dayChecks}</div>
+        </fieldset>
+        <label class="reality-message-field">
+          <span>播报内容</span>
+          <textarea name="reality_message" rows="3" maxlength="240" ${formDisabled}>${escapeHtml(alarm.message || data.default_message || "")}</textarea>
+          <small>到点后先由当前 TTS 配置合成，再交给系统默认音频输出。</small>
+        </label>
+        <div class="reality-form-actions">
+          <button type="submit" class="primary" ${formDisabled}>保存起床设置</button>
+          <button type="button" data-reality-touch-test data-reality-touch-test-kind="scenario" data-reality-touch-test-message="${escapeHtml(alarm.message || data.default_message || "")}" ${testDisabled}>试听此场景</button>
+          <button type="button" class="danger soft" data-reality-touch-disable ${alarm.enabled ? "" : "disabled"}>关闭该用户闹钟</button>
+        </div>
+      </form>
+    </article>
+  `;
+}
+
+function renderRealityTouchRuntime() {
+  const data = state.realityTouch;
+  if (!data) return realityTouchLoadingPanel("运行状态");
+  const user = selectedRealityTouchUser();
+  const counts = data.counts || {};
+  const consent = user?.consent || {};
+  const alarm = user?.alarm || {};
+  const dayLabels = ["一", "二", "三", "四", "五", "六", "日"];
+  const dayText = Array.isArray(alarm.days) && alarm.days.length === 7
+    ? "每天"
+    : (Array.isArray(alarm.days) ? `周${alarm.days.map((day) => dayLabels[Number(day)]).filter(Boolean).join("、")}` : "-");
+  return `
+    <article id="experimentalRuntime" class="exp-detail-card reality-touch-card">
+      <div class="reality-touch-section-head">
+        <div><span>实时摘要</span><h3>运行状态</h3></div>
+        <span class="reality-global-state ${data.global_enabled ? "on" : "off"}">${data.global_enabled ? "总开关已开启" : "总开关已关闭"}</span>
+      </div>
+      <div class="reality-runtime-stats">
+        <div><span>可见用户</span><b>${escapeHtml(String(counts.users || 0))}</b></div>
+        <div><span>已确认</span><b>${escapeHtml(String(counts.consented || 0))}</b></div>
+        <div><span>主动语音扩展</span><b>${escapeHtml(String(counts.proactive_voice || 0))}</b></div>
+        <div><span>计划场景</span><b>${escapeHtml(String(counts.enabled || 0))}</b></div>
+        <div><span>已排期</span><b>${escapeHtml(String(counts.scheduled || 0))}</b></div>
+      </div>
+      ${user ? `
+        <dl class="reality-runtime-detail">
+          <div><dt>当前用户</dt><dd>${escapeHtml(user.label || user.user_id || "-")}</dd></div>
+          <div><dt>音频授权</dt><dd>${consent.local_audio ? "已授权 local_audio" : "未授权"}</dd></div>
+          <div><dt>主动语音</dt><dd>${user.policy?.proactive_voice_enabled ? "同步到现实设备" : "未开放"}</dd></div>
+          <div><dt>摄像头</dt><dd class="denied">未授权，且不会继承音频授权</dd></div>
+          <div><dt>播放目标</dt><dd>${escapeHtml(data.audio_output?.label || "跟随系统默认输出")}</dd></div>
+          <div><dt>起床提醒模板</dt><dd>${alarm.time ? `${escapeHtml(alarm.time)} · ${escapeHtml(dayText)}` : "未设置"}</dd></div>
+          <div><dt>下次触发</dt><dd>${escapeHtml(alarm.next_trigger_text || (alarm.enabled ? "等待调度刷新" : "闹钟已关闭"))}</dd></div>
+          <div><dt>最近触发</dt><dd>${escapeHtml(alarm.last_trigger_key || "暂无记录")}</dd></div>
+        </dl>
+      ` : `<div class="exp-settings-empty">暂无用户运行态。</div>`}
+      <div class="reality-boundary-note">
+        <b>设备边界</b>
+        <span>插件可以把音频直接路由到已选择的电脑输出端点，但不会扫描或配对蓝牙设备。请先在操作系统中完成连接；设备离线或主机休眠时不会改投其他设备。</span>
+      </div>
+    </article>
+  `;
+}
+
 function renderExperimentalSettings(key) {
+  if (key === "enable_experimental_bluetooth_wakeup") return renderRealityTouchSettings();
   const sections = featureSettingSections[key] || [];
   const related = featureRelatedSettings(key);
   if (!related.length && !sections.length) {
@@ -32149,6 +32445,7 @@ function renderExperimentalSettings(key) {
 }
 
 function renderExperimentalRuntime(key) {
+  if (key === "enable_experimental_bluetooth_wakeup") return renderRealityTouchRuntime();
   const overview = state.overview || {};
   const settings = overview.settings || {};
   const features = state.featureDraft || {};
@@ -32654,10 +32951,136 @@ function bindExperimentalOverviewActions() {
   });
 }
 
+function bindRealityTouchActions(root) {
+  root.querySelector("[data-reality-touch-user]")?.addEventListener("change", (event) => {
+    state.realityTouchSelectedUserId = event.currentTarget.value || "";
+    renderExperimentalPage();
+  });
+  root.querySelector("[data-reality-touch-copy]")?.addEventListener("click", () => {
+    void copyTextToClipboard(state.realityTouch?.confirmation_command || "", "确认命令已复制");
+  });
+  root.querySelectorAll("[data-reality-touch-refresh]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      setActionBusy(button, true);
+      try {
+        await loadRealityTouch(true);
+        showToast("现实触及状态已刷新");
+      } catch (error) {
+        showToast(`刷新失败：${error.message}`, "error");
+      } finally {
+        setActionBusy(button, false);
+      }
+    });
+  });
+  root.querySelector("[data-reality-touch-device-save]")?.addEventListener("click", async (event) => {
+    const select = root.querySelector("[data-reality-touch-device]");
+    const result = await runAction(
+      () => postJson("/reality-touch/update", { action: "select_output", device_id: select?.value || "system_default" }),
+      "电脑音频输出设备已保存",
+      event.currentTarget,
+      { reload: false },
+    );
+    if (result) {
+      state.realityTouch = result;
+      renderExperimentalPage();
+    }
+  });
+  const policyForm = root.querySelector("[data-reality-touch-policy-form]");
+  policyForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const user = selectedRealityTouchUser();
+    if (!user) return;
+    const button = policyForm.querySelector('button[type="submit"]');
+    const result = await runAction(
+      () => postJson("/reality-touch/update", {
+        action: "save_policy",
+        user_id: user.user_id,
+        proactive_voice_enabled: Boolean(policyForm.elements.reality_proactive_voice?.checked),
+      }),
+      "主动语音现实触及策略已保存",
+      button,
+      { reload: false },
+    );
+    if (result) {
+      state.realityTouch = result;
+      renderExperimentalPage();
+    }
+  });
+  const form = root.querySelector("[data-reality-touch-form]");
+  form?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const user = selectedRealityTouchUser();
+    if (!user) return;
+    const days = Array.from(form.querySelectorAll('[name="reality_day"]:checked')).map((input) => Number(input.value));
+    const payload = {
+      action: "save",
+      user_id: user.user_id,
+      enabled: Boolean(form.elements.reality_enabled?.checked),
+      time: form.elements.reality_time?.value || "",
+      days,
+      message: form.elements.reality_message?.value || "",
+      repeat_count: Number(form.elements.reality_repeat_count?.value || 1),
+      repeat_interval_seconds: Number(form.elements.reality_repeat_interval?.value || 20),
+    };
+    const button = form.querySelector('button[type="submit"]');
+    const result = await runAction(
+      () => postJson("/reality-touch/update", payload),
+      "起床提醒场景已保存",
+      button,
+      { reload: false },
+    );
+    if (result) {
+      state.realityTouch = result;
+      renderExperimentalPage();
+    }
+  });
+  root.querySelectorAll("[data-reality-touch-test]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const user = selectedRealityTouchUser();
+      if (!user) return;
+      const control = event.currentTarget;
+      const result = await runAction(
+        () => postJson("/reality-touch/update", {
+          action: "test",
+          user_id: user.user_id,
+          test_kind: control.dataset.realityTouchTestKind || "scenario",
+          message: control.dataset.realityTouchTestMessage || "",
+        }),
+        control.dataset.realityTouchTestKind === "device"
+          ? "固定测试音频已发送到所选电脑音频输出设备"
+          : "场景试听已发送到所选电脑音频输出设备",
+        control,
+        { reload: false },
+      );
+      if (result) {
+        state.realityTouch = result;
+        renderExperimentalPage();
+      }
+    });
+  });
+  root.querySelector("[data-reality-touch-disable]")?.addEventListener("click", async (event) => {
+    const user = selectedRealityTouchUser();
+    if (!user) return;
+    const button = event.currentTarget;
+    if (!requireSecondClick(button, `reality-disable-${user.user_id}`, "再次点击将关闭该用户的起床语音")) return;
+    const result = await runAction(
+      () => postJson("/reality-touch/update", { action: "disable", user_id: user.user_id }),
+      "该用户的起床语音已关闭",
+      button,
+      { reload: false },
+    );
+    if (result) {
+      state.realityTouch = result;
+      renderExperimentalPage();
+    }
+  });
+}
+
 function bindExperimentalSubpageActions(key) {
   const root = $("#experimentalRoot");
   if (!root) return;
   if (key === "enable_reaction_expression_experiment") bindReactionLibraryActions();
+  if (key === "enable_experimental_bluetooth_wakeup") bindRealityTouchActions(root);
   root.querySelectorAll("[data-exp-back]").forEach((button) => {
     button.addEventListener("click", () => {
       state.experimentalSubpage = "";
@@ -32687,6 +33110,9 @@ function bindExperimentalSubpageActions(key) {
       );
       if (actionResultPersisted(result)) {
         reflectExperimentalToggleChange(toggleKey, requestedValue);
+        if (toggleKey === "enable_experimental_bluetooth_wakeup") {
+          loadRealityTouch(true).catch((error) => showToast(`刷新现实触及状态失败：${error.message}`, "error"));
+        }
         scheduleExperimentalRuntimeRefresh(false);
       } else {
         state.featureDraft[toggleKey] = previousValue;

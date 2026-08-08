@@ -3965,6 +3965,13 @@
     "default": false,
     "invisible": true
   },
+  "enable_experimental_bluetooth_wakeup": {
+    "description": "现实触及：主动能力设备扩展",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，可将 Bot 的主动语音动作路由到用户选择的电脑音频输出设备，并运行起床提醒等计划模板。每位用户仍须完成版本化知情确认；当前确认只授权本机音频，不包含未来的摄像头能力。蓝牙连接和配对仍由操作系统管理。",
+    "invisible": true
+  },
   "enable_tts_local_playback_live_only": {
     "description": "Legacy flat config: 直播时仅播放直播回应消息",
     "type": "bool",
@@ -11403,8 +11410,14 @@
   "experimental_motivation_config": {
     "description": "实验性功能",
     "type": "object",
-    "hint": "表情表达、心理机制、动机调度、角色贴合校准和情绪余波等探索性功能。除已存在的情绪模拟会保留原默认值外，其它实验项默认关闭；建议逐项开启观察，不把理论标签写进实际回复正文。",
+    "hint": "现实设备触及、表情表达、心理机制、动机调度、角色贴合校准和情绪余波等探索性功能。除已存在的情绪模拟会保留原默认值外，其它实验项默认关闭；建议逐项开启观察。设备能力还必须经过对应用户的显式知情确认。",
     "items": {
+      "enable_experimental_bluetooth_wakeup": {
+        "description": "启用现实触及",
+        "type": "bool",
+        "hint": "默认关闭。开启后开放现实触及设备路由与主动语音扩展；每位用户仍须在私聊中手动完成版本化知情确认。管理员可选择电脑音频输出设备，并单独启用主动语音同步或起床提醒等计划场景。当前授权范围仅为本机音频，不包含摄像头；未来摄像头能力必须再次单独确认。",
+        "default": false
+      },
       "enable_reaction_expression_experiment": {
         "description": "启用表情表达实验",
         "type": "bool",

@@ -696,6 +696,8 @@ class PrivateCompanionPageApi(
             ("/group/member-safety", self.get_group_member_safety, ["GET"], "Private Companion Page group member safety"),
             ("/group/member-safety/action", self.update_group_member_safety, ["POST"], "Private Companion Page update group member safety"),
             ("/settings/update", self.update_settings, ["POST"], "Private Companion Page update settings"),
+            ("/reality-touch", self.get_reality_touch, ["GET"], "Private Companion Page reality touch status"),
+            ("/reality-touch/update", self.update_reality_touch, ["POST"], "Private Companion Page update reality touch alarm"),
             ("/settings/swap_image_api", self.swap_image_api_settings, ["POST"], "Private Companion Page swap image API settings"),
             ("/image_api/status", self.get_image_api_status, ["GET"], "Private Companion Page image API status"),
             ("/image_api/test", self.test_image_api_endpoint, ["POST"], "Private Companion Page test one image API endpoint"),
@@ -4088,6 +4090,111 @@ class PrivateCompanionPageApi(
         if importer():
             self.plugin._save_data_sync()
 
+
+    async def get_reality_touch(self) -> dict[str, Any]:
+        snapshotter = getattr(self.plugin, "_reality_touch_page_snapshot", None)
+        if not callable(snapshotter):
+            return self._error("当前插件实例不支持现实触及控制台", status_code=503)
+        try:
+            async with self.plugin._data_lock:
+                snapshot = deepcopy(snapshotter())
+            return self._ok(snapshot)
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 获取现实触及状态失败: %s", exc, exc_info=True)
+            return self._exception_error("获取现实触及状态失败")
+
+    async def update_reality_touch(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        action = self._single_line(payload.get("action"), 24).lower()
+        user_id = self._single_line(payload.get("user_id"), 120)
+        if action not in {"save", "save_policy", "disable", "test", "select_output"}:
+            return self._error("不支持的现实触及操作")
+        if action != "select_output" and not user_id:
+            return self._error("请选择私聊用户")
+        snapshotter = getattr(self.plugin, "_reality_touch_page_snapshot", None)
+        updater = getattr(self.plugin, "_reality_touch_update_alarm", None)
+        policy_updater = getattr(self.plugin, "_reality_touch_update_policy", None)
+        device_selector = getattr(self.plugin, "_reality_touch_select_audio_device", None)
+        text_player = getattr(self.plugin, "_play_reality_touch_text", None)
+        test_audio_player = getattr(self.plugin, "_play_reality_touch_test_audio", None)
+        if not callable(snapshotter) or not callable(updater):
+            return self._error("当前插件实例不支持现实触及控制台", status_code=503)
+
+        alarm_for_test: dict[str, Any] | None = None
+        test_kind = ""
+        message = ""
+        try:
+            if action == "select_output":
+                if not callable(device_selector):
+                    return self._error("当前插件实例不支持选择音频输出设备", status_code=503)
+                async with self.plugin._data_lock:
+                    selected = device_selector(payload.get("device_id"))
+                    self.plugin._save_data_sync()
+                    snapshot = deepcopy(snapshotter())
+                snapshot["message"] = f"音频输出已切换为：{self._single_line(selected.get('name'), 120)}"
+                return self._ok(snapshot)
+
+            async with self.plugin._data_lock:
+                users = self.plugin.data.get("users", {}) if isinstance(self.plugin.data, dict) else {}
+                user = users.get(user_id) if isinstance(users, dict) else None
+                if not isinstance(user, dict):
+                    return self._error("没有找到对应的私聊用户")
+                if action == "save":
+                    updater(user, payload)
+                    self.plugin._save_data_sync()
+                    message = "起床提醒场景已保存"
+                elif action == "save_policy":
+                    if not callable(policy_updater):
+                        return self._error("当前插件实例不支持主动语音扩展", status_code=503)
+                    policy_updater(user, payload)
+                    self.plugin._save_data_sync()
+                    message = "现实触及主动语音策略已保存"
+                elif action == "disable":
+                    alarm = user.get("wakeup_alarm")
+                    if not isinstance(alarm, dict):
+                        alarm = {}
+                        user["wakeup_alarm"] = alarm
+                    alarm["enabled"] = False
+                    alarm.pop("last_trigger_key", None)
+                    self.plugin._save_data_sync()
+                    message = "已关闭该用户的起床语音"
+                else:
+                    test_kind = "device" if self._single_line(payload.get("test_kind"), 24).lower() == "device" else "scenario"
+                    consented = getattr(self.plugin, "_reality_touch_audio_consented", lambda _: False)(user)
+                    if not bool(getattr(self.plugin, "enable_experimental_bluetooth_wakeup", False)):
+                        return self._error("请先开启现实触及总开关")
+                    if not consented:
+                        return self._error("该用户尚未在私聊中完成现实触及知情确认")
+                    alarm = user.get("wakeup_alarm") if isinstance(user.get("wakeup_alarm"), dict) else {}
+                    alarm_for_test = {
+                        "message": self._single_line(payload.get("message"), 240)
+                        or self._single_line(alarm.get("message"), 240)
+                        or "现实触及音频输出测试。你现在听到的声音来自 Bot 的主动语音能力。",
+                    }
+
+            if action == "test":
+                if test_kind == "device":
+                    if not callable(test_audio_player):
+                        return self._error("当前插件实例没有固定测试音频播放能力", status_code=503)
+                    if not await test_audio_player():
+                        return self._error("固定测试音频播放失败，请检查所选音频输出设备")
+                    message = "固定测试音频已发送到所选音频输出设备"
+                else:
+                    if not callable(text_player) or alarm_for_test is None:
+                        return self._error("当前插件实例没有可用的本机语音播放能力", status_code=503)
+                    if not await text_player(alarm_for_test["message"], repeat=1, interval=20):
+                        return self._error("场景试听失败，请检查 TTS 配置和所选音频输出设备")
+                    message = "场景试听已发送到所选音频输出设备"
+
+            async with self.plugin._data_lock:
+                snapshot = deepcopy(snapshotter())
+            snapshot["message"] = message
+            return self._ok(snapshot)
+        except ValueError as exc:
+            return self._error(str(exc))
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 更新现实触及失败: %s", exc, exc_info=True)
+            return self._exception_error("更新现实触及失败")
 
     async def update_settings(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -16568,6 +16675,7 @@ class PrivateCompanionPageApi(
             "enable_reaction_expression_experiment",
             "enable_maslow_motivation_experiment",
             "enable_experimental_motivation_model",
+            "enable_experimental_bluetooth_wakeup",
             "enable_personality_iteration_experiment",
             "enable_daily_case_review_experiment",
             "enable_passive_topic_suppression",
@@ -21546,6 +21654,7 @@ class PrivateCompanionPageApi(
             "enable_reaction_expression_experiment",
             "enable_maslow_motivation_experiment",
             "enable_experimental_motivation_model",
+            "enable_experimental_bluetooth_wakeup",
             "enable_personality_iteration_experiment",
             "enable_daily_case_review_experiment",
             "enable_passive_topic_suppression",
@@ -21822,6 +21931,7 @@ class PrivateCompanionPageApi(
             "proactive_persona_judge_cache_minutes",
             "proactive_persona_judge_max_daily",
             "enable_experimental_motivation_model",
+            "enable_experimental_bluetooth_wakeup",
             "enable_personality_iteration_experiment",
             "enable_personality_iteration_auto_tune",
             "enable_maslow_schedule_influence",

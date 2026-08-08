@@ -7517,7 +7517,12 @@ Output:
         if not target:
             return {"success": False, "context": "voice：缺少目标会话,无法发送语音", "extra_components": [], "summary": "语音"}
         voice_text = await self._build_voice_note_text(user, name, reason, target=target)
-        components, audio_note = await self._create_voice_record_component(target, voice_text)
+        touch_allowed = getattr(self, "_reality_touch_proactive_voice_allowed", lambda _: False)(user)
+        components, audio_note = await self._create_voice_record_component(
+            target,
+            voice_text,
+            defer_local_playback=touch_allowed,
+        )
         if not components:
             return {
                 "success": False,
@@ -7529,12 +7534,15 @@ Output:
                 "extra_components": [],
                 "summary": "语音",
             }
+        touch_player = getattr(self, "_mirror_reality_touch_proactive_voice", None)
+        touched = bool(await touch_player(user, audio_note)) if touch_allowed and callable(touch_player) else False
         return {
             "success": True,
             "context": (
                 "voice：已生成真实语音\n"
                 f"语音内容：{self._strip_tts_markup(voice_text)}\n"
-                f"真实语音文件：{audio_note}"
+                f"真实语音文件：{audio_note}\n"
+                f"现实触及：{'已同步到所选电脑音频设备' if touched else '未同步到电脑音频设备'}"
             ),
             "extra_components": components,
             "summary": "留了句语音",
@@ -8065,7 +8073,13 @@ Output:
                     spoken = re.sub(r"[“”\"'`]", "", spoken).strip()
         return spoken
 
-    async def _create_voice_record_component(self, target: str, spoken_text: str) -> tuple[list[Any], str]:
+    async def _create_voice_record_component(
+        self,
+        target: str,
+        spoken_text: str,
+        *,
+        defer_local_playback: bool = False,
+    ) -> tuple[list[Any], str]:
         if not spoken_text:
             return [], "语音内容为空"
         try:
@@ -8107,14 +8121,29 @@ Output:
                 return records, note
         record_builder = getattr(self, "_tts_record_component", None)
         if callable(record_builder):
-            record = await record_builder(
-                spoken_text,
-                tts_provider,
-                provider_settings,
-                config,
-                source_text=spoken_text,
-                source="private_companion",
-            )
+            record_kwargs = {
+                "source_text": spoken_text,
+                "source": "private_companion",
+            }
+            if defer_local_playback:
+                record_kwargs["defer_delivery_effects"] = True
+            try:
+                record = await record_builder(
+                    spoken_text,
+                    tts_provider,
+                    provider_settings,
+                    config,
+                    **record_kwargs,
+                )
+            except TypeError:
+                record_kwargs.pop("defer_delivery_effects", None)
+                record = await record_builder(
+                    spoken_text,
+                    tts_provider,
+                    provider_settings,
+                    config,
+                    **record_kwargs,
+                )
             if record is not None:
                 return [record], self._extract_record_note([record]) or "已通过 TTS强化生成语音"
             return [], "TTS 没有返回音频文件"

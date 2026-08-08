@@ -28365,6 +28365,454 @@ pre {
   padding: 8px 0;
 }
 
+/* Reality touch control console */
+
+.reality-touch-grid {
+  grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.85fr);
+}
+
+.reality-touch-card {
+  min-width: 0;
+}
+
+.reality-device-card {
+  min-width: 0;
+}
+
+.reality-device-intro {
+  margin: -4px 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.reality-audio-backend {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 9px;
+  white-space: nowrap;
+}
+
+.reality-audio-backend.ready {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.reality-audio-backend.limited {
+  border-color: var(--gold);
+  color: var(--warn);
+  background: rgba(248, 242, 225, 0.72);
+}
+
+.reality-device-controls {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) repeat(3, auto);
+  gap: 8px;
+  align-items: end;
+}
+
+.reality-device-controls label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.reality-device-controls label span {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reality-device-controls select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+}
+
+.reality-device-status {
+  display: grid;
+  gap: 3px;
+  border-left: 3px solid var(--accent);
+  padding: 10px 12px;
+  margin-top: 12px;
+  background: var(--accent-soft);
+}
+
+.reality-device-status.error {
+  border-left-color: var(--danger);
+  background: rgba(247, 224, 221, 0.66);
+}
+
+.reality-device-status b {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.reality-device-status span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.reality-touch-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.reality-touch-section-head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.reality-touch-section-head span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.reality-touch-section-head h3 {
+  margin: 0;
+}
+
+.reality-user-select,
+.reality-field,
+.reality-message-field {
+  display: grid;
+  gap: 7px;
+}
+
+.reality-user-select {
+  grid-template-columns: minmax(90px, 0.32fr) minmax(180px, 1fr);
+  align-items: center;
+  border-block: 1px solid var(--line-soft);
+  padding: 12px 0;
+}
+
+.reality-user-select > span,
+.reality-field > span,
+.reality-message-field > span,
+.reality-days legend {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reality-user-select select,
+.reality-field input,
+.reality-field select,
+.reality-message-field textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  padding: 9px 10px;
+  font: inherit;
+}
+
+.reality-user-select select:focus-visible,
+.reality-field input:focus-visible,
+.reality-field select:focus-visible,
+.reality-message-field textarea:focus-visible,
+.reality-day-check input:focus-visible + span {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.reality-consent-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-left: 3px solid var(--warn);
+  padding: 12px;
+  margin-top: 12px;
+  background: rgba(246, 238, 208, 0.58);
+}
+
+.reality-consent-strip.ok {
+  border-left-color: var(--accent);
+  background: rgba(221, 239, 229, 0.62);
+}
+
+.reality-consent-strip > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.reality-consent-strip b {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.reality-consent-strip span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.reality-consent-time {
+  flex: 0 0 auto;
+}
+
+.reality-command-box {
+  border: 1px solid var(--line-soft);
+  border-top: 0;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.reality-command-box code {
+  display: block;
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 1.65;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.reality-alarm-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.reality-policy-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+  margin-top: 16px;
+}
+
+.reality-policy-form button {
+  min-height: 42px;
+}
+
+.reality-scenario-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 12px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 16px;
+  margin-top: 18px;
+}
+
+.reality-scenario-head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.reality-scenario-head span,
+.reality-scenario-head small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.reality-scenario-head h4 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.reality-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.reality-field small,
+.reality-message-field small,
+.reality-enable-field small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.reality-enable-field {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border-left: 3px solid var(--accent);
+  padding: 8px 10px;
+  background: var(--accent-soft);
+}
+
+.reality-enable-field > input {
+  flex: 0 0 18px;
+  width: 18px !important;
+  min-width: 18px;
+  height: 18px;
+  min-height: 18px !important;
+  padding: 0;
+  margin: 0;
+  accent-color: var(--accent-strong);
+}
+
+.reality-enable-field > span {
+  display: grid;
+  gap: 2px;
+}
+
+.reality-days {
+  min-width: 0;
+  border: 0;
+  border-block: 1px solid var(--line-soft);
+  padding: 12px 0;
+  margin: 0;
+}
+
+.reality-days > div {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(48px, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.reality-day-check input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.reality-day-check span {
+  display: grid;
+  place-items: center;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  background: var(--panel);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.reality-day-check input:checked + span {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  font-weight: 700;
+}
+
+.reality-day-check input:disabled + span {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.reality-message-field textarea {
+  min-height: 82px;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.reality-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.reality-form-actions button {
+  min-height: 36px;
+}
+
+.reality-global-state {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 9px;
+  white-space: nowrap;
+}
+
+.reality-global-state.on {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.reality-global-state.off {
+  color: var(--muted);
+  background: var(--panel);
+}
+
+.reality-runtime-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(76px, 1fr));
+  gap: 7px;
+}
+
+.reality-runtime-stats > div {
+  display: grid;
+  gap: 3px;
+  border-bottom: 2px solid var(--accent-soft);
+  padding: 8px 4px;
+}
+
+.reality-runtime-stats span,
+.reality-runtime-detail dt {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.reality-runtime-stats b {
+  color: var(--accent-strong);
+  font-size: 18px;
+}
+
+.reality-runtime-detail {
+  display: grid;
+  gap: 0;
+  margin: 14px 0 0;
+}
+
+.reality-runtime-detail > div {
+  display: grid;
+  grid-template-columns: minmax(76px, 0.34fr) minmax(0, 1fr);
+  gap: 10px;
+  border-top: 1px solid var(--line-soft);
+  padding: 9px 0;
+}
+
+.reality-runtime-detail dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.reality-runtime-detail dd.denied {
+  color: var(--danger);
+}
+
+.reality-boundary-note {
+  display: grid;
+  gap: 4px;
+  border-left: 3px solid var(--gold);
+  padding: 10px 12px;
+  margin-top: 12px;
+  background: rgba(248, 242, 225, 0.58);
+}
+
+.reality-boundary-note b {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.reality-boundary-note span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
 /* —— 运行状态 —— */
 
 .exp-runtime-card {
@@ -30254,6 +30702,45 @@ pre {
 
   .exp-bottom-grid {
     grid-template-columns: 1fr;
+  }
+
+  .reality-touch-section-head,
+  .reality-consent-strip {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .reality-user-select,
+  .reality-form-grid,
+  .reality-device-controls,
+  .reality-policy-form,
+  .reality-runtime-detail > div {
+    grid-template-columns: 1fr;
+  }
+
+  .reality-scenario-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .reality-days > div {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .reality-runtime-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .reality-form-actions {
+    flex-direction: column;
+  }
+
+  .reality-form-actions button,
+  .reality-device-controls button,
+  .reality-policy-form button,
+  .reality-consent-strip button,
+  .reality-touch-section-head button {
+    width: 100%;
   }
 
   .exp-theory-list {

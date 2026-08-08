@@ -3482,6 +3482,7 @@ class ProactiveMixin(UserRestGateMixin):
             ("日常状态", self._ensure_daily_state),
             ("今日日程", self._ensure_daily_plan),
             ("日程归档", self._run_agenda_maintenance_tick),
+            ("实验性起床语音", self._run_wakeup_alarm_tick),
             ("当前细化", self._ensure_detail_enhancement),
             ("当前在线感", self._ensure_current_detail_presence_status),
             ("日记", self._ensure_daily_diary),
