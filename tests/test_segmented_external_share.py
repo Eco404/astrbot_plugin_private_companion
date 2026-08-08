@@ -24,10 +24,14 @@ class _SegmentTtsHarness(TtsEnhancementMixin, ProactiveMessageMixin, EventDispat
 
 class SegmentedExternalShareTests(unittest.TestCase):
     def test_external_shares_follow_segmenting_config(self) -> None:
-        for reason in ("bili_video_share", "news_share", "web_exploration_share"):
+        for reason in (
+            "bili_video_share",
+            "news_share",
+            "web_exploration_share",
+            "creative_share",
+        ):
             self.assertFalse(DailyStateMixin._proactive_send_disables_segmenting(reason))
 
-        self.assertTrue(DailyStateMixin._proactive_send_disables_segmenting("creative_share"))
         self.assertTrue(
             DailyStateMixin._proactive_send_disables_segmenting(
                 "bili_video_share",
@@ -46,6 +50,81 @@ class SegmentedExternalShareTests(unittest.TestCase):
             'reason in {"creative_share", "bili_video_share", "news_share", "web_exploration_share"}',
             source,
         )
+
+    def test_creative_share_uses_configured_text_segmentation(self) -> None:
+        harness = _SegmentHarness()
+        harness.enable_segmented_proactive_reply = True
+        harness.segmented_proactive_threshold = 500
+        harness.segmented_proactive_min_segment_chars = 5
+        harness.segmented_proactive_max_segments = 5
+        harness.segmented_proactive_split_mode = "words"
+        harness.segmented_proactive_regex = r"(?<=[。！？!?…~～])\s*|\n+"
+        harness.segmented_proactive_split_words = [
+            "。", "？", "！", "~", "?", ".", "!", ";", "；", "……", "（", "“", "，", "…"
+        ]
+        harness.enable_segmented_proactive_content_cleanup = False
+        harness.segmented_proactive_content_cleanup_scope = "all"
+        harness.segmented_proactive_content_cleanup_rule = ""
+        harness.segmented_proactive_content_cleanup_words = []
+        harness.enable_segmented_proactive_content_replacement = False
+        harness.segmented_proactive_content_replacements = []
+        text = (
+            "嗯...\n比折大人，刚才靠在水池边把剩的蓝莓吃掉了，"
+            "手指被染上了一点点紫色呢，顺手把桌上几件本来想丢掉的旧东西"
+            "慢慢收好的时候，突然觉得……\n心里那个塞得满满的角落，"
+            "好像也跟着腾出了一小块位置呢。"
+        )
+
+        segments = harness._split_proactive_text(text)
+
+        self.assertFalse(DailyStateMixin._proactive_send_disables_segmenting("creative_share"))
+        self.assertEqual(5, len(segments))
+        self.assertTrue(segments[0].startswith("嗯...，比折大人"))
+        self.assertEqual("刚才靠在水池边把剩的蓝莓吃掉了，", segments[1])
+        self.assertIn("慢慢收好的时候", segments[3])
+        self.assertIn("心里那个塞得满满的角落", segments[4])
+        self.assertTrue(segments[-1].endswith("腾出了一小块位置呢。"))
+
+    def test_creative_excerpt_is_atomic_but_surrounding_chat_still_segments(self) -> None:
+        excerpt = (
+            "「笔尖落下去，墨迹在空白页上洇出一个小点，停了一拍，才慢慢拖成第一笔。"
+            "写得很慢，像在跟这块刚空出来的桌面重新认识。」"
+        )
+        text = f"嗯...\n比折大人，我刚写到这里。{excerpt}你觉得这个收尾怎么样？"
+
+        for mode in ("words", "regex"):
+            with self.subTest(mode=mode):
+                harness = _SegmentHarness()
+                harness.enable_segmented_proactive_reply = True
+                harness.segmented_proactive_threshold = 500
+                harness.segmented_proactive_min_segment_chars = 5
+                harness.segmented_proactive_max_segments = 5
+                harness.segmented_proactive_split_mode = mode
+                harness.segmented_proactive_regex = r".*?[。？！~…\n]+|.+$"
+                harness.segmented_proactive_split_words = [
+                    "。", "？", "！", "~", "?", ".", "!", ";", "；", "……", "（", "“", "，", "…"
+                ]
+                harness.enable_segmented_proactive_content_cleanup = False
+                harness.segmented_proactive_content_cleanup_scope = "all"
+                harness.segmented_proactive_content_cleanup_rule = ""
+                harness.segmented_proactive_content_cleanup_words = []
+                harness.enable_segmented_proactive_content_replacement = False
+                harness.segmented_proactive_content_replacements = []
+
+                segments = harness._split_proactive_text(text)
+
+                self.assertIn(excerpt, segments)
+                self.assertEqual(1, sum(excerpt in segment for segment in segments))
+                self.assertGreaterEqual(len(segments), 3)
+                self.assertNotEqual(excerpt, segments[0])
+                self.assertTrue(segments[-1].endswith("你觉得这个收尾怎么样？"))
+
+    def test_creative_share_prompt_defines_excerpt_boundary(self) -> None:
+        hint = _SegmentHarness._creative_share_excerpt_prompt_hint()
+
+        self.assertIn("连续截取", hint)
+        self.assertIn("`「...」`", hint)
+        self.assertIn("前后的普通聊天仍按自然聊天节奏分段", hint)
 
     def test_bilibili_url_survives_word_segmentation(self) -> None:
         harness = _SegmentHarness()

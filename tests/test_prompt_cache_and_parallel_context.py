@@ -133,6 +133,33 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state_calls, 0)
         self.assertNotIn("memory.current_state", {item["key"] for item in collected})
 
+    async def test_colloquial_current_activity_question_triggers_state_context(self) -> None:
+        plugin = _private_collector_harness()
+        calls: list[str] = []
+
+        async def current_state(**kwargs) -> str:
+            calls.append(kwargs["query"])
+            return "当前正在专心处理手头的事。"
+
+        async def private_recall(**_kwargs) -> str:
+            return ""
+
+        plugin._memory_companion_compose_feature_context = current_state
+        plugin._memory_companion_compose_private_recall = private_recall
+
+        for text in ("那你现在在干啥呢", "好像你在忙的样子，忙啥呢"):
+            with self.subTest(text=text):
+                collected = await plugin._collect_private_passive_prompt_contexts(
+                    _PrivateEvent(),
+                    SimpleNamespace(system_prompt="", prompt=text),
+                    inbound_text=text,
+                    current_user={"user_id": "10001"},
+                    is_private_chat=True,
+                )
+                by_key = {item["key"]: item for item in collected}
+                self.assertIn("memory.current_state", by_key)
+                self.assertIn(text, calls[-1])
+
     async def test_stable_media_rule_keeps_system_prefix_identical_across_turns(self) -> None:
         plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
         plugin.enabled = True

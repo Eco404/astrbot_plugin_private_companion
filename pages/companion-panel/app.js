@@ -35,6 +35,10 @@ const state = {
   memoFilter: "active",
   memoEditorId: "",
   selectedUserId: "",
+  userDetailCache: {},
+  userDetailView: "overview",
+  userScopeFilter: "all",
+  userStatusFilter: "all",
   learningSection: "expressions",
   expressionWorkspaceView: "library",
   selectedExpressionReviewRuleId: "",
@@ -1279,16 +1283,6 @@ const featureSearchAliases = {
 
 const featureGroups = [
   {
-    title: "用户与好感度",
-    note: "用户档案、用户画像、好感度总开关、互动状态与内容尺度配置。",
-    keys: [
-      "enable_auto_user_profile_creation",
-      "enable_companion_memory",
-      "enable_custom_relationship_stage_policy",
-      "enable_relationship_content_tiers",
-    ],
-  },
-  {
     title: "通用能力",
     note: "私聊、群聊和主动链路都会参考的状态、媒介、表达学习、收口与发送能力。",
     keys: [
@@ -1325,6 +1319,16 @@ const featureGroups = [
       "enable_open_loop_tracking",
       "enable_user_habit_learning",
       "enable_food_menu_recommendation",
+    ],
+  },
+  {
+    title: "用户与好感度",
+    note: "用户档案、用户画像、好感度总开关、互动状态与内容尺度配置。",
+    keys: [
+      "enable_auto_user_profile_creation",
+      "enable_companion_memory",
+      "enable_custom_relationship_stage_policy",
+      "enable_relationship_content_tiers",
     ],
   },
   {
@@ -1775,7 +1779,7 @@ const configLabels = {
   enable_private_image_gif_enhancement: "GIF 动图强化",
   private_image_gif_max_frames: "GIF 抽帧数",
   enable_private_image_self_recognition: "图片转述增强",
-  private_image_self_recognition_hint: "角色自我识别线索",
+  private_image_self_recognition_hint: "特殊图像身份线索",
   enable_private_image_vision_cache: "重复图片转述缓存",
   private_image_vision_cache_max_items: "图片转述缓存上限",
   enable_segmented_proactive_reply: "分段发送",
@@ -2088,6 +2092,7 @@ const configLabels = {
   photo_action_max_daily: "每日主动生图上限",
   proactive_photo_text_probability: "主动带图触发概率",
   photo_generation_backend: "主动生图后端",
+  photo_generation_allowed_scopes: "生图使用范围",
   custom_photo_tool_name: "函数工具名",
   custom_photo_tool_prompt_param: "提示词参数名",
   custom_photo_tool_kind_param: "类型参数名",
@@ -2339,7 +2344,7 @@ const configDescriptions = {
   enable_health_state: "开启后健康/不适状态视为可用，拟人状态可能出现生病、不舒服、头疼或恢复尾声；关闭后自动生成和手动增添都会跳过这类状态。",
   enable_hunger_state: "开启后饥饿/胃口状态视为可用，拟人状态可能出现饿、胃口不好、想吃东西或想吃甜的；关闭后不会生成吃什么类身体小需求，手动增添也会拦截饥饿状态。",
   enable_qq_presence_sync: "开启后，日程细化会通过 OneBot 的 set_online_status 尝试同步在线/忙碌等基础 QQ 状态；不包含自定义短状态。每次只提交一次标准请求，SnowLuma 的成功异常会按成功收口，真实失败一小时内不会重复请求。",
-  enable_qq_custom_presence_sync: "默认关闭。开启后才会尝试同步“专注中/休息中”等 QQ 自定义短状态；这依赖协议端支持非标准 OneBot 扩展。为避免 NapCat 兼容问题，插件不会调用 set_custom_online_status。",
+  enable_qq_custom_presence_sync: "默认关闭。开启后才会尝试同步“专注中/休息中”等 QQ 自定义短状态；这依赖协议端支持非标准 OneBot 扩展。为避免状态快速跳转，每次只提交一次，失败时保持账号原状态。",
   inject_passive_states: "开启后普通聊天会参考“当前扮演状态”；关闭后状态主要影响日程和主动行为。",
   enable_passive_state_delta_injection: "开启后，同一会话只在状态首次出现、明显变化或用户问近况时注入短状态摘要；状态未变时不重复塞完整日程和生活背景。关闭后恢复每轮完整状态注入。",
   enable_passive_state_continuity_anchor: "默认关闭。仅当被动状态注入和被动状态增量注入都开启时生效；私聊被动回复遇到状态未变化时，注入一段不超过 300 字的 Bot 当下连续性提示。开启后会增加少量动态提示词和缓存成本，不影响主动消息或群聊。",
@@ -2446,7 +2451,7 @@ const configDescriptions = {
   screen_diary_context_max_chars: "注入给状态和日程模型的昨日屏幕观察摘要最大字符数。建议较短，只保留活动类型和节奏。",
   TROUBLESHOOTING_PROVIDER_ID: "用于“陪伴 答疑”的插件专家问答和排障中心模型复核。建议使用能阅读长上下文、理解代码和配置关系的模型；留空时快速配置使用复杂推理模型。",
   DAILY_REVIEW_PROVIDER_ID: "用于每日结束时审阅脱敏运行摘要并生成次日柔性纠偏。留空时快速配置使用复杂推理模型。",
-  proactive_intensity_preset: "默认关闭，完全沿用手动参数。开启后只在运行态调整私聊主动、群聊唤醒和插话的有效频率，并会在排障页显示当前预设；最高档不限制每日主动次数和每日群聊插话次数，不再替用户节省主动成本，会忽略 Token 软限额降载，但不会绕过免打扰、休息、用户拒绝、隐私和每日 Token 硬限额。",
+  proactive_intensity_preset: "默认关闭，完全沿用手动参数。开启后只在运行态调整私聊主动、群聊唤醒和插话的有效频率，并会在排障页显示当前预设；最高档使用每日 25 条私聊配额并忽略 Token 软限额降载，但不会绕过免打扰、休息、用户拒绝、隐私和每日 Token 硬限额。",
   idle_minutes: "用户多久没有活跃后，才被视为适合主动触达或分享的空闲状态。",
   min_interval_minutes: "同一私聊对象两次主动消息之间的最小间隔，避免频繁打扰。",
   proactive_unanswered_slowdown_start: "用户连续几次不回应 Bot 主动消息后，开始自动降低主动频率。",
@@ -2531,7 +2536,7 @@ const configDescriptions = {
   private_image_vision_max_chars: "单次视觉转述最多保留多少字符。默认 2400；详细 OCR 或长日志可适当调高，但也会增加后续聊天模型的上下文与 token 占用。",
   enable_private_image_gif_enhancement: "图片转述增强的可选子功能。开启后动态 GIF 会抽取代表帧，让视觉模型理解动作、表情变化和文字变化；关闭后按普通 GIF/图片路径处理。",
   private_image_gif_max_frames: "动态 GIF 进入视觉转述时最多抽取多少个代表帧。帧数越多越能理解动作变化，但会增加识图耗时和视觉输入量。",
-  private_image_self_recognition_hint: "只补充当前角色自己的外观、头像、名字、表情包特征或聊天截图昵称，让视觉转述更容易判断图里是不是当前角色。不要写用户资料。",
+  private_image_self_recognition_hint: "角色外貌会自动从世界知识读取。这里只补充常用头像、截图昵称、OC 别名、表情包签名或水印等无法由外貌字段表达的身份线索；不要重复填写发色、瞳色和服装，也不要写用户资料。",
   enable_private_image_vision_cache: "开启后，同一张图片或表情包会按内容哈希复用上次视觉摘要，避免重复调用识图模型；会保留压缩预览图用于管理，不保留原始大图，也不会缓存最终聊天回复。",
   private_image_vision_cache_max_items: "最多保留多少条图片视觉摘要缓存。达到上限后会清理最久未命中的旧缓存，0 表示不限制。",
   segmented_proactive_threshold: "纯文本短于或等于该字数时才考虑分段；太长的内容保持一整条，避免读起来散。",
@@ -3009,7 +3014,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_intra_day_gap_minutes", "qzone_life_publish_probability", "qzone_life_publish_max_daily", "qzone_life_publish_window_mode", "qzone_life_publish_windows", "qzone_life_publish_allow_insomnia_night", "qzone_life_publish_similarity_threshold", "qzone_publish_style_prompt"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_reference_catalog", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "photo_generation_trace_max_size_kb", "photo_generation_trace_backup_count", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets", "enable_bot_relationship_network", "bot_relationship_cards"],
+  enable_photo_text_action: ["photo_generation_allowed_scopes", "photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_reference_catalog", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "photo_generation_trace_max_size_kb", "photo_generation_trace_backup_count", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets", "enable_bot_relationship_network", "bot_relationship_cards"],
   enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_goodnight_screen_check", "goodnight_screen_check_delay_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_poke_action: ["poke_action_max_times", "poke_action_cooldown_minutes"],
   enable_voice_action: ["voice_action_max_chars"],
@@ -3350,8 +3355,8 @@ const featureSettingSections = {
       keys: ["enable_private_image_vision_cache", "private_image_vision_cache_max_items"],
     },
     {
-      title: "角色自我识别",
-      note: "把当前角色名字、人设和自定义线索交给视觉模型，辅助判断图里是不是当前角色自己。",
+      title: "特殊图像身份识别",
+      note: "角色外貌自动取自世界知识；这里只补充头像、截图昵称、OC 别名和表情包签名等特殊线索。",
       keys: ["private_image_self_recognition_hint"],
     },
   ],
@@ -3808,6 +3813,7 @@ const featureSettingSections = {
 };
 
 const featureSettingTypes = {
+  photo_generation_allowed_scopes: { type: "photo-scopes" },
   default_interaction_band: { type: "select", options: [["avoidant", "回避"], ["hurt", "受伤"], ["relaxed", "放松"], ["lively", "活泼"], ["warm", "温暖"]] },
   relationship_positive_stage_cap_key: { type: "select", options: [["familiar", "熟悉"], ["close", "亲近"], ["intimate", "亲密"], ["deeply_bonded", "深度联结"]] },
   normal_interaction_band_cap: { type: "select", options: [["relaxed", "放松"], ["lively", "活泼"], ["warm", "温暖"]] },
@@ -4159,6 +4165,10 @@ function proactiveGaugeMax(used, limit, explicit = false, fallback = 8) {
 
 function collectSettingValue(key, input) {
   if (!input) return "";
+  if (key === "photo_generation_allowed_scopes") {
+    const host = input.closest("[data-feature-param-group='photo_generation_allowed_scopes']") || input.closest(".photo-scope-choice-list");
+    return Array.from(host?.querySelectorAll("[data-photo-scope-value]:checked") || []).map((item) => String(item.value || "").trim()).filter(Boolean);
+  }
   if (key === "multi_persona_ids") {
     const host = input.closest("[data-feature-param-group='multi_persona_ids']");
     return Array.from(host?.querySelectorAll("[data-multi-persona-profile]:checked") || [])
@@ -6783,7 +6793,7 @@ const setupGuideAdvancedItems = {
         { key: "private_image_vision_provider_priority", type: "select", label: "识图增强优先级", options: [["astrbot_first", "AstrBot 图片转文字优先"], ["plugin_first", "插件识图模型优先"], ["recent_success_first", "近期成功模型优先"]], description: "首选不可用、超时或不支持图片时会继续尝试后续候选。" },
         { key: "enable_private_image_vision_cache", type: "bool", label: "重复图片缓存", description: "推荐开启，表情包和重复图不会反复读。" },
         { key: "enable_private_image_gif_enhancement", type: "bool", label: "GIF 多帧增强", description: "会更懂动图，但更耗时。" },
-        { key: "private_image_self_recognition_hint", type: "textarea", label: "自我识别提示", placeholder: "例如：图片里出现某个固定角色/头像时如何判断是 Bot 自己。" },
+        { key: "private_image_self_recognition_hint", type: "textarea", label: "特殊图像身份线索", placeholder: "常用头像、截图昵称、OC 别名、表情包签名或水印；无需重复填写外貌。" },
       ],
     },
     {
@@ -7106,7 +7116,7 @@ const setupGuideAdvancedItems = {
       kind: "feature",
       settings: [
         { key: "enable_llm_proactive_persona_judge", type: "bool", label: "人格发送判断", description: "让模型判断此刻是否符合人设和关系。" },
-        { key: "max_daily_messages", type: "number", label: "每日私聊主动上限", placeholder: "5", min: 0 },
+        { key: "max_daily_messages", type: "number", label: "每日私聊主动配额", placeholder: "8", min: 0, max: 25 },
         { key: "idle_minutes", type: "number", label: "空闲多久后可主动", placeholder: "40", min: 0 },
         { key: "min_interval_minutes", type: "number", label: "两次主动最小间隔", placeholder: "75", min: 0 },
       ],
@@ -7139,6 +7149,7 @@ const setupGuideAdvancedItems = {
       ],
       kind: "feature",
       settings: [
+        { key: "photo_generation_allowed_scopes", type: "photo-scopes", label: "生图使用范围", description: "分别控制主要用户私聊、其他陪伴用户私聊、群聊和 Bot 主动生图；未选择时按全部范围开放。" },
         { key: "photo_generation_backend", type: "select", label: "生图后端", options: [["auto", "自动：在线 API → ComfyUI → SDGen"], ["external", "只用在线图片 API"], ["comfyui", "只用 ComfyUI"], ["sdgen", "只用 SDGen"], ["tool_call", "函数工具（调用其他插件的生图工具）"]], description: "这里仅选择后端；在线 API 凭据和队列统一在“模型配置 → 生图模型”维护。" },
         { key: "natural_language_photo_generation_mode", type: "select", label: "非指令生图处理方式", options: [["tool_first", "工具优先：主链调用 pc_generate_photo"], ["rule_fast", "规则快判：插件前置接管"], ["off", "关闭：不做前置接管"]], description: "注册生图工具后建议用工具优先；只有工具调用不稳定时再用规则快判。" },
         { key: "command_photo_generation_max_daily", type: "number", label: "用户请求每日上限", placeholder: "0（不限量）", min: 0, max: 100, description: "显式陪伴生图指令与主链 pc_generate_photo 工具共用；0 表示不限量。" },
@@ -7369,7 +7380,7 @@ const setupGuideIntensityPresets = {
   },
   live: {
     label: "在线陪伴",
-    description: "最高在线陪伴档，不限制每日主动次数；仍受免打扰、隐私和硬限额约束。",
+    description: "最高在线陪伴档，使用每日 25 条私聊配额；仍受免打扰、隐私和硬限额约束。",
     effects: {
       max_daily_messages: 999999,
       idle_minutes: 0,
@@ -8680,7 +8691,7 @@ function setupGuidePrivateIntensityHtml() {
     <div class="setup-guide-question">
       <h4>私聊影响参数</h4>
       <div class="setup-guide-grid-2">
-        ${setupGuideNumber("privateMaxDailyMessages", "每日私聊主动上限", "9", { min: 0, description: "999999 表示不限；0 表示不主动发私聊。" })}
+        ${setupGuideNumber("privateMaxDailyMessages", "每日私聊主动配额", "9", { min: 0, max: 25, description: "配额会自动派生五层主动策略；0 表示不主动发私聊。" })}
         ${setupGuideNumber("privateIdleMinutes", "空闲多久后可主动（分钟）", "40", { min: 0 })}
         ${setupGuideNumber("privateMinIntervalMinutes", "两次主动最小间隔（分钟）", "75", { min: 0 })}
         ${setupGuideNumber("privatePersonaJudgeThreshold", "人格发送判断阈值", "54", { min: 0, max: 100, description: "越低越容易通过主动发送判断。" })}
@@ -8689,7 +8700,7 @@ function setupGuidePrivateIntensityHtml() {
         ${setupGuideNumber("privateUnansweredMaxIntervalMultiplier", "未回复最大间隔倍率", "1.65", { min: 1, step: 0.05 })}
         ${setupGuideNumber("privateFriendUnansweredMaxCooldownHours", "次要用户未回复最长冷却（小时）", "30", { min: 0 })}
       </div>
-      ${setupGuideHint(`当前预设派生：${draft.privateIgnoreTokenSoftLimit ? "忽略 Token 软限额降载" : "遵循 Token 软限额"}；${draft.privateIgnoreDailyLimit ? "不按每日主动次数封顶" : "遵循每日主动上限"}。这些值由预设决定，无需手动填写。`)}
+      ${setupGuideHint(`当前预设派生：${draft.privateIgnoreTokenSoftLimit ? "忽略 Token 软限额降载" : "遵循 Token 软限额"}；私聊配额按五层策略执行。用户配额达到 25 或更高时统一使用最高档策略。`)}
     </div>
     <div class="setup-guide-question">
       <h4>联动影响参数</h4>
@@ -13915,59 +13926,48 @@ function renderLearning() {
 }
 
 function renderUsers() {
-  const keyword = ($("#userFilter").value || "").trim().toLowerCase();
+  const keyword = ($("#userFilter")?.value || "").trim().toLowerCase();
+  state.userScopeFilter = $("#userScopeFilter")?.value || state.userScopeFilter || "all";
+  state.userStatusFilter = $("#userStatusFilter")?.value || state.userStatusFilter || "all";
   const rows = state.users.filter((user) => {
     const aliases = Array.isArray(user.alias_user_ids) ? user.alias_user_ids.join(" ") : "";
     const text = `${user.user_id} ${user.nickname} ${user.umo} ${aliases}`.toLowerCase();
-    return !keyword || text.includes(keyword);
+    const matchesKeyword = !keyword || text.includes(keyword);
+    const matchesScope = state.userScopeFilter === "all" || state.userScopeFilter === "private";
+    const matchesStatus = state.userStatusFilter === "all"
+      || (state.userStatusFilter === "enabled" && user.enabled)
+      || (state.userStatusFilter === "disabled" && !user.enabled);
+    return matchesKeyword && matchesScope && matchesStatus;
   });
+  const rosterCount = $("#userRosterCount");
+  if (rosterCount) rosterCount.textContent = String(rows.length);
   $("#userRows").innerHTML = rows.length
     ? rows.map((user) => `
-      <tr data-user-id="${escapeHtml(user.user_id)}" class="${user.user_id === state.selectedUserId ? "is-selected" : ""}">
-        <td class="user-cell identity"><strong title="${escapeHtml(user.display_name || user.nickname || user.user_id)}">${escapeHtml(user.display_name || user.nickname || user.user_id)}</strong> ${userPlatformBadge(user)}${Array.isArray(user.alias_user_ids) && user.alias_user_ids.length ? ` <span class="badge ok" title="${escapeHtml(user.alias_user_ids.join("\\n"))}">已合并 ${escapeHtml(user.alias_user_ids.length)} 个身份</span>` : ""}<br><span class="user-id-line"><span class="muted mono" title="${escapeHtml(user.user_id)}">${escapeHtml(user.user_id)}</span><button type="button" class="copy-id-btn" data-copy-user-id="${escapeHtml(user.user_id)}">复制</button></span></td>
-        <td class="user-cell recent">${escapeHtml(user.last_seen)}<br><span class="muted">上次主动 ${escapeHtml(user.last_sent)}</span></td>
-        <td class="user-cell relation"><span class="badge ${user.enabled ? "" : "off"}">${escapeHtml(user.enabled ? "启用" : "停用")}</span> <span class="badge">${escapeHtml(user.relationship_role_label || "次要用户")}</span> <span class="muted">${escapeHtml(user.relationship_stage || "未分层")}</span><br><span>分数 ${escapeHtml(user.relationship_score)}</span></td>
-        <td class="user-cell compact">入站 ${escapeHtml(user.inbound_count)} · 回复 ${escapeHtml(user.reply_count)}<br><span class="muted">记忆 ${escapeHtml(user.memory_items)} 条</span></td>
-        <td class="user-cell proactive"><span>今日 ${escapeHtml(user.sent_today)} · 总计 ${escapeHtml(user.proactive_sent_count)}</span><br><span class="muted truncate" title="${escapeHtml(user.next_proactive || "")}">${escapeHtml(user.next_proactive)}</span></td>
-        <td class="user-cell action"><div class="user-capability-actions"><button type="button" class="table-action ${user.private_companion_enabled ? "" : "danger-outline"}" data-private-toggle="${escapeHtml(user.user_id)}">${escapeHtml(user.private_companion_enabled ? "私聊陪伴：开" : "私聊陪伴：关")}</button><button type="button" class="table-action ${user.proactive_private_enabled ? "" : "danger-outline"}" data-proactive-toggle="${escapeHtml(user.user_id)}">${escapeHtml(user.proactive_private_enabled ? "主动陪伴：开" : "主动陪伴：关")}</button></div></td>
-      </tr>
+      <article role="button" tabindex="0" data-user-id="${escapeHtml(user.user_id)}" class="user-roster-item ${user.user_id === state.selectedUserId ? "is-selected" : ""}" aria-current="${user.user_id === state.selectedUserId ? "true" : "false"}">
+        <div class="user-avatar" aria-hidden="true">${escapeHtml(String(user.display_name || user.nickname || user.user_id || "?").trim().slice(0, 1).toUpperCase())}</div>
+        <div class="user-roster-main">
+          <div class="user-roster-name"><strong title="${escapeHtml(user.display_name || user.nickname || user.user_id)}">${escapeHtml(user.display_name || user.nickname || user.user_id)}</strong>${userPlatformBadge(user)}</div>
+          <span class="user-roster-id mono" title="${escapeHtml(user.user_id)}">${escapeHtml(user.user_id)}</span>
+          <div class="user-roster-meta"><span>${escapeHtml(user.relationship_stage || "未分层")}</span><span>${escapeHtml(user.last_seen || "暂无互动")}</span></div>
+        </div>
+        <div class="user-roster-signals" aria-label="权限状态">
+          <i class="${user.private_companion_enabled ? "is-on" : ""}" title="私聊陪伴${user.private_companion_enabled ? "已开启" : "已关闭"}"></i>
+          <i class="${user.proactive_private_enabled ? "is-on proactive" : ""}" title="主动陪伴${user.proactive_private_enabled ? "已开启" : "已关闭"}"></i>
+        </div>
+      </article>
     `).join("")
-    : `<tr><td class="empty" colspan="6">暂无私聊对象</td></tr>`;
-  const updateUserCapability = async (button, dataKey, field, label) => {
-    const user = state.users.find((item) => item.user_id === button.dataset[dataKey]);
-    if (!user) return;
-    const nextValue = !Boolean(user[field]);
-    const saved = await runAction(() => postJson("/user/update", { user_id: user.user_id, [field]: nextValue }), `${label}已${nextValue ? "开启" : "关闭"}`, button, { reload: false });
-    if (saved) {
-      const index = state.users.findIndex((item) => item.user_id === user.user_id);
-      if (index >= 0) state.users[index] = { ...state.users[index], ...saved };
-      renderUsers();
-      if (state.selectedUserId === user.user_id) await renderUserDetail(true);
-    }
-  };
-  document.querySelectorAll("[data-private-toggle]").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await updateUserCapability(button, "privateToggle", "private_companion_enabled", "私聊陪伴");
-    });
-  });
-  document.querySelectorAll("[data-proactive-toggle]").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await updateUserCapability(button, "proactiveToggle", "proactive_private_enabled", "主动陪伴");
-    });
-  });
-  document.querySelectorAll("[data-copy-user-id]").forEach((button) => {
-    button.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await copyTextToClipboard(button.dataset.copyUserId || "", "已复制用户 ID");
-    });
-  });
+    : `<div class="user-roster-empty"><strong>${state.userScopeFilter === "group" ? "群聊成员即将接入" : "没有匹配的用户"}</strong><span>${state.userScopeFilter === "group" ? "目录结构已经预留，后续可以直接合并群成员数据。" : "尝试清除筛选条件或新增用户。"}</span></div>`;
   document.querySelectorAll("[data-user-id]").forEach((row) => {
     row.addEventListener("click", async () => {
       state.selectedUserId = row.dataset.userId;
+      state.userDetailView = "overview";
       renderUsers();
       await renderUserDetail(true);
+    });
+    row.addEventListener("keydown", async (event) => {
+      if (!["Enter", " "].includes(event.key)) return;
+      event.preventDefault();
+      row.click();
     });
   });
   renderUserDetail();
@@ -14038,6 +14038,18 @@ function relationshipTimeText(value, fallback) {
   return timestamp > 0 ? new Date(timestamp * 1000).toLocaleString() : fallback;
 }
 
+function renderUserViewOverview(title, description, stats) {
+  const items = Array.isArray(stats) ? stats.slice(0, 3) : [];
+  return `
+    <header class="user-view-overview">
+      <div class="user-view-heading"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(description)}</p></div>
+      <div class="user-view-stats">
+        ${items.map(([label, value]) => `<span title="${escapeHtml(value)}"><small>${escapeHtml(label)}</small><b>${escapeHtml(value)}</b></span>`).join("")}
+      </div>
+    </header>
+  `;
+}
+
 function renderRelationshipStatus(detail) {
   const intimacy = detail?.relationship_intimacy && typeof detail.relationship_intimacy === "object" ? detail.relationship_intimacy : {};
   const stages = normalizedRelationshipStages(intimacy.stages);
@@ -14051,6 +14063,8 @@ function renderRelationshipStatus(detail) {
   const expression = detail?.expression_decision && typeof detail.expression_decision === "object" ? detail.expression_decision : {};
   const contentTier = { normal: "日常", flirt: "含蓄暧昧", adult: "成人私密" }[String(expression.content_tier || "normal")] || "日常";
   const providerPolicy = expression.content_provider_policy === "configured_local_only" ? "指定 Provider 精确匹配" : "当前 Provider";
+  const proactiveTarget = Number(expression.proactive_target || 0);
+  const proactiveTargetText = Number.isFinite(proactiveTarget) && proactiveTarget > 0 ? `${proactiveTarget} / 天` : "跟随全局";
   const trend = { up: "近期升温", down: "近期降温", steady: "近期稳定", unknown: "暂无趋势" }[String(intimacy.trend || "unknown")] || "暂无趋势";
   return `
     <section class="companion-intimacy-card">
@@ -14104,7 +14118,7 @@ function renderRelationshipStatus(detail) {
         <span><b>当前语气</b>${escapeHtml(Object.fromEntries(RELATIONSHIP_INTERACTION_BANDS)[expression.expression_band] || "放松")}</span>
         <span><b>内容尺度</b>${escapeHtml(contentTier)}</span>
         <span><b>模型规则</b>${escapeHtml(providerPolicy)}</span>
-        <span><b>主动额度</b>${escapeHtml(expression.proactive_budget ?? 0)}</span>
+        <span title="关系阶段提供的柔性节奏目标，不是当日硬上限"><b>主动节奏目标</b>${escapeHtml(proactiveTargetText)}</span>
       </div>
     </section>
   `;
@@ -14113,28 +14127,47 @@ function renderRelationshipStatus(detail) {
 async function renderUserDetail(forceFetch = false) {
   const box = $("#userDetail");
   if (!state.selectedUserId) {
-    box.innerHTML = "";
+    box.innerHTML = `<div class="user-detail-empty"><span class="eyebrow">PERSON WORKSPACE</span><h3>选择一位用户</h3><p>在左侧目录中选择成员，检查关系、权限、记忆和运行诊断。</p></div>`;
     return;
   }
-  let detail = state.users.find((user) => user.user_id === state.selectedUserId);
+  let detail = state.userDetailCache[state.selectedUserId]
+    || state.users.find((user) => user.user_id === state.selectedUserId);
   if (forceFetch || !detail?.formatted) {
     try {
       detail = await fetchJson(`/user?user_id=${encodeURIComponent(state.selectedUserId)}`);
+      state.userDetailCache[state.selectedUserId] = detail;
     } catch (error) {
       box.innerHTML = `<p class="muted">详情读取失败：${escapeHtml(error.message)}</p>`;
       return;
     }
   }
   const privateEnabled = Boolean(detail.private_companion_enabled ?? detail.enabled);
+  const relationshipLabel = detail.relationship_stage || detail.relationship_intimacy?.phase?.label || "初识";
+  const currentInteractionLabel = normalizedCurrentInteraction(detail.current_interaction, detail.relationship_role === "owner").label;
+  const openLoopCount = Array.isArray(detail.open_loops) ? activeOpenLoopItems(detail.open_loops).length : Number(detail.open_loop_count || 0);
+  const proactiveLimitLabel = detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited);
+  const nextProactiveLabel = detail.formatted?.next_proactive || detail.next_proactive || "尚未安排";
+  const emotionModeLabel = detail.relationship_state?.mode || "normal";
+  const emotionTraceCount = Array.isArray(detail.emotion_trace_summary) ? detail.emotion_trace_summary.length : 0;
   box.innerHTML = `
-    <div class="toolbar">
-      <button data-user-action="toggle">${escapeHtml(privateEnabled ? "停用私聊陪伴" : "启用私聊陪伴")}</button>
-      <button data-user-action="reset_daily">重置今日额度</button>
-      <button data-user-action="clear_schedule">清空主动计划</button>
-      <button data-user-action="clear_emotion_state">重置情绪状态</button>
-      <button data-user-action="delete" class="danger">删除私聊用户</button>
-    </div>
-    <form id="userEditForm" class="inline-form">
+    <header class="user-detail-header">
+      <div class="user-detail-identity">
+        <div class="user-detail-avatar" aria-hidden="true">${escapeHtml(String(detail.display_name || detail.nickname || detail.user_id || "?").slice(0, 1).toUpperCase())}</div>
+        <div><span class="eyebrow">${escapeHtml(detail.relationship_role_label || "PERSON")}</span><h2>${escapeHtml(detail.display_name || detail.nickname || detail.user_id)}</h2><span class="mono muted">${escapeHtml(detail.user_id)}</span></div>
+      </div>
+      <div class="user-detail-actions">
+        <button data-user-action="toggle" class="${privateEnabled ? "secondary-button" : "primary-button"}">${escapeHtml(privateEnabled ? "私聊陪伴已开" : "启用私聊陪伴")}</button>
+        <button data-user-action="toggle_proactive" class="${detail.proactive_private_enabled ? "secondary-button" : "ghost-button"}" ${privateEnabled ? "" : "disabled"}>${escapeHtml(detail.proactive_private_enabled ? "主动陪伴已开" : "开启主动陪伴")}</button>
+        <button type="button" class="icon-button" data-copy-current-user="${escapeHtml(detail.user_id)}" aria-label="复制用户 ID" title="复制用户 ID">⧉</button>
+      </div>
+    </header>
+    <div class="user-detail-summary"><span class="badge ${privateEnabled ? "ok" : "off"}">${privateEnabled ? "私聊已授权" : "私聊未授权"}</span><span class="badge ${detail.proactive_private_enabled ? "ok" : "off"}">${detail.proactive_private_enabled ? "主动陪伴" : "主动未开启"}</span><span class="muted">最近互动 ${escapeHtml(detail.last_seen || "暂无")}</span></div>
+    <nav class="user-detail-tabs" role="tablist" aria-label="用户详情视图">
+      ${[["overview","概览"],["relationship","关系"],["proactive","主动陪伴"],["memory","记忆与学习"],["diagnostics","诊断"]].map(([key,label]) => `<button type="button" role="tab" data-user-detail-view="${key}" aria-selected="${state.userDetailView === key ? "true" : "false"}" class="${state.userDetailView === key ? "is-active" : ""}">${label}</button>`).join("")}
+    </nav>
+    <section class="user-detail-view ${state.userDetailView === "overview" ? "is-active" : "is-hidden"}" data-user-detail-panel="overview">
+      ${renderUserViewOverview("用户概览", "集中查看身份、最近互动和仍需延续的对话线索。", [["关系阶段", relationshipLabel], ["今日主动", `${detail.sent_today || 0} / ${proactiveLimitLabel}`], ["未完话头", String(openLoopCount)]])}
+      <form id="userEditForm" class="inline-form user-profile-form">
       <label>称呼 <input name="nickname" value="${escapeHtml(detail.nickname || "")}" placeholder="例如 昵称 / 名字" /></label>
       <label>语气 <input name="style" value="${escapeHtml(detail.style || "")}" placeholder="温柔 / 活泼 / 工作" /></label>
       <label>关系角色
@@ -14143,12 +14176,8 @@ async function renderUserDetail(forceFetch = false) {
           <option value="friend" ${detail.relationship_role !== "owner" ? "selected" : ""}>次要用户</option>
         </select>
       </label>
-      <label>每日主动 <input name="proactive_daily_limit" type="number" min="-1" max="30" step="1" value="${escapeHtml(detail.proactive_daily_limit ?? -1)}" /></label>
-      <label>空闲门槛 <input name="proactive_idle_minutes" type="number" min="-1" step="1" value="${escapeHtml(detail.proactive_idle_minutes ?? -1)}" title="-1 跟随全局" /></label>
-      <label>最小间隔 <input name="proactive_min_interval_minutes" type="number" min="-1" step="1" value="${escapeHtml(detail.proactive_min_interval_minutes ?? -1)}" title="-1 跟随全局" /></label>
       <button type="submit">保存</button>
-    </form>
-    ${renderRelationshipStatus(detail)}
+      </form>
     <div class="visual-strip">
       ${miniStat("关系阶段", detail.relationship_stage || detail.relationship_intimacy?.phase?.label || "初识")}
       ${scoreGauge("今日主动", detail.sent_today || 0, 0, proactiveGaugeMax(detail.sent_today, detail.effective_daily_limit, detail.effective_daily_limit_unlimited, state.overview?.private?.max_daily_messages || 8))}
@@ -14156,24 +14185,49 @@ async function renderUserDetail(forceFetch = false) {
       ${miniStat("未完话头", Array.isArray(detail.open_loops) ? activeOpenLoopItems(detail.open_loops).length : (detail.open_loop_count || 0))}
       ${miniStat("习惯", detail.habit_count || detail.behavior_habits?.items?.length || 0)}
     </div>
-    <div class="detail-grid">
+      ${detailBlock("最近对话", "", [["用户消息", detail.last_user_message || ""], ["陪伴回复", detail.last_companion_message || ""]])}
+      ${renderOpenLoopBlock(detail)}
+    </section>
+    <section class="user-detail-view ${state.userDetailView === "relationship" ? "is-active" : "is-hidden"}" data-user-detail-panel="relationship">
+      ${renderUserViewOverview("关系与互动", "分别管理长期关系阶段和当前互动语气，避免把短期情绪误当成长期关系。", [["长期阶段", relationshipLabel], ["当前互动", currentInteractionLabel], ["关系节点", detail.worldbook_member ? "已登记" : "未登记"]])}
+      ${renderRelationshipStatus(detail)}
       ${renderRelationshipPanel(detail.relationship_panel)}
+      ${userWorldbookBlock(detail.worldbook_member)}
+    </section>
+    <section class="user-detail-view ${state.userDetailView === "proactive" ? "is-active" : "is-hidden"}" data-user-detail-panel="proactive">
+      ${renderUserViewOverview("主动陪伴", "检查授权、节奏和实际投递路线；用户级设置会与全局策略共同生效。", [["运行状态", detail.proactive_private_enabled ? "已开启" : "未开启"], ["今日额度", `${detail.sent_today || 0} / ${proactiveLimitLabel}`], ["下次主动", nextProactiveLabel]])}
+      <form id="userProactiveForm" class="inline-form user-profile-form">
+        <label>每日主动 <input name="proactive_daily_limit" type="number" min="-1" max="30" step="1" value="${escapeHtml(detail.proactive_daily_limit ?? -1)}" /></label>
+        <label>空闲门槛 <input name="proactive_idle_minutes" type="number" min="-1" step="1" value="${escapeHtml(detail.proactive_idle_minutes ?? -1)}" title="-1 跟随全局" /></label>
+        <label>最小间隔 <input name="proactive_min_interval_minutes" type="number" min="-1" step="1" value="${escapeHtml(detail.proactive_min_interval_minutes ?? -1)}" title="-1 跟随全局" /></label>
+        <button type="submit">保存主动策略</button>
+      </form>
       ${renderUnifiedProfileCapabilityPanel(detail)}
-      ${renderPortraitBridgeStatus(detail.portrait_bridge)}
-      ${detailBlock("陪伴权限与主动计划", `长期关系：${detail.relationship_stage || detail.relationship_intimacy?.phase?.label || "初识"} ｜ 当前互动：${normalizedCurrentInteraction(detail.current_interaction, detail.relationship_role === "owner").label}`, [["角色", detail.relationship_role_label || ""], ["有效主动上限", `${detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited)} / 天`], ["柔性节奏目标", `${Number(detail.soft_daily_target || 0).toFixed(1)} / 天（只调节节奏，不是一到即停）`], ["有效空闲门槛", `${detail.effective_idle_minutes ?? 0} 分钟`], ["有效最小间隔", `${detail.effective_min_interval_minutes ?? 0} 分钟`], ...(detail.unanswered_slowdown_count > 0 ? [["未回应降频", detail.unanswered_slowdown_text || "已逐步放慢主动间隔"]] : []), ["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
+      ${detailBlock("陪伴权限与主动计划", `长期关系：${detail.relationship_stage || detail.relationship_intimacy?.phase?.label || "初识"} ｜ 当前互动：${normalizedCurrentInteraction(detail.current_interaction, detail.relationship_role === "owner").label}`, [["角色", detail.relationship_role_label || ""], ["每日主动配额", `${detail.effective_daily_limit_text || formatProactiveLimit(detail.effective_daily_limit, detail.effective_daily_limit_unlimited)} / 天`], ["主动策略", `L${detail.proactive_quota_tier || 0} ${detail.proactive_quota_tier_label || "已关闭"}`], ["当前供给目标", `${Number(detail.soft_daily_target || 0).toFixed(1)} / 天`], ["有效空闲门槛", `${detail.effective_idle_minutes ?? 0} 分钟`], ["有效最小间隔", `${detail.effective_min_interval_minutes ?? 0} 分钟`], ...(detail.unanswered_slowdown_count > 0 ? [["未回应节奏", detail.unanswered_slowdown_text || "已按当前层级调整"]] : []), ["下次主动", detail.formatted?.next_proactive || detail.next_proactive], ["动作偏好", detail.formatted?.action_affinity || ""]])}
       ${renderPrivateDeliveryRoute(detail)}
+      <div class="toolbar user-more-actions">
+        <button data-user-action="reset_daily">重置今日额度</button>
+        <button data-user-action="clear_schedule">清空主动计划</button>
+      </div>
+    </section>
+    <section class="user-detail-view ${state.userDetailView === "memory" ? "is-active" : "is-hidden"}" data-user-detail-panel="memory">
+      ${renderUserViewOverview("记忆与学习", "查看稳定习惯、共同经历和画像同步状态。", [["稳定习惯", String(detail.habit_count || detail.behavior_habits?.items?.length || 0)], ["对话片段", String(detail.dialogue_episode_count || detail.dialogue_episodes?.length || 0)], ["画像版本", detail.portrait_bridge?.portrait_revision ? `r${detail.portrait_bridge.portrait_revision}` : "-"]])}
       ${renderPrivateBehaviorHabits(detail)}
+      ${renderPortraitBridgeStatus(detail.portrait_bridge)}
+      ${renderPrivateDialogueEpisodes(detail)}
+    </section>
+    <section class="user-detail-view ${state.userDetailView === "diagnostics" ? "is-active" : "is-hidden"}" data-user-detail-panel="diagnostics">
+      ${renderUserViewOverview("运行诊断", "只读检查情绪链路和安全回复保护；危险操作集中放在页面底部。", [["情绪状态", emotionModeLabel], ["本地事件", String(emotionTraceCount)], ["安全保护", detail.p4_runtime ? "已投影" : "待确认"]])}
       ${emotionGateBlock(detail)}
       ${renderEmotionDiagnostics(detail)}
       ${renderUserP4RuntimeStatus(detail.p4_runtime)}
-      ${userWorldbookBlock(detail.worldbook_member)}
-      ${detailBlock("最近对话", "", [["用户消息", detail.last_user_message || ""], ["陪伴回复", detail.last_companion_message || ""]])}
-      ${renderOpenLoopBlock(detail)}
-    </div>
-    <div class="private-dialogue-section">
-      ${renderPrivateDialogueEpisodes(detail)}
-    </div>
+      <div class="toolbar user-danger-actions"><button data-user-action="clear_emotion_state">重置情绪状态</button><button data-user-action="delete" class="danger">删除私聊用户</button></div>
+    </section>
   `;
+  document.querySelectorAll("[data-user-detail-view]").forEach((button) => button.addEventListener("click", () => {
+    state.userDetailView = button.dataset.userDetailView || "overview";
+    renderUserDetail(false);
+  }));
   bindUserActions(detail);
 }
 
@@ -14209,18 +14263,27 @@ function renderPortraitBridgeStatus(value) {
   const status = value && typeof value === "object" ? value : {};
   const available = Boolean(status.available);
   const code = String(status.code || "bridge_unavailable");
-  const syncedAt = String(status.last_synced_at || "");
+  const rawSyncedAt = String(status.last_synced_at || "");
+  const parsedSyncedAt = rawSyncedAt ? new Date(rawSyncedAt) : null;
+  const syncedAt = parsedSyncedAt && Number.isFinite(parsedSyncedAt.getTime())
+    ? parsedSyncedAt.toLocaleString()
+    : rawSyncedAt;
   const revision = Number(status.portrait_revision || 0);
   const summaries = Array.isArray(status.summaries) ? status.summaries.filter(Boolean).slice(0, 3) : [];
-  return detailBlock(
-    "画像同步状态",
-    available ? (summaries.length ? `Memory 只读映射：${summaries.join("；")}` : "Memory 已连接；该用户暂未形成可展示的低敏画像摘要。") : "Memory 当前不可用或身份尚未精确投影；为避免陈旧披露，本页不会回显任何画像摘要。",
-    [
-      ["Bridge", available ? "可用" : code],
-      ["最近同步", syncedAt || "暂无"],
-      ["画像版本", revision ? `r${revision}` : "暂无"],
-    ],
-  );
+  return `
+    <section class="memory-module portrait-sync-module ${available ? "is-ready" : "is-unavailable"}">
+      <header class="memory-module-head">
+        <div class="memory-module-title"><span class="memory-module-mark" aria-hidden="true">P</span><div><span class="eyebrow">PORTRAIT BRIDGE</span><h2>画像同步</h2><p>${escapeHtml(available ? "Memory 连接正常" : "当前没有可用画像连接")}</p></div></div>
+        <span class="memory-status-pill ${available ? "is-ready" : "is-muted"}"><i></i>${escapeHtml(available ? "已连接" : "未连接")}</span>
+      </header>
+      ${summaries.length ? `<div class="portrait-summary-list">${summaries.map((summary) => `<span>${escapeHtml(summary)}</span>`).join("")}</div>` : `<div class="memory-empty-state compact"><i aria-hidden="true"></i><div><b>${escapeHtml(available ? "等待形成画像摘要" : "暂不展示画像数据")}</b><span>${escapeHtml(available ? "连接可用，当前还没有达到展示条件的低敏摘要。" : "身份未精确投影或 Memory 当前不可用。")}</span></div></div>`}
+      <div class="memory-meta-grid">
+        <span><small>连接状态</small><b>${escapeHtml(available ? "可用" : code)}</b></span>
+        <span><small>最近同步</small><b>${escapeHtml(syncedAt || "尚未同步")}</b></span>
+        <span><small>画像版本</small><b>${escapeHtml(revision ? `r${revision}` : "尚未生成")}</b></span>
+      </div>
+    </section>
+  `;
 }
 
 function renderEmotionDiagnostics(detail) {
@@ -14317,30 +14380,38 @@ function renderPrivateDeliveryRoute(detail) {
 
 function renderPrivateDialogueEpisodes(detail) {
   const episodes = Array.isArray(detail?.dialogue_episodes) ? detail.dialogue_episodes : [];
-  const episodePairs = episodes.length
-    ? episodes.map((item, index) => [
-      item.title || `片段 ${index + 1}`,
-      item.summary || item.content || JSON.stringify(item),
-    ])
-    : [["-", "暂无已整理对话片段"]];
-  const note = episodes.length ? `当前保留 ${episodes.length} 个私聊片段` : "私聊积累到整理条件后会显示在这里";
-  return detailBlock("对话片段", note, episodePairs);
+  return `
+    <section class="memory-module dialogue-episode-module">
+      <header class="memory-module-head">
+        <div class="memory-module-title"><span class="memory-module-mark" aria-hidden="true">D</span><div><span class="eyebrow">DIALOGUE MOMENTS</span><h2>对话片段</h2><p>${escapeHtml(episodes.length ? `当前保留 ${episodes.length} 个片段` : "暂未形成可展示片段")}</p></div></div>
+        <span class="memory-count-pill">${escapeHtml(episodes.length)}</span>
+      </header>
+      ${episodes.length ? `<div class="dialogue-episode-list">${episodes.map((item, index) => `
+        <article class="dialogue-episode-item">
+          <span class="dialogue-episode-index">${String(index + 1).padStart(2, "0")}</span>
+          <div><b>${escapeHtml(item.title || `片段 ${index + 1}`)}</b><p>${escapeHtml(item.summary || item.content || JSON.stringify(item))}</p></div>
+        </article>
+      `).join("")}</div>` : `<div class="memory-empty-state"><i aria-hidden="true"></i><div><b>还没有整理出的对话片段</b><span>形成足够完整的共同经历后，会在这里保留摘要。</span></div></div>`}
+    </section>
+  `;
 }
 
 function renderPrivateBehaviorHabits(detail) {
   const habits = detail?.behavior_habits || {};
-  const pairs = userHabitPairs(habits);
+  const items = Array.isArray(habits.items) ? habits.items : [];
   const updatedAt = habits.updated_at ? `更新于 ${habits.updated_at}` : (habits.enabled ? "等待形成稳定样本" : "习惯学习未开启");
   return `
-    <section class="detail-block private-habit-block">
-      <header class="private-habit-head">
-        <div>
-          <h2>行为习惯</h2>
-          <span>${escapeHtml(updatedAt)}</span>
-        </div>
-        <button type="button" class="danger-outline" data-private-learning-clear>清空</button>
+    <section class="memory-module private-habit-block">
+      <header class="memory-module-head private-habit-head">
+        <div class="memory-module-title"><span class="memory-module-mark" aria-hidden="true">H</span><div><span class="eyebrow">HABIT LEARNING</span><h2>行为习惯</h2><p>${escapeHtml(updatedAt)}</p></div></div>
+        ${items.length ? `<button type="button" class="danger-outline" data-private-learning-clear>清空习惯</button>` : `<span class="memory-status-pill is-muted"><i></i>${escapeHtml(habits.enabled ? "采集中" : "未开启")}</span>`}
       </header>
-      <dl>${pairs.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value || "-")}</dd>`).join("")}</dl>
+      ${items.length ? `<div class="habit-signal-grid">${items.map((item) => `
+        <article class="habit-signal-item">
+          <div><span>${escapeHtml(`${item.bucket || "时段"}${item.avg_time ? ` · ${item.avg_time}` : ""}`)}</span><b>${escapeHtml(item.topic || item.category || "未命名习惯")}</b></div>
+          <footer><span>${escapeHtml(item.category || "习惯")}</span><span>${escapeHtml(`${item.count || 0} 次`)}</span>${item.last_seen || item.last_seen_text ? `<span>${escapeHtml(item.last_seen_text || `最近 ${item.last_seen}`)}</span>` : ""}</footer>
+        </article>
+      `).join("")}</div>` : `<div class="memory-empty-state"><i aria-hidden="true"></i><div><b>${escapeHtml(habits.enabled ? "还没有稳定习惯" : "习惯学习当前关闭")}</b><span>${escapeHtml(habits.enabled ? "样本仍在积累，达到稳定阈值后会显示时段和主题。" : "已有数据会保留，重新开启后继续积累。")}</span></div></div>`}
     </section>
   `;
 }
@@ -15636,11 +15707,27 @@ function bindUserActions(detail) {
     await runAction(() => postJson("/user/update", body), "已保存私聊对象", event.submitter);
     await refreshSelectedUserDetail();
   });
+  $("#userProactiveForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const body = {
+      user_id: detail.user_id,
+      proactive_daily_limit: Number(form.get("proactive_daily_limit") || -1),
+      proactive_idle_minutes: Number(form.get("proactive_idle_minutes") || -1),
+      proactive_min_interval_minutes: Number(form.get("proactive_min_interval_minutes") || -1),
+    };
+    await runAction(() => postJson("/user/update", body), "已保存主动策略", event.submitter);
+    await refreshSelectedUserDetail();
+  });
+  document.querySelector("[data-copy-current-user]")?.addEventListener("click", async (event) => {
+    await copyTextToClipboard(event.currentTarget.dataset.copyCurrentUser || "", "已复制用户 ID");
+  });
   document.querySelectorAll("[data-user-action]").forEach((button) => {
     button.addEventListener("click", async () => {
       const action = button.dataset.userAction;
       const body = { user_id: detail.user_id };
-      if (action === "toggle") body.enabled = !detail.enabled;
+      if (action === "toggle") body.private_companion_enabled = !Boolean(detail.private_companion_enabled ?? detail.enabled);
+      if (action === "toggle_proactive") body.proactive_private_enabled = !Boolean(detail.proactive_private_enabled);
       if (action === "reset_daily") body.reset_daily = true;
       if (action === "clear_schedule") body.clear_schedule = true;
       if (action === "clear_emotion_state") {
@@ -20711,6 +20798,24 @@ function statusText(value) {
   return toBool(value) ? "开启" : "关闭";
 }
 
+function resizeRoleplayTextarea(control) {
+  if (!(control instanceof HTMLTextAreaElement) || !control.closest("#roleplayProfileForm")) return;
+  control.style.height = "auto";
+  const styles = window.getComputedStyle(control);
+  const minHeight = Number.parseFloat(styles.minHeight) || 0;
+  const borderHeight = styles.boxSizing === "border-box"
+    ? (Number.parseFloat(styles.borderTopWidth) || 0) + (Number.parseFloat(styles.borderBottomWidth) || 0)
+    : 0;
+  control.style.height = `${Math.max(minHeight, control.scrollHeight + borderHeight)}px`;
+}
+
+function resizeRoleplayTextareas(root = document) {
+  window.requestAnimationFrame(() => {
+    root.querySelectorAll?.("#roleplayProfileForm textarea, textarea[data-roleplay-persona-part], textarea[data-roleplay-world-part], textarea[data-roleplay-user-part]")
+      .forEach(resizeRoleplayTextarea);
+  });
+}
+
 function renderModuleSettings() {
   const settings = state.overview?.settings || {};
   const formValues = { ...settings, ...(state.featureDraft || {}) };
@@ -20720,6 +20825,7 @@ function renderModuleSettings() {
   const newsRaw = $("#newsSourcesRaw");
   if (newsRaw) newsRaw.value = displaySettingValue("news_sources", settings.news_sources);
   fillForm("#roleplayProfileForm", formValues);
+  resizeRoleplayTextareas();
   fillForm("#privateAliasForm", formValues);
   fillForm("#quickModuleForm", formValues);
   fillForm("#runtimeSettingsForm", formValues);
@@ -21584,6 +21690,7 @@ function setRoleplayMode(mode) {
   document.querySelectorAll(".roleplay-mode-switch [data-roleplay-mode]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.roleplayMode === normalized);
   });
+  resizeRoleplayTextareas();
 }
 
 function bindRoleplayModeSwitch() {
@@ -21627,6 +21734,7 @@ function applyRoleplayExample(kind) {
   }
   const form = document.getElementById("roleplayProfileForm");
   if (form) markModuleFormDirty(form);
+  resizeRoleplayTextareas();
 }
 
 async function generateRoleplayDraftFromPersona(button) {
@@ -24191,6 +24299,11 @@ function featureSettingInput(key, value, accessibility = {}) {
   const disabled = featureLockedByProactiveOnlyMode(key);
   const disabledAttr = disabled ? " disabled" : "";
   const accessibilityAttrs = featureSettingAccessibilityAttrs(accessibility);
+  if (spec.type === "photo-scopes") {
+    const allowed = new Set(Array.isArray(value) ? value : String(value || "").split(/[\r\n,，、;；]+/));
+    const options = [["private_owner", "主要用户私聊"], ["private_friend", "其他陪伴用户私聊"], ["group", "群聊"], ["proactive", "Bot 主动生图"]];
+    return `<div class="multi-persona-choice-list photo-scope-choice-list" data-feature-param-group="${safeKey}">${options.map(([scope, label]) => `<label><input type="checkbox" data-photo-scope-value="${scope}" data-feature-param="${safeKey}" value="${scope}"${allowed.has(scope) ? " checked" : ""}${accessibilityAttrs}${disabledAttr}><span>${label}</span></label>`).join("")}<textarea data-feature-param="${safeKey}" hidden>${escapeHtml(options.map(([scope]) => scope).filter((scope) => allowed.has(scope)).join("\n"))}</textarea></div>`;
+  }
   if (key === "multi_persona_primary_id") {
     const current = String(value || "").trim();
     const personas = (state.roleplayPersonas || []).filter((item) => String(item.id || "").trim());
@@ -26540,6 +26653,17 @@ function bindFeatureDetailActions() {
       markFeatureDetailDirty();
     });
   });
+  detailPage?.querySelectorAll("[data-photo-scope-value]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const host = input.closest(".photo-scope-choice-list");
+      const hidden = host?.querySelector('[data-feature-param="photo_generation_allowed_scopes"]');
+      if (hidden) {
+        hidden.value = Array.from(host.querySelectorAll("[data-photo-scope-value]:checked")).map((item) => String(item.value || "").trim()).filter(Boolean).join("\n");
+        rememberFeatureParamDraft(hidden);
+      }
+      markFeatureDetailDirty();
+    });
+  });
   detailPage?.querySelector("[data-migrate-submit]")?.addEventListener("click", async (event) => {
     const card = event.currentTarget.closest(".multi-persona-migration-card");
     const source = card?.querySelector("[data-migrate-source]")?.value || "";
@@ -26665,7 +26789,7 @@ function bindFeatureDetailActions() {
   });
   document.querySelectorAll("[data-feature-param-form]").forEach((form) => {
     form.querySelectorAll("[data-feature-param]").forEach((input) => {
-      if (input.type === "checkbox") {
+      if (input.type === "checkbox" && !input.dataset.photoScopeValue) {
         input.addEventListener("change", () => {
           const paramKey = input.dataset.featureParam || "";
           const label = input.closest(".feature-param-check")?.querySelector("span");
@@ -28142,7 +28266,7 @@ function relationshipMemberMap(groupMembers = {}) {
     const item = raw && typeof raw === "object" ? raw : {};
     const existing = map.get(String(id)) || {};
     map.set(String(id), {
-      name: existing.name || item.name || item.nickname || item.card || id,
+      name: existing.name || item.identity_name || item.display_name || item.name || item.nickname || item.card || id,
       aliases: existing.aliases || [],
       observed: existing.observed || [],
       source: existing.source || "群聊",
@@ -28251,7 +28375,7 @@ function groupMessageActivityView(messages) {
 
 function normalizeGroupMessage(item) {
   const raw = item && typeof item === "object" ? item : {};
-  const sender = raw.sender_name || raw.nickname || raw.card || raw.name || raw.user_name || raw.sender_id || raw.user_id || "";
+  const sender = raw.identity_name || raw.sender_name || raw.nickname || raw.card || raw.name || raw.user_name || raw.sender_id || raw.user_id || "";
   const senderId = raw.sender_id || raw.user_id || raw.qq || "";
   const text = raw.text || raw.message || raw.content || raw.raw_message || raw.summary || "";
   const timestamp = parseMessageTimestamp(raw.ts ?? raw.timestamp ?? raw.time ?? raw.datetime ?? raw.created_at);
@@ -33901,6 +34025,26 @@ $("#memoEditorForm")?.addEventListener("submit", async (event) => {
   }, state.memoEditorId ? "便签已更新" : "便签已保存", submit, { reload: false });
 });
 $("#userFilter").addEventListener("input", renderUsers);
+$("#userScopeFilter")?.addEventListener("change", renderUsers);
+$("#userStatusFilter")?.addEventListener("change", renderUsers);
+$("#userFilterToggle")?.addEventListener("click", (event) => {
+  const panel = $("#userFilterPanel");
+  if (!panel) return;
+  panel.hidden = !panel.hidden;
+  event.currentTarget.classList.toggle("is-active", !panel.hidden);
+});
+const openPageDialog = (selector) => {
+  const dialog = $(selector);
+  if (!dialog) return;
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+};
+$("#addUserOpen")?.addEventListener("click", () => openPageDialog("#addUserDialog"));
+$("#aliasManageOpen")?.addEventListener("click", () => openPageDialog("#aliasManageDialog"));
+document.querySelectorAll("[data-dialog-close]").forEach((button) => button.addEventListener("click", () => button.closest("dialog")?.close()));
+document.querySelectorAll(".pc-dialog").forEach((dialog) => dialog.addEventListener("click", (event) => {
+  if (event.target === dialog) dialog.close();
+}));
 $("#groupFilter").addEventListener("input", renderGroups);
 $("#worldbookMemberFilter").addEventListener("input", renderWorldbook);
 $("#featureFilter").addEventListener("input", renderFeatureSwitches);
@@ -34095,6 +34239,77 @@ document.addEventListener("change", (event) => {
 bindRoleplayModeSwitch();
 bindProviderToolbar();
 
+function worldPreviewRows(sectionKey) {
+  const form = $("#roleplayProfileForm");
+  if (!form) return [];
+  const selectors = {
+    persona: "[data-roleplay-persona-part], [name='private_image_self_recognition_hint']",
+    world: "[data-roleplay-world-part], [data-roleplay-translation-part], [name='worldview_adaptation_mode']",
+    sources: "[name='roleplay_knowledge_source_ids']",
+    advanced: "[data-roleplay-user-part], [name='default_nickname']",
+  };
+  return [...form.querySelectorAll(selectors[sectionKey] || selectors.persona)]
+    .map((control) => {
+      const label = control.closest("label")?.childNodes?.[0]?.textContent?.trim()
+        || control.dataset.roleplayPersonaPart
+        || control.dataset.roleplayWorldPart
+        || control.dataset.roleplayUserPart
+        || "内容";
+      const value = String(control.value || "").trim();
+      return value ? [label, value] : null;
+    })
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function renderWorldPreview(sectionKey = "persona") {
+  const output = $("#worldPreviewContent");
+  if (!output) return;
+  const rows = worldPreviewRows(sectionKey);
+  output.innerHTML = rows.length
+    ? `<dl>${rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("")}</dl>`
+    : `<div class="world-preview-empty">当前章节还没有可预览的内容。</div>`;
+}
+
+document.querySelectorAll("[data-world-section]").forEach((button) => button.addEventListener("click", () => {
+  document.querySelectorAll("[data-world-section]").forEach((item) => item.classList.toggle("is-active", item === button));
+  const sectionKey = button.dataset.worldSection || "persona";
+  document.querySelectorAll("[data-world-panel]").forEach((panel) => {
+    const active = panel.dataset.worldPanel === sectionKey;
+    panel.classList.toggle("is-active", active);
+    panel.classList.toggle("is-hidden", !active);
+  });
+  const activePanel = document.querySelector(`[data-world-panel="${sectionKey}"]`);
+  if (activePanel) resizeRoleplayTextareas(activePanel);
+  renderWorldPreview(sectionKey);
+}));
+$("#worldPreviewToggle")?.addEventListener("click", (event) => {
+  const preview = $("#worldPreview");
+  if (!preview) return;
+  preview.hidden = false;
+  requestAnimationFrame(() => preview.classList.add("is-open"));
+  event.currentTarget.setAttribute("aria-expanded", "true");
+  renderWorldPreview(document.querySelector("[data-world-section].is-active")?.dataset.worldSection || "persona");
+});
+$("#worldPreviewClose")?.addEventListener("click", () => {
+  const preview = $("#worldPreview");
+  if (!preview) return;
+  preview.classList.remove("is-open");
+  $("#worldPreviewToggle")?.setAttribute("aria-expanded", "false");
+  window.setTimeout(() => { if (!preview.classList.contains("is-open")) preview.hidden = true; }, 240);
+});
+$("#roleplayProfileForm")?.addEventListener("input", (event) => {
+  if (event.target instanceof HTMLTextAreaElement) resizeRoleplayTextarea(event.target);
+  const status = $("#worldSaveState");
+  if (status) status.textContent = "有未保存修改";
+  if ($("#worldPreview")?.classList.contains("is-open")) {
+    renderWorldPreview(document.querySelector("[data-world-section].is-active")?.dataset.worldSection || "persona");
+  }
+});
+document.querySelectorAll("#roleplayProfileForm details").forEach((details) => details.addEventListener("toggle", () => {
+  if (details.open) resizeRoleplayTextareas(details);
+}));
+
 ["roleplayProfileForm", "privateAliasForm", "quickModuleForm", "runtimeSettingsForm"].forEach((formId) => {
   const form = document.getElementById(formId);
   if (!form) return;
@@ -34107,7 +34322,12 @@ bindProviderToolbar();
     }), formId === "runtimeSettingsForm" ? "已保存运行设置" : "已保存模块调参", event.submitter);
     if (!actionResultPersisted(saved)) return;
     markModuleFormClean(form);
+    if (formId === "roleplayProfileForm") {
+      const status = $("#worldSaveState");
+      if (status) status.textContent = "已同步";
+    }
     if (formId === "privateAliasForm") {
+      $("#aliasManageDialog")?.close();
       await loadAll();
     }
   });
@@ -34125,7 +34345,10 @@ $("#addUserForm").addEventListener("submit", async (event) => {
     enabled: true,
     nickname: form.get("nickname") || "",
   }), "已添加私聊对象", event.submitter);
-  if (saved) event.currentTarget.reset();
+  if (saved) {
+    event.currentTarget.reset();
+    $("#addUserDialog")?.close();
+  }
 });
 
 $("#addGroupForm").addEventListener("submit", async (event) => {

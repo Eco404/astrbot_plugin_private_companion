@@ -487,6 +487,34 @@ class CycleReplyContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("【Bot 自身模拟状态更新】", changed_update[0])
         self.assertNotIn("【Bot 当下连续性】", changed_update[0])
 
+    def test_colloquial_activity_questions_use_direct_grounded_state_prompt(self) -> None:
+        plugin = _state_harness()
+        plugin._passive_state_session_cache = {}
+        plugin._get_current_plan_item = lambda _plan: {
+            "activity": "专心做正事啦",
+            "message_seed": "认真干活略",
+        }
+        plugin._format_plan_item_for_prompt = lambda item: (
+            f"10:20｜{item['activity']}｜可分享碎片：{item['message_seed']}"
+        )
+        state = {"energy": 79, "mood_bias": "专注"}
+
+        for text in ("那你现在在干啥呢", "好像你在忙的样子，忙啥呢"):
+            with self.subTest(text=text):
+                update = plugin._private_passive_state_update_for_prompt(
+                    session=f"default:FriendMessage:{text}",
+                    state=state,
+                    current_user={},
+                    inbound_text=text,
+                    lightweight=True,
+                )
+
+                self.assertEqual(update[1:], (True, "direct"))
+                self.assertIn("专心做正事啦", update[0])
+                self.assertIn("先正面回答拟人化日程素材中的当前活动", update[0])
+                self.assertIn("不得另编素材未提供的动作、地点、饮食或娱乐活动", update[0])
+                self.assertIn("不要为了显得具体而补造细节", update[0])
+
     def test_continuity_anchor_omits_missing_optional_state_fields(self) -> None:
         plugin = _state_harness()
         plugin.enable_passive_state_continuity_anchor = True

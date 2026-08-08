@@ -23,6 +23,70 @@ from .helpers import (
 
 class DailyStateTickMixin:
     """Execute one user's proactive tick outside the daily-state capability module."""
+
+    def _route_recent_chat_guard_reason(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float,
+        planned_reason: str,
+        due_timer_active: bool,
+        is_troubleshooting: bool,
+    ) -> str:
+        options = self._planned_proactive_route_delivery_options(user)
+        policy = _single_line(options.get("recent_chat_policy"), 40) or "defer"
+        if policy in {"bypass", "anchor_check"}:
+            return ""
+        note = self._recent_chat_proactive_guard_reason(
+            user,
+            now=now,
+            planned_reason=planned_reason,
+            planned_source=normalize_legacy_tag_text(user.get("planned_proactive_source")),
+            due_timer_active=due_timer_active,
+            is_troubleshooting=is_troubleshooting,
+        )
+        if note and policy == "short_defer":
+            return note.replace("普通主动延后", "分享路线短暂避让")
+        return note
+
+    def _defer_route_for_recent_chat(self, user: dict[str, Any], *, now: float, note: str) -> None:
+        options = self._planned_proactive_route_delivery_options(user)
+        if _single_line(options.get("recent_chat_policy"), 40) == "short_defer":
+            self._defer_or_replace_planned_impulse(
+                user,
+                now=now,
+                note=note,
+                delay_minutes=(5.0, 15.0),
+                block_current=False,
+            )
+            self._mark_planned_candidate_status(user, "deferred", note)
+            return
+        self._defer_proactive_for_recent_chat(user, now=now, note=note)
+
+    def _settle_proactive_route_state(
+        self,
+        user: dict[str, Any],
+        *,
+        route_key: str,
+        settlement: dict[str, Any],
+        sent_at: float,
+        count_delivery: bool = True,
+    ) -> None:
+        user["last_proactive_kind"] = route_key
+        if count_delivery:
+            route_counts = user.setdefault("proactive_route_sent_counts", {})
+            if not isinstance(route_counts, dict):
+                route_counts = {}
+                user["proactive_route_sent_counts"] = route_counts
+            route_counts[route_key] = _safe_int(route_counts.get(route_key), 0, 0) + 1
+            if bool(settlement.get("await_reply")):
+                user["ignored_streak"] = _safe_int(user.get("ignored_streak"), 0) + 1
+                user["awaiting_reply_since"] = sent_at
+        for context_key in settlement.get("clear_context_keys", ()):
+            clean_key = _single_line(context_key, 80)
+            if clean_key:
+                user[clean_key] = {}
+
     async def _tick_user(self, user_id: str, user: Any) -> None:
         """Process one user while the outer tick keeps sequential ordering."""
         if isinstance(user, dict):
@@ -322,16 +386,15 @@ class DailyStateTickMixin:
                     self._save_data_sync()
                     self._debug_tick_skip(user_id, "用户刚自然来聊,已取消或延后问候主动")
                     return
-            recent_chat_guard_reason = self._recent_chat_proactive_guard_reason(
+            recent_chat_guard_reason = self._route_recent_chat_guard_reason(
                 current_for_mark,
                 now=_now_ts(),
                 planned_reason=current_reason,
-                planned_source=normalize_legacy_tag_text(current_for_mark.get("planned_proactive_source")),
                 due_timer_active=bool(due_timer_id),
                 is_troubleshooting=is_troubleshooting_for_send,
             )
             if recent_chat_guard_reason:
-                self._defer_proactive_for_recent_chat(
+                self._defer_route_for_recent_chat(
                     current_for_mark,
                     now=_now_ts(),
                     note=recent_chat_guard_reason,
@@ -348,6 +411,10 @@ class DailyStateTickMixin:
                 return
             current_for_mark["proactive_sending"] = True
             current_for_mark["proactive_sending_started_at"] = _now_ts()
+            planned_route_for_send = self._planned_proactive_route(current_for_mark)
+            route_key_for_send = _single_line(planned_route_for_send.key, 40) or "relational"
+            route_options_for_send = self._planned_proactive_route_delivery_options(current_for_mark)
+            route_settlement_for_send = self._planned_proactive_route_settlement(current_for_mark)
             planned_delivery_snapshot = self._ensure_planned_proactive_delivery_state(current_for_mark, now=_now_ts())
             audit_id = self._append_proactive_audit(
                 user_id,
@@ -387,7 +454,11 @@ class DailyStateTickMixin:
         friend_proactive_for_send = self._private_user_role(user) == "friend"
         if friend_proactive_for_send:
             planned_chain_for_send = []
-        proactive_quote_message_id = self._planned_proactive_quote_message_id(user, send_umo_for_send)
+        proactive_quote_message_id = (
+            self._planned_proactive_quote_message_id(user, send_umo_for_send)
+            if bool(route_options_for_send.get("quote_anchor"))
+            else ""
+        )
         planned_opener_mode_for_send = str(user.get("planned_opener_mode") or "")
         planned_followup_kind_for_send = str(user.get("planned_followup_kind") or "")
         if not is_troubleshooting_for_send and normalize_legacy_tag_text(user.get("planned_proactive_reason")) == "activity_share":
@@ -923,7 +994,12 @@ class DailyStateTickMixin:
                     else "routine"
                 )
                 similar_note = ""
-                if timeliness == "routine":
+                duplicate_policy = _single_line(route_options_for_send.get("duplicate_policy"), 40)
+                if timeliness == "routine" and duplicate_policy in {
+                    "semantic",
+                    "content_fingerprint",
+                    "life_event",
+                }:
                     similar_note = self._recent_proactive_text_duplicate_reason(
                         current_for_similarity_guard,
                         text=text,
@@ -948,7 +1024,11 @@ class DailyStateTickMixin:
                 )
                 self._debug_tick_skip(user_id, similar_note, prefix="取消")
                 return
-        if not is_troubleshooting_for_send and (effective_action_for_send or planned_action_for_send or "message") == "message":
+        if (
+            not is_troubleshooting_for_send
+            and route_key_for_send == "ritual"
+            and (effective_action_for_send or planned_action_for_send or "message") == "message"
+        ):
             async with self._data_lock:
                 current_for_greeting_text = self._get_user(user_id)
                 textual_greeting_note = self._textual_greeting_duplicate_reason(
@@ -1023,9 +1103,16 @@ class DailyStateTickMixin:
                         extra_count=len(extra_components),
                     )
                     self._save_data_sync()
+            elif not bool(route_options_for_send.get("cancel_if_new_inbound", True)):
+                logger.info(
+                    "[PrivateCompanion] 生成期间收到新消息，但 %s 路线保留独立投递: user=%s",
+                    route_key_for_send,
+                    user_id,
+                )
             else:
                 logger.info(
-                    "[PrivateCompanion] 用户在主动消息生成期间已有新消息,丢弃本次主动发送: %s",
+                    "[PrivateCompanion] 用户在主动消息生成期间已有新消息,%s 路线取消本次发送: %s",
+                    route_key_for_send,
                     user_id,
                 )
                 async with self._data_lock:
@@ -1069,11 +1156,10 @@ class DailyStateTickMixin:
             return
         async with self._data_lock:
             current_for_recent_chat = self._get_user(user_id)
-            recent_chat_guard_reason = self._recent_chat_proactive_guard_reason(
+            recent_chat_guard_reason = self._route_recent_chat_guard_reason(
                 current_for_recent_chat,
                 now=_now_ts(),
                 planned_reason=reason or normalize_legacy_tag_text(user.get("planned_proactive_reason")),
-                planned_source=normalize_legacy_tag_text(current_for_recent_chat.get("planned_proactive_source")),
                 due_timer_active=bool(due_timer_id),
                 is_troubleshooting=is_troubleshooting_for_send,
             )
@@ -1095,7 +1181,7 @@ class DailyStateTickMixin:
                     )
                     self._restore_troubleshooting_proactive_plan(current_for_recent_chat)
                 else:
-                    self._defer_proactive_for_recent_chat(
+                    self._defer_route_for_recent_chat(
                         current_for_recent_chat,
                         now=_now_ts(),
                         note=recent_chat_guard_reason,
@@ -1207,9 +1293,12 @@ class DailyStateTickMixin:
                 image_path,
                 extra_components=extra_components,
                 quote_message_id=proactive_quote_message_id,
-                disable_segmenting=self._proactive_send_disables_segmenting(
-                    reason,
-                    friend_proactive=friend_proactive_for_send,
+                disable_segmenting=(
+                    bool(route_options_for_send.get("disable_segmenting"))
+                    or self._proactive_send_disables_segmenting(
+                        reason,
+                        friend_proactive=friend_proactive_for_send,
+                    )
                 ),
             )
             if not delivered:
@@ -1597,10 +1686,18 @@ class DailyStateTickMixin:
             self._note_proactive_daypart_sent(current, current["last_sent"])
             opener_mode = planned_opener_mode_for_send
             followup_kind = planned_followup_kind_for_send
+            allow_route_followup = bool(route_settlement_for_send.get("allow_automatic_followup"))
+            self._settle_proactive_route_state(
+                current,
+                route_key=route_key_for_send,
+                settlement=route_settlement_for_send,
+                sent_at=current["last_sent"],
+                count_delivery=not simulation_active,
+            )
             if self._private_user_role(current) == "friend":
                 current["pending_followup_event"] = {}
                 current["suspended_proactive"] = {}
-            elif reason == "meal_care":
+            elif allow_route_followup and reason == "meal_care":
                 planned_meal = current.get("planned_meal_care_context") if isinstance(current.get("planned_meal_care_context"), dict) else {}
                 meal_key = _single_line(planned_meal.get("meal_key"), 20) or self._current_food_time_key()
                 meal_label = _single_line(planned_meal.get("meal_label"), 12) or self._food_menu_time_label(meal_key) or "这顿饭"
@@ -1624,7 +1721,7 @@ class DailyStateTickMixin:
                 if meal_key not in asked_meals:
                     asked_meals.append(meal_key)
                 current["pending_followup_event"] = self._meal_care_followup_event(current, now=current["last_sent"]) or {}
-            elif reason == "meal_care_followup":
+            elif allow_route_followup and reason == "meal_care_followup":
                 meal_context = current.get("meal_check_context") if isinstance(current.get("meal_check_context"), dict) else {}
                 if meal_context:
                     meal_context["followup_count"] = 1
@@ -1632,7 +1729,7 @@ class DailyStateTickMixin:
                     meal_context["followup_due_at"] = 0
                     current["meal_check_context"] = meal_context
                 current["pending_followup_event"] = {}
-            elif opener_mode == "name_only":
+            elif allow_route_followup and opener_mode == "name_only":
                 current["suspended_proactive"] = self._build_suspended_proactive_payload(
                     opener_text=text,
                     reason=reason,
@@ -1641,7 +1738,7 @@ class DailyStateTickMixin:
                     action_summary=action_summary,
                     chain=planned_chain_for_send,
                 )
-            elif followup_kind == "suspended_opener":
+            elif allow_route_followup and followup_kind == "suspended_opener":
                 suspended = current.get("suspended_proactive")
                 if isinstance(suspended, dict) and suspended.get("active"):
                     suspended["complaint_sent"] = True
@@ -1665,7 +1762,7 @@ class DailyStateTickMixin:
                             "_scheduled_ts": _now_ts() + after_minutes * 60,
                             "_cancel_on_inbound": True,
                         }
-            elif followup_kind == "chain_followup":
+            elif allow_route_followup and followup_kind == "chain_followup":
                 next_chain_followup = self._build_followup_event_from_chain(
                     planned_chain_for_send,
                     origin_reason=reason,
@@ -1674,7 +1771,7 @@ class DailyStateTickMixin:
                 )
                 if isinstance(next_chain_followup, dict):
                     current["pending_followup_event"] = next_chain_followup
-            elif planned_chain_for_send and not current.get("pending_followup_event"):
+            elif allow_route_followup and planned_chain_for_send and not current.get("pending_followup_event"):
                 next_chain_followup = self._build_followup_event_from_chain(
                     planned_chain_for_send,
                     origin_reason=reason,
@@ -1683,25 +1780,13 @@ class DailyStateTickMixin:
                 )
                 if isinstance(next_chain_followup, dict):
                     current["pending_followup_event"] = next_chain_followup
-            if reason == "group_share":
-                current["group_share_context"] = {}
-            if reason == "bili_video_share":
-                current["bilibili_video_context"] = {}
-            if reason == "news_share":
-                current["news_context"] = {}
-            if reason == "web_exploration_share":
-                current["web_exploration_context"] = {}
             if reason == "jm_cosmos_recommendation_request":
                 current["jm_cosmos_recommendation_context"] = {}
-            if reason == "creative_share":
-                current["creative_share_context"] = {}
             if simulation_active:
                 self._consume_simulation_event(current)
             else:
                 current["sent_today"] = _safe_int(current.get("sent_today"), 0) + 1
                 current["proactive_sent_count"] = _safe_int(current.get("proactive_sent_count"), 0) + 1
-                current["ignored_streak"] = _safe_int(current.get("ignored_streak"), 0) + 1
-                current["awaiting_reply_since"] = _now_ts()
                 self._note_action_sent(
                     current,
                     current["last_proactive_action"],
@@ -1717,7 +1802,7 @@ class DailyStateTickMixin:
                     current["pending_followup_event"] = existing_followup
                 elif followup_kind in {"suspended_opener", "chain_followup"} or opener_mode == "name_only":
                     current["pending_followup_event"] = {}
-                else:
+                elif allow_route_followup:
                     current["pending_followup_event"] = self._maybe_make_unanswered_screen_peek_event(
                         current,
                         reason,
@@ -1755,7 +1840,10 @@ class DailyStateTickMixin:
                     current["planned_proactive_topic"] = _single_line(next_timer.get("topic"), 60)
                     current["planned_proactive_impulse_id"] = ""
                     current["planned_proactive_window_start_at"] = current["next_proactive_at"]
-                    active_span, grace_span = self._proactive_impulse_default_window_seconds(current["planned_proactive_reason"])
+                    active_span, grace_span = self._proactive_impulse_default_window_seconds(
+                        current["planned_proactive_reason"],
+                        source="timer",
+                    )
                     current["planned_proactive_best_until_at"] = current["next_proactive_at"] + active_span
                     current["planned_proactive_expire_at"] = current["next_proactive_at"] + active_span + grace_span
                     semantics = self._planned_proactive_semantics(current)
@@ -1775,6 +1863,7 @@ class DailyStateTickMixin:
                     current["planned_opener_mode"] = ""
                     current["planned_followup_kind"] = ""
                     current["planned_proactive_quota_exempt"] = False
+                    self._store_planned_proactive_route_fields(current, {**next_timer, "source": "timer"})
                 else:
                     self._clear_pending_proactive_plan(current)
                     schedule_now = _now_ts()

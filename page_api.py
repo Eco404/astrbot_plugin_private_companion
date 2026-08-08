@@ -1604,6 +1604,43 @@ class PrivateCompanionPageApi(
         )
 
     @staticmethod
+    def _vision_provider_test_image_data_url() -> str:
+        # A tiny valid PNG keeps the connection test cheap while still forcing
+        # the Provider through its real multimodal request path.
+        return (
+            "data:image/png;base64,"
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+
+    def _visual_provider_for_test(self, provider_id: str) -> Any:
+        getter = getattr(self.plugin, "_private_image_provider_by_id", None)
+        provider = getter(provider_id) if callable(getter) else None
+        if provider is not None:
+            return provider
+        context = getattr(self.plugin, "context", None)
+        context_getter = getattr(context, "get_provider_by_id", None)
+        return context_getter(provider_id) if callable(context_getter) else None
+
+    def _visual_provider_test_timeout(self, provider_id: str, key: str, requested: float | None) -> float:
+        if requested is not None:
+            return requested
+        getter = getattr(self.plugin, "_private_image_provider_timeout_seconds", None)
+        if callable(getter):
+            source = "plugin_vision" if key == "PLUGIN_VISION_PROVIDER_ID" else "private_reading_vision"
+            return max(0.0, float(getter(provider_id, source)))
+        return 30.0
+
+    def _visual_call_error_text(self, exc: Exception, *, timeout: float = 0.0) -> str:
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+            duration = f"（{timeout:g} 秒）" if timeout > 0 else ""
+            return f"视觉模型图片请求超时{duration}"
+        unsupported = getattr(self.plugin, "_exception_indicates_image_input_unsupported", None)
+        if callable(unsupported) and unsupported(exc):
+            return "Provider 拒绝图片输入，请确认所选模型支持视觉"
+        detail = self._single_line(exc, 220)
+        return detail or f"视觉模型调用失败（{exc.__class__.__name__}）"
+
+    @staticmethod
     def _parse_reaction_library_analysis(text: Any, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         raw = str(text or "").strip()
         if not raw:
@@ -1754,7 +1791,7 @@ class PrivateCompanionPageApi(
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                last_error = self._single_line(exc, 220) or "视觉模型调用失败"
+                last_error = self._visual_call_error_text(exc, timeout=timeout)
                 recorder = getattr(self.plugin, "_record_llm_usage", None)
                 if callable(recorder):
                     recorder(
@@ -1769,8 +1806,10 @@ class PrivateCompanionPageApi(
                         budget_exempt=False,
                     )
                 logger.info(
-                    "[PrivateCompanionPage] 表情包自动识别尝试下一个视觉模型: provider=%s error=%s",
+                    "[PrivateCompanionPage] 表情包自动识别尝试下一个视觉模型: provider=%s images=%s exception=%s error=%s",
                     provider_id,
+                    len(image_urls),
+                    exc.__class__.__name__,
                     last_error,
                 )
         return [], "", last_error
@@ -6421,6 +6460,19 @@ class PrivateCompanionPageApi(
             "planned_proactive_reason",
             "planned_proactive_action",
             "planned_proactive_source",
+            "planned_proactive_kind",
+            "planned_proactive_route_version",
+            "planned_proactive_route_dedupe_key",
+            "planned_proactive_route_review_profile",
+            "planned_proactive_route_retry_profile",
+            "planned_proactive_route_cancel_if_new_inbound",
+            "planned_proactive_route_recent_chat_policy",
+            "planned_proactive_route_allow_automatic_followup",
+            "planned_proactive_route_disable_segmenting",
+            "planned_proactive_response_expectation",
+            "planned_proactive_origin_event_id",
+            "planned_proactive_route_preflight_action",
+            "planned_proactive_route_preflight_note",
             "planned_proactive_motive",
             "planned_proactive_topic",
             "planned_proactive_impulse_id",
@@ -6459,6 +6511,8 @@ class PrivateCompanionPageApi(
             "last_proactive_action",
             "last_proactive_behavior_summary",
             "last_proactive_motive",
+            "last_proactive_kind",
+            "proactive_route_sent_counts",
             "recent_proactive_topics",
             "proactive_daypart_counts",
             "proactive_afterglow",
@@ -6540,7 +6594,13 @@ class PrivateCompanionPageApi(
             current["planned_proactive_topic"] = "主动来找对方一下"
             current["planned_proactive_impulse_id"] = ""
             current["planned_proactive_window_start_at"] = scheduled_ts
-            active_span, grace_span = self.plugin._proactive_impulse_default_window_seconds("check_in")
+            try:
+                active_span, grace_span = self.plugin._proactive_impulse_default_window_seconds(
+                    "check_in",
+                    source="troubleshooting",
+                )
+            except TypeError:
+                active_span, grace_span = self.plugin._proactive_impulse_default_window_seconds("check_in")
             current["planned_proactive_best_until_at"] = scheduled_ts + active_span
             current["planned_proactive_expire_at"] = scheduled_ts + active_span + grace_span
             semantics = self.plugin._planned_proactive_semantics(current)
@@ -6553,6 +6613,19 @@ class PrivateCompanionPageApi(
             current["planned_followup_kind"] = ""
             current["planned_proactive_quota_exempt"] = True
             current["planned_candidate_id"] = f"troubleshooting_{test_id}"
+            route_store = getattr(self.plugin, "_store_planned_proactive_route_fields", None)
+            if callable(route_store):
+                route_store(
+                    current,
+                    {
+                        "source": "troubleshooting",
+                        "reason": "check_in",
+                        "scheduled_ts": scheduled_ts,
+                        "topic": current["planned_proactive_topic"],
+                        "motive": current["planned_proactive_motive"],
+                        "origin_event_id": current["planned_candidate_id"],
+                    },
+                )
             current["llm_timer_event"] = {}
             current["poke_daily_limit"] = 0
             current["photo_daily_limit"] = 0
@@ -13682,6 +13755,27 @@ class PrivateCompanionPageApi(
                 vector = await vector_getter(provider, "开心 安慰 抱抱 表情语义测试")
                 text = f"{len(vector)} 维向量" if vector else ""
                 step_name = "向量生成"
+            elif key in {"PLUGIN_VISION_PROVIDER_ID", "PRIVATE_READING_VISION_PROVIDER_ID"}:
+                provider = self._visual_provider_for_test(provider_id)
+                supports_image = getattr(self.plugin, "_provider_supports_image", None)
+                if provider is None:
+                    raise RuntimeError("未找到已加载的视觉 Provider")
+                if callable(supports_image) and not supports_image(provider):
+                    raise RuntimeError("Provider 配置未声明支持图片输入")
+                visual_timeout = self._visual_provider_test_timeout(provider_id, key, timeout_seconds)
+                call = provider.text_chat(
+                    prompt="这是视觉 Provider 图片输入测试。请观察所附图片，并只回复两个字：正常",
+                    image_urls=[self._vision_provider_test_image_data_url()],
+                    max_tokens=16,
+                )
+                try:
+                    response = await asyncio.wait_for(call, timeout=visual_timeout) if visual_timeout > 0 else await call
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    raise RuntimeError(self._visual_call_error_text(exc, timeout=visual_timeout)) from exc
+                text = str(getattr(response, "completion_text", response) or "").strip()
+                step_name = "图片输入"
             else:
                 text = await self.plugin._llm_call(
                     "请只回复两个字：正常",
@@ -13695,6 +13789,7 @@ class PrivateCompanionPageApi(
             elapsed_ms = int((time.time() - start) * 1000)
             ok = bool(text)
             embedding_test = key == "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"
+            vision_test = key in {"PLUGIN_VISION_PROVIDER_ID", "PRIVATE_READING_VISION_PROVIDER_ID"}
             result = {
                 "ok": ok,
                 "key": key,
@@ -13704,6 +13799,8 @@ class PrivateCompanionPageApi(
                 "detail": (
                     "Embedding Provider 已返回有效向量"
                     if ok and embedding_test
+                    else "视觉 Provider 已接受图片并返回有效内容"
+                    if ok and vision_test
                     else "Provider 已返回有效测试内容"
                     if ok
                     else "Provider 调用完成，但返回内容为空"
@@ -13833,6 +13930,8 @@ class PrivateCompanionPageApi(
                 soft_daily_target = max(0.0, float(soft_target_getter(user)))
             except Exception:
                 soft_daily_target = 0.0
+        quota_policy_getter = getattr(self.plugin, "_proactive_quota_policy", None)
+        quota_policy = quota_policy_getter(user) if callable(quota_policy_getter) else {}
         pending_emotion_judgement = self._emotion_pending_judgement_summary(user.get("pending_emotion_judgement"))
         last_emotion_judgement = self._emotion_last_judgement_summary(user.get("last_emotion_judgement"))
         last_emotion_judgement_error = self._emotion_judgement_error_summary(user.get("last_emotion_judgement_error"))
@@ -13902,6 +14001,8 @@ class PrivateCompanionPageApi(
                 else False
             ),
             "soft_daily_target": round(soft_daily_target, 2),
+            "proactive_quota_tier": self._int(quota_policy.get("tier")),
+            "proactive_quota_tier_label": self._single_line(quota_policy.get("label"), 40),
             "unanswered_slowdown_count": unanswered_slowdown_count,
             "unanswered_interval_multiplier": unanswered_interval_multiplier,
             "unanswered_slowdown_text": unanswered_slowdown_text,
@@ -15518,7 +15619,8 @@ class PrivateCompanionPageApi(
                 uid = self._single_line(user_id, 40)
                 member = members.get(uid) if isinstance(members.get(uid), dict) else {}
                 name = self._single_line(
-                    member.get("display_name")
+                    member.get("identity_name")
+                    or member.get("display_name")
                     or member.get("nickname")
                     or member.get("name")
                     or member.get("card")
@@ -15531,9 +15633,14 @@ class PrivateCompanionPageApi(
             for example in (raw.get("recent_examples") if isinstance(raw.get("recent_examples"), list) else [])[-4:]:
                 if not isinstance(example, dict):
                     continue
+                example_sender_id = self._single_line(example.get("sender_id") or example.get("user_id"), 40)
+                example_member = members.get(example_sender_id) if isinstance(members.get(example_sender_id), dict) else {}
                 examples.append(
                     {
-                        "name": self._single_line(example.get("name"), 24),
+                        "name": self._single_line(
+                            example_member.get("identity_name") or example.get("name"),
+                            24,
+                        ),
                         "text": self._single_line(example.get("text"), 120),
                         "time": self.plugin._format_timestamp_elapsed(example.get("ts", 0)),
                     }
@@ -18784,7 +18891,7 @@ class PrivateCompanionPageApi(
             "configured": configured,
             "effective": effective,
             "changed_keys": changed,
-            "note": "预设只覆盖运行态有效频率，不改写手动参数；最高档不按每日主动次数封顶，并会忽略 Token 软限额降载，但免打扰、休息、用户拒绝、隐私和每日 Token 硬限额仍然生效。",
+            "note": "预设只覆盖运行态有效频率，不改写手动参数；最高档使用每日 25 条私聊配额并忽略 Token 软限额降载，但免打扰、休息、用户拒绝、隐私和每日 Token 硬限额仍然生效。",
         }
 
     async def _record_personality_auto_tune_manual_values(self, changed: dict[str, Any]) -> None:
@@ -19313,7 +19420,7 @@ class PrivateCompanionPageApi(
             if effective_max_daily != max_daily:
                 detail += f"（手动配置 {max_daily} 条）"
             if callable(limit_is_unlimited) and limit_is_unlimited(effective_max_daily):
-                detail += "，当前最高档不按每日主动次数封顶"
+                detail += "，当前使用最高档主动策略"
             add("ok", "私聊主动额度可用", detail)
         else:
             add("warn", "私聊主动已关闭", "每日主动上限为 0", "在模块配置里调高每日主动上限", "proactive.daily_limit_zero")

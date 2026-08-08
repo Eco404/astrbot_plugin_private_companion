@@ -88,11 +88,11 @@ class RelationshipProactiveSoftTargetTests(unittest.TestCase):
         }
 
         self.assertEqual(8, harness._effective_user_daily_limit(user))
-        self.assertAlmostEqual(7.2, harness._soft_daily_target(user), places=1)
+        self.assertAlmostEqual(7.36, harness._soft_daily_target(user), places=2)
 
     def test_unanswered_slowdown_keeps_daily_allowance_and_scales_interval(self) -> None:
         harness = _ProactiveHarness()
-        for ignored, expected_multiplier in ((0, 1.0), (1, 1.35), (2, 1.7), (3, 2.05), (4, 2.2)):
+        for ignored, expected_multiplier in ((0, 1.0), (1, 1.147), (2, 1.294), (3, 1.441), (4, 1.504)):
             user = {
                 "relationship_role": "friend",
                 "relationship_mode": "normal",
@@ -165,7 +165,7 @@ class RelationshipProactiveSoftTargetTests(unittest.TestCase):
         self.assertIn('"unanswered_interval_multiplier"', page_source)
         self.assertIn('"unanswered_slowdown_text"', page_source)
         self.assertIn('"soft_daily_target"', page_source)
-        self.assertIn('"未回应降频"', panel_source)
+        self.assertIn('"未回应节奏"', panel_source)
         self.assertIn('"有效空闲门槛"', panel_source)
         self.assertIn('"有效最小间隔"', panel_source)
 

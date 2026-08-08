@@ -1176,7 +1176,7 @@
     "invisible": true
   },
   "private_image_self_recognition_hint": {
-    "description": "Legacy flat config: 图片转述增强：识别当前角色自己的线索",
+    "description": "Legacy flat config: 图片转述增强：特殊图像身份线索",
     "type": "string",
     "default": "",
     "invisible": true
@@ -4868,12 +4868,12 @@
   "proactive_reach_config": {
     "description": "主动频率与强度",
     "type": "object",
-    "hint": "控制主动频率、私聊主动每日上限和入站消息合并等待。主动强度预设默认关闭；开启后只作为运行态覆盖层，不会改写下方手动参数。最高档不限制每日主动次数和每日群聊插话次数，并会忽略 Token 软限额降载，但不会绕过硬限额。",
+    "hint": "控制主动频率、私聊主动每日配额和入站消息合并等待。私聊配额会自动派生五层策略；25 及以上统一使用最高档策略。主动强度预设默认关闭，开启后只作为运行态覆盖层，不会改写下方手动参数。",
     "items": {
       "proactive_intensity_preset": {
         "description": "主动强度预设",
         "type": "string",
-        "hint": "默认 off 表示完全沿用手动参数。选择预设后，会在运行态降低/提高私聊主动、群聊唤醒和插话的有效频率，并在排障页显示当前覆盖项；扩展页入口位于配置 → 功能开关 → 通用能力。最高档“在线陪伴”不再限制每日主动次数和每日群聊插话次数，也不再替用户节省主动成本，会忽略 Token 软限额降载；但不会绕过免打扰、休息、用户拒绝、隐私和每日 Token 硬限额。",
+        "hint": "默认 off 表示完全沿用手动参数。选择预设后，会在运行态降低/提高私聊主动、群聊唤醒和插话的有效频率，并在排障页显示当前覆盖项；扩展页入口位于配置 → 功能开关 → 通用能力。最高档“在线陪伴”使用每日 25 条私聊配额并忽略 Token 软限额降载，但不会绕过免打扰、休息、用户拒绝、隐私和每日 Token 硬限额。",
         "default": "off",
         "options": [
           "off",
@@ -4891,12 +4891,12 @@
         ]
       },
       "max_daily_messages": {
-        "description": "每日最多主动消息数",
+        "description": "每日主动消息配额",
         "type": "int",
-        "hint": "每个用户每天最多收到多少条主动陪伴消息。设为 0 会停止主动念头、候选、主动行为的生成与发送；被动聊天和日程状态等基础维护不受影响。",
+        "hint": "既是每日普通主动消息上限，也是调度器尝试接近的供给目标，并自动派生五层主动策略。25 及以上统一使用最高档策略；设为 0 会停止主动念头、候选、主动行为的生成与发送。",
         "slider": {
           "min": 0,
-          "max": 12,
+          "max": 25,
           "step": 1
         },
         "default": 8
@@ -5486,9 +5486,9 @@
         "condition": "enable_private_image_gif_enhancement"
       },
       "private_image_self_recognition_hint": {
-        "description": "图片转述增强：识别当前角色自己的线索",
+        "description": "图片转述增强：特殊图像身份线索",
         "type": "string",
-        "hint": "用于私聊单图防抖后的视觉转述。只填写当前角色自己的头像、发色、服装、物种、常见表情包特征、OC 名称、聊天截图昵称等线索；不要填写用户性别、职业或与用户关系。视觉模型会据此判断图里是否疑似是当前角色自己。留空时仍会使用 AstrBot 人格与日程角色设定中的外貌线索。",
+        "hint": "角色姓名、发色、瞳色、服装等外貌会自动从 AstrBot 人格与世界知识读取。这里只填写常用头像、聊天截图昵称、OC 或二创别名、表情包签名、水印等外貌字段无法表达的身份线索；不要重复填写外貌，也不要填写用户资料。留空不影响基于角色外貌的识别。",
         "default": "",
         "condition": "enable_private_image_self_recognition"
       },
@@ -9744,6 +9744,15 @@
         "hint": "开启后，Bot 可能在合适动机下调用 ComfyUI、SDGen 或在线图片 API 生成图片，拿到图片后再由 LLM 自然写成主动消息并一起发送。生成成功即计入图片额度，即使发送失败也不会立刻继续生图。",
         "default": true
       },
+      "photo_generation_allowed_scopes": {
+        "description": "生图使用范围",
+        "type": "array",
+        "hint": "可选：主要用户私聊、其他陪伴用户私聊、群聊、Bot 主动生图。留空按全部范围开放。",
+        "default": ["private_owner", "private_friend", "group", "proactive"],
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
       "photo_action_max_daily": {
         "description": "每日主动生图最多次数",
         "type": "int",
@@ -11107,7 +11116,7 @@
       "enable_qq_custom_presence_sync": {
         "description": "同步 QQ 自定义短状态",
         "type": "bool",
-        "hint": "默认关闭。开启后才会尝试同步“专注中/休息中”等自定义短状态；该能力依赖协议端支持非标准 OneBot 扩展，不会调用已知会让部分 NapCat 版本断连的 set_custom_online_status。",
+        "hint": "默认关闭。开启后才会尝试同步“专注中/休息中”等自定义短状态；该能力依赖协议端支持非标准 OneBot 扩展，不会调用已知会让部分 NapCat 版本断连的 set_custom_online_status。每次只提交一次，失败时保持账号原状态，不再回退在线。",
         "default": false,
         "condition": {
           "enable_qq_presence_sync": true

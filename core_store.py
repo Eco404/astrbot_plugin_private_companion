@@ -2800,6 +2800,48 @@ class CoreStoreMixin:
             return True
         return False
 
+    def _photo_generation_scope(self, event: Any = None, *, proactive: bool = False, user: dict[str, Any] | None = None, user_id: str = "") -> str:
+        """Return the configured permission bucket for a photo request."""
+        proactive = proactive or bool(getattr(event, "private_companion_proactive_framework", False))
+        if proactive:
+            return "proactive"
+        group_getter = getattr(self, "_extract_group_id_from_event", None)
+        if event is not None and callable(group_getter):
+            try:
+                if str(group_getter(event) or "").strip():
+                    return "group"
+            except Exception:
+                pass
+        resolved_id = str(user_id or "").strip()
+        if not resolved_id and event is not None:
+            try:
+                resolved_id = str(event.get_sender_id() or "").strip()
+            except Exception:
+                resolved_id = ""
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        if event is not None and resolved_id and callable(resolver):
+            try:
+                resolved_id = str(resolver(event, resolved_id) or resolved_id)
+            except Exception:
+                pass
+        if user is None and resolved_id:
+            getter = getattr(self, "_get_user", None)
+            if callable(getter):
+                try:
+                    user = getter(resolved_id)
+                except Exception:
+                    user = None
+        role_getter = getattr(self, "_private_user_role", None)
+        role = role_getter(user, resolved_id) if callable(role_getter) else str((user or {}).get("relationship_role") or "friend")
+        return "private_owner" if role == "owner" else "private_friend"
+
+    def _photo_generation_scope_allowed(self, event: Any = None, *, proactive: bool = False, user: dict[str, Any] | None = None, user_id: str = "") -> bool:
+        scopes = getattr(self, "photo_generation_allowed_scopes", None)
+        if not isinstance(scopes, (list, tuple, set)) or not scopes:
+            scopes = ["private_owner", "private_friend", "group", "proactive"]
+        scope = self._photo_generation_scope(event, proactive=proactive, user=user, user_id=user_id)
+        return scope in {str(item or "").strip().lower() for item in scopes}
+
     def _is_bot_self_user_id(self, user_id: str) -> bool:
         user_id = str(user_id or "").strip()
         return bool(user_id and user_id in self._known_bot_self_ids())

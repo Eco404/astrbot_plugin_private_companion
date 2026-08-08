@@ -685,6 +685,55 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 )
         return group
 
+    def _group_page_identity_names(self, group: dict[str, Any]) -> dict[str, str]:
+        """Project relationship-network names onto group members for page display only."""
+        members = group.get("members") if isinstance(group.get("members"), dict) else {}
+        resolver = getattr(self.plugin, "_group_member_identity_name", None)
+        profile_getter = getattr(self.plugin, "_worldbook_profile_by_user_id", None)
+        if not callable(resolver) or not callable(profile_getter):
+            return {}
+        names: dict[str, str] = {}
+        for user_id, raw_member in members.items():
+            uid = self._single_line(user_id, 40)
+            if not uid or not isinstance(raw_member, dict):
+                continue
+            fallback = self._single_line(
+                raw_member.get("display_name")
+                or raw_member.get("nickname")
+                or raw_member.get("name")
+                or raw_member.get("card")
+                or uid,
+                40,
+            )
+            try:
+                profile = profile_getter(uid, include_observation=True)
+                if not isinstance(profile, dict):
+                    continue
+                identity_name = self._single_line(resolver(uid, fallback, limit=40), 40)
+            except Exception:
+                identity_name = ""
+            if identity_name and identity_name != uid:
+                raw_member["identity_name"] = identity_name
+                names[uid] = identity_name
+        return names
+
+    def _group_page_recent_messages(
+        self,
+        group: dict[str, Any],
+        identity_names: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        items = self._limited_list(group.get("recent_messages"), 30)
+        projected: list[dict[str, Any]] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            sender_id = self._single_line(item.get("sender_id") or item.get("user_id") or item.get("qq"), 40)
+            if sender_id in identity_names:
+                item["identity_name"] = identity_names[sender_id]
+            projected.append(item)
+        return projected
+
     def _looks_like_member_shadow_group(self, group_id: str, group: dict[str, Any]) -> bool:
         """Hide historical records created when a sender id was mistaken for a group id."""
         gid = str(group_id or group.get("group_id") or "").strip()
@@ -954,13 +1003,14 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 return self._error("群不存在")
             await self._refresh_group_names_from_platform([(group_id, group)], force=True)
             self._refresh_group_atmosphere_for_page(group)
+            identity_names = self._group_page_identity_names(group)
             detail = self._group_summary(group_id, group)
             safety_getter = getattr(self.plugin, "_group_member_safety_compact_summary", None)
             member_safety = safety_getter(group) if callable(safety_getter) else {}
             detail.update(
                 {
                     "members": group.get("members") if isinstance(group.get("members"), dict) else {},
-                    "recent_messages": self._limited_list(group.get("recent_messages"), 30),
+                    "recent_messages": self._group_page_recent_messages(group, identity_names),
                     "topic_threads": self._group_topic_thread_items(group),
                     "group_episodes": self._limited_list(group.get("group_episodes"), 12),
                     "relationship_edges": group.get("relationship_edges") if isinstance(group.get("relationship_edges"), dict) else {},

@@ -187,7 +187,7 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
         max(1.0, self._cfg_float(c, "friend_unanswered_max_cooldown_hours", 60.0, 1.0)),
     )
     self.timer_pre_silence_minutes = self._cfg_int(c, "timer_pre_silence_minutes", 20, 0, 240)
-    self.max_daily_messages = self._cfg_int(c, "max_daily_messages", 8, 0, 12)
+    self.max_daily_messages = self._cfg_int(c, "max_daily_messages", 8, 0, 25)
     self.enable_reply_interception_forward = self._cfg_bool(c, "enable_reply_interception_forward", False)
     self.reply_interception_forward_target_umo = self._cfg_str(c, "reply_interception_forward_target_umo", "")
     self.reply_interception_forward_plugin_blocks = self._cfg_bool(c, "reply_interception_forward_plugin_blocks", True)
@@ -1050,6 +1050,22 @@ def _initialize_photo_and_expression_config(self: Any, c: Any) -> None:
     self.enable_photo_text_action = self._cfg_bool(
         c, "enable_photo_text_action", bool(self._cfg_raw(c, "allow_photo_text_action", legacy_photo_enabled))
     )
+    raw_photo_scopes = self._cfg_raw(c, "photo_generation_allowed_scopes", None)
+    if isinstance(raw_photo_scopes, str):
+        raw_photo_scopes = re.split(r"[\\n,，、;；]+", raw_photo_scopes)
+    if not isinstance(raw_photo_scopes, (list, tuple, set)):
+        raw_photo_scopes = []
+    allowed_photo_scopes = {
+        str(item or "").strip().lower()
+        for item in raw_photo_scopes
+        if str(item or "").strip().lower() in {"private_owner", "private_friend", "group", "proactive"}
+    }
+    self.photo_generation_allowed_scopes = sorted(allowed_photo_scopes) or [
+        "private_owner",
+        "private_friend",
+        "group",
+        "proactive",
+    ]
     self.enable_photo_reference_image = self._cfg_bool(c, "enable_photo_reference_image", False)
     self.enable_group_nsfw_private_fallback = self._cfg_bool(c, "enable_group_nsfw_private_fallback", False)
     self.group_nsfw_image_review_timeout_seconds = min(

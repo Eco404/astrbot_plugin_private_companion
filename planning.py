@@ -1248,6 +1248,26 @@ def build_detail_enhancement_prompt(
     voice_formatter = getattr(plugin, "_format_persona_voice_channel_prompt", None)
     inner_voice = voice_formatter("inner") if callable(voice_formatter) else ""
     proactive_voice = voice_formatter("proactive") if callable(voice_formatter) else ""
+    if bool(getattr(plugin, "enable_qq_custom_presence_sync", False)):
+        presence_status_hint = (
+            "普通可聊天时 online；想表现“写作业/发呆/吃饭/路上/看剧/专注”等生活状态时"
+            "可以用 custom，并必须填写 custom_text（2-8 个中文字符）；睡眠段倾向 sleep；"
+            "不确定或不想影响账号时 unchanged。"
+        )
+        presence_status_example = (
+            '{"mode": "custom", "custom_text": "写题中", "reason": "这一段在书桌前专注写作业", '
+            '"duration_minutes": "60"}'
+        )
+    else:
+        presence_status_hint = (
+            "当前未开启 QQ 自定义短状态同步。普通可聊天且确实需要恢复基础状态时才用 online；"
+            "写作业、发呆、吃饭、路上、看剧、专注、睡眠等原本适合自定义短状态的生活场景一律用 unchanged，"
+            "避免覆盖账号已有的手动自定义状态；不要输出 custom 或 sleep。"
+        )
+        presence_status_example = (
+            '{"mode": "unchanged", "custom_text": "", "reason": "自定义短状态同步未开启，保持账号现状", '
+            '"duration_minutes": "60"}'
+        )
     channel_voice_block = "\n\n".join(
         part for part in (
             planning_style_context,
@@ -1318,7 +1338,7 @@ D. 表达与主动规划：分通道风格、能力检索和内容菜单只决�
 · morning_greeting 可以带 chain 做分支逻辑：先只叫名字,没回->隔久一点再轻轻放一句；早晨未回复不需要马上追,也不要把没回理解成故意不理。是否还需要 morning_greeting 取决于此前是否真的完成晨间招呼，而不是它是否恰好为当天第一条主动；若双方已在早晨连续聊了一阵，则避免生硬补一句正式早安。
 · 输出中的 summary 要相当于“更新后的角色状态摘要”：一句话写出当前段结束后的情绪、体力走向和最多两个残留状态,方便下一时间段承接。例如“情绪平淡但有点等回复,体力约 58/100,还惦记刚才那张没发出去的图。”
 · 同时输出 state_variables,作为这个时间段的状态机变量。它们既要描述无用户干预时自然发展到当前段结束的大致状态,也要吸收“今日互动造成的日程偏移”里已经发生的用户介入。例如作业完成度、情绪、体力、等待回复、是否想发消息、特殊能力冷却、是否预留空档等。变量要短,方便后续用户事件做局部更新。
-· 同时输出 presence_status,由细化模型决定这个时间段适合的 QQ 全局状态表现。它只用于平台侧同步,不是角色正文。mode 只能使用 online / custom / sleep / unchanged；禁止输出 away / invisible / dnd / do_not_disturb / 请勿打扰 / 勿扰。普通可聊天时 online；想表现“写作业/发呆/吃饭/路上/看剧/专注”等生活状态时优先用 custom,并必须填写 custom_text（2-8 个中文字符,像“写题中”“路上”“犯困中”“看剧中”）；睡眠段倾向 sleep；不确定或不想影响账号时 unchanged。不要频繁改变,一段最多一个状态。
+· 同时输出 presence_status,由细化模型决定这个时间段适合的 QQ 全局状态表现。它只用于平台侧同步,不是角色正文。mode 只能使用 online / custom / sleep / unchanged；禁止输出 away / invisible / dnd / do_not_disturb / 请勿打扰 / 勿扰。{presence_status_hint}不要频繁改变,一段最多一个状态。
 · 这段细化通常会在对应区间开始前约 3 分钟生成,所以内容要贴近“马上进入这一段”的状态：可以有刚从上一段收尾、准备切换到当前段的动作,但不要写成已经完整度过了后面几个小时。
 · 只输出 JSON。
 
@@ -1335,7 +1355,7 @@ D. 表达与主动规划：分通道风格、能力检索和内容菜单只决�
     {{"name": "体力", "value": "58/100", "note": "这一段消耗不大"}},
     {{"name": "等待回复", "value": "否", "note": "没有主动发出需要等待的消息"}}
   ],
-  "presence_status": {{"mode": "custom", "custom_text": "写题中", "reason": "这一段在书桌前专注写作业,适合用轻量自定义状态,不需要显示忙碌", "duration_minutes": "60"}},
+  "presence_status": {presence_status_example},
   "today_events": [
     {{"window": "10:00-10:12", "event": "靠在桌边发了一会儿呆,慢慢把状态找回来", "mood": "困", "basis": ["coarse_plan", "state"], "confidence": 0.9}},
     {{"window": "10:22-10:40", "event": "把手边的事情推进了一段,中途停下来喝了口水", "mood": "逐渐专注", "basis": ["coarse_plan"], "confidence": 0.82}},
