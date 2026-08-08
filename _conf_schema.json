@@ -9746,7 +9746,7 @@
       },
       "photo_generation_allowed_scopes": {
         "description": "生图使用范围",
-        "type": "array",
+        "type": "list",
         "hint": "可选：主要用户私聊、其他陪伴用户私聊、群聊、Bot 主动生图。留空按全部范围开放。",
         "default": ["private_owner", "private_friend", "group", "proactive"],
         "condition": {
