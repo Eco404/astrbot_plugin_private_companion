@@ -142,6 +142,8 @@ def _content_payload(**overrides: Any) -> dict[str, Any]:
             "adult_enabled": True,
             "adult_owner_confirmed": True,
             "require_turn_consent": True,
+            "require_exclusive": True,
+            "require_affectionate": True,
             "private_chat": True,
             "local_provider_configured": True,
             "local_provider_match": True,
@@ -199,6 +201,43 @@ def test_adult_tier_fails_closed_when_any_required_condition_is_missing() -> Non
         assert decision.content_tier != "adult", label
         expected_policy = "unmanaged" if label == "total switch" else "current_provider"
         assert decision.content_provider_policy == expected_policy, label
+
+
+def test_adult_tier_only_relaxes_relationship_expression_gates() -> None:
+    relaxed = {
+        "affectionate": build_expression_decision(
+            _content_payload(current_interaction="warm", policy_require_affectionate=False)
+        ),
+        "exclusive": build_expression_decision(
+            _content_payload(relationship_mode="normal", policy_require_exclusive=False)
+        ),
+    }
+    for label, decision in relaxed.items():
+        assert decision.content_tier == "adult", label
+        assert decision.content_provider_policy == "configured_local_only", label
+
+    # The global age confirmation only certifies the configured primary user,
+    # and a group request cannot establish consent for every audience member.
+    owner_boundary = build_expression_decision(
+        _content_payload(
+            relationship_role="friend",
+            policy_require_owner=False,
+            policy_require_exclusive=False,
+            policy_require_affectionate=False,
+        )
+    )
+    private_boundary = build_expression_decision(
+        _content_payload(policy_private_chat=False, policy_require_private_chat=False)
+    )
+    assert owner_boundary.content_tier != "adult"
+    assert "adult_owner_required" in owner_boundary.reason_codes
+    assert private_boundary.content_tier != "adult"
+    assert "adult_private_required" in private_boundary.reason_codes
+    avoidant_boundary = build_expression_decision(
+        _content_payload(current_interaction="avoidant", policy_require_affectionate=False)
+    )
+    assert avoidant_boundary.content_tier != "adult"
+    assert "adult_interaction_boundary" in avoidant_boundary.reason_codes
 
 
 def test_group_proactive_and_unconfigured_paths_remain_normal() -> None:
@@ -264,6 +303,10 @@ def test_strict_llm_provider_skips_peak_replacement_and_fallback() -> None:
             self.fallback_calls += 1
             return "response_review", "cloud-fallback"
 
+        @staticmethod
+        def _model_token_limit_route_for_call(**_kwargs: Any) -> tuple[bool, int | None, int]:
+            return False, None, 0
+
         def _model_timeout_seconds_for_call(self, **_kwargs: Any) -> None:
             return None
 
@@ -293,6 +336,8 @@ def test_schema_and_settings_page_expose_fail_closed_content_controls() -> None:
     assert items["enable_adult_content_tier"]["default"] is False
     assert items["adult_content_owner_confirmed"]["default"] is False
     assert items["adult_content_require_turn_consent"]["default"] is True
+    assert items["adult_content_require_exclusive"]["default"] is True
+    assert items["adult_content_require_affectionate"]["default"] is True
     assert items["ADULT_CONTENT_PROVIDER_ID"]["_special"] == "select_provider"
 
     source = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")

@@ -14,7 +14,6 @@ from .helpers import _safe_int
 from .companion_interaction_expression import allowed_expression_bands, current_interaction_projection
 from .emotion_diagnostics import build_emotion_trace_projection, emotion_trace_summary
 from .relationship_ledger import (
-    is_owner_exclusive,
     normalize_relationship_mode,
     record_manual_relationship_change,
     relationship_positive_score_cap,
@@ -283,6 +282,15 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     return self._error("owner_exclusive relationship score is frozen; select normal mode first")
                 if next_mode == "owner_exclusive" and relationship_score is not None:
                     return self._error("owner_exclusive relationship does not accept an exact score")
+                if relationship_score is not None and relationship_score > 0 and role != "owner":
+                    positive_cap = relationship_positive_score_cap(
+                        getattr(self.plugin, "relationship_positive_stage_cap_key", "deeply_bonded")
+                    )
+                    if relationship_score > positive_cap:
+                        return self._error(
+                            f"普通用户亲密度上限为 {positive_cap}（当前配置的阶段上限），"
+                            "请先调整「普通用户正向亲密度阶段上限」或将该用户设为主要用户"
+                        )
                 if requested_interaction_band is not None:
                     if not requested_interaction_band:
                         return self._error("current_interaction_band is required")
@@ -348,13 +356,6 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 if relationship_score is not None:
                     previous_score = _safe_int(user.get("relationship_score"), 0, -1200, 1200)
                     effective_score = relationship_score
-                    if effective_score > 0 and not is_owner_exclusive(user):
-                        effective_score = min(
-                            effective_score,
-                            relationship_positive_score_cap(
-                                getattr(self.plugin, "relationship_positive_stage_cap_key", "deeply_bonded")
-                            ),
-                        )
                     user["relationship_score"] = effective_score
                     record_manual_relationship_change(
                         user,

@@ -78,6 +78,13 @@ def is_owner_exclusive(user: Any) -> bool:
     return normalize_relationship_mode(user.get("relationship_mode"), user.get("relationship_role")) == OWNER_EXCLUSIVE_MODE
 
 
+def is_owner_role(user: Any) -> bool:
+    """Return whether this relationship record belongs to the primary user."""
+    if not isinstance(user, dict):
+        return False
+    return str(user.get("relationship_role") or "").strip().lower() == "owner"
+
+
 def normalize_relationship_positive_stage_cap_key(value: Any) -> str:
     """Return the configured ordinary-user positive relationship ceiling."""
     key = str(value or "").strip().lower()
@@ -293,11 +300,15 @@ def apply_relationship_event(
 
     positive_score_cap = relationship_positive_score_cap(_effective_positive_stage_cap_key(user, positive_stage_cap_key))
     after = max(RELATIONSHIP_SCORE_MIN, min(RELATIONSHIP_SCORE_MAX, before + applied))
-    if applied > 0:
+    if applied > 0 and not is_owner_role(user):
         after = min(after, positive_score_cap)
     applied = after - before
     if applied == 0:
-        code = "positive_stage_cap" if requested > 0 and before >= positive_score_cap else "score_bound"
+        code = (
+            "positive_stage_cap"
+            if requested > 0 and before >= positive_score_cap and not is_owner_role(user)
+            else "score_bound"
+        )
         return _result(False, code, score=before)
     user["relationship_score"] = after
     if applied > 0:
@@ -333,6 +344,8 @@ def clamp_relationship_positive_stage_cap(
     user["relationship_positive_stage_cap_key"] = key
     if is_owner_exclusive(user):
         return _result(False, "owner_exclusive_exempt", score=_score(user.get("relationship_score")))
+    if is_owner_role(user):
+        return _result(False, "owner_role_exempt", score=_score(user.get("relationship_score")))
     before = _score(user.get("relationship_score"))
     if before <= 0:
         return _result(False, "non_positive_score_exempt", score=before)
@@ -367,14 +380,17 @@ def migrate_relationship_positive_stage_cap(
     old_max = relationship_positive_score_cap(old_key)
     new_max = relationship_positive_score_cap(new_key)
     # Configuration elevation begins a new future lowering generation even for
-    # an owner or currently non-positive record.  Otherwise its old marker
-    # would incorrectly suppress a later real lowering after that exemption
-    # no longer applies.
+    # a currently non-positive record. Otherwise its old marker would suppress
+    # a later real lowering once the record becomes positive again.
     if new_max > old_max:
         user.pop("relationship_positive_stage_cap_migration", None)
         return _result(False, "positive_stage_cap_not_lowered", score=_score(user.get("relationship_score")))
     if is_owner_exclusive(user):
         return _result(False, "owner_exclusive_exempt", score=_score(user.get("relationship_score")))
+    # Do not write a migration marker for an exempt owner. If the role is later
+    # removed, a real ordinary-user lowering must still be eligible.
+    if is_owner_role(user):
+        return _result(False, "owner_role_exempt", score=_score(user.get("relationship_score")))
     before = _score(user.get("relationship_score"))
     if before <= 0:
         return _result(False, "non_positive_score_exempt", score=before)
@@ -676,6 +692,7 @@ __all__ = [
     "apply_relationship_event",
     "clamp_relationship_positive_stage_cap",
     "is_owner_exclusive",
+    "is_owner_role",
     "legacy_relationship_score_to_v2",
     "migrate_legacy_relationship_score",
     "migrate_relationship_score_schema",
