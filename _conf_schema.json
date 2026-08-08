@@ -9744,6 +9744,15 @@
         "hint": "开启后，Bot 可能在合适动机下调用 ComfyUI、SDGen 或在线图片 API 生成图片，拿到图片后再由 LLM 自然写成主动消息并一起发送。生成成功即计入图片额度，即使发送失败也不会立刻继续生图。",
         "default": true
       },
+      "photo_generation_allowed_scopes": {
+        "description": "生图使用范围",
+        "type": "array",
+        "hint": "可选：主要用户私聊、其他陪伴用户私聊、群聊、Bot 主动生图。留空按全部范围开放。",
+        "default": ["private_owner", "private_friend", "group", "proactive"],
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
       "photo_action_max_daily": {
         "description": "每日主动生图最多次数",
         "type": "int",

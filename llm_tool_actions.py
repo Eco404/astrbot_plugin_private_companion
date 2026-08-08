@@ -2639,6 +2639,20 @@ class LlmToolActionsMixin:
             return public_receipt({"status": "disabled", "message": "非指令生图/改图已关闭；显式指令仍可使用“陪伴 生图/自拍/改图”。"}, ensure_ascii=False)
         if not getattr(self, "enable_photo_text_action", False):
             return public_receipt({"status": "disabled", "message": "主动拍照/生图能力未启用"}, ensure_ascii=False)
+        scope_checker = getattr(self, "_photo_generation_scope_allowed", None)
+        if callable(scope_checker) and not scope_checker(event):
+            return public_receipt(
+                {
+                    "status": "unauthorized",
+                    "success": False,
+                    "generated": False,
+                    "sent": False,
+                    "message": "当前会话不在生图使用范围内。请在生图设置中调整使用范围。",
+                    "must_not_claim_sent": True,
+                    "retryable": False,
+                },
+                ensure_ascii=False,
+            )
         structured_generator = getattr(self, "_generate_photo_image_result", None)
         legacy_generator = getattr(self, "_generate_photo_image", None)
         if not callable(structured_generator) and not callable(legacy_generator):
@@ -2792,7 +2806,13 @@ class LlmToolActionsMixin:
                         and target_checker(requester_id, None)
                     ):
                         requester = user_getter(requester_id)
-                    requester_authorized = bool(
+                    group_enabled = False
+                    if request_scope == "group":
+                        group_id_getter = getattr(self, "_extract_group_id_from_event", None)
+                        group_id = group_id_getter(event) if callable(group_id_getter) else ""
+                        checker = getattr(self, "_group_enabled_for_event", None)
+                        group_enabled = bool(group_id and callable(checker) and checker(group_id))
+                    requester_authorized = group_enabled or bool(
                         isinstance(requester, dict)
                         and target_checker(requester_id, requester)
                         and requester.get("enabled", True)
@@ -2809,7 +2829,13 @@ class LlmToolActionsMixin:
                     and target_checker(requester_id, None)
                 ):
                     requester = user_getter(requester_id)
-                requester_authorized = bool(
+                group_enabled = False
+                if request_scope == "group":
+                    group_id_getter = getattr(self, "_extract_group_id_from_event", None)
+                    group_id = group_id_getter(event) if callable(group_id_getter) else ""
+                    checker = getattr(self, "_group_enabled_for_event", None)
+                    group_enabled = bool(group_id and callable(checker) and checker(group_id))
+                requester_authorized = group_enabled or bool(
                     isinstance(requester, dict)
                     and target_checker(requester_id, requester)
                     and requester.get("enabled", True)

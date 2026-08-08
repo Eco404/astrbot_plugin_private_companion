@@ -2092,6 +2092,7 @@ const configLabels = {
   photo_action_max_daily: "每日主动生图上限",
   proactive_photo_text_probability: "主动带图触发概率",
   photo_generation_backend: "主动生图后端",
+  photo_generation_allowed_scopes: "生图使用范围",
   custom_photo_tool_name: "函数工具名",
   custom_photo_tool_prompt_param: "提示词参数名",
   custom_photo_tool_kind_param: "类型参数名",
@@ -3013,7 +3014,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_intra_day_gap_minutes", "qzone_life_publish_probability", "qzone_life_publish_max_daily", "qzone_life_publish_window_mode", "qzone_life_publish_windows", "qzone_life_publish_allow_insomnia_night", "qzone_life_publish_similarity_threshold", "qzone_publish_style_prompt"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_reference_catalog", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "photo_generation_trace_max_size_kb", "photo_generation_trace_backup_count", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets", "enable_bot_relationship_network", "bot_relationship_cards"],
+  enable_photo_text_action: ["photo_generation_allowed_scopes", "photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_reference_catalog", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "photo_generation_trace_max_size_kb", "photo_generation_trace_backup_count", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets", "enable_bot_relationship_network", "bot_relationship_cards"],
   enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_goodnight_screen_check", "goodnight_screen_check_delay_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_poke_action: ["poke_action_max_times", "poke_action_cooldown_minutes"],
   enable_voice_action: ["voice_action_max_chars"],
@@ -3812,6 +3813,7 @@ const featureSettingSections = {
 };
 
 const featureSettingTypes = {
+  photo_generation_allowed_scopes: { type: "photo-scopes" },
   default_interaction_band: { type: "select", options: [["avoidant", "回避"], ["hurt", "受伤"], ["relaxed", "放松"], ["lively", "活泼"], ["warm", "温暖"]] },
   relationship_positive_stage_cap_key: { type: "select", options: [["familiar", "熟悉"], ["close", "亲近"], ["intimate", "亲密"], ["deeply_bonded", "深度联结"]] },
   normal_interaction_band_cap: { type: "select", options: [["relaxed", "放松"], ["lively", "活泼"], ["warm", "温暖"]] },
@@ -4163,6 +4165,10 @@ function proactiveGaugeMax(used, limit, explicit = false, fallback = 8) {
 
 function collectSettingValue(key, input) {
   if (!input) return "";
+  if (key === "photo_generation_allowed_scopes") {
+    const host = input.closest("[data-feature-param-group='photo_generation_allowed_scopes']") || input.closest(".photo-scope-choice-list");
+    return Array.from(host?.querySelectorAll("[data-photo-scope-value]:checked") || []).map((item) => String(item.value || "").trim()).filter(Boolean);
+  }
   if (key === "multi_persona_ids") {
     const host = input.closest("[data-feature-param-group='multi_persona_ids']");
     return Array.from(host?.querySelectorAll("[data-multi-persona-profile]:checked") || [])
@@ -7143,6 +7149,7 @@ const setupGuideAdvancedItems = {
       ],
       kind: "feature",
       settings: [
+        { key: "photo_generation_allowed_scopes", type: "photo-scopes", label: "生图使用范围", description: "分别控制主要用户私聊、其他陪伴用户私聊、群聊和 Bot 主动生图；未选择时按全部范围开放。" },
         { key: "photo_generation_backend", type: "select", label: "生图后端", options: [["auto", "自动：在线 API → ComfyUI → SDGen"], ["external", "只用在线图片 API"], ["comfyui", "只用 ComfyUI"], ["sdgen", "只用 SDGen"], ["tool_call", "函数工具（调用其他插件的生图工具）"]], description: "这里仅选择后端；在线 API 凭据和队列统一在“模型配置 → 生图模型”维护。" },
         { key: "natural_language_photo_generation_mode", type: "select", label: "非指令生图处理方式", options: [["tool_first", "工具优先：主链调用 pc_generate_photo"], ["rule_fast", "规则快判：插件前置接管"], ["off", "关闭：不做前置接管"]], description: "注册生图工具后建议用工具优先；只有工具调用不稳定时再用规则快判。" },
         { key: "command_photo_generation_max_daily", type: "number", label: "用户请求每日上限", placeholder: "0（不限量）", min: 0, max: 100, description: "显式陪伴生图指令与主链 pc_generate_photo 工具共用；0 表示不限量。" },
@@ -24292,6 +24299,11 @@ function featureSettingInput(key, value, accessibility = {}) {
   const disabled = featureLockedByProactiveOnlyMode(key);
   const disabledAttr = disabled ? " disabled" : "";
   const accessibilityAttrs = featureSettingAccessibilityAttrs(accessibility);
+  if (spec.type === "photo-scopes") {
+    const allowed = new Set(Array.isArray(value) ? value : String(value || "").split(/[\r\n,，、;；]+/));
+    const options = [["private_owner", "主要用户私聊"], ["private_friend", "其他陪伴用户私聊"], ["group", "群聊"], ["proactive", "Bot 主动生图"]];
+    return `<div class="multi-persona-choice-list photo-scope-choice-list" data-feature-param-group="${safeKey}">${options.map(([scope, label]) => `<label><input type="checkbox" data-photo-scope-value="${scope}" data-feature-param="${safeKey}" value="${scope}"${allowed.has(scope) ? " checked" : ""}${accessibilityAttrs}${disabledAttr}><span>${label}</span></label>`).join("")}<textarea data-feature-param="${safeKey}" hidden>${escapeHtml(options.map(([scope]) => scope).filter((scope) => allowed.has(scope)).join("\n"))}</textarea></div>`;
+  }
   if (key === "multi_persona_primary_id") {
     const current = String(value || "").trim();
     const personas = (state.roleplayPersonas || []).filter((item) => String(item.id || "").trim());
@@ -26641,6 +26653,17 @@ function bindFeatureDetailActions() {
       markFeatureDetailDirty();
     });
   });
+  detailPage?.querySelectorAll("[data-photo-scope-value]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const host = input.closest(".photo-scope-choice-list");
+      const hidden = host?.querySelector('[data-feature-param="photo_generation_allowed_scopes"]');
+      if (hidden) {
+        hidden.value = Array.from(host.querySelectorAll("[data-photo-scope-value]:checked")).map((item) => String(item.value || "").trim()).filter(Boolean).join("\n");
+        rememberFeatureParamDraft(hidden);
+      }
+      markFeatureDetailDirty();
+    });
+  });
   detailPage?.querySelector("[data-migrate-submit]")?.addEventListener("click", async (event) => {
     const card = event.currentTarget.closest(".multi-persona-migration-card");
     const source = card?.querySelector("[data-migrate-source]")?.value || "";
@@ -26766,7 +26789,7 @@ function bindFeatureDetailActions() {
   });
   document.querySelectorAll("[data-feature-param-form]").forEach((form) => {
     form.querySelectorAll("[data-feature-param]").forEach((input) => {
-      if (input.type === "checkbox") {
+      if (input.type === "checkbox" && !input.dataset.photoScopeValue) {
         input.addEventListener("change", () => {
           const paramKey = input.dataset.featureParam || "";
           const label = input.closest(".feature-param-check")?.querySelector("span");

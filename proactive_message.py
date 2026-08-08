@@ -8323,8 +8323,9 @@ Output:
     async def _run_photo_text_action(self, user: dict[str, Any], name: str, reason: str) -> str:
         if not self.enable_photo_text_action:
             return "photo_text：未启用"
-        if self._private_user_role(user) == "friend":
-            return "photo_text：次要用户关系不使用主动生图或复用主要用户图片,不能假装已经拍照"
+        scope_checker = getattr(self, "_photo_generation_scope_allowed", None)
+        if callable(scope_checker) and not scope_checker(proactive=True, user=user, user_id=str(user.get("user_id") or "")):
+            return "photo_text：主动生图不在当前配置的使用范围内,不能假装已经拍照"
         load_defer_note = self._photo_text_load_defer_note("photo_text", force_refresh=True)
         if load_defer_note:
             return f"photo_text：{load_defer_note},不能假装已经拍照"
@@ -8461,6 +8462,9 @@ Output:
         today = today or _today_key()
         if not self.enable_photo_text_action:
             return await self._record_daily_outfit_photo_result(today, "", "主动拍照/生图未开启")
+        scope_checker = getattr(self, "_photo_generation_scope_allowed", None)
+        if callable(scope_checker) and not scope_checker(proactive=True):
+            return await self._record_daily_outfit_photo_result(today, "", "主动生图不在当前配置的使用范围内")
         if not self._photo_text_available():
             return await self._record_daily_outfit_photo_result(today, "", "当前没有可用的生图后端")
         memory_context = ""

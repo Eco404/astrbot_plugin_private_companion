@@ -1050,6 +1050,22 @@ def _initialize_photo_and_expression_config(self: Any, c: Any) -> None:
     self.enable_photo_text_action = self._cfg_bool(
         c, "enable_photo_text_action", bool(self._cfg_raw(c, "allow_photo_text_action", legacy_photo_enabled))
     )
+    raw_photo_scopes = self._cfg_raw(c, "photo_generation_allowed_scopes", None)
+    if isinstance(raw_photo_scopes, str):
+        raw_photo_scopes = re.split(r"[\\n,，、;；]+", raw_photo_scopes)
+    if not isinstance(raw_photo_scopes, (list, tuple, set)):
+        raw_photo_scopes = []
+    allowed_photo_scopes = {
+        str(item or "").strip().lower()
+        for item in raw_photo_scopes
+        if str(item or "").strip().lower() in {"private_owner", "private_friend", "group", "proactive"}
+    }
+    self.photo_generation_allowed_scopes = sorted(allowed_photo_scopes) or [
+        "private_owner",
+        "private_friend",
+        "group",
+        "proactive",
+    ]
     self.enable_photo_reference_image = self._cfg_bool(c, "enable_photo_reference_image", False)
     self.enable_group_nsfw_private_fallback = self._cfg_bool(c, "enable_group_nsfw_private_fallback", False)
     self.group_nsfw_image_review_timeout_seconds = min(
