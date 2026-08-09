@@ -39,11 +39,15 @@ class SegmentedExternalShareTests(unittest.TestCase):
             )
         )
 
-    def test_proactive_send_loop_uses_the_reason_gate(self) -> None:
+    def test_proactive_send_loop_uses_route_and_reason_gates(self) -> None:
         source = inspect.getsource(DailyStateMixin._tick_user)
 
         self.assertIn(
-            "disable_segmenting=self._proactive_send_disables_segmenting(",
+            'route_options_for_send.get("disable_segmenting")',
+            source,
+        )
+        self.assertIn(
+            "self._proactive_send_disables_segmenting(",
             source,
         )
         self.assertNotIn(

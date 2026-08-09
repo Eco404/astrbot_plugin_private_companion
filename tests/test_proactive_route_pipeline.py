@@ -295,9 +295,9 @@ class ProactiveRoutePipelineTests(unittest.TestCase):
     def test_delivery_shape_is_route_specific(self) -> None:
         expected = {
             "transactional": True,
-            "safety_event": True,
+            "safety_event": False,
             "continuation": True,
-            "ritual": True,
+            "ritual": False,
             "content_share": False,
             "self_life": False,
             "relational": False,

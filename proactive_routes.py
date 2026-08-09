@@ -183,7 +183,9 @@ class SafetyEventRoute(ProactiveRoute):
     recent_chat_policy = "bypass"
     duplicate_policy = "event_revision"
     review_profile = "safety_grounded"
-    disable_segmenting = True
+    # Safety facts must remain intact, but the configured text splitter can
+    # still deliver them as ordered bubbles without changing their content.
+    disable_segmenting = False
     allow_automatic_followup = False
     retry_profile = "short_lived"
 
@@ -328,7 +330,9 @@ class RitualRoute(ProactiveRoute):
     recent_chat_policy = "satisfy_or_defer"
     duplicate_policy = "daily_slot"
     review_profile = "time_slot"
-    disable_segmenting = True
+    # Respect the user's global segmentation preference for greetings and
+    # other daily rituals instead of forcing every message into one bubble.
+    disable_segmenting = False
     allow_automatic_followup = True
 
     def dedupe_key(self, candidate: dict[str, Any], *, date_key: str) -> str:
