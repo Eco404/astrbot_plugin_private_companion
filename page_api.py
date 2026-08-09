@@ -894,7 +894,19 @@ class PrivateCompanionPageApi(
                 )
             users = data.get("users") if isinstance(data.get("users"), dict) else {}
             groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
-            enabled_users = sum(1 for item in users.values() if isinstance(item, dict) and item.get("enabled", True))
+            enabled_users = len(users)
+            proactive_enabled_users = sum(
+                1
+                for item in users.values()
+                if isinstance(item, dict)
+                and (
+                    item.get("proactive_private_enabled") is True
+                    or (
+                        isinstance(item.get("unified_profile_capabilities"), dict)
+                        and item["unified_profile_capabilities"].get("proactive_private_enabled") is True
+                    )
+                )
+            )
             visible_groups = {
                 str(group_id): group
                 for group_id, group in groups.items()
@@ -933,6 +945,7 @@ class PrivateCompanionPageApi(
                 "private": {
                     "user_count": len(users),
                     "enabled_user_count": enabled_users,
+                    "proactive_enabled_user_count": proactive_enabled_users,
                     "require_opt_in": bool(getattr(self.plugin, "require_private_opt_in", True)),
                     "admin_ids": list(self.plugin._configured_admin_ids()) if hasattr(self.plugin, "_configured_admin_ids") else [],
                     "target_user_ids": list(self.plugin._configured_target_ids()) if hasattr(self.plugin, "_configured_target_ids") else [],
@@ -9302,7 +9315,18 @@ class PrivateCompanionPageApi(
                 "group.llm_breaker",
             )
 
-        enabled_users = [item for item in users.values() if isinstance(item, dict) and item.get("enabled", True)]
+        enabled_users = [
+            item
+            for item in users.values()
+            if isinstance(item, dict)
+            and (
+                item.get("proactive_private_enabled") is True
+                or (
+                    isinstance(item.get("unified_profile_capabilities"), dict)
+                    and item["unified_profile_capabilities"].get("proactive_private_enabled") is True
+                )
+            )
+        ]
         runtime = proactive_tasks.get("runtime", {})
         daily_limit = self._int(getattr(self.plugin, "max_daily_messages", 0))
         budget = token_stats.get("budget", {})
@@ -14527,7 +14551,7 @@ class PrivateCompanionPageApi(
         last_emotion_judgement_error = self._emotion_judgement_error_summary(user.get("last_emotion_judgement_error"))
         capability_getter = getattr(self.plugin, "_req036_capability_summary_for_user", None)
         capability_summary = capability_getter(user) if callable(capability_getter) else {
-            "private_companion_enabled": bool(user.get("private_companion_enabled", user.get("enabled", False))),
+            "private_companion_enabled": True,
             "proactive_private_enabled": False,
             "effective_proactive_private_enabled": False,
             "portrait_mode": "disabled",
@@ -14536,7 +14560,6 @@ class PrivateCompanionPageApi(
             "grant_source": "legacy",
             "blocked_reasons": [],
         }
-        private_companion_enabled = bool(capability_summary.get("private_companion_enabled"))
         return {
             "user_id": user_id_text,
             "display_name": display_name,
@@ -14546,8 +14569,8 @@ class PrivateCompanionPageApi(
             "identity_label": self._single_line((platform_profile or {}).get("identity_label"), 60),
             "stable_platform_identity": bool(platform_kind == "qq_official" or is_qq_user),
             "source": source,
-            "enabled": private_companion_enabled,
-            "private_companion_enabled": private_companion_enabled,
+            "enabled": True,
+            "private_companion_enabled": True,
             "proactive_private_enabled": bool(capability_summary.get("proactive_private_enabled")),
             "portrait_mode": self._single_line(capability_summary.get("portrait_mode"), 40) or "disabled",
             "portrait_learning_enabled": bool(capability_summary.get("portrait_learning_enabled")),
@@ -18780,12 +18803,10 @@ class PrivateCompanionPageApi(
             "default_nickname",
             "enable_auto_user_profile_creation",
             "portrait_global_mode",
-            "auto_enable_companion_for_new_users",
             "auto_profile_platforms",
             "default_nickname_strategy",
             "default_proactive_enabled",
             "default_proactive_daily_limit",
-            "owner_companion_enabled",
             "default_interaction_band",
             "enable_custom_relationship_stage_policy",
             "relationship_stage_policy",
@@ -19922,7 +19943,18 @@ class PrivateCompanionPageApi(
         group_mode = str(getattr(self.plugin, "group_access_mode", "whitelist") or "whitelist")
         whitelist = self.plugin._configured_group_ids()
         blacklist = self.plugin._configured_group_blacklist_ids()
-        enabled_users = sum(1 for item in users.values() if isinstance(item, dict) and item.get("enabled", True))
+        enabled_users = sum(
+            1
+            for item in users.values()
+            if isinstance(item, dict)
+            and (
+                item.get("proactive_private_enabled") is True
+                or (
+                    isinstance(item.get("unified_profile_capabilities"), dict)
+                    and item["unified_profile_capabilities"].get("proactive_private_enabled") is True
+                )
+            )
+        )
         enabled_groups = sum(1 for item in groups.values() if isinstance(item, dict) and item.get("enabled", True))
 
         if getattr(self.plugin, "enabled", False):
@@ -21863,12 +21895,10 @@ class PrivateCompanionPageApi(
             "default_nickname",
             "enable_auto_user_profile_creation",
             "portrait_global_mode",
-            "auto_enable_companion_for_new_users",
             "auto_profile_platforms",
             "default_nickname_strategy",
             "default_proactive_enabled",
             "default_proactive_daily_limit",
-            "owner_companion_enabled",
             "default_interaction_band",
             "enable_custom_relationship_stage_policy",
             "relationship_stage_policy",

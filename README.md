@@ -10,7 +10,7 @@
 | --- | --- |
 | 插件名 | <code>astrbot_plugin_private_companion</code> |
 | 显示名 | 我会永远陪着你 |
-| 版本 | <code>6.0.9</code> |
+| 版本 | <code>6.0.10</code> |
 | AstrBot | <code>>= 4.22.0</code> |
 | 官方声明平台 | <code>aiocqhttp</code>、<code>qq_official</code> |
 | 管理入口 | AstrBot 插件拓展页中的“陪伴面板”（含纯英文路径兜底入口） |
@@ -713,6 +713,8 @@ if api:
         "executor": my_executor,
     })
 ~~~
+
+`config_schema` 支持控件类型元数据：字段声明 `"type": "select"`（配合 `"options"` 数组渲染下拉，选项元素可为字符串或 `{"value": ..., "label": ...}`）、`"type": "text"`（输入框）、`"type": "bool"`（开关）、`"type": "number"`（数字框）。声明后，陪伴面板「外部主动能力」卡片会把该字段渲染为对应控件，配置时无需手写 JSON；未声明类型时保留原 JSON 文本编辑作为回退。
 
 外部主动能力还可提供同步 `availability(ctx)` 回调；返回 false 时，该能力不会进入当前用户的主动动作候选。`ctx` 包含 `user/config/plugin`，回调只适合做快速、无副作用的本地检查。能力冷却按用户分别记录；上下文缺少稳定的 `user_id`、`id` 或 `umo` 时回退到全局执行时间。
 

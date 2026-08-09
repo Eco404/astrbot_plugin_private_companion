@@ -237,8 +237,8 @@ class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
         self.assertEqual("小雪", user["nickname"])
         self.assertEqual("friend", user["relationship_role"])
         self.assertEqual(7, user["relationship_score"])
-        self.assertFalse(user["enabled"])
-        self.assertFalse(user["auto_enabled"])
+        self.assertTrue(user["enabled"])
+        self.assertTrue(user["auto_enabled"])
         self.assertFalse(user["manual_enabled"])
         self.assertFalse(user["manual_disabled"])
         self.assertEqual(0, user["proactive_daily_limit"])
@@ -279,7 +279,7 @@ class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
         host.auto_profile_platforms = ["onebot"]
         self.assertEqual((None, False), host._ensure_auto_private_user_profile(event, user_id="10001"))
 
-        self.assertFalse(host._is_target_private_user("10001", {"auto_enabled": True, "manual_disabled": True}))
+        self.assertTrue(host._is_target_private_user("10001", {"auto_enabled": True, "manual_disabled": True}))
         self.assertTrue(host._is_target_private_user("10001", {"auto_enabled": True, "manual_disabled": False}))
 
     def test_auto_profile_can_grant_private_without_proactive_permission(self) -> None:
@@ -325,7 +325,7 @@ class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
         self.assertIsNot(owner, isolated)
         self.assertNotEqual(owner["user_id"], isolated["user_id"])
         self.assertEqual("friend", isolated.get("relationship_role"))
-        self.assertFalse(isolated.get("enabled", True))
+        self.assertTrue(isolated.get("enabled", False))
         self.assertNotEqual("owner", isolated.get("relationship_role"))
         self.assertEqual("qq_official", isolated.get("identity_platform_kind"))
 
@@ -521,8 +521,8 @@ class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
         self.assertIn('data-feature-open="${escapeHtml(key)}"', source)
         schema = (ROOT / "_conf_schema.json").read_text(encoding="utf-8")
         self.assertIn("新用户最小档案", schema)
-        self.assertIn("新用户默认私聊权限", schema)
-        self.assertIn('privateEnabled ? "关闭私聊权限" : "授予私聊权限"', source)
+        self.assertNotIn("新用户默认私聊权限", schema)
+        self.assertNotIn('关闭私聊权限', source)
         self.assertIn('detail.proactive_private_enabled ? "关闭主动权限" : "授予主动权限"', source)
         self.assertIn("启用好感度系统", source)
         self.assertIn("用户档案", html)

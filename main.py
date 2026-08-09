@@ -2770,71 +2770,8 @@ class PrivateCompanionPlugin(
     def get_unified_person_projection(self, person_id: str) -> dict[str, Any] | None:
         return self._active_unified_person_registry().read_projection(person_id)
 
-    def _req036_owner_companion_status(self, user: Any) -> tuple[bool, bool] | None:
-        """Return the global/private owner gates, or ``None`` for friends."""
-        if not isinstance(user, dict) or _single_line(user.get("relationship_role"), 40).lower() != "owner":
-            return None
-
-        def enabled(value: Any, default: bool = True) -> bool:
-            if value is None:
-                return default
-            if isinstance(value, str):
-                normalized = value.strip().lower()
-                if normalized in {"false", "0", "no", "off", "disabled", "停用", "关闭", "关", "否", ""}:
-                    return False
-                if normalized in {"true", "1", "yes", "on", "enabled", "启用", "开启", "开", "是"}:
-                    return True
-            return bool(value)
-
-        global_enabled = enabled(getattr(self, "owner_companion_enabled", True))
-        user_enabled = enabled(user.get("owner_companion_enabled"), True)
-        return global_enabled, user_enabled
-
     def _req036_private_gate_for_user(self, user: Any) -> dict[str, Any]:
-        gate = req036_private_companion_gate(
-            user,
-            getattr(self, "private_companion_disabled_reply", DEFAULT_UNAUTHORIZED_PRIVATE_REPLY),
-        )
-        if isinstance(user, dict) and bool(user.get("manual_disabled")):
-            gate["allowed"] = False
-            gate["code"] = "private_companion_manually_disabled"
-            gate["reply"] = _single_line(
-                getattr(self, "private_companion_disabled_reply", DEFAULT_UNAUTHORIZED_PRIVATE_REPLY),
-                480,
-            ) or DEFAULT_UNAUTHORIZED_PRIVATE_REPLY
-            capabilities = gate.get("capabilities")
-            if isinstance(capabilities, dict):
-                capabilities["private_companion_enabled"] = False
-                capabilities["proactive_private_enabled"] = False
-                capabilities["effective_proactive_private_enabled"] = False
-            return gate
-        owner_status = self._req036_owner_companion_status(user)
-        if owner_status is None:
-            return gate
-        global_enabled, user_enabled = owner_status
-        capabilities = gate.get("capabilities")
-        if not global_enabled or not user_enabled:
-            gate["allowed"] = False
-            gate["code"] = "owner_companion_disabled"
-            gate["reply"] = _single_line(
-                getattr(self, "private_companion_disabled_reply", DEFAULT_UNAUTHORIZED_PRIVATE_REPLY),
-                480,
-            ) or DEFAULT_UNAUTHORIZED_PRIVATE_REPLY
-            if isinstance(capabilities, dict):
-                capabilities["private_companion_enabled"] = False
-                capabilities["proactive_private_enabled"] = False
-                capabilities["effective_proactive_private_enabled"] = False
-            return gate
-        # A pre-REQ036 owner may not have a capability document at all. Keep
-        # that legacy account usable, while a present document remains the
-        # administrator's explicit source of truth.
-        if not isinstance(user.get("unified_profile_capabilities"), dict):
-            gate["allowed"] = True
-            gate["code"] = "owner_default_enabled"
-            gate["reply"] = ""
-            if isinstance(capabilities, dict):
-                capabilities["private_companion_enabled"] = True
-        return gate
+        return req036_private_companion_gate(user)
 
     def _req036_migrate_configured_target_capability(self, user_id: Any, user: Any) -> bool:
         """Repair migration-only false gates for configured targets and legacy owners."""
@@ -2915,10 +2852,8 @@ class PrivateCompanionPlugin(
                 if observed_adapter and configured_platform_raw not in {observed_adapter, observed_adapter.split(":", 1)[0]}:
                     configured_match = False
 
-        owner_status_getter = getattr(self, "_req036_owner_companion_status", None)
-        owner_status = owner_status_getter(user) if callable(owner_status_getter) else None
-        owner_match = bool(owner_status and all(owner_status))
-        if not configured_match and not owner_match:
+        owner_match = False
+        if not configured_match:
             return False
 
         capabilities = user.get("unified_profile_capabilities")
@@ -3007,50 +2942,13 @@ class PrivateCompanionPlugin(
     def _req036_capability_summary_for_user(self, user: Any) -> dict[str, Any]:
         bridge = self._memory_companion_bridge()
         portrait_backend_available = callable(getattr(bridge, "read_unified_profile_portrait", None))
-        summary = req036_capability_summary(
+        return req036_capability_summary(
             user,
             global_portrait_mode=getattr(self, "portrait_global_mode", "disabled"),
             portrait_backend_available=portrait_backend_available,
         )
-        if isinstance(user, dict) and bool(user.get("manual_disabled")):
-            summary["private_companion_enabled"] = False
-            summary["proactive_private_enabled"] = False
-            summary["effective_proactive_private_enabled"] = False
-            reasons = list(summary.get("blocked_reasons") or [])
-            if "private_companion_manually_disabled" not in reasons:
-                reasons.append("private_companion_manually_disabled")
-            summary["blocked_reasons"] = reasons[:8]
-            return summary
-        owner_status = self._req036_owner_companion_status(user)
-        if owner_status is None:
-            return summary
-        global_enabled, user_enabled = owner_status
-        if not global_enabled or not user_enabled:
-            summary["private_companion_enabled"] = False
-            summary["proactive_private_enabled"] = False
-            summary["effective_proactive_private_enabled"] = False
-            reasons = list(summary.get("blocked_reasons") or [])
-            if "owner_companion_disabled" not in reasons:
-                reasons.append("owner_companion_disabled")
-            summary["blocked_reasons"] = reasons[:8]
-        elif not isinstance(user.get("unified_profile_capabilities"), dict):
-            summary["private_companion_enabled"] = True
-            summary["proactive_private_enabled"] = True
-            summary["effective_proactive_private_enabled"] = True
-            summary["grant_source"] = "owner_default_enabled"
-            summary["blocked_reasons"] = []
-        return summary
 
     def _req036_proactive_private_allowed(self, user: Any) -> bool:
-        if isinstance(user, dict) and bool(user.get("manual_disabled")):
-            return False
-        owner_status = self._req036_owner_companion_status(user)
-        if owner_status is not None:
-            global_enabled, user_enabled = owner_status
-            if not global_enabled or not user_enabled:
-                return False
-            if not isinstance(user.get("unified_profile_capabilities"), dict):
-                return True
         return bool(req036_proactive_private_gate(user).get("allowed"))
 
     def _req036_update_capabilities(
@@ -12181,51 +12079,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         *args,
         **kwargs,
     ):
-        """Fail closed before any Provider, Memory, tool, or relationship hook runs."""
-        if self is None or event is None:
-            return
-        try:
-            if not bool(event.is_private_chat()):
-                return
-        except Exception:
-            return
-        inbound_checker = getattr(self, "_event_is_inbound_chat_message", None)
-        if callable(inbound_checker) and not inbound_checker(event):
-            return
-        already_denied = bool(getattr(event, "private_companion_req036_denied", False))
-        try:
-            resolver = getattr(self, "_private_user_id_for_event", None)
-            user_id = (
-                resolver(event)
-                if callable(resolver)
-                else self._canonical_private_user_id(str(event.get_sender_id()))
-            )
-        except Exception:
-            user_id = ""
-        users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
-        user = users.get(user_id) if user_id and isinstance(users, dict) else None
-        gate = self._req036_private_gate_for_user(user)
-        if gate.get("allowed") and not already_denied:
-            return
-        if req is not None:
-            for attribute, value in (
-                ("system_prompt", ""),
-                ("prompt", ""),
-                ("contexts", []),
-                ("extra_user_content_parts", []),
-                ("func_tool", None),
-                ("tools", []),
-                ("images", []),
-                ("image_urls", []),
-            ):
-                try:
-                    setattr(req, attribute, value)
-                except Exception:
-                    pass
-        if already_denied:
-            event.stop_event()
-            return
-        await self._req036_reject_unauthorized_private_event(event, gate)
+        """Compatibility hook retained after removing passive private-chat gating."""
+        return
 
     @filter.on_llm_request(priority=-30000)
     @_multi_persona_event_context
@@ -13596,17 +13451,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 migrator = getattr(self, "_req036_migrate_configured_target_capability", None)
                 if callable(migrator):
                     migrator(user_id, private_user)
-                private_gate = self._req036_private_gate_for_user(private_user)
-                if private_gate.get("allowed") or is_private_delivery_bootstrap:
-                    self._req036_attach_unified_profile_context(
-                        event,
-                        user=private_user if isinstance(private_user, dict) else None,
-                        source="private_command",
-                    )
-                    self._schedule_data_save()
-            if not private_gate.get("allowed") and not is_private_delivery_bootstrap:
-                await self._req036_reject_unauthorized_private_event(event, private_gate)
-                return
+                self._req036_attach_unified_profile_context(
+                    event,
+                    user=private_user if isinstance(private_user, dict) else None,
+                    source="private_command",
+                )
+                self._schedule_data_save()
         self._qzone_note_event_bot(event)
         raw_text = str(event.message_str or "")
         args = raw_text.replace("\u3000", " ").split(maxsplit=2)
@@ -14260,7 +14110,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         inbound_checker = getattr(self, "_event_is_inbound_chat_message", None)
         if callable(inbound_checker) and not inbound_checker(event):
-            logger.debug("[PrivateCompanion] 非入站聊天事件跳过私聊权限闸门")
+            logger.debug("[PrivateCompanion] 非入站聊天事件跳过私聊档案预建")
             return
         try:
             user_id = str(event.get_sender_id())
@@ -14281,17 +14131,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 user_id = _single_line(private_user.get("user_id"), 160) or user_id
             migrator = getattr(self, "_req036_migrate_configured_target_capability", None)
             migrated = bool(migrator(user_id, private_user)) if callable(migrator) else False
-            private_gate = self._req036_private_gate_for_user(private_user)
             if migrated:
                 self._schedule_data_save()
         if auto_profile_created:
             logger.info(
-                "[PrivateCompanion] 已建立默认关闭的最小用户档案: user=%s platform=%s",
+                "[PrivateCompanion] 已建立最小用户档案: user=%s platform=%s",
                 _single_line(self._canonical_private_user_id(user_id), 80),
                 _single_line(self._platform_kind_for_event(event), 40),
             )
-        if not private_gate.get("allowed"):
-            await self._req036_reject_unauthorized_private_event(event, private_gate)
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     @_multi_persona_event_context

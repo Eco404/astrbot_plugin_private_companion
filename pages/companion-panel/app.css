@@ -13070,6 +13070,27 @@ body.daily-outfit-preview-open {
   min-height: 112px;
 }
 
+.external-ability-config-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 16px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 12px;
+}
+
+.external-ability-config-field {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.external-ability-config-field small {
+  color: var(--muted);
+  line-height: 1.45;
+  overflow-wrap: break-word;
+}
+
 .external-ability-form button {
   grid-column: 1 / -1;
   height: 34px;

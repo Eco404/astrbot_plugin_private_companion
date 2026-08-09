@@ -36,6 +36,8 @@ def _bool(value: Any) -> bool:
 
 
 def _legacy_private_enabled(user: dict[str, Any]) -> bool:
+    # Read the historical effective state only to avoid accidentally granting
+    # proactive permission during migration. It no longer gates passive chat.
     if _bool(user.get("manual_disabled")):
         return False
     if "private_companion_enabled" in user:
@@ -109,7 +111,7 @@ def _default_closed_repair_plan(
 
     private_decision = _latest_explicit_capability_decision(user, "private_companion_enabled")
     proactive_decision = _latest_explicit_capability_decision(user, "proactive_private_enabled")
-    private_enabled = _bool(existing.get("private_companion_enabled"))
+    private_enabled = True
     proactive_enabled = _bool(existing.get("proactive_private_enabled"))
     snapshot_private_enabled = False
     if isinstance(legacy_snapshot, dict):
@@ -131,21 +133,21 @@ def _default_closed_repair_plan(
             "auto_enabled",
         )
     ) or snapshot_private_enabled
-    repaired_private = private_enabled or (private_decision is not False and private_evidence)
+    legacy_private_allowed = private_decision is not False and private_evidence
     proactive_evidence = (
         proactive_decision is True
         or _bool(user.get("proactive_private_enabled"))
         or _legacy_positive_daily_limit(user)
     )
     repaired_proactive = proactive_enabled or (
-        repaired_private
+        legacy_private_allowed
         and proactive_decision is not False
         and proactive_evidence
     )
-    if repaired_private == private_enabled and repaired_proactive == proactive_enabled:
+    if repaired_proactive == proactive_enabled:
         return None
     return {
-        "private_companion_enabled": repaired_private,
+        "private_companion_enabled": True,
         "proactive_private_enabled": repaired_proactive,
         "grant_source": "legacy_default_closed_repair",
     }
@@ -185,7 +187,7 @@ def _migration_snapshots_valid(snapshots: Any) -> bool:
 def default_capabilities(*, grant_source: str = "default_closed") -> dict[str, Any]:
     return {
         "schema_version": CAPABILITY_SCHEMA_VERSION,
-        "private_companion_enabled": False,
+        "private_companion_enabled": True,
         "proactive_private_enabled": False,
         "portrait_mode": "disabled",
         "portrait_mode_override": "follow_global",
@@ -199,7 +201,7 @@ def normalize_capabilities(value: Any, *, default_source: str = "default_closed"
     result = default_capabilities(grant_source=_text(source.get("grant_source"), 80) or default_source)
     result.update(
         {
-            "private_companion_enabled": _bool(source.get("private_companion_enabled")),
+            "private_companion_enabled": True,
             "proactive_private_enabled": _bool(source.get("proactive_private_enabled")),
             "portrait_mode": normalize_portrait_mode(source.get("portrait_mode")),
             "portrait_mode_override": "explicit" if _text(source.get("portrait_mode_override"), 40) == "explicit" else "follow_global",
@@ -212,7 +214,7 @@ def normalize_capabilities(value: Any, *, default_source: str = "default_closed"
 def ensure_new_profile_capabilities(
     user: dict[str, Any],
     *,
-    private_companion_enabled: bool = False,
+    private_companion_enabled: bool = True,
     proactive_private_enabled: bool = False,
     grant_source: str = "default_closed",
 ) -> dict[str, Any]:
@@ -224,11 +226,8 @@ def ensure_new_profile_capabilities(
         normalized = normalize_capabilities(existing)
     else:
         normalized = default_capabilities(grant_source=grant_source)
-    private_enabled = bool(private_companion_enabled)
-    normalized["private_companion_enabled"] = private_enabled
-    normalized["proactive_private_enabled"] = bool(
-        private_enabled and proactive_private_enabled
-    )
+    normalized["private_companion_enabled"] = True
+    normalized["proactive_private_enabled"] = bool(proactive_private_enabled)
     normalized["grant_source"] = _text(grant_source, 80) or "default_closed"
     normalized["updated_at"] = _now()
     user["unified_profile_capabilities"] = normalized
@@ -255,25 +254,15 @@ def ensure_legacy_profile_capabilities(user: dict[str, Any]) -> dict[str, Any]:
     else:
         private_decision = _latest_explicit_capability_decision(user, "private_companion_enabled")
         proactive_decision = _latest_explicit_capability_decision(user, "proactive_private_enabled")
-        manually_disabled = _bool(user.get("manual_disabled"))
-        if private_decision is not None:
-            private_enabled = private_decision
-        else:
-            private_enabled = _legacy_private_enabled(user) or any(
-                _bool(user.get(key))
-                for key in ("manual_enabled", "auto_enabled")
-            )
-            if _text(user.get("relationship_role"), 40).lower() == "owner":
-                private_enabled = True
-        if manually_disabled:
-            private_enabled = False
+        legacy_private_enabled = _legacy_private_enabled(user)
+        private_enabled = True
         if proactive_decision is not None:
             proactive_enabled = proactive_decision
         else:
-            proactive_enabled = _legacy_proactive_enabled(user, private_enabled)
+            proactive_enabled = _legacy_proactive_enabled(user, legacy_private_enabled)
             if private_enabled and _text(user.get("relationship_role"), 40).lower() == "owner":
                 proactive_enabled = True
-        proactive_enabled = bool(private_enabled and proactive_enabled and not manually_disabled)
+        proactive_enabled = bool(proactive_enabled)
         normalized = normalize_capabilities(
             {
                 "private_companion_enabled": private_enabled,
@@ -283,9 +272,7 @@ def ensure_legacy_profile_capabilities(user: dict[str, Any]) -> dict[str, Any]:
             },
             default_source="legacy_effective_migration",
         )
-    if _bool(user.get("manual_disabled")):
-        normalized["private_companion_enabled"] = False
-        normalized["proactive_private_enabled"] = False
+    normalized["private_companion_enabled"] = True
     user["unified_profile_capabilities"] = normalized
     user["private_companion_enabled"] = normalized["private_companion_enabled"]
     user["proactive_private_enabled"] = normalized["proactive_private_enabled"]
@@ -317,21 +304,11 @@ def capability_summary(
 
 def private_companion_gate(user: Any, configured_reply: Any = "") -> dict[str, Any]:
     summary = capability_summary(user)
-    if summary["private_companion_enabled"]:
-        return {"allowed": True, "code": "profile_exact", "reply": "", "capabilities": summary}
-    reply = _text(configured_reply, 480) or DEFAULT_UNAUTHORIZED_PRIVATE_REPLY
-    return {
-        "allowed": False,
-        "code": "private_companion_disabled",
-        "reply": reply,
-        "capabilities": summary,
-    }
+    return {"allowed": True, "code": "private_chat_unrestricted", "reply": "", "capabilities": summary}
 
 
 def proactive_private_gate(user: Any) -> dict[str, Any]:
     summary = capability_summary(user)
-    if not summary["private_companion_enabled"]:
-        return {"allowed": False, "code": "proactive_requires_private_companion", "capabilities": summary}
     if not summary["proactive_private_enabled"]:
         return {"allowed": False, "code": "proactive_private_disabled", "capabilities": summary}
     return {"allowed": True, "code": "profile_exact", "capabilities": summary}
@@ -352,13 +329,13 @@ def update_capabilities(
     if not actor_authorized:
         return {"ok": False, "code": "admin_required", "capabilities": capability_summary(user)}
     current = normalize_capabilities(user.get("unified_profile_capabilities"), default_source="default_closed")
+    current["private_companion_enabled"] = True
     previous = {
         key: current.get(key)
         for key in ("private_companion_enabled", "proactive_private_enabled", "portrait_mode", "portrait_mode_override")
     }
-    for key in ("private_companion_enabled", "proactive_private_enabled"):
-        if key in changes:
-            current[key] = _bool(changes[key])
+    if "proactive_private_enabled" in changes:
+        current["proactive_private_enabled"] = _bool(changes["proactive_private_enabled"])
     if "portrait_mode" in changes:
         requested_mode = _text(changes.get("portrait_mode"), 40).lower()
         if requested_mode == "follow_global":
@@ -371,7 +348,7 @@ def update_capabilities(
         for key in previous
         if previous.get(key) != current.get(key)
     }
-    if any(key in changed for key in ("private_companion_enabled", "proactive_private_enabled")):
+    if "proactive_private_enabled" in changed:
         current["grant_source"] = _text(grant_source, 80) or "admin"
     if changed:
         current["updated_at"] = _now()
@@ -414,8 +391,9 @@ def migration_preview(data: Any, *, operation_id: str = "") -> dict[str, Any]:
                     continue
             except (TypeError, ValueError, OverflowError):
                 pass
-        private_enabled = _legacy_private_enabled(user)
-        proactive_enabled = _legacy_proactive_enabled(user, private_enabled)
+        legacy_private_enabled = _legacy_private_enabled(user)
+        private_enabled = True
+        proactive_enabled = _legacy_proactive_enabled(user, legacy_private_enabled)
         planned.append(
             {
                 "user_id": _text(user_id, 120),
@@ -491,8 +469,9 @@ def migrate_legacy_capabilities(data: dict[str, Any], *, operation_id: str, dry_
                     continue
             except (TypeError, ValueError, OverflowError):
                 pass
-        private_enabled = _legacy_private_enabled(user)
-        proactive_enabled = _legacy_proactive_enabled(user, private_enabled)
+        legacy_private_enabled = _legacy_private_enabled(user)
+        private_enabled = True
+        proactive_enabled = _legacy_proactive_enabled(user, legacy_private_enabled)
         snapshots[raw_user_id] = {
             "unified_profile_capabilities": deepcopy(user.get("unified_profile_capabilities")),
             "private_companion_enabled": deepcopy(user.get("private_companion_enabled")),

@@ -270,17 +270,20 @@ def build_capability_summary(value: Any) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     mode = normalize_portrait_mode(source.get("portrait_mode"))
     learning, usage = portrait_mode_flags(mode)
-    private_enabled = source.get("private_companion_enabled") is True
+    # Passive private chat is no longer permission-gated. Keep the legacy
+    # field in the contract so older consumers remain compatible.
+    private_enabled = True
     proactive_enabled = source.get("proactive_private_enabled") is True
     reasons = [_text(item, 80) for item in source.get("blocked_reasons", []) if _text(item, 80)] if isinstance(source.get("blocked_reasons"), list) else []
-    if proactive_enabled and not private_enabled and "proactive_requires_private_companion" not in reasons:
-        reasons.append("proactive_requires_private_companion")
-    if not private_enabled and "private_companion_disabled" not in reasons:
-        reasons.append("private_companion_disabled")
+    reasons = [
+        reason
+        for reason in reasons
+        if reason not in {"private_companion_disabled", "private_companion_manually_disabled", "proactive_requires_private_companion"}
+    ]
     return {
         "private_companion_enabled": private_enabled,
         "proactive_private_enabled": proactive_enabled,
-        "effective_proactive_private_enabled": proactive_enabled and private_enabled,
+        "effective_proactive_private_enabled": proactive_enabled,
         "portrait_mode": mode,
         "portrait_learning_enabled": learning,
         "portrait_usage_enabled": usage,

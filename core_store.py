@@ -2623,18 +2623,8 @@ class CoreStoreMixin:
         relationship_changed = self._ensure_relationship_user_state(user, created=created)
         user.setdefault("manual_enabled", False)
         user.setdefault("manual_disabled", False)
-        if created:
-            user["enabled"] = self._is_target_private_user(user_id, user)
-        elif user.get("manual_disabled"):
-            user["enabled"] = False
-        elif isinstance(user.get("unified_profile_capabilities"), dict):
-            # ``enabled`` is a compatibility mirror of the private capability,
-            # never a second authority.  In particular, proactive scheduling
-            # must not turn a privately authorized user off merely because its
-            # proactive budget is currently exhausted or disabled.
-            user["enabled"] = user["unified_profile_capabilities"].get("private_companion_enabled") is True
-        elif not self._is_target_private_user(user_id, user):
-            user["enabled"] = False
+        # Compatibility mirror only: passive private chat is always available.
+        user["enabled"] = True
         if not user.get("nickname"):
             user["nickname"] = self.default_nickname
         if not user.get("style"):
@@ -2742,17 +2732,11 @@ class CoreStoreMixin:
         # must not bypass the ledger or overwrite an explicitly configured role.
         user["nickname"] = self._auto_profile_nickname(canonical_user_id, sender_display_name)
         user["style"] = _single_line(getattr(self, "default_style", "温柔"), 24) or "温柔"
-        auto_companion_enabled = bool(
-            getattr(self, "auto_enable_companion_for_new_users", True)
-        )
-        default_proactive_enabled = bool(
-            auto_companion_enabled
-            and getattr(self, "default_proactive_enabled", False)
-        )
-        user["auto_enabled"] = auto_companion_enabled
+        default_proactive_enabled = bool(getattr(self, "default_proactive_enabled", False))
+        user["auto_enabled"] = True
         user["manual_enabled"] = False
         user["manual_disabled"] = False
-        user["enabled"] = auto_companion_enabled
+        user["enabled"] = True
         user["private_memory_enabled"] = False
         user["cross_group_memory_enabled"] = False
         user["proactive_daily_limit"] = (
@@ -2767,9 +2751,8 @@ class CoreStoreMixin:
         )
         ensure_new_profile_capabilities(
             user,
-            private_companion_enabled=auto_companion_enabled,
             proactive_private_enabled=default_proactive_enabled,
-            grant_source=("private_auto_default" if auto_companion_enabled else "default_closed"),
+            grant_source="private_auto_default",
         )
         user["last_seen"] = max(_safe_float(user.get("last_seen"), 0), created_at)
         user["last_activity_at"] = max(_safe_float(user.get("last_activity_at"), 0), created_at)
@@ -2810,8 +2793,6 @@ class CoreStoreMixin:
         if self._is_bot_self_user_id(user_id):
             return False
         if isinstance(user, dict):
-            if user.get("manual_disabled"):
-                return False
             if user.get("manual_enabled") or user.get("auto_enabled"):
                 return True
         if not user_id:

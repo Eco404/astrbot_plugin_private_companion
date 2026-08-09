@@ -947,15 +947,9 @@ class ProactiveMixin(UserRestGateMixin):
                     return False
             except Exception:
                 return False
-        if user.get("manual_disabled"):
+        elif not req036_capability_summary(user).get("proactive_private_enabled"):
             return False
-        capabilities = user.get("unified_profile_capabilities")
-        if isinstance(capabilities, dict):
-            if capabilities.get("private_companion_enabled") is not True:
-                return False
-        elif user.get("enabled") is False:
-            return False
-        return self._is_target_private_user(user_id, user)
+        return bool(user_id and not self._is_bot_self_user_id(user_id))
 
     def _default_private_umo_for_user_id(self, user_id: str) -> str:
         normalizer = getattr(self, "_normalize_private_identity_id", None)
@@ -1986,10 +1980,8 @@ class ProactiveMixin(UserRestGateMixin):
     def _sync_configured_targets(self):
         for user_id in self._configured_target_ids():
             user = self._get_user(user_id)
-            if user.get("manual_disabled"):
-                self._clear_pending_proactive_plan(user)
-                continue
             capabilities = user.get("unified_profile_capabilities")
+            needs_initial_route = not isinstance(capabilities, dict)
             migrator = getattr(self, "_req036_migrate_configured_target_capability", None)
             migrated = bool(migrator(user_id, user)) if callable(migrator) else False
             capabilities = user.get("unified_profile_capabilities")
@@ -2011,13 +2003,11 @@ class ProactiveMixin(UserRestGateMixin):
                     reason_code="legacy_configured_target_migration",
                 )
             capability = req036_capability_summary(user)
-            user["enabled"] = bool(capability.get("private_companion_enabled"))
+            user["enabled"] = True
             user["target_user"] = True
             user.setdefault("nickname", self.default_nickname)
-            if user["enabled"]:
+            if needs_initial_route or migrated or capability.get("proactive_private_enabled"):
                 self._ensure_private_user_umo(user_id, user)
-            else:
-                self._clear_pending_proactive_plan(user)
             if self._user_enabled_for_proactive(user_id, user) and _safe_float(user.get("next_proactive_at"), 0) <= 0:
                 self._schedule_next_proactive(user, now=_now_ts())
 
@@ -2032,13 +2022,7 @@ class ProactiveMixin(UserRestGateMixin):
                 continue
             raw_user_id = str(raw_user.get("user_id") or "")
             if not self._user_enabled_for_proactive(raw_user_id, raw_user):
-                capabilities = raw_user.get("unified_profile_capabilities")
-                private_enabled = (
-                    capabilities.get("private_companion_enabled") is True
-                    if isinstance(capabilities, dict)
-                    else bool(raw_user.get("enabled")) and self._is_target_private_user(raw_user_id, raw_user)
-                )
-                raw_user["enabled"] = bool(private_enabled and not raw_user.get("manual_disabled"))
+                raw_user["enabled"] = True
                 self._clear_pending_proactive_plan(raw_user)
                 changed = True
                 continue

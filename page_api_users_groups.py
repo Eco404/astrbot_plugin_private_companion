@@ -219,9 +219,10 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         user_id = str(payload.get("user_id", "")).strip()
         if not user_id:
             return self._error("缺少 user_id")
-        for key in ("enabled", "private_companion_enabled", "proactive_private_enabled"):
-            if key in payload and type(payload.get(key)) is not bool:
-                return self._error(f"{key} 必须是 JSON 布尔值")
+        if "enabled" in payload or "private_companion_enabled" in payload:
+            return self._error("私聊权限已移除，普通私聊始终可用")
+        if "proactive_private_enabled" in payload and type(payload.get("proactive_private_enabled")) is not bool:
+            return self._error("proactive_private_enabled 必须是 JSON 布尔值")
         if "portrait_mode" in payload:
             portrait_mode = str(payload.get("portrait_mode") or "").strip().lower()
             if portrait_mode not in {"follow_global", "disabled", "use_existing", "learn_and_use"}:
@@ -306,22 +307,12 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     if requested_projection.get("expression_band") != requested_interaction_band:
                         return self._error("current interaction band exceeds the configured user cap")
                 capability_changes = {}
-                if "enabled" in payload:
-                    capability_changes["private_companion_enabled"] = payload.get("enabled")
                 for capability_key in (
-                    "private_companion_enabled",
                     "proactive_private_enabled",
                     "portrait_mode",
                 ):
                     if capability_key in payload:
                         capability_changes[capability_key] = payload.get(capability_key)
-                if role == "owner" and previous_role != "owner":
-                    # Becoming the configured primary user is the sole role
-                    # transition that grants the two private capabilities.
-                    # Later edits preserve any explicit administrator choice.
-                    capability_changes["private_companion_enabled"] = True
-                    capability_changes["proactive_private_enabled"] = True
-                    user["owner_companion_enabled"] = True
                 if capability_changes:
                     updater = getattr(self.plugin, "_req036_update_capabilities", None)
                     if not callable(updater):
@@ -335,14 +326,14 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     )
                     if not bool(capability_result.get("ok")):
                         return self._error(str(capability_result.get("code") or "权限更新失败"))
-                    enabled = bool(capability_result["capabilities"].get("private_companion_enabled"))
-                    user["manual_enabled"] = enabled
-                    user["manual_disabled"] = not enabled
-                    user["auto_enabled"] = False
-                    if enabled:
-                        self.plugin._ensure_private_user_umo(user_id, user)
-                    else:
-                        self.plugin._clear_pending_proactive_plan(user)
+                    if "proactive_private_enabled" in capability_changes:
+                        proactive_enabled = bool(
+                            capability_result["capabilities"].get("proactive_private_enabled")
+                        )
+                        if proactive_enabled:
+                            self.plugin._ensure_private_user_umo(user_id, user)
+                        else:
+                            self.plugin._clear_pending_proactive_plan(user)
                 if "nickname" in payload:
                     user["nickname"] = self._single_line(payload.get("nickname"), 24)
                 if "style" in payload:

@@ -585,13 +585,13 @@ class _UserListHost:
 
 
 class Req036CompanionTests(unittest.TestCase):
-    def test_default_capabilities_and_hard_proactive_dependency(self) -> None:
+    def test_default_capabilities_keep_private_open_and_proactive_independent(self) -> None:
         state = default_capabilities()
-        self.assertFalse(state["private_companion_enabled"])
+        self.assertTrue(state["private_companion_enabled"])
         self.assertFalse(state["proactive_private_enabled"])
         self.assertEqual("disabled", state["portrait_mode"])
         state["proactive_private_enabled"] = True
-        self.assertEqual("proactive_requires_private_companion", proactive_private_gate({"unified_profile_capabilities": state})["code"])
+        self.assertTrue(proactive_private_gate({"unified_profile_capabilities": state})["allowed"])
 
     def test_portrait_capability_fails_closed_without_memory_backend(self) -> None:
         state = default_capabilities()
@@ -671,7 +671,7 @@ class Req036CompanionTests(unittest.TestCase):
 
         unknown = {"relationship_role": "friend"}
         unknown_state = ensure_legacy_profile_capabilities(unknown)
-        self.assertFalse(unknown_state["private_companion_enabled"])
+        self.assertTrue(unknown_state["private_companion_enabled"])
         self.assertFalse(unknown_state["proactive_private_enabled"])
 
         late_import = {
@@ -699,7 +699,7 @@ class Req036CompanionTests(unittest.TestCase):
             }],
         }
         state = ensure_legacy_profile_capabilities(owner)
-        self.assertFalse(state["private_companion_enabled"])
+        self.assertTrue(state["private_companion_enabled"])
         self.assertFalse(state["proactive_private_enabled"])
 
         enabled_state = default_capabilities(grant_source="administrator")
@@ -710,8 +710,8 @@ class Req036CompanionTests(unittest.TestCase):
             "unified_profile_capabilities": enabled_state,
         }
         disabled_state = ensure_legacy_profile_capabilities(manually_disabled)
-        self.assertFalse(disabled_state["private_companion_enabled"])
-        self.assertFalse(disabled_state["proactive_private_enabled"])
+        self.assertTrue(disabled_state["private_companion_enabled"])
+        self.assertTrue(disabled_state["proactive_private_enabled"])
 
     def test_default_closed_compatibility_repair_restores_legacy_evidence_once(self) -> None:
         state = default_capabilities()
@@ -882,7 +882,7 @@ class Req036CompanionTests(unittest.TestCase):
         by_user = {item["user_id"]: item for item in preview["planned"]}
         self.assertFalse(by_user["positive-infinity"]["proactive_private_enabled"])
         self.assertFalse(by_user["negative-infinity"]["proactive_private_enabled"])
-        self.assertFalse(by_user["manual-disabled"]["private_companion_enabled"])
+        self.assertTrue(by_user["manual-disabled"]["private_companion_enabled"])
         self.assertFalse(by_user["manual-disabled"]["proactive_private_enabled"])
 
         applied = migrate_legacy_capabilities(data, operation_id="non-finite-limits", dry_run=False)
@@ -892,7 +892,7 @@ class Req036CompanionTests(unittest.TestCase):
             self.assertTrue(capabilities["private_companion_enabled"])
             self.assertFalse(capabilities["proactive_private_enabled"])
         disabled = data["users"]["manual-disabled"]["unified_profile_capabilities"]
-        self.assertFalse(disabled["private_companion_enabled"])
+        self.assertTrue(disabled["private_companion_enabled"])
         self.assertFalse(disabled["proactive_private_enabled"])
 
     def test_capability_migration_repairs_damaged_containers_and_schema(self) -> None:
@@ -1122,7 +1122,7 @@ class Req036CompanionTests(unittest.TestCase):
         self.assertNotIn("unified_person", host.primary_store)
         self.assertIn("unified_person", host.secondary_store)
 
-    def test_unauthorized_private_llm_gate_clears_request_before_other_paths(self) -> None:
+    def test_private_llm_gate_is_a_compatibility_noop(self) -> None:
         host = _GateHost()
         event = _PrivateEvent()
         req = types.SimpleNamespace(
@@ -1136,16 +1136,16 @@ class Req036CompanionTests(unittest.TestCase):
             image_urls=["url"],
         )
         asyncio.run(REQ036_LLM_GATE(host, event, req))
-        self.assertTrue(event.stopped)
-        self.assertEqual(["固定拒绝文本"], host.replies)
-        self.assertEqual("", req.system_prompt)
-        self.assertEqual([], req.contexts)
-        self.assertIsNone(req.func_tool)
+        self.assertFalse(event.stopped)
+        self.assertEqual([], host.replies)
+        self.assertEqual("secret", req.system_prompt)
+        self.assertEqual(["memory"], req.contexts)
+        self.assertIsNotNone(req.func_tool)
         self.assertEqual(0, host.memory_calls)
         self.assertEqual(0, host.tool_calls)
         self.assertEqual(0, host.relationship_calls)
 
-    def test_already_denied_private_event_still_clears_llm_request_without_duplicate_reply(self) -> None:
+    def test_legacy_denied_marker_no_longer_blocks_llm_request(self) -> None:
         host = _GateHost()
         event = _PrivateEvent()
         event.private_companion_req036_denied = True
@@ -1160,12 +1160,12 @@ class Req036CompanionTests(unittest.TestCase):
             image_urls=["url"],
         )
         asyncio.run(REQ036_LLM_GATE(host, event, req))
-        self.assertTrue(event.stopped)
+        self.assertFalse(event.stopped)
         self.assertEqual([], host.replies)
-        self.assertEqual("", req.system_prompt)
-        self.assertEqual("", req.prompt)
-        self.assertEqual([], req.contexts)
-        self.assertIsNone(req.func_tool)
+        self.assertEqual("secret", req.system_prompt)
+        self.assertEqual("message", req.prompt)
+        self.assertEqual(["memory"], req.contexts)
+        self.assertIsNotNone(req.func_tool)
 
     def test_private_guards_run_before_enrichment_hooks(self) -> None:
         enrichment_priority = _method_priority("enforce_p4_live_confinement_before_enrichment")
@@ -1197,7 +1197,7 @@ class Req036CompanionTests(unittest.TestCase):
                 self.assertEqual(0, host.profile_checks)
                 self.assertEqual({}, host.data["users"])
 
-    def test_real_text_and_empty_image_messages_still_enter_early_guard(self) -> None:
+    def test_real_text_and_empty_image_messages_create_profiles_without_denial(self) -> None:
         events = (
             _PrivateEvent("你好", raw_message={"post_type": "message", "message_type": "private"}),
             _PrivateEvent(
@@ -1213,9 +1213,9 @@ class Req036CompanionTests(unittest.TestCase):
             with self.subTest(raw_message=event.message_obj.raw_message):
                 host = _EarlyGateHost()
                 asyncio.run(REQ036_EARLY_GATE(host, event))
-                self.assertTrue(event.stopped)
-                self.assertTrue(event.private_companion_req036_denied)
-                self.assertEqual(["固定拒绝文本"], host.replies)
+                self.assertFalse(event.stopped)
+                self.assertFalse(getattr(event, "private_companion_req036_denied", False))
+                self.assertEqual([], host.replies)
                 self.assertEqual(1, host.profile_checks)
 
     def test_event_classification_keeps_real_empty_media_and_old_adapter_messages(self) -> None:
@@ -1508,22 +1508,18 @@ class Req036CompanionTests(unittest.TestCase):
         self.assertTrue(event.stopped)
         self.assertTrue(event.private_companion_req036_denied)
 
-    def test_unauthorized_private_message_does_not_attach_unified_identity(self) -> None:
-        host = _PrivatePipelineGateHost()
-        event = _PrivateEvent("你好")
-        asyncio.run(REQ036_PRIVATE_HANDLER(host, event))
-        self.assertTrue(event.stopped)
-        self.assertEqual([], host.attached_sources)
-        self.assertEqual(0, host.qzone_calls)
+    def test_private_message_attaches_unified_identity_without_permission(self) -> None:
+        source = (ROOT / "message_pipeline.py").read_text(encoding="utf-8")
+        self.assertIn('source="private_auto"', source)
+        self.assertNotIn("_req036_reject_unauthorized_private_event", source)
 
-    def test_unauthorized_private_command_stops_before_qzone_or_command_actions(self) -> None:
-        host = _CommandGateHost()
-        event = _CommandEvent()
-        asyncio.run(REQ036_COMMAND_GATE(host, event))
-        self.assertTrue(event.stopped)
-        self.assertEqual(["固定拒绝文本"], host.replies)
-        self.assertEqual(0, host.qzone_calls)
-        self.assertEqual([], host.attached_sources)
+    def test_private_command_has_no_permission_rejection_path(self) -> None:
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        start = source.index("    async def companion_command(")
+        end = source.index("    async def group_companion_command(", start)
+        command = source[start:end]
+        self.assertNotIn("_req036_reject_unauthorized_private_event", command)
+        self.assertIn('source="private_command"', command)
 
     def test_contract_rejects_raw_conversation_fields(self) -> None:
         # PR #104 and the paired Memory PR #6 publish this exact v1 wire
@@ -1592,13 +1588,14 @@ class Req036CompanionTests(unittest.TestCase):
         extra_field["message_text"] = "hidden"
         self.assertIn("portrait_request_fields_invalid", validate_portrait_request(extra_field))
 
-    def test_private_entry_places_side_effects_after_capability_gate(self) -> None:
+    def test_private_entry_has_no_capability_rejection(self) -> None:
         source = (ROOT / "message_pipeline.py").read_text(encoding="utf-8")
         start = source.index("async def handle_private_message(")
         end = source.index("async def handle_group_message(", start)
         handler = source[start:end]
-        self.assertLess(handler.index("if not private_gate.get(\"allowed\")"), handler.index("self._qzone_note_event_bot(event)"))
-        self.assertLess(handler.index("if not private_gate.get(\"allowed\")"), handler.index("self._message_debounce_command_text(event, text)"))
+        self.assertNotIn("private_gate", handler)
+        self.assertNotIn("_req036_reject_unauthorized_private_event", handler)
+        self.assertLess(handler.index("self._req036_attach_unified_profile_context("), handler.index("self._qzone_note_event_bot(event)"))
 
     def test_group_portrait_query_classifier_distinguishes_self_from_third_party(self) -> None:
         source = (ROOT / "main.py").read_text(encoding="utf-8")
@@ -1672,7 +1669,7 @@ class Req036CompanionTests(unittest.TestCase):
         REQ036_CONFIGURED_TARGET_SYNC(host)
         self.assertTrue(host.user["unified_profile_capabilities"]["private_companion_enabled"])
         self.assertFalse(host.user["unified_profile_capabilities"]["proactive_private_enabled"])
-        self.assertEqual("legacy_configured_target_migration", host.user["unified_profile_capabilities"]["grant_source"])
+        self.assertEqual("default_closed", host.user["unified_profile_capabilities"]["grant_source"])
         self.assertEqual(1, host.delivery_bound)
         update_capabilities(
             host.user,
@@ -1682,7 +1679,7 @@ class Req036CompanionTests(unittest.TestCase):
             target_identity="legacy-target",
         )
         REQ036_CONFIGURED_TARGET_SYNC(host)
-        self.assertFalse(host.user["unified_profile_capabilities"]["private_companion_enabled"])
+        self.assertTrue(host.user["unified_profile_capabilities"]["private_companion_enabled"])
         self.assertEqual(1, host.delivery_bound)
 
     def test_configured_target_compatibility_migration_never_reopens_explicit_disable(self) -> None:
@@ -1701,7 +1698,7 @@ class Req036CompanionTests(unittest.TestCase):
             target_identity="legacy-target",
         )
         self.assertFalse(REQ036_CONFIGURED_TARGET_MIGRATION(host, "legacy-target", user))
-        self.assertFalse(user["unified_profile_capabilities"]["private_companion_enabled"])
+        self.assertTrue(user["unified_profile_capabilities"]["private_companion_enabled"])
 
     def test_configured_target_reconciles_migrated_false_scoped_profile(self) -> None:
         host = _LegacyTargetMigrationHost()
@@ -1732,7 +1729,7 @@ class Req036CompanionTests(unittest.TestCase):
             "unified_profile_capabilities": default_capabilities(grant_source="legacy_effective_migration"),
         }
         self.assertFalse(REQ036_CONFIGURED_TARGET_MIGRATION(host, "telegram:legacy-target:scope", other_platform))
-        self.assertFalse(other_platform["unified_profile_capabilities"]["private_companion_enabled"])
+        self.assertTrue(other_platform["unified_profile_capabilities"]["private_companion_enabled"])
 
         manually_disabled = {
             "user_id": "legacy-target",
@@ -1742,9 +1739,9 @@ class Req036CompanionTests(unittest.TestCase):
             "unified_profile_capabilities": default_capabilities(grant_source="legacy_effective_migration"),
         }
         self.assertFalse(REQ036_CONFIGURED_TARGET_MIGRATION(host, "legacy-target", manually_disabled))
-        self.assertFalse(manually_disabled["unified_profile_capabilities"]["private_companion_enabled"])
+        self.assertTrue(manually_disabled["unified_profile_capabilities"]["private_companion_enabled"])
 
-    def test_owner_reconciliation_restores_legacy_false_without_reopening_admin_state(self) -> None:
+    def test_owner_role_does_not_implicitly_grant_proactive_permission(self) -> None:
         class OwnerHost(_LegacyTargetMigrationHost):
             @staticmethod
             def _configured_target_ids() -> list[str]:
@@ -1760,9 +1757,10 @@ class Req036CompanionTests(unittest.TestCase):
             "relationship_role": "owner",
             "unified_profile_capabilities": default_capabilities(grant_source="legacy_effective_migration"),
         }
-        self.assertTrue(REQ036_CONFIGURED_TARGET_MIGRATION(host, "owner-shadow", user))
+        self.assertFalse(REQ036_CONFIGURED_TARGET_MIGRATION(host, "owner-shadow", user))
         self.assertTrue(user["unified_profile_capabilities"]["private_companion_enabled"])
-        self.assertEqual("owner_capability_reconciliation", user["unified_profile_capabilities"]["grant_source"])
+        self.assertFalse(user["unified_profile_capabilities"]["proactive_private_enabled"])
+        self.assertEqual("legacy_effective_migration", user["unified_profile_capabilities"]["grant_source"])
 
     def test_user_list_keeps_permission_sources_visible(self) -> None:
         result = asyncio.run(REQ036_USER_LIST(_UserListHost()))

@@ -38,7 +38,6 @@ from .relationship_policy import normalize_relationship_stage_policy
 from .runtime_compat import probe_runtime_capabilities
 from .segmented_message import normalize_component_strategy
 from .unified_person_registry import UnifiedPersonRegistry
-from .unified_profile_service import DEFAULT_UNAUTHORIZED_PRIVATE_REPLY
 
 DEFAULT_AI_DAILY_MORNING_UID = "3706929260006322"
 DEFAULT_AI_DAILY_JUYA_UID = "285286947"
@@ -307,7 +306,6 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.worldview_adaptation_prompt = self._cfg_str(c, "worldview_adaptation_prompt", "")
     self.default_nickname = self._cfg_str(c, "default_nickname", "你", "你")
     self.enable_auto_user_profile_creation = self._cfg_bool(c, "enable_auto_user_profile_creation", True)
-    self.auto_enable_companion_for_new_users = self._cfg_bool(c, "auto_enable_companion_for_new_users", True)
     self.auto_profile_platforms = self._cfg_raw(
         c,
         "auto_profile_platforms",
@@ -322,13 +320,6 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
         self.default_nickname_strategy = "platform_display_name"
     self.default_proactive_enabled = self._cfg_bool(c, "default_proactive_enabled", False)
     self.default_proactive_daily_limit = self._cfg_int(c, "default_proactive_daily_limit", 0, 0, 30)
-    self.owner_companion_enabled = self._cfg_bool(c, "owner_companion_enabled", True)
-    self.private_companion_disabled_reply = self._cfg_str(
-        c,
-        "private_companion_disabled_reply",
-        DEFAULT_UNAUTHORIZED_PRIVATE_REPLY,
-        DEFAULT_UNAUTHORIZED_PRIVATE_REPLY,
-    )
     self.portrait_global_mode = self._cfg_str(c, "portrait_global_mode", "learn_and_use", "learn_and_use")
     if self.portrait_global_mode not in {"disabled", "use_existing", "learn_and_use"}:
         self.portrait_global_mode = "learn_and_use"

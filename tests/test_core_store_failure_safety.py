@@ -120,7 +120,7 @@ class CoreStoreFailureSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(user["enabled"])
         self.assertEqual("legacy_effective_migration", capabilities["grant_source"])
 
-    def test_existing_legacy_manual_disable_stays_closed(self) -> None:
+    def test_existing_legacy_manual_disable_only_keeps_proactive_closed(self) -> None:
         harness = _IdentityCoreHarness()
         harness.data["users"]["legacy"] = {
             "user_id": "legacy",
@@ -133,9 +133,9 @@ class CoreStoreFailureSafetyTests(unittest.IsolatedAsyncioTestCase):
         user = harness._get_user("legacy")
 
         capabilities = user["unified_profile_capabilities"]
-        self.assertFalse(capabilities["private_companion_enabled"])
+        self.assertTrue(capabilities["private_companion_enabled"])
         self.assertFalse(capabilities["proactive_private_enabled"])
-        self.assertFalse(user["enabled"])
+        self.assertTrue(user["enabled"])
 
     def test_late_imported_manual_grant_repairs_default_closed_capability(self) -> None:
         harness = _IdentityCoreHarness()

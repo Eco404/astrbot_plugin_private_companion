@@ -211,26 +211,7 @@
       "enable_auto_user_profile_creation": {
         "description": "新用户最小档案",
         "type": "bool",
-        "hint": "默认开启。首次收到允许范围内的真实私聊消息时建立统一用户档案；是否授予私聊和主动权限由下方新用户默认项控制。建档不会授予主要用户、跨用户查询或 P4 权限。群聊档案仍由统一群聊观测链路建立。",
-        "default": true
-      },
-      "auto_enable_companion_for_new_users": {
-        "description": "新用户默认私聊权限",
-        "type": "bool",
-        "hint": "开启后，新私聊用户建档时自动获得被动私聊回复权限；不会同时开启主动陪伴。现有用户权限不受影响。",
-        "default": true,
-        "condition": "enable_auto_user_profile_creation"
-      },
-      "private_companion_disabled_reply": {
-        "description": "未授权私聊回复",
-        "type": "string",
-        "hint": "私聊陪伴未获管理员授权时直接发送的固定文本。为空或无效时使用内置默认文本；此分支不会调用 LLM、Memory、工具、画像或关系结算。",
-        "default": "老大不让我跟陌生人说话哦。"
-      },
-      "owner_companion_enabled": {
-        "description": "主要用户陪伴开关",
-        "type": "bool",
-        "hint": "默认开启。仅插件 Dashboard 设置页的受信后台管理员可修改；群主、群管理员、聊天命令和平台角色均不能触发。关闭后主要用户的私聊陪伴与主动私聊立即停用，但不删除身份、画像或好感度。",
+        "hint": "默认开启。首次收到允许范围内的真实私聊消息时建立统一用户档案；普通私聊无需授权，主动权限由下方新用户默认项独立控制。建档不会授予主要用户、跨用户查询或 P4 权限。群聊档案仍由统一群聊观测链路建立。",
         "default": true
       },
       "portrait_global_mode": {
@@ -260,7 +241,7 @@
       "default_proactive_enabled": {
         "description": "新用户默认主动权限",
         "type": "bool",
-        "hint": "仅在新用户默认私聊权限开启时生效；默认关闭，因此新用户可以正常私聊，但不会被主动联系。",
+        "hint": "默认关闭。开启后新建档用户获得主动联系权限；普通私聊始终可用且不受此项影响。",
         "default": false,
         "condition": "enable_auto_user_profile_creation"
       },
@@ -268,7 +249,7 @@
         "description": "新用户每日主动上限",
         "type": "int",
         "slider": {"min": 0, "max": 30, "step": 1},
-        "hint": "自动档案的主动上限；未允许主动关心或未自动接管陪伴时强制为 0。",
+        "hint": "自动档案的主动上限；未授予主动权限时强制为 0。",
         "default": 0,
         "condition": "default_proactive_enabled"
       },

@@ -1610,7 +1610,6 @@ const safeFeatureKeys = [
 const configLabels = {
   auto_profile_platforms: "自动建档平台",
   default_nickname_strategy: "新用户默认称呼来源",
-  auto_enable_companion_for_new_users: "新用户默认私聊权限",
   default_proactive_enabled: "新用户默认主动权限",
   default_proactive_daily_limit: "新用户默认每日主动上限",
   portrait_global_mode: "全局智能画像模式",
@@ -2889,7 +2888,6 @@ const featureSettingGroups = {
   enable_auto_user_profile_creation: [
     "auto_profile_platforms",
     "default_nickname_strategy",
-    "auto_enable_companion_for_new_users",
     "default_proactive_enabled",
     "default_proactive_daily_limit",
   ],
@@ -3047,8 +3045,8 @@ const featureSettingSections = {
   enable_auto_user_profile_creation: [
     {
       title: "自动建档范围",
-      note: "建立统一用户档案；默认授予被动私聊权限，主动陪伴保持关闭，之后仍可在用户页单独调整。",
-      keys: ["auto_profile_platforms", "default_nickname_strategy", "auto_enable_companion_for_new_users", "default_proactive_enabled", "default_proactive_daily_limit"],
+      note: "建立统一用户档案；普通私聊始终可用，主动权限可在这里设置默认值，并在用户页单独调整。",
+      keys: ["auto_profile_platforms", "default_nickname_strategy", "default_proactive_enabled", "default_proactive_daily_limit"],
     },
   ],
   enable_multi_persona_mode: [
@@ -14139,8 +14137,8 @@ function renderUsers() {
     const matchesKeyword = !keyword || text.includes(keyword);
     const matchesScope = state.userScopeFilter === "all" || state.userScopeFilter === "private";
     const matchesStatus = state.userStatusFilter === "all"
-      || (state.userStatusFilter === "enabled" && user.enabled)
-      || (state.userStatusFilter === "disabled" && !user.enabled);
+      || (state.userStatusFilter === "enabled" && user.proactive_private_enabled)
+      || (state.userStatusFilter === "disabled" && !user.proactive_private_enabled);
     return matchesKeyword && matchesScope && matchesStatus;
   });
   const rosterCount = $("#userRosterCount");
@@ -14154,8 +14152,7 @@ function renderUsers() {
           <span class="user-roster-id mono" title="${escapeHtml(user.user_id)}">${escapeHtml(user.user_id)}</span>
           <div class="user-roster-meta"><span>${escapeHtml(user.relationship_stage || "未分层")}</span><span>${escapeHtml(user.last_seen || "暂无互动")}</span></div>
         </div>
-        <div class="user-roster-signals" aria-label="权限状态">
-          <i class="${user.private_companion_enabled ? "is-on" : ""}" title="私聊陪伴${user.private_companion_enabled ? "已开启" : "已关闭"}"></i>
+        <div class="user-roster-signals" aria-label="主动权限状态">
           <i class="${user.proactive_private_enabled ? "is-on proactive" : ""}" title="主动陪伴${user.proactive_private_enabled ? "已开启" : "已关闭"}"></i>
         </div>
       </article>
@@ -14346,7 +14343,6 @@ async function renderUserDetail(forceFetch = false) {
       return;
     }
   }
-  const privateEnabled = Boolean(detail.private_companion_enabled ?? detail.enabled);
   const relationshipLabel = detail.relationship_stage || detail.relationship_intimacy?.phase?.label || "初识";
   const currentInteractionLabel = normalizedCurrentInteraction(detail.current_interaction, detail.relationship_role === "owner").label;
   const openLoopCount = Array.isArray(detail.open_loops) ? activeOpenLoopItems(detail.open_loops).length : Number(detail.open_loop_count || 0);
@@ -14361,12 +14357,11 @@ async function renderUserDetail(forceFetch = false) {
         <div><span class="eyebrow">${escapeHtml(detail.relationship_role_label || "PERSON")}</span><h2>${escapeHtml(detail.display_name || detail.nickname || detail.user_id)}</h2><span class="mono muted">${escapeHtml(detail.user_id)}</span></div>
       </div>
       <div class="user-detail-actions">
-        <button data-user-action="toggle" class="${privateEnabled ? "secondary-button" : "primary-button"}">${escapeHtml(privateEnabled ? "关闭私聊权限" : "授予私聊权限")}</button>
-        <button data-user-action="toggle_proactive" class="${detail.proactive_private_enabled ? "secondary-button" : "ghost-button"}" ${privateEnabled ? "" : "disabled"}>${escapeHtml(detail.proactive_private_enabled ? "关闭主动权限" : "授予主动权限")}</button>
+        <button data-user-action="toggle_proactive" class="${detail.proactive_private_enabled ? "secondary-button" : "primary-button"}">${escapeHtml(detail.proactive_private_enabled ? "关闭主动权限" : "授予主动权限")}</button>
         <button type="button" class="icon-button" data-copy-current-user="${escapeHtml(detail.user_id)}" aria-label="复制用户 ID" title="复制用户 ID">⧉</button>
       </div>
     </header>
-    <div class="user-detail-summary"><span class="badge ${privateEnabled ? "ok" : "off"}">${privateEnabled ? "私聊已授权" : "私聊未授权"}</span><span class="badge ${detail.proactive_private_enabled ? "ok" : "off"}">${detail.proactive_private_enabled ? "主动陪伴" : "主动未开启"}</span><span class="muted">最近互动 ${escapeHtml(detail.last_seen || "暂无")}</span></div>
+    <div class="user-detail-summary"><span class="badge ${detail.proactive_private_enabled ? "ok" : "off"}">${detail.proactive_private_enabled ? "主动权限已开启" : "主动权限未开启"}</span><span class="muted">最近互动 ${escapeHtml(detail.last_seen || "暂无")}</span></div>
     <nav class="user-detail-tabs" role="tablist" aria-label="用户详情视图">
       ${[["overview","概览"],["relationship","关系"],["proactive","主动陪伴"],["memory","记忆与学习"],["diagnostics","诊断"]].map(([key,label]) => `<button type="button" role="tab" data-user-detail-view="${key}" aria-selected="${state.userDetailView === key ? "true" : "false"}" class="${state.userDetailView === key ? "is-active" : ""}">${label}</button>`).join("")}
     </nav>
@@ -14447,7 +14442,6 @@ function portraitModeLabel(mode) {
 
 function renderUnifiedProfileCapabilityPanel(detail) {
   const capabilities = detail?.capability_summary && typeof detail.capability_summary === "object" ? detail.capability_summary : {};
-  const privateEnabled = Boolean(capabilities.private_companion_enabled ?? detail?.private_companion_enabled ?? detail?.enabled);
   const proactiveEnabled = Boolean(capabilities.proactive_private_enabled ?? detail?.proactive_private_enabled);
   const effectiveProactive = Boolean(capabilities.effective_proactive_private_enabled ?? detail?.proactive_contact_enabled);
   const override = String(detail?.portrait_mode_override || "follow_global") === "explicit"
@@ -14457,9 +14451,8 @@ function renderUnifiedProfileCapabilityPanel(detail) {
   const personId = String(detail?.unified_person_id || "");
   return `
     <section class="detail-block unified-profile-capabilities">
-      <header class="detail-block-head"><div><h2>统一档案与当前身份权限</h2><p>仅管理员可修改；关联身份不会自动获得私聊或主动权限。</p></div><span class="badge ${privateEnabled ? "ok" : "off"}">${escapeHtml(privateEnabled ? "私聊已授权" : "私聊未授权")}</span></header>
-      <p class="muted">私聊陪伴与主动陪伴请使用上方列表中的独立按钮管理。</p>
-      <dl><dt>统一人物</dt><dd>${escapeHtml(personId || "等待精确身份投影")}</dd><dt>私聊陪伴</dt><dd>${escapeHtml(privateEnabled ? "开启" : "关闭")}</dd><dt>主动陪伴</dt><dd>${escapeHtml(effectiveProactive ? "可在既有日程和安全门内执行" : proactiveEnabled ? "等待私聊陪伴授权" : "关闭")}</dd><dt>画像实际模式</dt><dd>${escapeHtml(portraitModeLabel(effectivePortraitMode))}</dd></dl>
+      <header class="detail-block-head"><div><h2>统一档案与主动权限</h2><p>普通私聊始终可用；主动联系仍需管理员单独开启。</p></div><span class="badge ${proactiveEnabled ? "ok" : "off"}">${escapeHtml(proactiveEnabled ? "主动已授权" : "主动未授权")}</span></header>
+      <dl><dt>统一人物</dt><dd>${escapeHtml(personId || "等待精确身份投影")}</dd><dt>主动陪伴</dt><dd>${escapeHtml(effectiveProactive ? "可在既有日程和安全门内执行" : "关闭")}</dd><dt>画像实际模式</dt><dd>${escapeHtml(portraitModeLabel(effectivePortraitMode))}</dd></dl>
     </section>
   `;
 }
@@ -14561,8 +14554,8 @@ function renderUserP4RuntimeStatus(status) {
 
 function renderPrivateDeliveryRoute(detail) {
   const route = detail?.delivery_route && typeof detail.delivery_route === "object" ? detail.delivery_route : {};
-  if (route.reason === "private_companion_disabled" || !Boolean(detail?.private_companion_enabled ?? detail?.enabled)) {
-    return detailBlock("主动投递会话", "私聊陪伴当前关闭；主动联系不会因群聊观察或画像模式而自动开启。", [
+  if (!Boolean(detail?.proactive_private_enabled)) {
+    return detailBlock("主动投递会话", "主动权限当前关闭；普通私聊、群聊观察和画像模式都不会自动开启主动联系。", [
       ["主动联系", "关闭"],
     ]);
   }
@@ -15931,7 +15924,6 @@ function bindUserActions(detail) {
     button.addEventListener("click", async () => {
       const action = button.dataset.userAction;
       const body = { user_id: detail.user_id };
-      if (action === "toggle") body.private_companion_enabled = !Boolean(detail.private_companion_enabled ?? detail.enabled);
       if (action === "toggle_proactive") body.proactive_private_enabled = !Boolean(detail.proactive_private_enabled);
       if (action === "reset_daily") body.reset_daily = true;
       if (action === "clear_schedule") body.clear_schedule = true;
@@ -21524,6 +21516,7 @@ function renderExternalAbilities() {
   box.innerHTML = items.map((item) => {
     const configText = JSON.stringify(item.config || {}, null, 2);
     const schemaRows = externalAbilitySchemaRows(item.config_schema || {});
+    const configFields = externalAbilityConfigFields(item.config_schema || {}, item.config || {});
     return `
       <article class="external-ability-card ${item.enabled ? "is-enabled" : ""} ${item.available ? "" : "is-unavailable"}">
         <header>
@@ -21544,7 +21537,7 @@ function renderExternalAbilities() {
           <label class="toggle-row"><input name="enabled" type="checkbox" ${item.enabled ? "checked" : ""} ${item.available ? "" : "disabled"} /> <span>加入主动候选</span></label>
           <label>触发权重（%）<input name="share_probability" type="number" min="0" max="100" step="1" value="${escapeHtml(displaySettingValue('share_probability', Number(item.share_probability ?? 0)))}" /></label>
           <label>最小间隔小时 <input name="min_interval_hours" type="number" min="0" step="0.5" value="${escapeHtml(item.min_interval_hours ?? 0)}" /></label>
-          <label class="wide-field">自定义配置 <textarea name="config" rows="5">${escapeHtml(configText)}</textarea></label>
+          ${configFields ? `<input name="config" type="hidden" value="${escapeHtml(JSON.stringify(item.config || {}))}" /><div class="external-ability-config-fields wide-field">${configFields}</div>` : `<label class="wide-field">自定义配置 <textarea name="config" rows="5">${escapeHtml(configText)}</textarea></label>`}
           ${schemaRows ? `<div class="external-ability-schema wide-field">${schemaRows}</div>` : ""}
           <button type="submit">保存外部能力</button>
         </form>
@@ -21562,6 +21555,64 @@ function externalAbilitySchemaRows(schema) {
     const desc = item.description || item.desc || item.help || "";
     return `<span><b>${escapeHtml(label)}</b>${desc ? `：${escapeHtml(desc)}` : ""}<small>${escapeHtml(key)}</small></span>`;
   }).join("");
+}
+
+const EXTERNAL_ABILITY_CONTROL_TYPES = new Set(["select", "text", "bool", "number"]);
+
+function externalAbilityConfigFields(schema, config) {
+  const entries = Object.entries(schema || {}).filter(([, raw]) => (
+    raw && typeof raw === "object" && EXTERNAL_ABILITY_CONTROL_TYPES.has(String(raw.type || "").toLowerCase())
+  ));
+  if (!entries.length) return "";
+  return entries.slice(0, 16).map(([key, raw]) => {
+    const item = raw;
+    const label = item.label || item.title || key;
+    const desc = item.description || item.desc || item.help || "";
+    const type = String(item.type).toLowerCase();
+    const value = config && config[key] !== undefined ? config[key] : (item.default !== undefined ? item.default : (type === "bool" ? false : ""));
+    const esc = escapeHtml;
+    let control = "";
+    if (type === "bool") {
+      const checked = value === true || value === 1 || ["true", "1", "yes", "on"].includes(String(value).toLowerCase());
+      control = `<label class="toggle-row"><input type="checkbox" data-cfg-key="${esc(key)}" data-cfg-type="bool" ${checked ? "checked" : ""} /> <span>${esc(label)}</span></label>`;
+    } else if (type === "select") {
+      const options = Array.isArray(item.options) ? item.options : [];
+      control = `<label>${esc(label)} <select data-cfg-key="${esc(key)}" data-cfg-type="select">${options.map((o) => {
+        const rawValue = typeof o === "object" && o !== null ? o.value : o;
+        const optionValue = ["string", "number", "boolean"].includes(typeof rawValue) || rawValue === null ? rawValue : String(rawValue ?? "");
+        const optionLabel = typeof o === "object" && o !== null ? (o.label ?? o.value) : o;
+        const encodedValue = JSON.stringify(optionValue);
+        return `<option value="${esc(encodedValue)}" ${JSON.stringify(value) === encodedValue ? "selected" : ""}>${esc(optionLabel)}</option>`;
+      }).join("")}</select></label>`;
+    } else if (type === "number") {
+      const min = Number.isFinite(Number(item.min)) ? ` min="${esc(item.min)}"` : "";
+      const max = Number.isFinite(Number(item.max)) ? ` max="${esc(item.max)}"` : "";
+      const step = item.step !== undefined && item.step !== null ? esc(item.step) : "any";
+      control = `<label>${esc(label)} <input type="number" step="${step}"${min}${max} data-cfg-key="${esc(key)}" data-cfg-type="number" value="${esc(value === null || value === undefined ? "" : value)}" /></label>`;
+    } else {
+      const placeholder = item.placeholder ? ` placeholder="${esc(item.placeholder)}"` : "";
+      control = `<label>${esc(label)} <input type="text"${placeholder} data-cfg-key="${esc(key)}" data-cfg-type="text" value="${esc(value === null || value === undefined ? "" : value)}" /></label>`;
+    }
+    return `<div class="external-ability-config-field">${control}${desc ? `<small>${esc(desc)}</small>` : ""}</div>`;
+  }).join("");
+}
+
+function collectExternalAbilityConfig(form, currentConfig = {}) {
+  const config = { ...(currentConfig || {}) };
+  form.querySelectorAll("[data-cfg-key]").forEach((el) => {
+    const key = el.dataset.cfgKey;
+    if (!key || ["__proto__", "prototype", "constructor"].includes(key)) return;
+    const type = el.dataset.cfgType || "text";
+    if (type === "bool") config[key] = el.checked;
+    else if (type === "number") {
+      if (el.value === "") delete config[key];
+      else { const value = Number(el.value); if (Number.isFinite(value)) config[key] = value; }
+    } else if (type === "select") {
+      try { config[key] = JSON.parse(el.value); } catch (_error) { config[key] = el.value; }
+    }
+    else config[key] = el.value;
+  });
+  return config;
 }
 
 function markModuleFormDirty(form) {
@@ -34849,6 +34900,10 @@ document.addEventListener("submit", async (event) => {
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     showToast("自定义配置必须是 JSON 对象", "error");
     return;
+  }
+  const cfgEls = form.querySelectorAll("[data-cfg-key]");
+  if (cfgEls.length) {
+    config = collectExternalAbilityConfig(form, config);
   }
   await runAction(() => postJson("/external_ability/update", {
     name,

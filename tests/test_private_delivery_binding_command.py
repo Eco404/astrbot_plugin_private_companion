@@ -142,7 +142,7 @@ class PrivateDeliveryBindingCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("私聊窗口", harness.replies[0])
         self.assertTrue(event.stopped)
 
-    async def test_binding_bootstrap_keeps_private_and_proactive_capabilities_closed(self) -> None:
+    async def test_binding_bootstrap_keeps_proactive_capability_closed(self) -> None:
         harness = _Harness()
         harness.data["users"]["openid-owner"]["unified_profile_capabilities"] = default_capabilities()
 
@@ -150,19 +150,14 @@ class PrivateDeliveryBindingCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["bind"], harness.calls)
         capabilities = harness.data["users"]["openid-owner"]["unified_profile_capabilities"]
-        self.assertFalse(capabilities["private_companion_enabled"])
+        self.assertTrue(capabilities["private_companion_enabled"])
         self.assertFalse(capabilities["proactive_private_enabled"])
         self.assertNotIn("固定拒绝文本", harness.replies)
 
-    async def test_non_binding_command_stays_denied_during_bootstrap(self) -> None:
-        harness = _Harness()
-        harness.data["users"]["openid-owner"]["unified_profile_capabilities"] = default_capabilities()
-
-        event = await self._run(harness, "陪伴 状态")
-
-        self.assertEqual([], harness.calls)
-        self.assertEqual(["固定拒绝文本"], harness.replies)
-        self.assertTrue(event.stopped)
+    async def test_non_binding_command_is_not_denied_during_bootstrap(self) -> None:
+        gate = private_companion_gate({"unified_profile_capabilities": default_capabilities()})
+        self.assertTrue(gate["allowed"])
+        self.assertEqual("private_chat_unrestricted", gate["code"])
 
     async def test_command_normalizes_full_umo_sender_id_before_loading_user(self) -> None:
         harness = _Harness()

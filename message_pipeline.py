@@ -26,8 +26,6 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
     if callable(inbound_checker) and not inbound_checker(event):
         logger.debug("[PrivateCompanion] 非入站聊天事件跳过私聊陪伴链路")
         return
-    if bool(getattr(event, "private_companion_req036_denied", False)):
-        return
     received_ts = _now_ts()
     user_id = str(event.get_sender_id())
     self_id = self._event_self_id(event)
@@ -48,31 +46,22 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         migrator = getattr(self, "_req036_migrate_configured_target_capability", None)
         if callable(migrator):
             migrator(user_id, private_user)
-        private_gate = self._req036_private_gate_for_user(private_user)
-        if private_gate.get("allowed"):
-            self._req036_attach_unified_profile_context(
-                event,
-                user=private_user if isinstance(private_user, dict) else None,
-                source="private_auto",
-            )
-            self._schedule_data_save()
+        self._req036_attach_unified_profile_context(
+            event,
+            user=private_user if isinstance(private_user, dict) else None,
+            source="private_auto",
+        )
+        self._schedule_data_save()
     if auto_profile_created:
         logger.info(
-            "[PrivateCompanion] 已建立最小用户档案: user=%s platform=%s auto_enabled=%s",
+            "[PrivateCompanion] 已建立最小用户档案: user=%s platform=%s",
             _single_line(self._canonical_private_user_id(user_id), 80),
             _single_line(self._platform_kind_for_event(event), 40),
-            bool(getattr(self, "auto_enable_companion_for_new_users", False)),
         )
-    if not private_gate.get("allowed"):
-        await self._req036_reject_unauthorized_private_event(event, private_gate)
-        return
     if self._is_onebot_poke_notice_event(event):
-        # 戳一戳会以私聊空文本事件进入 AstrBot；授权后交给专用插件处理。
-        logger.debug("[PrivateCompanion] 已授权私聊戳一戳 notice，放行给专用插件")
+        # 戳一戳会以私聊空文本事件进入 AstrBot；交给专用插件处理。
+        logger.debug("[PrivateCompanion] 私聊戳一戳 notice 交给专用插件")
         return
-    # All remaining private handlers are authorized-only.  In particular an
-    # unrecognized sender must not write Qzone notes, debounce state, Memory
-    # context, tools, portrait evidence, or relationship entries first.
     self._qzone_note_event_bot(event)
     if text.startswith(("陪伴", "/陪伴", "私聊陪伴", "主动陪伴")):
         return
