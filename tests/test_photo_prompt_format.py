@@ -15,6 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class _PromptFormatHarness(ProactiveMessageMixin):
     photo_generation_prompt_format = "traditional"
+    photo_generation_text2img_fixed_prompt = "text fixed"
+    photo_generation_selfie_fixed_prompt = "selfie fixed"
+    photo_generation_edit_fixed_prompt = "edit fixed"
 
 
 class PhotoPromptFormatTests(unittest.TestCase):
@@ -132,6 +135,54 @@ class PhotoPromptFormatTests(unittest.TestCase):
         self.assertIn('addButton.disabled = cards.length >= RELATIONSHIP_CARD_MAX', script)
         self.assertIn('const seenNames = new Set()', script)
         self.assertIn('maxlength="200" data-relationship-card-field="name"', script)
+
+    def test_workflow_fixed_prompt_config_is_exposed_and_normalized(self) -> None:
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        items = schema["photo_action_config"]["items"]
+        keys = (
+            "photo_generation_text2img_fixed_prompt",
+            "photo_generation_selfie_fixed_prompt",
+            "photo_generation_edit_fixed_prompt",
+        )
+        api = PrivateCompanionPageApi.__new__(PrivateCompanionPageApi)
+        api.plugin = self.harness
+        api._schema_key_index_cache = None
+        allowed = api._allowed_setting_keys()
+
+        for key in keys:
+            self.assertEqual(items[key]["default"], "")
+            self.assertEqual(schema[key]["default"], "")
+            self.assertTrue(schema[key]["invisible"])
+            self.assertIn(key, allowed)
+            self.assertEqual(api._normalize_setting_value(key, "  fixed prompt  "), "fixed prompt")
+
+        expected = {
+            "text2img": ("text2img", "photo_generation_text2img_fixed_prompt", "text fixed"),
+            " TEXT2IMG ": ("text2img", "photo_generation_text2img_fixed_prompt", "text fixed"),
+            "unknown-workflow": ("text2img", "photo_generation_text2img_fixed_prompt", "text fixed"),
+            "selfie": ("selfie", "photo_generation_selfie_fixed_prompt", "selfie fixed"),
+            "portrait": ("selfie", "photo_generation_selfie_fixed_prompt", "selfie fixed"),
+            "自拍": ("selfie", "photo_generation_selfie_fixed_prompt", "selfie fixed"),
+            "人像": ("selfie", "photo_generation_selfie_fixed_prompt", "selfie fixed"),
+            "edit": ("edit", "photo_generation_edit_fixed_prompt", "edit fixed"),
+            "改图": ("edit", "photo_generation_edit_fixed_prompt", "edit fixed"),
+            "修图": ("edit", "photo_generation_edit_fixed_prompt", "edit fixed"),
+            "重绘": ("edit", "photo_generation_edit_fixed_prompt", "edit fixed"),
+            "P图": ("edit", "photo_generation_edit_fixed_prompt", "edit fixed"),
+        }
+        for workflow_kind, (scope, config_key, marker) in expected.items():
+            section, audit = self.harness._photo_generation_workflow_fixed_prompt_section(
+                workflow_kind
+            )
+            self.assertEqual(audit["scope"], scope)
+            self.assertEqual(audit["config_key"], config_key)
+            self.assertIn(marker, section.positive)
+            self.assertTrue(section.protected)
+            self.assertTrue(section.sanitize_conflicts)
+
+        script = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
+        for key in keys:
+            self.assertIn(key, script)
 
 
 if __name__ == "__main__":

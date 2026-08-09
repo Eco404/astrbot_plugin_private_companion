@@ -423,7 +423,14 @@ class PageSettingNormalizerMixin:
             return mode if mode in {"partial", "full"} else "partial"
         if key in {"tts_extra_prompt", "main_user_mention_voice_prompt"}:
             return str(value or "").strip()[:1200]
-        if key in {"natural_language_photo_extra_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"}:
+        if key in {
+            "natural_language_photo_extra_prompt",
+            "photo_generation_fixed_prompt",
+            "photo_generation_text2img_fixed_prompt",
+            "photo_generation_selfie_fixed_prompt",
+            "photo_generation_edit_fixed_prompt",
+            "photo_generation_scene_presets",
+        }:
             return str(value or "").strip()[:5000]
         if key == "photo_generation_prompt_format":
             normalizer = getattr(self.plugin, "_normalize_photo_generation_prompt_format", None)

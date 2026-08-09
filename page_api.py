@@ -8383,6 +8383,11 @@ class PrivateCompanionPageApi(
             prompt = str(item.get("prompt") or "")
             debug_payload = self._photo_prompt_debug_payload(item.get("prompt_path"))
             full_prompt = str(debug_payload.get("final_prompt") or "")
+            raw_workflow_fixed = item.get("workflow_fixed_prompt")
+            if not isinstance(raw_workflow_fixed, dict):
+                raw_workflow_fixed = debug_payload.get("workflow_fixed_prompt")
+            if not isinstance(raw_workflow_fixed, dict):
+                raw_workflow_fixed = {}
             items.append(
                 {
                     "ts": ts,
@@ -8456,6 +8461,38 @@ class PrivateCompanionPageApi(
                         else {}
                     ),
                     "sanitizer_version": self._int(item.get("sanitizer_version")),
+                    "workflow_fixed_prompt": {
+                        "scope": self._single_line(raw_workflow_fixed.get("scope"), 30),
+                        "config_key": self._single_line(
+                            raw_workflow_fixed.get("config_key"), 80
+                        ),
+                        "configured": bool(raw_workflow_fixed.get("configured")),
+                        "normalized": bool(raw_workflow_fixed.get("normalized")),
+                        "normalization_changed": bool(
+                            raw_workflow_fixed.get("normalization_changed")
+                        ),
+                        "conflict_cleaned": bool(
+                            raw_workflow_fixed.get("conflict_cleaned")
+                        ),
+                        "cleaned": bool(raw_workflow_fixed.get("cleaned")),
+                        "applied": bool(raw_workflow_fixed.get("applied")),
+                        "raw_length": self._int(raw_workflow_fixed.get("raw_length")),
+                        "normalized_length": self._int(
+                            raw_workflow_fixed.get("normalized_length")
+                        ),
+                        "applied_length": self._int(
+                            raw_workflow_fixed.get("applied_length")
+                        ),
+                        "removed_rules": [
+                            self._single_line(value, 80)
+                            for value in (
+                                raw_workflow_fixed.get("removed_rules")
+                                if isinstance(raw_workflow_fixed.get("removed_rules"), list)
+                                else []
+                            )
+                            if self._single_line(value, 80)
+                        ][:12],
+                    },
                     "detected_conflicts": compact_audit(item.get("detected_conflicts")),
                     "removed_conflict_details": compact_audit(item.get("removed_conflict_details")),
                     "residual_conflict_details": compact_audit(item.get("residual_conflict_details")),
@@ -19017,6 +19054,9 @@ class PrivateCompanionPageApi(
             "photo_generation_style",
             "photo_generation_style_custom_prompt",
             "photo_generation_fixed_prompt",
+            "photo_generation_text2img_fixed_prompt",
+            "photo_generation_selfie_fixed_prompt",
+            "photo_generation_edit_fixed_prompt",
             "photo_generation_scene_presets",
             "enable_bot_relationship_network",
             "bot_relationship_cards",
@@ -21446,6 +21486,9 @@ class PrivateCompanionPageApi(
             "photo_generation_style": "photo_generation_style",
             "photo_generation_style_custom_prompt": "photo_generation_style_custom_prompt",
             "photo_generation_fixed_prompt": "photo_generation_fixed_prompt",
+            "photo_generation_text2img_fixed_prompt": "photo_generation_text2img_fixed_prompt",
+            "photo_generation_selfie_fixed_prompt": "photo_generation_selfie_fixed_prompt",
+            "photo_generation_edit_fixed_prompt": "photo_generation_edit_fixed_prompt",
             "photo_generation_scene_presets": "photo_generation_scene_presets",
             "bot_relationship_cards": "bot_relationship_cards",
         }
@@ -22117,6 +22160,9 @@ class PrivateCompanionPageApi(
             "photo_generation_style",
             "photo_generation_style_custom_prompt",
             "photo_generation_fixed_prompt",
+            "photo_generation_text2img_fixed_prompt",
+            "photo_generation_selfie_fixed_prompt",
+            "photo_generation_edit_fixed_prompt",
             "photo_generation_scene_presets",
             "enable_bot_relationship_network",
             "bot_relationship_cards",

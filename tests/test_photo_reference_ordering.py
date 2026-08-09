@@ -1352,7 +1352,7 @@ class PhotoReferenceOrderingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         item = harness.data["recent_photo_generations"][0]
-        self.assertEqual(item["schema_version"], 2)
+        self.assertEqual(item["schema_version"], 3)
         self.assertEqual(item["presets"], ["校服人像"])
         self.assertEqual(item["scene_preset"], "校服人像")
         self.assertEqual(item["preset_hint"], "居家睡衣")

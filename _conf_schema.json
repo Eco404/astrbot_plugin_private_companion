@@ -3712,6 +3712,24 @@
     "default": "",
     "invisible": true
   },
+  "photo_generation_text2img_fixed_prompt": {
+    "description": "Legacy flat config: 文生图固定附加提示词",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "photo_generation_selfie_fixed_prompt": {
+    "description": "Legacy flat config: 自拍/人像固定附加提示词",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "photo_generation_edit_fixed_prompt": {
+    "description": "Legacy flat config: 改图固定附加提示词",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
   "photo_generation_scene_presets": {
     "description": "Legacy flat config: 生图场景预设",
     "type": "string",
@@ -10426,10 +10444,37 @@
           "enable_photo_text_action": true
         }
       },
-      "photo_generation_fixed_prompt": {
-        "description": "生图固定附加提示词",
+      "photo_generation_text2img_fixed_prompt": {
+        "description": "文生图固定附加提示词",
         "type": "string",
-        "hint": "可选。所有生图提交后端前都会追加这段固定提示词，包括主动随手拍、每日穿搭、自然语言文生图和引用/携带图片改图。适合放固定画质、角色细节、安全区或负面约束；留空不追加。",
+        "hint": "可选。只追加到 text2img 文生图，包括 QQ 空间非自拍配图、主动生活场景、普通场景/静物和创作封面。会先规范控制字符和内部结构标记，再经过正负面拆分及服装冲突清洗；清洗结果写入生图日志。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_selfie_fixed_prompt": {
+        "description": "自拍/人像固定附加提示词",
+        "type": "string",
+        "hint": "可选。只追加到 selfie/portrait，包括 QQ 空间自拍、主动自拍和每日穿搭。会先规范控制字符和内部结构标记，再经过正负面拆分及服装冲突清洗；清洗结果写入生图日志。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_edit_fixed_prompt": {
+        "description": "改图固定附加提示词",
+        "type": "string",
+        "hint": "可选。只追加到 edit/改图/重绘请求。会先规范控制字符和内部结构标记，再经过正负面拆分及服装冲突清洗；清洗结果写入生图日志。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_fixed_prompt": {
+        "description": "全局固定附加提示词（兼容）",
+        "type": "string",
+        "hint": "兼容旧配置。非空时仍会叠加到所有生图类型；想完全按文生图、自拍/人像、改图区分时请留空。全局词在类型词之前拼接，也会经过服装冲突清洗。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
