@@ -148,7 +148,26 @@ class PathStatePreservationTests(unittest.TestCase):
             debug_root.mkdir()
             prompt_path = debug_root / "trace  prompt.json"
             prompt_path.write_text(
-                json.dumps({"final_prompt": "complete prompt"}, ensure_ascii=False),
+                json.dumps(
+                    {
+                        "final_prompt": "complete prompt",
+                        "workflow_fixed_prompt": {
+                            "scope": "selfie",
+                            "config_key": "photo_generation_selfie_fixed_prompt",
+                            "configured": True,
+                            "normalized": True,
+                            "normalization_changed": True,
+                            "conflict_cleaned": True,
+                            "cleaned": True,
+                            "applied": True,
+                            "raw_length": 42,
+                            "normalized_length": 36,
+                            "applied_length": 28,
+                            "removed_rules": ["incompatible_wardrobe"],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
                 encoding="utf-8",
             )
             output_path = _long_image_path("summary  image.png")
@@ -174,6 +193,23 @@ class PathStatePreservationTests(unittest.TestCase):
             self.assertEqual(items[0]["prompt_path"], str(prompt_path))
             self.assertEqual(items[0]["path"], output_path)
             self.assertEqual(items[0]["full_prompt"], "complete prompt")
+            self.assertEqual(
+                items[0]["workflow_fixed_prompt"],
+                {
+                    "scope": "selfie",
+                    "config_key": "photo_generation_selfie_fixed_prompt",
+                    "configured": True,
+                    "normalized": True,
+                    "normalization_changed": True,
+                    "conflict_cleaned": True,
+                    "cleaned": True,
+                    "applied": True,
+                    "raw_length": 42,
+                    "normalized_length": 36,
+                    "applied_length": 28,
+                    "removed_rules": ["incompatible_wardrobe"],
+                },
+            )
 
 
 if __name__ == "__main__":

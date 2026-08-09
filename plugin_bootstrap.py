@@ -908,6 +908,15 @@ def _initialize_photo_and_expression_config(self: Any, c: Any) -> None:
     self.photo_generation_style = self._cfg_str(c, "photo_generation_style", "真实", "真实")
     self.photo_generation_style_custom_prompt = self._cfg_str(c, "photo_generation_style_custom_prompt", "")
     self.photo_generation_fixed_prompt = self._cfg_str(c, "photo_generation_fixed_prompt", "")
+    self.photo_generation_text2img_fixed_prompt = self._cfg_str(
+        c, "photo_generation_text2img_fixed_prompt", ""
+    )
+    self.photo_generation_selfie_fixed_prompt = self._cfg_str(
+        c, "photo_generation_selfie_fixed_prompt", ""
+    )
+    self.photo_generation_edit_fixed_prompt = self._cfg_str(
+        c, "photo_generation_edit_fixed_prompt", ""
+    )
     self.photo_generation_scene_presets = self._cfg_raw(c, "photo_generation_scene_presets", "")
     self.enable_bot_relationship_network = self._cfg_bool(c, "enable_bot_relationship_network", False)
     self.bot_relationship_cards = self._normalize_bot_relationship_cards(

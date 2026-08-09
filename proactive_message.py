@@ -9676,6 +9676,7 @@ Output:
         residual_conflict_details: list[dict[str, Any]] | None = None,
         suggested_scene_preset: str = "",
         prompt_format: str = "",
+        workflow_fixed_prompt_audit: dict[str, Any] | None = None,
         generation_completed: bool = False,
         failure_stage: str = "",
     ) -> None:
@@ -9705,8 +9706,9 @@ Output:
                         result.append(item)
                 return result[:24]
 
+            fixed_prompt_audit = dict(workflow_fixed_prompt_audit or {})
             item = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "ts": _now_ts(),
                 "trace": _single_line(trace_id, 40),
                 "session": _single_line(session_key, 340),
@@ -9816,6 +9818,39 @@ Output:
                 "reference_removed": bool(reference_removed),
                 "reference_removal": dict(reference_removed or {}),
                 "sanitizer_version": _safe_int(sanitizer_version, 0, 0),
+                "workflow_fixed_prompt": {
+                    "scope": _single_line(fixed_prompt_audit.get("scope"), 30),
+                    "config_key": _single_line(fixed_prompt_audit.get("config_key"), 80),
+                    "configured": bool(fixed_prompt_audit.get("configured")),
+                    "normalized": bool(fixed_prompt_audit.get("normalized")),
+                    "normalization_changed": bool(
+                        fixed_prompt_audit.get("normalization_changed")
+                    ),
+                    "conflict_cleaned": bool(fixed_prompt_audit.get("conflict_cleaned")),
+                    "cleaned": bool(fixed_prompt_audit.get("cleaned")),
+                    "applied": bool(fixed_prompt_audit.get("applied")),
+                    "raw_length": _safe_int(fixed_prompt_audit.get("raw_length"), 0, 0),
+                    "normalized_length": _safe_int(
+                        fixed_prompt_audit.get("normalized_length"), 0, 0
+                    ),
+                    "applied_length": _safe_int(
+                        fixed_prompt_audit.get("applied_length"), 0, 0
+                    ),
+                    "raw_sha256": _single_line(
+                        fixed_prompt_audit.get("raw_sha256"), 80
+                    ),
+                    "normalized_sha256": _single_line(
+                        fixed_prompt_audit.get("normalized_sha256"), 80
+                    ),
+                    "applied_sha256": _single_line(
+                        fixed_prompt_audit.get("applied_sha256"), 80
+                    ),
+                    "removed_rules": [
+                        _single_line(value, 80)
+                        for value in (fixed_prompt_audit.get("removed_rules") or [])
+                        if _single_line(value, 80)
+                    ][:12],
+                },
                 "detected_conflicts": compact_audit(detected_conflict_details),
                 "removed_conflict_details": compact_audit(removed_conflict_details),
                 "residual_conflict_details": compact_audit(residual_conflict_details),
@@ -9957,6 +9992,7 @@ Output:
         reference_fallback: ReferenceFallback | None = None,
         suggested_scene_preset: str = "",
         prompt_format: str = "",
+        workflow_fixed_prompt_audit: dict[str, Any] | None = None,
     ) -> tuple[str, str]:
         prompt_hash = hashlib.sha256(str(final_prompt or "").encode("utf-8", "ignore")).hexdigest()
         submitted_prompt_hash = hashlib.sha256(
@@ -9995,7 +10031,7 @@ Output:
             fallback_payload = reference_fallback or ReferenceFallback((), (), (), "")
             payload = redact(
                 {
-                    "schema_version": 3,
+                    "schema_version": 4,
                     "created_at": now.isoformat(timespec="seconds"),
                     "trace": _single_line(trace_id, 40),
                     "session": _single_line(session_key, 340),
@@ -10053,6 +10089,7 @@ Output:
                     "residual_conflict_details": list(residual_conflict_details),
                     "reference_removed": dict(reference_removed or {}),
                     "sanitizer_version": _safe_int(sanitizer_version, 0, 0),
+                    "workflow_fixed_prompt": dict(workflow_fixed_prompt_audit or {}),
                     "final_prompt": final_prompt,
                     "final_prompt_length": len(str(final_prompt or "")),
                     "final_prompt_sha256": prompt_hash,
@@ -10312,6 +10349,74 @@ Output:
         if fixed in prompt:
             return _single_line(prompt, 1800)
         return _single_line(f"{prompt}\n\nAdditional fixed prompt: {fixed}".strip(), 1800)
+
+    @staticmethod
+    def _sanitize_photo_generation_fixed_prompt_config(value: Any, *, limit: int = 5000) -> str:
+        text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
+        text = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]", "", text)
+        text = re.sub(
+            r"</?(?:instruction|system|assistant|user|tool|memorycompanion-context)\b[^>]*>",
+            " ",
+            text,
+            flags=re.I,
+        )
+        text = re.sub(
+            r"(?im)^\s*\[(?:user image request|reference and wardrobe ruling|"
+            r"scene, style and final preset|composition and continuity)\]\s*$",
+            " ",
+            text,
+        )
+        return _single_line(text, max(0, int(limit or 0)))
+
+    def _photo_generation_workflow_fixed_prompt_section(
+        self,
+        workflow_kind: str,
+    ) -> tuple[PhotoPromptSection, dict[str, Any]]:
+        normalized = str(workflow_kind or "").strip().lower()
+        if normalized in {"edit", "改图", "修图", "重绘", "p图"}:
+            scope = "edit"
+            config_key = "photo_generation_edit_fixed_prompt"
+            label = "Additional image-edit fixed prompt"
+        elif normalized in {"selfie", "portrait", "自拍", "人像"}:
+            scope = "selfie"
+            config_key = "photo_generation_selfie_fixed_prompt"
+            label = "Additional selfie fixed prompt"
+        else:
+            scope = "text2img"
+            config_key = "photo_generation_text2img_fixed_prompt"
+            label = "Additional text-to-image fixed prompt"
+
+        raw = str(getattr(self, config_key, "") or "")
+        normalized_prompt = self._sanitize_photo_generation_fixed_prompt_config(raw)
+        positive, negative = self._photo_generation_semantic_prompt_parts(normalized_prompt)
+        section = PhotoPromptSection(
+            name="workflow_fixed_prompt",
+            source="fixed_prompt",
+            positive=f"{label}: {positive}" if positive else "",
+            negative=negative,
+            protected=True,
+            sanitize_conflicts=True,
+        )
+        raw_trimmed = raw.strip()
+        audit = {
+            "scope": scope,
+            "config_key": config_key,
+            "configured": bool(raw_trimmed),
+            "normalized": bool(normalized_prompt),
+            "normalization_changed": raw_trimmed != normalized_prompt,
+            "raw_length": len(raw),
+            "normalized_length": len(normalized_prompt),
+            "raw_sha256": hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()
+            if raw
+            else "",
+            "normalized_sha256": hashlib.sha256(
+                normalized_prompt.encode("utf-8", "ignore")
+            ).hexdigest()
+            if normalized_prompt
+            else "",
+        }
+        return section, audit
 
     @staticmethod
     def _normalize_photo_generation_prompt_format(value: Any) -> str:
@@ -11615,6 +11720,9 @@ Output:
                 )
             )
         fixed_prompt = str(getattr(self, "photo_generation_fixed_prompt", "") or "").strip()
+        workflow_fixed_section, workflow_fixed_prompt_audit = (
+            self._photo_generation_workflow_fixed_prompt_section(workflow_kind)
+        )
         generated_sections = (
             PhotoPromptSection(
                 name="wardrobe_decision",
@@ -11659,7 +11767,9 @@ Output:
                 if fixed_prompt
                 else "",
                 protected=True,
+                sanitize_conflicts=True,
             ),
+            workflow_fixed_section,
             PhotoPromptSection(
                 name="edit_contract",
                 source="edit_contract",
@@ -11762,10 +11872,50 @@ Output:
                 "positive": section.positive,
                 "negative": section.negative,
                 "protected": section.protected,
+                "sanitize_conflicts": section.sanitize_conflicts,
             }
         detected_conflict_details = [dict(item) for item in resolved_context.detected_conflicts]
         removed_conflict_details = [dict(item) for item in resolved_context.removed_conflicts]
         residual_conflict_details = [dict(item) for item in resolved_context.residual_conflicts]
+        workflow_fixed_after = next(
+            (
+                section
+                for section in resolved_context.prompt_sections
+                if section.name == "workflow_fixed_prompt"
+            ),
+            PhotoPromptSection("workflow_fixed_prompt", "fixed_prompt"),
+        )
+        workflow_fixed_prompt_audit.update(
+            {
+                "applied": bool(workflow_fixed_after.positive or workflow_fixed_after.negative),
+                "conflict_cleaned": (
+                    workflow_fixed_section.positive != workflow_fixed_after.positive
+                    or workflow_fixed_section.negative != workflow_fixed_after.negative
+                ),
+                "cleaned": bool(
+                    workflow_fixed_prompt_audit.get("normalization_changed")
+                    or workflow_fixed_section.positive != workflow_fixed_after.positive
+                    or workflow_fixed_section.negative != workflow_fixed_after.negative
+                ),
+                "applied_length": len(workflow_fixed_after.positive)
+                + len(workflow_fixed_after.negative),
+                "applied_sha256": hashlib.sha256(
+                    f"{workflow_fixed_after.positive}\n{workflow_fixed_after.negative}".encode(
+                        "utf-8", "ignore"
+                    )
+                ).hexdigest()
+                if workflow_fixed_after.positive or workflow_fixed_after.negative
+                else "",
+                "removed_rules": list(
+                    dict.fromkeys(
+                        _single_line(item.get("rule"), 80)
+                        for item in removed_conflict_details
+                        if item.get("section") == "workflow_fixed_prompt"
+                        and _single_line(item.get("rule"), 80)
+                    )
+                ),
+            }
+        )
         conflicts = [
             f"{item.get('source')}:{item.get('rule')}:{item.get('category')}"
             for item in resolved_context.detected_conflicts
@@ -11792,6 +11942,7 @@ Output:
                 "positive": section.positive,
                 "negative": section.negative,
                 "protected": section.protected,
+                "sanitize_conflicts": section.sanitize_conflicts,
             }
         prompt_path, prompt_hash = self._write_photo_prompt_debug_file(
             trace_id=trace_id,
@@ -11821,6 +11972,7 @@ Output:
             sanitizer_version=resolved_context.sanitizer_version,
             suggested_scene_preset=suggested_scene_preset,
             prompt_format=prompt_format,
+            workflow_fixed_prompt_audit=workflow_fixed_prompt_audit,
         )
         self._append_photo_generation_trace_event(
             trace_id,
@@ -11839,8 +11991,19 @@ Output:
                 "removed_conflicts": removed_conflicts,
                 "residual_conflicts": residual_conflicts,
                 "sanitizer_version": resolved_context.sanitizer_version,
+                "workflow_fixed_prompt": workflow_fixed_prompt_audit,
             },
         )
+        if workflow_fixed_prompt_audit.get("configured"):
+            logger.info(
+                "[PrivateCompanion] 分类型固定生图提示词: trace=%s scope=%s key=%s applied=%s cleaned=%s removed_rules=%s",
+                trace_id,
+                _single_line(workflow_fixed_prompt_audit.get("scope"), 30),
+                _single_line(workflow_fixed_prompt_audit.get("config_key"), 80),
+                bool(workflow_fixed_prompt_audit.get("applied")),
+                bool(workflow_fixed_prompt_audit.get("cleaned")),
+                ",".join(workflow_fixed_prompt_audit.get("removed_rules") or []) or "-",
+            )
         if scene_context_after:
             logger.info(
                 "[PrivateCompanion] 自拍生图已加入当前日程地点约束: trace=%s session=%s hint=%s reference=%s",
@@ -12046,6 +12209,7 @@ Output:
                 residual_conflict_details=residual_conflict_details,
                 suggested_scene_preset=suggested_scene_preset,
                 prompt_format=prompt_format,
+                workflow_fixed_prompt_audit=workflow_fixed_prompt_audit,
                 generation_completed=generation_completed,
                 failure_stage=failure_stage,
             )

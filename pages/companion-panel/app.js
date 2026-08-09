@@ -2143,7 +2143,10 @@ const configLabels = {
   photo_generation_prompt_format: "生图提示词表达方式",
   photo_generation_style: "主动生图风格",
   photo_generation_style_custom_prompt: "自定义风格说明",
-  photo_generation_fixed_prompt: "固定附加提示词",
+  photo_generation_fixed_prompt: "全局固定附加提示词（兼容）",
+  photo_generation_text2img_fixed_prompt: "文生图固定提示词",
+  photo_generation_selfie_fixed_prompt: "自拍/人像固定提示词",
+  photo_generation_edit_fixed_prompt: "改图固定提示词",
   photo_generation_scene_presets: "生图场景预设",
   enable_bot_relationship_network: "Bot 关系网",
   bot_relationship_cards: "关系网角色卡",
@@ -2753,7 +2756,10 @@ const configDescriptions = {
   photo_generation_prompt_format: "控制所有生图最终提交给后端的提示词形式。传统文生图提示词使用 Positive/Negative prompt 和逗号分隔短语；自然语言描述使用连贯英文句子；NAI 联动模式按 NovelAI 4/4.5 标签语法（{}/[] 加降权、权重::标签::、负向权重、多角色块、Text: 文字）书写并原样提交给在线 API。若 NAI 联动模式生图效果不理想，请切换回自然语言描述模式。只改变提示词组织，不改变后端、参考图或画面风格。",
   photo_generation_style: "影响主动生图提示词的整体风格倾向，可填 真实、二次元 或 其他。",
   photo_generation_style_custom_prompt: "当风格为“其他”时，把这里作为额外风格要求注入生图提示词。",
-  photo_generation_fixed_prompt: "所有生图提交后端前都会追加这段固定提示词，包括主动随手拍、每日穿搭、自然语言文生图和引用/携带图片改图。适合放固定画质、角色细节、安全区或负面约束；留空不追加。",
+  photo_generation_fixed_prompt: "兼容旧配置。非空时仍叠加到所有生图类型；想完全按文生图、自拍/人像、改图区分时请留空。全局词在类型词之前拼接，也会经过服装冲突清洗。",
+  photo_generation_text2img_fixed_prompt: "只追加到 text2img 文生图，包括 QQ 空间非自拍配图、主动生活场景、普通场景/静物和创作封面。会清理控制字符和内部结构标记、拆分正负面语义并执行服装冲突保护。",
+  photo_generation_selfie_fixed_prompt: "只追加到 selfie/portrait，包括 QQ 空间自拍、主动自拍和每日穿搭。会清理控制字符和内部结构标记、拆分正负面语义并执行服装冲突保护。",
+  photo_generation_edit_fixed_prompt: "只追加到 edit/改图/重绘请求。会清理控制字符和内部结构标记、拆分正负面语义并执行服装冲突保护。",
   photo_generation_scene_presets: "格式参考通用生图插件，一行一个：预设名:提示词。内置已有角色自拍、COS自拍、日常穿搭、镜前穿搭、头像特写、房间日常、可拍画面、表情包场景；普通穿搭默认走日常穿搭，只有明确镜前/对镜/镜子时才走镜前穿搭；自定义同名会覆盖内置。",
   enable_bot_relationship_network: "开启后可配置 Bot 熟悉的角色卡；主动拍照/生图时只把它用于理解关系情境，可用第二只杯子、礼物、便签等非人物线索自然表达。角色卡文字不等于人物参考图，当前不会让关系卡人物直接入镜或生成合影。",
   bot_relationship_cards: "一行一张角色卡，格式：角色名 || 与Bot的关系 || 角色外貌描述。例如：小林 || 高中同学兼死党 || 齐肩短发，戴黑框眼镜，常穿灰色连帽卫衣。最多保存 16 张。没有其他人物参考图时禁止合影，不会仅凭文字生成该角色。",
@@ -3026,7 +3032,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_intra_day_gap_minutes", "qzone_life_publish_probability", "qzone_life_publish_max_daily", "qzone_life_publish_window_mode", "qzone_life_publish_windows", "qzone_life_publish_allow_insomnia_night", "qzone_life_publish_similarity_threshold", "qzone_publish_style_prompt"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_generation_allowed_scopes", "photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_reference_catalog", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "photo_generation_trace_max_size_kb", "photo_generation_trace_backup_count", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets", "enable_bot_relationship_network", "bot_relationship_cards"],
+  enable_photo_text_action: ["photo_generation_allowed_scopes", "photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_reference_catalog", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "photo_generation_trace_max_size_kb", "photo_generation_trace_backup_count", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_text2img_fixed_prompt", "photo_generation_selfie_fixed_prompt", "photo_generation_edit_fixed_prompt", "photo_generation_scene_presets", "enable_bot_relationship_network", "bot_relationship_cards"],
   enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_goodnight_screen_check", "goodnight_screen_check_delay_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_poke_action: ["poke_action_max_times", "poke_action_cooldown_minutes"],
   enable_voice_action: ["voice_action_max_chars"],
@@ -3744,7 +3750,7 @@ const featureSettingSections = {
     {
       title: "画面风格",
       note: "只影响提示词组织，不改变后端配置。",
-      keys: ["photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+      keys: ["photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_text2img_fixed_prompt", "photo_generation_selfie_fixed_prompt", "photo_generation_edit_fixed_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
     },
     {
       title: "Bot 关系网",
@@ -4083,6 +4089,9 @@ const featureSettingTypes = {
   daily_outfit_photo_prompt: { type: "textarea" },
   photo_generation_style_custom_prompt: { type: "textarea" },
   photo_generation_fixed_prompt: { type: "textarea" },
+  photo_generation_text2img_fixed_prompt: { type: "textarea" },
+  photo_generation_selfie_fixed_prompt: { type: "textarea" },
+  photo_generation_edit_fixed_prompt: { type: "textarea" },
   natural_language_photo_extra_prompt: { type: "textarea" },
   photo_generation_scene_presets: { type: "textarea" },
   enable_bot_relationship_network: { type: "checkbox" },
@@ -7353,7 +7362,10 @@ const setupGuideAdvancedItems = {
         { key: "photo_generation_prompt_format", type: "select", label: "提示词表达方式", options: [["traditional", "传统文生图提示词（标签/短语）"], ["natural_language", "自然语言描述"], ["nai", "NAI 联动模式（NovelAI 标签语法）"]], description: "全局作用于主动拍照、每日穿搭、创作封面、自然语言生图及函数工具生图。" },
         { key: "photo_generation_style", type: "select", label: "生图风格", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
         { key: "photo_generation_style_custom_prompt", type: "textarea", label: "自定义风格说明", placeholder: "例如：胶片感、浅景深、室内自然光", description: "只有风格选“其他”时重点使用。", showWhen: (draft) => photoSettingVisibleForValues("photo_generation_style_custom_prompt", draft) },
-        { key: "photo_generation_fixed_prompt", type: "textarea", label: "固定附加提示词", placeholder: "每次生图都要保留的画面约束，例如角色发色、服装禁忌、不要水印。", description: "会追加到主动生图提示词里，适合写稳定外观和禁忌。" },
+        { key: "photo_generation_text2img_fixed_prompt", type: "textarea", label: "文生图固定提示词", placeholder: "例如：clean composition, environmental storytelling, no watermark", description: "只用于 text2img；覆盖 QQ 空间非自拍配图、主动生活场景、普通文生图和创作封面。正负面内容会拆分并经过冲突清洗。" },
+        { key: "photo_generation_selfie_fixed_prompt", type: "textarea", label: "自拍/人像固定提示词", placeholder: "例如：stable facial features, natural selfie framing, no watermark", description: "只用于 selfie/portrait；覆盖 QQ 空间自拍、主动自拍和每日穿搭。正负面内容会拆分并经过冲突清洗。" },
+        { key: "photo_generation_edit_fixed_prompt", type: "textarea", label: "改图固定提示词", placeholder: "例如：preserve unedited pixels, no unrelated redesign", description: "只用于 edit/改图/重绘。正负面内容会拆分并经过冲突清洗。" },
+        { key: "photo_generation_fixed_prompt", type: "textarea", label: "全局固定提示词（兼容）", placeholder: "旧配置兼容项；完全按类型控制时留空。", description: "非空时仍叠加到全部类型，并排在分类型固定提示词之前。" },
         { key: "photo_generation_scene_presets", type: "textarea", label: "场景预设", placeholder: "按现有格式配置不同场景的提示词。" },
       ],
     },
@@ -11877,11 +11889,17 @@ function troubleshootingRecentPhotoGenerationMarkup(itemsRaw) {
         <details class="chain-test-steps chain-test-preview photo-prompt-history">
           <summary>查看最近生图记录</summary>
           ${items.map((item) => {
+            const workflowFixed = item.workflow_fixed_prompt && typeof item.workflow_fixed_prompt === "object"
+              ? item.workflow_fixed_prompt
+              : {};
             const meta = [
               item.ok ? "成功" : "失败",
               item.backend || "",
               item.kind ? `类型 ${item.kind}` : "",
               item.prompt_format === "natural_language" ? "自然语言提示词" : (item.prompt_format === "nai" ? "NAI 提示词" : (item.prompt_format === "traditional" ? "传统提示词" : "")),
+              workflowFixed.configured ? `分类型固定词 ${workflowFixed.scope || item.kind || "-"}` : "",
+              workflowFixed.configured && workflowFixed.applied ? "固定词已应用" : "",
+              workflowFixed.configured && workflowFixed.cleaned ? "固定词已清洗" : "",
               item.intent_kind ? `意图 ${item.intent_kind}` : "",
               item.trigger ? `来源 ${item.trigger}` : "",
               item.sent ? "已发送" : "",
@@ -11911,6 +11929,7 @@ function troubleshootingRecentPhotoGenerationMarkup(itemsRaw) {
                 ${item.note ? `<p class="photo-prompt-note">${escapeHtml(item.note)}</p>` : ""}
                 ${item.caption ? `<small class="photo-prompt-caption">附言：${escapeHtml(item.caption)}</small>` : ""}
                 ${item.wardrobe_reason ? `<small class="photo-prompt-caption">服装裁决：${escapeHtml(item.wardrobe_reason)}</small>` : ""}
+                ${workflowFixed.configured ? `<small class="photo-prompt-caption">分类型固定词：${escapeHtml(workflowFixed.config_key || workflowFixed.scope || "-")}；原始 ${escapeHtml(String(workflowFixed.raw_length || 0))} 字，应用 ${escapeHtml(String(workflowFixed.applied_length || 0))} 字${Array.isArray(workflowFixed.removed_rules) && workflowFixed.removed_rules.length ? `；清洗规则 ${escapeHtml(workflowFixed.removed_rules.join("、"))}` : ""}</small>` : ""}
                 ${removedConflicts.length ? `<small class="photo-prompt-caption">已物理移除：${escapeHtml(removedConflicts.join("、"))}</small>` : ""}
                 ${conflicts.length ? `<small class="photo-prompt-caption">冲突检测：${escapeHtml(conflicts.join("、"))}</small>` : ""}
                 ${item.path ? `<small class="path photo-prompt-path">输出：${escapeHtml(item.path)}</small>` : ""}

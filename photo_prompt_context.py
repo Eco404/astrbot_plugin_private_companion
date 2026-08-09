@@ -9,7 +9,7 @@ from typing import Any
 from . import photo_wardrobe_decision as _wardrobe_rules
 
 
-_SANITIZER_VERSION = 2
+_SANITIZER_VERSION = 3
 _SECTION_SOURCES = frozenset(
     {
         "user_request",
@@ -72,10 +72,17 @@ class PhotoPromptSection:
     positive: str = ""
     negative: str = ""
     protected: bool = False
+    sanitize_conflicts: bool | None = None
 
     def __post_init__(self) -> None:
         if self.source not in _SECTION_SOURCES:
             raise ValueError(f"unsupported photo prompt section source: {self.source}")
+
+
+def _section_conflict_sanitization_enabled(section: PhotoPromptSection) -> bool:
+    if section.sanitize_conflicts is not None:
+        return bool(section.sanitize_conflicts)
+    return not section.protected
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +224,7 @@ def _generic_wardrobe_is_compatible(text: str, active_category: str) -> bool:
         r"\b(?:one|single)\s+(?:single\s+)?coherent\s+outfit\b"
         r"|\bthe\s+same\s+outfit\b"
         r"|\b(?:requested|authoritative|resolved)\s+(?:wardrobe|outfit)\b"
+        r"|\b(?:current|selected|established|stable|consistent)\s+(?:wardrobe|outfit|attire)\b"
         r"|\bwardrobe\s+(?:decision|ruling)\b"
         r"|\bconflicting\s+(?:schedule\s+location\s+or\s+)?wardrobe\b",
         normalized,
@@ -451,7 +459,10 @@ def _sanitize_sections(
     for section in sections:
         if not isinstance(section, PhotoPromptSection):
             raise TypeError("sections must contain PhotoPromptSection values")
-        if section.protected or section.source in {"user_request", "wardrobe_decision"}:
+        if (
+            not _section_conflict_sanitization_enabled(section)
+            or section.source in {"user_request", "wardrobe_decision"}
+        ):
             sanitized.append(section)
             continue
         if section.name != "global_fixed_prompt":
@@ -523,7 +534,10 @@ def _sanitize_sections(
 
     residual: list[dict[str, Any]] = []
     for index, section in enumerate(sanitized):
-        if section.protected or section.source in {"user_request", "wardrobe_decision"}:
+        if (
+            not _section_conflict_sanitization_enabled(section)
+            or section.source in {"user_request", "wardrobe_decision"}
+        ):
             continue
         found = _conflicts_in_section(
             section,
@@ -546,7 +560,10 @@ def _sanitize_sections(
         sanitized[index] = replace(section, positive="", negative="")
 
     for section in sanitized:
-        if section.protected or section.source in {"user_request", "wardrobe_decision"}:
+        if (
+            not _section_conflict_sanitization_enabled(section)
+            or section.source in {"user_request", "wardrobe_decision"}
+        ):
             continue
         residual.extend(
             _conflicts_in_section(
@@ -576,7 +593,10 @@ def _scan_residual_conflicts(
     excluded_outfit_terms = _excluded_outfit_terms(wardrobe)
     residual: list[dict[str, Any]] = []
     for section in sections:
-        if section.protected or section.source in {"user_request", "wardrobe_decision"}:
+        if (
+            not _section_conflict_sanitization_enabled(section)
+            or section.source in {"user_request", "wardrobe_decision"}
+        ):
             continue
         residual.extend(
             _conflicts_in_section(

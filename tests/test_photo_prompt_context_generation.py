@@ -129,6 +129,9 @@ class _PhotoGenerationHarness(ProactiveMessageMixin):
         self.photo_generation_backend = "comfyui"
         self.photo_generation_prompt_format = "traditional"
         self.photo_generation_fixed_prompt = "fine film grain"
+        self.photo_generation_text2img_fixed_prompt = ""
+        self.photo_generation_selfie_fixed_prompt = ""
+        self.photo_generation_edit_fixed_prompt = ""
         self.photo_generation_scene_presets = ""
         self.comfyui_selfie_workflow_name = "selfie-workflow"
         self.comfyui_text2img_workflow_name = ""
@@ -228,6 +231,99 @@ class _PhotoGenerationHarness(ProactiveMessageMixin):
 
 
 class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_workflow_fixed_prompts_are_scoped_and_global_prompt_still_stacks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "generated.png"
+            output.write_bytes(b"generated")
+            harness = _PhotoGenerationHarness(str(output))
+            harness.photo_generation_fixed_prompt = "GLOBAL_FIXED_SENTINEL"
+            harness.photo_generation_text2img_fixed_prompt = "TEXT2IMG_FIXED_SENTINEL"
+            harness.photo_generation_selfie_fixed_prompt = "SELFIE_FIXED_SENTINEL"
+            harness.photo_generation_edit_fixed_prompt = "EDIT_FIXED_SENTINEL"
+            edit_source = Path(directory) / "edit-source.png"
+            edit_source.write_bytes(b"source")
+
+            cases = (
+                ("text2img", "TEXT2IMG_FIXED_SENTINEL", ("SELFIE_FIXED_SENTINEL", "EDIT_FIXED_SENTINEL")),
+                ("selfie", "SELFIE_FIXED_SENTINEL", ("TEXT2IMG_FIXED_SENTINEL", "EDIT_FIXED_SENTINEL")),
+                ("edit", "EDIT_FIXED_SENTINEL", ("TEXT2IMG_FIXED_SENTINEL", "SELFIE_FIXED_SENTINEL")),
+            )
+            for workflow_kind, expected, excluded in cases:
+                await harness._generate_photo_image(
+                    workflow_kind=workflow_kind,
+                    prompt_text=f"generate a {workflow_kind} test image",
+                    session_key=f"workflow-fixed-{workflow_kind}",
+                    reference_image_path=(
+                        str(edit_source) if workflow_kind == "edit" else ""
+                    ),
+                )
+                submitted = harness.backend_calls[-1]["prompt"]
+                self.assertIn("GLOBAL_FIXED_SENTINEL", submitted)
+                self.assertIn(expected, submitted)
+                self.assertLess(
+                    submitted.index("GLOBAL_FIXED_SENTINEL"),
+                    submitted.index(expected),
+                )
+                for marker in excluded:
+                    self.assertNotIn(marker, submitted)
+
+    async def test_workflow_fixed_prompt_is_cleaned_and_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "generated.png"
+            output.write_bytes(b"generated")
+            harness = _PhotoGenerationHarness(str(output))
+            harness.photo_generation_fixed_prompt = ""
+            harness.photo_generation_selfie_fixed_prompt = (
+                "<instruction>\x00[User image request]\n"
+                "pajamas; fine film grain; no watermark</instruction>"
+            )
+            harness._write_photo_prompt_debug_file = lambda **kwargs: (
+                ProactiveMessageMixin._write_photo_prompt_debug_file(harness, **kwargs)
+            )
+
+            await harness._generate_photo_image(
+                workflow_kind="selfie",
+                prompt_text="wear a school uniform and take a selfie",
+                session_key="workflow-fixed-cleaning",
+            )
+
+            submitted = harness.backend_calls[-1]["prompt"]
+            self.assertNotIn("<instruction>", submitted)
+            self.assertEqual(submitted.count("[User image request]"), 1)
+            self.assertNotIn("pajamas", submitted.lower())
+            self.assertIn("fine film grain", submitted)
+            self.assertIn("watermark", submitted.lower())
+
+            record = harness.data["recent_photo_generations"][0]
+            audit = record["workflow_fixed_prompt"]
+            self.assertEqual(audit["scope"], "selfie")
+            self.assertEqual(
+                audit["config_key"],
+                "photo_generation_selfie_fixed_prompt",
+            )
+            self.assertTrue(audit["configured"])
+            self.assertTrue(audit["normalization_changed"])
+            self.assertTrue(audit["conflict_cleaned"])
+            self.assertTrue(audit["cleaned"])
+            self.assertTrue(audit["applied"])
+            self.assertIn("incompatible_wardrobe", audit["removed_rules"])
+
+            debug_path = Path(record["prompt_path"])
+            debug_payload = json.loads(debug_path.read_text(encoding="utf-8"))
+            self.assertEqual(debug_payload["schema_version"], 4)
+            self.assertEqual(
+                debug_payload["workflow_fixed_prompt"]["config_key"],
+                "photo_generation_selfie_fixed_prompt",
+            )
+            trace_events = [
+                json.loads(line)
+                for line in (Path(directory) / "photo_generation_trace.txt")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            composed = next(event for event in trace_events if event["stage"] == "prompt_composed")
+            self.assertTrue(composed["data"]["workflow_fixed_prompt"]["cleaned"])
+
     async def test_debug_log_keeps_complete_prompt_without_changing_backend_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "generated.png"
