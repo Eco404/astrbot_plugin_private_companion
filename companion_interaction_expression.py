@@ -609,6 +609,17 @@ def build_expression_decision(input_data: ExpressionInput | Mapping[str, Any] | 
     if not followup and "followup" in behaviors:
         behaviors = tuple(item for item in behaviors if item != "followup")
 
+    # Long-term closeness should change more than warmth and wording.  Keep
+    # these as optional expression affordances so the model can show genuine
+    # interest without turning every close conversation into a questionnaire.
+    stage_key = _text(relationship_baseline.get("stage_key"))
+    close_relationship = score >= 600 or stage_key in {"close", "intimate", "deeply_bonded", "owner_exclusive"}
+    intimate_relationship = score >= 900 or stage_key in {"intimate", "deeply_bonded", "owner_exclusive"}
+    if followup and close_relationship:
+        behaviors = tuple(dict.fromkeys((*behaviors, "relational_curiosity")))
+    if followup and intimate_relationship:
+        behaviors = tuple(dict.fromkeys((*behaviors, "reciprocal_request")))
+
     content_tier, content_provider_policy = _resolve_content_tier(
         source,
         band=band,
@@ -805,12 +816,28 @@ def expression_decision_prompt(value: ExpressionDecision | Mapping[str, Any]) ->
         f"幽默={str(decision.get('humor_mode') or 'off')[:12]}，"
         f"话题={str(decision.get('topic_initiative') or 'reply_only')[:16]}"
     )
+    allowed_behaviors = {
+        str(item or "").strip()
+        for item in decision.get("allowed_behaviors", ())
+        if str(item or "").strip()
+    }
+    relationship_initiative = ""
+    if "relational_curiosity" in allowed_behaviors:
+        relationship_initiative = (
+            "；关系主动性=可偶尔真诚好奇用户本人、彼此相处感受或共同默契，一次只问一个具体问题，不必每轮都问"
+        )
+    if "reciprocal_request" in allowed_behaviors:
+        relationship_initiative += (
+            "；也可请用户帮一个容易拒绝的低负担小忙，如给意见、选一样东西或拍一张特定但不敏感的生活照片；"
+            "请求要贴当前话题或自身愿望，不索取表态、承诺、秘密、排他性或即时回复"
+        )
     return (
         f"当前互动表达：{EXPRESSION_BAND_LABELS[band.value]}；"
         f"语气={str(decision.get('tone') or 'steady')[:24]}，"
         f"称呼距离={str(decision.get('address_style') or 'neutral')[:24]}，"
         f"回复长度={str(decision.get('response_length') or 'balanced')[:24]}；"
-        f"{followup}；{initiative}；{proactive_rhythm}；{dimensions}{f'；{content_instruction}' if content_instruction else ''}。"
+        f"{followup}；{initiative}；{proactive_rhythm}；{dimensions}{relationship_initiative}"
+        f"{f'；{content_instruction}' if content_instruction else ''}。"
     )
 
 

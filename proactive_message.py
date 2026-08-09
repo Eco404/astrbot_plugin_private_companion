@@ -2158,6 +2158,54 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             parts.append(f"用户级备注：{note}")
         return "；".join(parts)
 
+    def _format_proactive_relationship_initiative_hint(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str = "",
+        action: str = "message",
+    ) -> str:
+        """Offer high-affinity relational initiative without making it a quota."""
+        if not isinstance(user, dict) or _safe_int(user.get("ignored_streak"), 0, 0) > 0:
+            return ""
+        allowed_reasons = {
+            "activity_share",
+            "background_schedule",
+            "check_in",
+            "diary_share",
+            "evening_greeting",
+            "quiet_care",
+            "state_share",
+        }
+        if _single_line(reason, 48) not in allowed_reasons:
+            return ""
+        normalized_action = _single_line(action, 80).lower()
+        if not normalized_action or any(token in normalized_action for token in ("photo", "image", "screen")):
+            return ""
+        profile_getter = getattr(self, "_relationship_profile", None)
+        if not callable(profile_getter):
+            return ""
+        try:
+            profile = profile_getter(user)
+        except Exception:
+            return ""
+        if not isinstance(profile, dict):
+            return ""
+        stage_key = _single_line(profile.get("stage_key"), 32).lower()
+        if stage_key not in {"close", "intimate", "deeply_bonded"}:
+            return ""
+        lines = [
+            "【高亲密关系主动性】",
+            "- 如果本轮原本就是想靠近、关系试探或想听对方的声音，可以把泛泛关心变成一次具体而真诚的好奇：好奇用户自己的想法、对彼此相处的感受，或想一起形成的小默契。一次只选一个，不盘问，也不抢过明确的事实话题。",
+            "- 这种好奇是偶尔出现的关系表达，不是每条主动消息的固定任务；不要试探用户是否喜欢你，不索取表态、秘密、承诺、排他性或即时回复。",
+        ]
+        if stage_key in {"intimate", "deeply_bonded"}:
+            lines.append(
+                "- 也可以自然请用户帮一个低负担、很具体且容易拒绝的小忙，例如给一个选择或意见、推荐一首歌、替某样东西取名，或拍一张指定主题但不敏感的生活照片。请求要来自当前话题或角色自己的真实愿望，不能只是随意给用户派任务。"
+                "照片可以是此刻看到的天空、手边物件、食物或环境一角；不要索取人脸、身体私密部位、证件票据、屏幕聊天、门牌住址、实时定位或他人隐私。不能命令、查岗、要求证明感情，也不能把拒绝或没回复写成关系受损。"
+            )
+        return "\n".join(lines)
+
     @staticmethod
     def _normalize_proactive_address_token(value: Any) -> str:
         token = _single_line(value, 24).strip(" -*`_【】[]（）()<>《》\"'“”‘’")
@@ -2625,6 +2673,11 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "- 如果记忆或历史里是昨天、昨晚、之前的天气/通勤/身体状态，除非当前日程或最新私聊明确延续，否则不要拿来当本轮主动切口。\n"
             "- 如果必须提旧事，要明确说“昨晚/昨天/那次”，不要写成“今天刚遇到/现在还在/刚才发生”。"
         )
+        relationship_initiative_hint = self._format_proactive_relationship_initiative_hint(
+            user,
+            reason=reason,
+            action=action,
+        )
         prompt = self.proactive_prompt_template or self._default_proactive_prompt_template()
         worldview_adaptation = ""
         reason_text = _REASON_TEXT.get(reason, reason).replace("{name}", name)
@@ -2745,6 +2798,8 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             prompt = f"{prompt.rstrip()}\n\n{visible_format_hint}"
         if "时间锚定" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{temporal_grounding_hint}"
+        if relationship_initiative_hint and "高亲密关系主动性" not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{relationship_initiative_hint}"
         if troubleshooting_hint and "本轮真实开口由头" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{troubleshooting_hint}"
         if recent_history_hint and "最近私聊实况" not in prompt:
@@ -2943,6 +2998,13 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 "结合真实由头、对方反馈和打扰感自然调整，不要求凑满或机械卡线；"
                 "内容尺度=normal。"
             )
+        relationship_initiative_hint = self._format_proactive_relationship_initiative_hint(
+            user,
+            reason=reason,
+            action=action,
+        )
+        if relationship_initiative_hint:
+            lines.append(relationship_initiative_hint)
         model_judgement = (
             user.get("planned_proactive_model_judge_result")
             if isinstance(user.get("planned_proactive_model_judge_result"), dict)
@@ -5636,6 +5698,13 @@ Output:
                 f"互道晚安后，如果{name or '对方'}还没睡，就轻声提醒忙完早点休息；"
                 "不提看见了什么，不追问，不要求回复，也不表现成在监控。"
             )
+        relationship_initiative_hint = self._format_proactive_relationship_initiative_hint(
+            user,
+            reason=reason,
+            action=action,
+        )
+        if relationship_initiative_hint:
+            reference = f"{reference}\n{relationship_initiative_hint}" if reference else relationship_initiative_hint
         if not reference:
             reference = f"自然地向{name or '对方'}主动说一句与当前状态有关、低压力且无需立即回复的话。"
         reference = sanitize_relationship_source(reference, "proactive_fallback.reference")
