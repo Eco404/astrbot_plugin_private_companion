@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import io
 import json
 import math
+import os
 import time
 import re
 import shutil
@@ -129,6 +131,15 @@ PHOTO_REFERENCE_METADATA_REVIEW_TIMEOUT_SECONDS = 60.0
 PHOTO_REFERENCE_ASSET_MAX_BYTES = 12 * 1024 * 1024
 PHOTO_REFERENCE_ASSET_MAX_COUNT = 256
 PHOTO_REFERENCE_ASSET_MAX_PER_OWNER = 32
+# WebUI catalog uploads are content-addressed so repeated submissions do not
+# create another copy of the same image. These limits cover abandoned uploads
+# that are no longer referenced by the saved catalog.
+PHOTO_REFERENCE_UPLOAD_MAX_COUNT = 256
+PHOTO_REFERENCE_UPLOAD_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
+# A 12 MiB image expands to roughly 16 MiB when Base64 encoded. Leave room for
+# the data URL and JSON envelope, while rejecting oversized bodies before
+# Quart parses them into memory.
+PHOTO_REFERENCE_UPLOAD_MAX_REQUEST_BYTES = 20 * 1024 * 1024
 PHOTO_REFERENCE_ASSET_SCOPES = {"relation_user", "group", "knowledge"}
 PHOTO_REFERENCE_ASSET_MIMES = {
     "image/png": ".png",
@@ -736,6 +747,7 @@ class PrivateCompanionPageApi(
             ("/reaction_assets/image_data", self.get_owned_reaction_asset_image_data, ["GET"], "Private Companion Page owned reaction asset image"),
             ("/photo_reference/list", self.list_photo_references, ["GET"], "Private Companion Page photo reference list"),
             ("/photo_reference/image_data", self.get_photo_reference_image_data, ["GET"], "Private Companion Page photo reference image data"),
+            ("/photo_reference/upload", self.upload_photo_reference, ["POST"], "Private Companion Page upload photo reference image"),
             ("/photo_reference/metadata/compile", self.compile_photo_reference_metadata, ["POST"], "Compile guided photo reference metadata"),
             ("/photo_reference/metadata/review", self.review_photo_reference_metadata, ["POST"], "Review and merge guided photo reference answers"),
             ("/photo_reference/selection_trial", self.run_photo_reference_selection_trial, ["POST"], "Run side-effect-free photo reference selection trial"),
@@ -2551,6 +2563,177 @@ class PrivateCompanionPageApi(
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取参考图库失败: {exc}", exc_info=True)
             return self._exception_error(str(exc))
+
+    @staticmethod
+    def _photo_reference_upload_validation_error(raw: bytes, mime: str) -> str:
+        """Fully decode a catalog upload before it is persisted."""
+        if PILImage is None:
+            return "服务器缺少 Pillow 图片校验组件，暂时无法上传参考图"
+        expected_format = {
+            "image/png": "PNG",
+            "image/jpeg": "JPEG",
+            "image/webp": "WEBP",
+        }.get(mime)
+        if not expected_format:
+            return "参考图库只支持 PNG、JPEG 或 WebP 图片"
+        try:
+            # verify() checks the container, then a fresh decoder loads the pixels
+            # so truncated images are rejected instead of merely passing a magic
+            # byte check.
+            with PILImage.open(io.BytesIO(raw)) as image:
+                if str(getattr(image, "format", "") or "").upper() != expected_format:
+                    return "图片声明类型与实际格式不一致"
+                image.verify()
+            with PILImage.open(io.BytesIO(raw)) as image:
+                if str(getattr(image, "format", "") or "").upper() != expected_format:
+                    return "图片声明类型与实际格式不一致"
+                image.load()
+        except Exception as exc:
+            logger.info("[PrivateCompanionPage] 参考图库上传图片解码失败: type=%s", type(exc).__name__)
+            return "图片内容损坏或无法解码，请选择完整的 PNG、JPEG 或 WebP 文件"
+        return ""
+
+    @staticmethod
+    def _photo_reference_upload_usage(directory: Path) -> tuple[int, int]:
+        count = 0
+        total_bytes = 0
+        for entry in directory.iterdir():
+            if not entry.name.startswith("webui_") or entry.suffix.lower() not in {
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".webp",
+            }:
+                continue
+            try:
+                if entry.is_symlink() or not entry.is_file():
+                    continue
+                size = max(0, int(entry.stat().st_size))
+            except (OSError, ValueError):
+                continue
+            count += 1
+            total_bytes += size
+        return count, total_bytes
+
+    @asynccontextmanager
+    async def _photo_reference_catalog_upload_lock(self):
+        data_lock = getattr(self.plugin, "_data_lock", None)
+        if data_lock is not None and callable(getattr(data_lock, "__aenter__", None)):
+            async with data_lock:
+                yield
+            return
+        lock = getattr(self.plugin, "_photo_reference_catalog_upload_guard", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            setattr(self.plugin, "_photo_reference_catalog_upload_guard", lock)
+        async with lock:
+            yield
+
+    async def upload_photo_reference(self) -> dict[str, Any]:
+        content_length = request.content_length
+        if content_length is not None:
+            try:
+                if int(content_length) > PHOTO_REFERENCE_UPLOAD_MAX_REQUEST_BYTES:
+                    return self._error("参考图上传请求体过大，请将图片控制在 12 MB 以内")
+            except (TypeError, ValueError):
+                pass
+        payload = await request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return self._error("请求体必须是 JSON 对象")
+        decoded = self._decode_photo_reference_asset_data_url(
+            payload.get("data_url") or payload.get("image_data") or payload.get("image")
+        )
+        if decoded is None:
+            return self._error("只支持不超过 12 MB 的有效 PNG、JPEG 或 WebP 图片")
+        raw, mime, suffix = decoded
+        if mime not in {"image/png", "image/jpeg", "image/webp"}:
+            return self._error("参考图库只支持 PNG、JPEG 或 WebP 图片")
+        validation_error = await asyncio.to_thread(
+            self._photo_reference_upload_validation_error,
+            raw,
+            mime,
+        )
+        if validation_error:
+            return self._error(validation_error)
+
+        directory_getter = getattr(self.plugin, "_photo_reference_image_dir", None)
+        try:
+            target_dir = Path(directory_getter()) if callable(directory_getter) else (
+                Path(str(getattr(self.plugin, "data_dir", "") or ".")).expanduser()
+                / "photo_reference_images"
+            )
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_dir = target_dir.resolve()
+            if not target_dir.is_dir():
+                return self._error("参考图存储目录不可用")
+        except (OSError, TypeError, ValueError) as exc:
+            return self._error(f"无法创建参考图存储目录: {exc}")
+
+        digest = hashlib.sha256(raw).hexdigest()
+        target = target_dir / f"webui_{digest}{suffix}"
+        temporary: Path | None = None
+        async with self._photo_reference_catalog_upload_lock():
+            try:
+                if target.is_symlink():
+                    return self._error("参考图目标文件异常，请清理后重试")
+                target_exists = target.exists()
+                existing_size = 0
+                if target_exists:
+                    if not target.is_file():
+                        return self._error("参考图目标文件异常，请清理后重试")
+                    existing_size = max(0, int(target.stat().st_size))
+                    if existing_size == len(raw):
+                        existing_hash = await asyncio.to_thread(
+                            lambda: hashlib.sha256(target.read_bytes()).hexdigest()
+                        )
+                        if existing_hash == digest:
+                            resolved = target.resolve()
+                            return self._ok({
+                                "source": str(resolved),
+                                "filename": resolved.name,
+                                "mime": mime,
+                                "size": existing_size,
+                            })
+
+                count, total_bytes = self._photo_reference_upload_usage(target_dir)
+                if target_exists:
+                    count = max(0, count - 1)
+                    total_bytes = max(0, total_bytes - existing_size)
+                if count >= PHOTO_REFERENCE_UPLOAD_MAX_COUNT:
+                    return self._error(
+                        f"参考图库上传缓存已达到 {PHOTO_REFERENCE_UPLOAD_MAX_COUNT} 个文件上限"
+                    )
+                if total_bytes + len(raw) > PHOTO_REFERENCE_UPLOAD_MAX_TOTAL_BYTES:
+                    return self._error("参考图库上传缓存已达到 1 GiB 容量上限")
+
+                temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.uploading")
+                await asyncio.to_thread(temporary.write_bytes, raw)
+                if temporary.stat().st_size != len(raw):
+                    return self._error("参考图写入不完整，请重新上传")
+                await asyncio.to_thread(os.replace, temporary, target)
+                temporary = None
+                resolved = target.resolve()
+                stored_size = resolved.stat().st_size
+            except OSError as exc:
+                return self._error(f"保存参考图失败: {exc}")
+            finally:
+                if temporary is not None:
+                    try:
+                        temporary.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        if stored_size != len(raw):
+            try:
+                resolved.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return self._error("参考图写入不完整，请重新上传")
+        return self._ok({
+            "source": str(resolved),
+            "filename": resolved.name,
+            "mime": mime,
+            "size": stored_size,
+        })
 
     async def get_photo_reference_image_data(self) -> dict[str, Any]:
         item_id = self._single_line(request.args.get("id"), 80)

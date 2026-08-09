@@ -85,8 +85,11 @@ const state = {
   photoReferenceEditingIndex: -1,
   photoReferenceLibraryStatus: null,
   photoReferenceLibraryLoading: false,
+  photoReferenceLibraryRequestSeq: 0,
   photoReferenceLibraryError: "",
   photoReferenceAddDialogOpen: false,
+  photoReferenceSubmitting: false,
+  photoReferenceSubmissionToken: null,
   relationshipRoleReferenceAssets: {},
   relationshipRoleReferenceAssetsLoaded: false,
   relationshipRoleReferenceAssetsLoading: false,
@@ -755,6 +758,13 @@ function markFeatureDetailDirty() {
 }
 
 function leaveFeatureDetail(control = null) {
+  if (
+    state.featureDetailSubpage === "photo_reference_library"
+    && (photoReferenceManagerBusy() || state.photoReferenceAddDialogOpen)
+  ) {
+    showToast(state.photoReferenceSubmitting ? "参考图正在处理，请稍候" : "请先关闭参考图配置窗口", "error");
+    return false;
+  }
   if (state.featureDetailSubpage === "photo_reference_library") {
     state.featureDetailSubpage = "";
     state.photoReferenceManagerDraft = null;
@@ -788,6 +798,10 @@ function leaveFeatureDetail(control = null) {
 }
 
 function discardAllFeatureChanges() {
+  if (photoReferenceManagerBusy()) {
+    showToast("参考图正在处理，请稍候", "error");
+    return false;
+  }
   restoreFeatureDetailSession();
   state.featureAuxiliaryDirty = false;
   state.featureDetailDirty = false;
@@ -798,6 +812,7 @@ function discardAllFeatureChanges() {
   state.selectedFeatureKey = "";
   syncFeatureDraftFromOverview(state.overview || {});
   syncFeatureFooterAction();
+  return true;
 }
 
 const pluginIntegrationAvailabilityRules = {
@@ -23332,6 +23347,10 @@ function renderListCoverage(group, draft = null) {
 }
 
 function renderFeatureSwitches() {
+  if (
+    state.featureDetailSubpage === "photo_reference_library"
+    && (state.photoReferenceSubmitting || state.photoReferenceAddDialogOpen)
+  ) return;
   const filter = ($("#featureFilter")?.value || "").trim().toLowerCase();
   renderIsolationModeCards();
   renderPassiveInjectionPositionForm();
@@ -23506,7 +23525,7 @@ function syncFeatureFooterAction() {
   if (!onConfigPage) return;
   const inDetail = Boolean(state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, state.selectedFeatureKey));
   const dirty = hasUnsavedFeatureChanges();
-  const busy = Boolean(state.featureSaveInProgress);
+  const busy = Boolean(state.featureSaveInProgress || state.photoReferenceSubmitting);
   actions.classList.toggle("in-detail", inDetail);
   actions.classList.toggle("has-unsaved", dirty);
   if (backButton) backButton.hidden = !inDetail;
@@ -24844,6 +24863,10 @@ function collectFeatureSwitchPayload() {
 }
 
 async function saveFeatureSwitchChanges(control = null, successMessage = "已保存功能开关") {
+  if (state.photoReferenceSubmitting) {
+    showToast("参考图正在处理，请稍候", "error");
+    return false;
+  }
   refreshFeatureDetailDirty();
   if (state.featureSaveInProgress) return false;
   if (!hasUnsavedFeatureChanges()) {
@@ -24851,6 +24874,7 @@ async function saveFeatureSwitchChanges(control = null, successMessage = "已保
     return false;
   }
   state.featureSaveInProgress = true;
+  setPhotoReferenceManagerBusy(true);
   syncFeatureFooterAction();
   try {
     const payload = collectFeatureSwitchPayload();
@@ -24881,6 +24905,7 @@ async function saveFeatureSwitchChanges(control = null, successMessage = "已保
     return actionResultPersisted(result);
   } finally {
     state.featureSaveInProgress = false;
+    setPhotoReferenceManagerBusy(false);
     refreshFeatureDetailDirty();
     syncFeatureFooterAction();
   }
@@ -26539,6 +26564,152 @@ function photoReferenceRoleShortcuts() {
     .filter((item) => item.value.length && item.label);
 }
 
+const PHOTO_REFERENCE_UPLOAD_MAX_BYTES = 12 * 1024 * 1024;
+const PHOTO_REFERENCE_UPLOAD_MIMES = new Set(["image/png", "image/jpeg", "image/webp"]);
+
+function photoReferenceUploadMime(file) {
+  const declared = String(file?.type || "").trim().toLowerCase();
+  if (declared === "image/jpg") return "image/jpeg";
+  if (PHOTO_REFERENCE_UPLOAD_MIMES.has(declared)) return declared;
+  const extension = String(file?.name || "").split(".").pop().toLowerCase();
+  return {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    webp: "image/webp",
+  }[extension] || "";
+}
+
+function photoReferenceUploadError(file) {
+  if (!file) return "请选择一张参考图片";
+  if (!photoReferenceUploadMime(file)) return "只支持 PNG、JPEG 或 WebP 图片";
+  if (Number(file.size || 0) <= 0) return "图片文件为空";
+  if (Number(file.size || 0) > PHOTO_REFERENCE_UPLOAD_MAX_BYTES) return "单张参考图不能超过 12 MB";
+  return "";
+}
+
+function readPhotoReferenceFileDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const encoded = String(reader.result || "").split(",", 2)[1] || "";
+      if (!encoded) {
+        reject(new Error(`无法读取 ${file?.name || "参考图片"}`));
+        return;
+      }
+      resolve(`data:${photoReferenceUploadMime(file)};base64,${encoded}`);
+    };
+    reader.onerror = () => reject(new Error(`无法读取 ${file?.name || "参考图片"}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function clearPhotoReferenceLocalPreview(form) {
+  if (!form) return;
+  if (form._photoReferenceObjectUrl) URL.revokeObjectURL(form._photoReferenceObjectUrl);
+  form._photoReferenceObjectUrl = "";
+  const preview = form.querySelector("[data-photo-reference-file-preview]");
+  if (preview) {
+    preview.hidden = true;
+    preview.removeAttribute("src");
+  }
+  const filename = form.querySelector("[data-photo-reference-file-name]");
+  if (filename) filename.textContent = "尚未选择图片";
+}
+
+function setPhotoReferenceSourceMode(form, mode) {
+  if (!form) return;
+  const nextMode = mode === "url" ? "url" : "file";
+  form.dataset.photoReferenceSourceMode = nextMode;
+  form.querySelectorAll("[data-photo-reference-source-mode]").forEach((button) => {
+    const active = button.dataset.photoReferenceSourceMode === nextMode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  form.querySelectorAll("[data-photo-reference-source-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.photoReferenceSourcePanel !== nextMode;
+  });
+  if (form.elements.source) form.elements.source.required = nextMode === "url";
+}
+
+function setPhotoReferenceFormBusy(form, busy) {
+  if (!form) return;
+  if (busy) {
+    form._photoReferenceBusyControls = Array.from(form.querySelectorAll("input,textarea,select,button"))
+      .map((control) => ({ control, disabled: control.disabled }));
+    form._photoReferenceSubmitting = true;
+    form._photoReferenceBusyControls.forEach(({ control }) => { control.disabled = true; });
+    return;
+  }
+  (form._photoReferenceBusyControls || []).forEach(({ control, disabled }) => {
+    control.disabled = disabled;
+  });
+  form._photoReferenceBusyControls = null;
+  form._photoReferenceSubmitting = false;
+}
+
+function photoReferenceManagerBusy() {
+  return Boolean(state.featureSaveInProgress || state.photoReferenceSubmitting);
+}
+
+function setPhotoReferenceManagerBusy(busy) {
+  const manager = document.querySelector("[data-photo-reference-manager]");
+  if (!manager) return;
+  manager.setAttribute("aria-busy", busy ? "true" : "false");
+  if (busy) {
+    if (!manager._photoReferenceBusyControls) {
+      manager._photoReferenceBusyControls = Array.from(
+        manager.querySelectorAll("button,input,textarea,select"),
+      ).map((control) => ({
+        control,
+        disabled: control.disabled && !control.classList.contains("is-busy"),
+      }));
+    }
+    manager._photoReferenceBusyControls.forEach(({ control }) => { control.disabled = true; });
+    return;
+  }
+  (manager._photoReferenceBusyControls || []).forEach(({ control, disabled }) => {
+    if (control.isConnected) control.disabled = disabled;
+  });
+  const refreshButton = manager.querySelector("[data-photo-reference-refresh]");
+  if (refreshButton && state.photoReferenceLibraryLoading) refreshButton.disabled = true;
+  manager._photoReferenceBusyControls = null;
+}
+
+function updatePhotoReferenceFilePreview(form) {
+  const fileInput = form?.querySelector("[data-photo-reference-file]");
+  const file = fileInput?.files?.[0];
+  clearPhotoReferenceLocalPreview(form);
+  if (!file) return;
+  const error = photoReferenceUploadError(file);
+  if (error) {
+    fileInput.value = "";
+    showToast(error, "error");
+    return;
+  }
+  const filename = form.querySelector("[data-photo-reference-file-name]");
+  if (filename) filename.textContent = `${file.name} · ${formatBytes(file.size)}`;
+  const preview = form.querySelector("[data-photo-reference-file-preview]");
+  if (preview) {
+    form._photoReferenceObjectUrl = URL.createObjectURL(file);
+    preview.src = form._photoReferenceObjectUrl;
+    preview.hidden = false;
+  }
+}
+
+async function uploadPhotoReferenceFile(file) {
+  const error = photoReferenceUploadError(file);
+  if (error) throw new Error(error);
+  const dataUrl = await readPhotoReferenceFileDataUrl(file);
+  const uploaded = await postJson("/photo_reference/upload", {
+    data_url: dataUrl,
+    filename: String(file.name || "reference"),
+  });
+  const source = String(uploaded?.source || "").trim();
+  if (!source) throw new Error("上传完成后没有返回可用的参考图路径");
+  return source;
+}
+
 function photoReferenceSourceKind(source) {
   const text = String(source || "").trim();
   if (/^https?:\/\//i.test(text)) return "远程 URL";
@@ -26703,6 +26874,7 @@ function structuredReferenceAssetStatusHtml() {
 
 function photoReferenceManagerPageHtml(open) {
   const items = photoReferenceManagerItems();
+  const submitting = photoReferenceManagerBusy();
   const personaSource = currentPhotoPersonaReferenceValue();
   const personaStatus = photoReferenceStatusFor("persona", personaSource);
   const statusLoaded = Boolean(state.photoReferenceLibraryStatus);
@@ -26711,7 +26883,7 @@ function photoReferenceManagerPageHtml(open) {
   return `
     <section class="photo-reference-manager" data-photo-reference-manager ${open ? "" : "hidden"}>
       <nav class="feature-detail-breadcrumb photo-reference-breadcrumb" aria-label="页面层级">
-        <button type="button" data-photo-reference-back>生图/拍照能力</button>
+        <button type="button" data-photo-reference-back ${submitting ? "disabled" : ""}>生图/拍照能力</button>
         <span>/ 参考图库管理</span>
       </nav>
       <header class="photo-reference-manager-head">
@@ -26721,9 +26893,9 @@ function photoReferenceManagerPageHtml(open) {
           <p><b>${items.length} / 24</b> 张附加参考图 · ${personaSource ? "基础人设已设置" : "基础人设未设置"} · ${statusError ? "状态读取失败" : statusLoaded ? `${availableCount} 张附加图可用` : "状态读取中"}</p>
         </div>
         <div class="photo-reference-head-actions">
-          <button type="button" data-photo-reference-add-open ${items.length >= 24 ? "disabled" : ""}>添加参考图</button>
-          <button type="button" data-photo-reference-refresh ${state.photoReferenceLibraryLoading ? "disabled" : ""}>${state.photoReferenceLibraryLoading ? "刷新中" : "刷新状态"}</button>
-          <button type="button" class="feature-param-save" data-photo-reference-save>保存图库</button>
+          <button type="button" data-photo-reference-add-open ${items.length >= 24 || submitting ? "disabled" : ""}>添加参考图</button>
+          <button type="button" data-photo-reference-refresh ${state.photoReferenceLibraryLoading || submitting ? "disabled" : ""}>${state.photoReferenceLibraryLoading ? "刷新中" : "刷新状态"}</button>
+          <button type="button" class="feature-param-save" data-photo-reference-save ${submitting ? "disabled" : ""}>保存图库</button>
         </div>
       </header>
 
@@ -26739,9 +26911,9 @@ function photoReferenceManagerPageHtml(open) {
         <div class="photo-reference-persona-controls">
           <label>
             <span>图片路径或 URL</span>
-            <input type="text" data-photo-reference-persona-source value="${escapeHtml(personaSource)}" maxlength="1000" placeholder="C:\\role.png 或 https://..." />
+            <input type="text" data-photo-reference-persona-source value="${escapeHtml(personaSource)}" maxlength="1000" placeholder="C:\\role.png 或 https://..." ${submitting ? "disabled" : ""} />
           </label>
-          <button type="button" data-photo-reference-persona-configure>配置使用方式</button>
+          <button type="button" data-photo-reference-persona-configure ${submitting ? "disabled" : ""}>配置使用方式</button>
         </div>
       </section>
 
@@ -26753,7 +26925,27 @@ function photoReferenceManagerPageHtml(open) {
           </header>
           <div class="photo-reference-add-body">
             <div class="photo-reference-add-basics">
-              <label><span>图片路径或 URL</span><input name="source" maxlength="1000" required placeholder="C:\\photo.png 或 https://..." /></label>
+              <div class="photo-reference-source-field">
+                <span>参考图片</span>
+                <div class="photo-reference-source-modes" role="group" aria-label="参考图片来源">
+                  <button type="button" class="is-active" data-photo-reference-source-mode="file" aria-pressed="true">上传文件</button>
+                  <button type="button" data-photo-reference-source-mode="url" aria-pressed="false">图片地址</button>
+                </div>
+                <div class="photo-reference-upload-panel" data-photo-reference-source-panel="file">
+                  <label class="photo-reference-file-picker">
+                    <span>选择图片</span>
+                    <input type="file" name="file" data-photo-reference-file accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" />
+                  </label>
+                  <div class="photo-reference-file-preview">
+                    <img data-photo-reference-file-preview alt="待上传参考图预览" hidden />
+                    <div><b data-photo-reference-file-name>尚未选择图片</b><small>PNG、JPEG、WebP · 最大 12 MB</small></div>
+                  </div>
+                </div>
+                <label data-photo-reference-source-panel="url" hidden>
+                  <span>图片 URL 或服务器路径</span>
+                  <input name="source" maxlength="1000" autocomplete="off" placeholder="https://... 或 C:\\photo.png" />
+                </label>
+              </div>
               <label><span>用途备注</span><input name="note" maxlength="500" placeholder="例如：居家服，在家或睡前使用" /></label>
             </div>
             <div data-photo-reference-guided-host></div>
@@ -27437,21 +27629,27 @@ function photoReferenceDraftValidationError() {
 }
 
 async function refreshPhotoReferenceLibraryStatus(control = null) {
-  if (state.photoReferenceLibraryLoading) return;
+  if (state.photoReferenceLibraryLoading || photoReferenceManagerBusy()) return;
+  const requestSeq = ++state.photoReferenceLibraryRequestSeq;
   state.photoReferenceLibraryLoading = true;
   setActionBusy(control, true);
   try {
     const status = await fetchJson("/photo_reference/list");
+    if (requestSeq !== state.photoReferenceLibraryRequestSeq || photoReferenceManagerBusy()) return;
     state.photoReferenceLibraryStatus = status;
     state.photoReferenceLibraryError = "";
     hydratePhotoReferenceDraftFromStatus(status);
   } catch (error) {
+    if (requestSeq !== state.photoReferenceLibraryRequestSeq || photoReferenceManagerBusy()) return;
     state.photoReferenceLibraryError = String(error?.message || "未知错误");
     showToast(`参考图状态读取失败：${error.message}`, "error");
   } finally {
-    state.photoReferenceLibraryLoading = false;
+    const isCurrent = requestSeq === state.photoReferenceLibraryRequestSeq;
+    if (isCurrent) state.photoReferenceLibraryLoading = false;
     setActionBusy(control, false);
-    if (state.featureDetailSubpage === "photo_reference_library") renderFeatureSwitches();
+    if (isCurrent && !photoReferenceManagerBusy() && state.featureDetailSubpage === "photo_reference_library") {
+      renderFeatureSwitches();
+    }
   }
 }
 
@@ -27509,14 +27707,20 @@ function bindPhotoReferenceManagerActions() {
     renderFeatureSwitches();
   });
   if (!manager || state.featureDetailSubpage !== "photo_reference_library") return;
+  setPhotoReferenceManagerBusy(photoReferenceManagerBusy());
   const addDialog = manager.querySelector("[data-photo-reference-add-dialog]");
   const closeAddDialog = () => {
+    const form = addDialog?.querySelector("[data-photo-reference-add-form]");
+    if (photoReferenceManagerBusy() || form?._photoReferenceSubmitting) return;
+    clearPhotoReferenceLocalPreview(form);
     state.photoReferenceAddDialogOpen = false;
     state.photoReferenceEditingIndex = -1;
     if (addDialog?.open) addDialog.close();
   };
   const openAddDialog = (editingIndex = -1) => {
-    if (!addDialog) return;
+    if (!addDialog || state.photoReferenceSubmitting || state.featureSaveInProgress) return;
+    state.photoReferenceLibraryRequestSeq += 1;
+    state.photoReferenceLibraryLoading = false;
     state.photoReferenceAddDialogOpen = true;
     state.photoReferenceEditingIndex = Number.isInteger(editingIndex) ? editingIndex : -1;
     renderGuidedPhotoReferenceEditor();
@@ -27526,8 +27730,11 @@ function bindPhotoReferenceManagerActions() {
       ? currentPhotoPersonaReference()
       : (state.photoReferenceEditingIndex >= 0 ? photoReferenceManagerItems()[state.photoReferenceEditingIndex] : null);
     if (form) {
+      clearPhotoReferenceLocalPreview(form);
+      if (form.elements.file) form.elements.file.value = "";
       form.elements.source.value = editingItem?.source || "";
       form.elements.note.value = editingItem?.note || "";
+      setPhotoReferenceSourceMode(form, editingItem?.source ? "url" : "file");
       const title = form.querySelector("header h3");
       if (title) title.textContent = editingPersona ? "配置基础人设图" : editingItem ? "配置参考图使用方式" : "添加参考图";
       const submit = form.querySelector('button[type="submit"]');
@@ -27538,7 +27745,8 @@ function bindPhotoReferenceManagerActions() {
       applyGuidedPhotoReferenceDraft(form.querySelector("[data-photo-reference-guided-editor]"), editingItem);
     }
     if (!addDialog.open) addDialog.showModal();
-    addDialog.querySelector('[name="source"]')?.focus();
+    if (form?.dataset.photoReferenceSourceMode === "file") form.elements.file?.focus();
+    else form?.elements.source?.focus();
   };
   manager.querySelector("[data-photo-reference-add-open]")?.addEventListener("click", () => openAddDialog(-1));
   manager.querySelector("[data-photo-reference-persona-configure]")?.addEventListener("click", () => openAddDialog(-2));
@@ -27546,11 +27754,47 @@ function bindPhotoReferenceManagerActions() {
     button.addEventListener("click", () => openAddDialog(Number(button.dataset.index)));
   });
   manager.querySelectorAll("[data-photo-reference-add-close]").forEach((button) => button.addEventListener("click", closeAddDialog));
-  addDialog?.addEventListener("cancel", () => { state.photoReferenceAddDialogOpen = false; state.photoReferenceEditingIndex = -1; });
-  addDialog?.addEventListener("close", () => { state.photoReferenceAddDialogOpen = false; state.photoReferenceEditingIndex = -1; });
+  addDialog?.addEventListener("cancel", (event) => {
+    const form = addDialog.querySelector("[data-photo-reference-add-form]");
+    if (photoReferenceManagerBusy() || form?._photoReferenceSubmitting) {
+      event.preventDefault();
+      return;
+    }
+    clearPhotoReferenceLocalPreview(form);
+    state.photoReferenceAddDialogOpen = false;
+    state.photoReferenceEditingIndex = -1;
+  });
+  addDialog?.addEventListener("close", () => {
+    clearPhotoReferenceLocalPreview(addDialog.querySelector("[data-photo-reference-add-form]"));
+    state.photoReferenceAddDialogOpen = false;
+    state.photoReferenceEditingIndex = -1;
+    if (!photoReferenceManagerBusy() && state.featureDetailSubpage === "photo_reference_library") {
+      renderFeatureSwitches();
+    }
+  });
+  addDialog?.querySelectorAll("[data-photo-reference-source-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (photoReferenceManagerBusy()) return;
+      const form = button.closest("form");
+      setPhotoReferenceSourceMode(form, button.dataset.photoReferenceSourceMode);
+      if (form?.dataset.photoReferenceSourceMode === "file") form.elements.file?.focus();
+      else form?.elements.source?.focus();
+    });
+  });
+  addDialog?.querySelector("[data-photo-reference-file]")?.addEventListener("change", (event) => {
+    if (photoReferenceManagerBusy()) return;
+    const form = event.currentTarget.closest("form");
+    setPhotoReferenceSourceMode(form, "file");
+    updatePhotoReferenceFilePreview(form);
+  });
   if (state.photoReferenceAddDialogOpen) openAddDialog(state.photoReferenceEditingIndex);
 
-  manager.querySelector("[data-photo-reference-back]")?.addEventListener("click", () => {
+  manager.querySelector("[data-photo-reference-back]")?.addEventListener("click", (event) => {
+    const form = manager.querySelector("[data-photo-reference-add-form]");
+    if (photoReferenceManagerBusy() || form?._photoReferenceSubmitting) {
+      event.preventDefault();
+      return;
+    }
     syncPhotoReferenceManagerDraft();
     state.photoReferenceAddDialogOpen = false;
     state.featureDetailSubpage = "";
@@ -27558,12 +27802,17 @@ function bindPhotoReferenceManagerActions() {
     renderFeatureSwitches();
   });
   manager.querySelector("[data-photo-reference-refresh]")?.addEventListener("click", (event) => {
+    if (photoReferenceManagerBusy()) return;
     void refreshPhotoReferenceLibraryStatus(event.currentTarget);
   });
-  manager.querySelector("[data-photo-reference-persona-source]")?.addEventListener("input", syncPhotoReferenceManagerDraft);
+  manager.querySelector("[data-photo-reference-persona-source]")?.addEventListener("input", () => {
+    if (photoReferenceManagerBusy()) return;
+    syncPhotoReferenceManagerDraft();
+  });
   manager.querySelectorAll("[data-photo-reference-source], [data-photo-reference-note], [data-photo-reference-roles], [data-photo-reference-role-shortcut], [data-photo-reference-multi-option], [data-photo-reference-outfit-category], [data-photo-reference-outfit-lock], [data-photo-reference-scenes], [data-photo-reference-times], [data-photo-reference-preferred-preset]").forEach((input) => {
     const eventName = input.matches("button") ? "click" : input.matches("select, input[type='checkbox']") ? "change" : "input";
     input.addEventListener(eventName, () => {
+      if (photoReferenceManagerBusy()) return;
       const index = Number(input.dataset.index);
       const item = photoReferenceManagerItems()[index];
       if (!item) return;
@@ -27624,20 +27873,32 @@ function bindPhotoReferenceManagerActions() {
   });
   manager.querySelector("[data-photo-reference-add-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (photoReferenceManagerBusy()) return;
     const form = event.currentTarget;
     const submitButton = event.submitter || form.querySelector('button[type="submit"]');
-    const source = String(form.elements.source?.value || "").trim();
+    const sourceMode = form.dataset.photoReferenceSourceMode === "url" ? "url" : "file";
+    let source = String(form.elements.source?.value || "").trim();
+    const selectedFile = form.elements.file?.files?.[0] || null;
     const note = String(form.elements.note?.value || "").trim();
     const items = photoReferenceManagerItems();
     const editingIndex = state.photoReferenceEditingIndex;
     const editingPersona = state.photoReferenceEditingIndex === -2;
     const editingExisting = Number.isInteger(editingIndex) && editingIndex >= 0 && Boolean(items[editingIndex]);
-    if (!source) return;
+    if (sourceMode === "file") {
+      const uploadError = photoReferenceUploadError(selectedFile);
+      if (uploadError) {
+        showToast(uploadError, "error");
+        return;
+      }
+    } else if (!source) {
+      showToast("请填写图片 URL 或服务器路径", "error");
+      return;
+    }
     if (!editingPersona && !editingExisting && items.length >= 24) {
       showToast("参考图库已达到 24 张上限", "error");
       return;
     }
-    if (!editingPersona && items.some((item, index) => index !== editingIndex && String(item.source || "").trim() === source)) {
+    if (sourceMode === "url" && !editingPersona && items.some((item, index) => index !== editingIndex && String(item.source || "").trim() === source)) {
       showToast("这张图片已经在参考图库中", "error");
       return;
     }
@@ -27653,12 +27914,31 @@ function bindPhotoReferenceManagerActions() {
       showToast("请选择图中的穿搭类型，或选择“不参考这张图里的穿搭”", "error");
       return;
     }
+    const submissionToken = {};
+    state.photoReferenceSubmitting = true;
+    state.photoReferenceSubmissionToken = submissionToken;
+    state.photoReferenceLibraryRequestSeq += 1;
+    state.photoReferenceLibraryLoading = false;
+    form._photoReferenceSubmissionToken = submissionToken;
+    setPhotoReferenceFormBusy(form, true);
     setActionBusy(submitButton, true);
+    syncFeatureFooterAction();
+    let renderAfterSubmission = false;
     try {
       const compiled = await reviewGuidedPhotoReference(
         form.querySelector("[data-photo-reference-guided-editor]"),
       );
+      if (state.photoReferenceSubmissionToken !== submissionToken || form._photoReferenceSubmissionToken !== submissionToken) {
+        throw new Error("参考图配置已变化，请重新提交");
+      }
       if (!compiled?.metadata || typeof compiled.metadata !== "object") throw new Error("没有返回可保存的选图规则");
+      if (sourceMode === "file") source = await uploadPhotoReferenceFile(selectedFile);
+      if (state.photoReferenceSubmissionToken !== submissionToken || form._photoReferenceSubmissionToken !== submissionToken) {
+        throw new Error("参考图配置已变化，请重新提交");
+      }
+      if (!editingPersona && items.some((item, index) => index !== editingIndex && String(item.source || "").trim() === source)) {
+        throw new Error("这张图片已经在参考图库中");
+      }
       if (editingPersona) {
         syncGuidedPhotoPersonaReferenceDraft(source, note, compiled.metadata);
       } else {
@@ -27675,8 +27955,9 @@ function bindPhotoReferenceManagerActions() {
       }
       state.photoReferenceAddDialogOpen = false;
       state.photoReferenceEditingIndex = -1;
+      clearPhotoReferenceLocalPreview(form);
       if (addDialog?.open) addDialog.close();
-      renderFeatureSwitches();
+      renderAfterSubmission = true;
       showToast(
         compiled.review?.status === "approved"
           ? `主模型 ${compiled.review.provider_id || "LLM_PROVIDER_ID"} 已审批，参考图规则已写入待保存图库`
@@ -27684,13 +27965,24 @@ function bindPhotoReferenceManagerActions() {
         "ok",
       );
     } catch (error) {
-      showToast(`配置失败：${error.message}`, "error");
+      if (state.photoReferenceSubmissionToken === submissionToken) {
+        showToast(`配置失败：${error.message}`, "error");
+      }
     } finally {
-      setActionBusy(submitButton, false);
+      if (state.photoReferenceSubmissionToken === submissionToken) {
+        setActionBusy(submitButton, false);
+        setPhotoReferenceFormBusy(form, false);
+        form._photoReferenceSubmissionToken = null;
+        state.photoReferenceSubmissionToken = null;
+        state.photoReferenceSubmitting = false;
+        syncFeatureFooterAction();
+        if (renderAfterSubmission) renderFeatureSwitches();
+      }
     }
   });
   manager.querySelectorAll("[data-photo-reference-move]").forEach((button) => {
     button.addEventListener("click", () => {
+      if (photoReferenceManagerBusy()) return;
       const index = Number(button.dataset.index);
       const target = button.dataset.photoReferenceMove === "up" ? index - 1 : index + 1;
       const items = photoReferenceManagerItems();
@@ -27702,6 +27994,7 @@ function bindPhotoReferenceManagerActions() {
   });
   manager.querySelectorAll("[data-photo-reference-delete]").forEach((button) => {
     button.addEventListener("click", () => {
+      if (photoReferenceManagerBusy()) return;
       const index = Number(button.dataset.index);
       if (!photoReferenceManagerItems()[index]) return;
       if (!requireSecondClick(button, `photo-reference-delete-${index}`, "再次点击确认删除这张参考图", "确认")) return;
@@ -27717,6 +28010,10 @@ function bindPhotoReferenceManagerActions() {
     });
   });
   manager.querySelector("[data-photo-reference-save]")?.addEventListener("click", async (event) => {
+    if (photoReferenceManagerBusy()) {
+      showToast("参考图正在处理，请稍候", "error");
+      return;
+    }
     syncPhotoReferenceManagerDraft();
     const error = photoReferenceDraftValidationError();
     if (error) {
@@ -27731,7 +28028,12 @@ function bindPhotoReferenceManagerActions() {
     }
   });
   void hydratePhotoReferencePreviews(manager);
-  if (!state.photoReferenceLibraryStatus && !state.photoReferenceLibraryLoading) {
+  if (
+    !state.photoReferenceLibraryStatus
+    && !state.photoReferenceLibraryLoading
+    && !photoReferenceManagerBusy()
+    && !state.photoReferenceAddDialogOpen
+  ) {
     void refreshPhotoReferenceLibraryStatus();
   }
 }
@@ -28963,13 +29265,15 @@ async function copyTextToClipboard(text, successMessage = "已复制") {
 
 function setActionBusy(control, busy) {
   if (!(control instanceof HTMLButtonElement)) return;
+  const keepManagerLocked = !busy
+    && Boolean(control.closest?.("[data-photo-reference-manager]") && photoReferenceManagerBusy());
   if (busy) {
     control.dataset.originalText = control.textContent || "";
     control.disabled = true;
     control.classList.add("is-busy");
     control.textContent = "处理中...";
   } else {
-    control.disabled = false;
+    control.disabled = keepManagerLocked;
     control.classList.remove("is-busy");
     if (control.dataset.originalText) {
       control.textContent = control.dataset.originalText;
@@ -33454,6 +33758,10 @@ function revealActiveTab(tabButton, reduceMotion = false) {
 }
 
 function switchTab(tabName) {
+  if (photoReferenceManagerBusy() || state.photoReferenceAddDialogOpen) {
+    showToast(state.photoReferenceSubmitting ? "参考图正在处理，请稍候" : "请先关闭参考图配置窗口", "error");
+    return;
+  }
   const opensSocialLearning = tabName === "worldbook";
   const opensDailyReview = tabName === "daily-review";
   tabName = tabName === "modules" ? "config" : (opensSocialLearning ? "learning" : (opensDailyReview ? "experimental" : (tabName || "dashboard")));

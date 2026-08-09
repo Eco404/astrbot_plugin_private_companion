@@ -174,10 +174,10 @@ class LearningPageUiTests(unittest.TestCase):
         self.assertIn(".expression-review-select-toggle", self.polish_css)
 
     def test_learning_page_assets_use_current_cache_versions(self) -> None:
-        self.assertIn('./app.css?v=20260804-reference-guided-dialog-v6', self.html)
-        self.assertIn('./css/polish.css?v=20260804-expression-batch-review-v1', self.html)
+        self.assertIn('./app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1', self.html)
+        self.assertIn('./css/polish.css?v=20260808-world-users-overview-v6', self.html)
         self.assertIn(
-            './app.js?v=20260806-reference-guided-busy-release-v2',
+            './app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2',
             self.html,
         )
         self.assertIn(
