@@ -359,10 +359,10 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
         self.assertIn('root.querySelectorAll("[data-photo-guided-answer-label]")', APP_JS)
 
     def test_metadata_editor_assets_are_cache_busted(self) -> None:
-        self.assertIn('app.css?v=20260804-reference-guided-dialog-v6', INDEX_HTML)
-        self.assertIn('css/polish.css?v=20260804-expression-batch-review-v1', INDEX_HTML)
+        self.assertIn('app.css?v=20260809-external-ability-controls-v3', INDEX_HTML)
+        self.assertIn('css/polish.css?v=20260808-world-users-overview-v6', INDEX_HTML)
         self.assertIn(
-            'app.js?v=20260806-reference-guided-busy-release-v2',
+            'app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1',
             INDEX_HTML,
         )
 

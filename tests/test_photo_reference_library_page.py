@@ -729,7 +729,7 @@ class PhotoReferenceLibraryPageUiTests(unittest.TestCase):
         self.assertIn('grid-template-columns: repeat(2, minmax(0, 1fr));', self.styles)
         self.assertIn('@media (max-width: 520px)', self.styles)
         self.assertIn('.photo-reference-manager[hidden]', self.styles)
-        self.assertIn('./app.css?v=20260804-reference-guided-dialog-v6', self.html)
+        self.assertIn('./app.css?v=20260809-external-ability-controls-v3', self.html)
         self.assertRegex(self.html, r'<script src="\./app\.js\?v=[^" ]+"')
 
     def test_structured_metadata_round_trip_keeps_explicit_false_lock(self) -> None:

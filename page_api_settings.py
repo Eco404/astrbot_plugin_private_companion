@@ -813,9 +813,9 @@ class PageSettingNormalizerMixin:
                 return 2
         if key == "command_photo_generation_max_daily":
             try:
-                return max(0, min(100, int(value)))
+                return max(-1, min(100, int(value)))
             except (TypeError, ValueError):
-                return 0
+                return -1
         if key in self.PERCENT_PROBABILITY_KEYS:
             try:
                 raw = float(value)
