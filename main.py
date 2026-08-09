@@ -2791,6 +2791,25 @@ class PrivateCompanionPlugin(
         return global_enabled, user_enabled
 
     def _req036_private_gate_for_user(self, user: Any) -> dict[str, Any]:
+        # AstrBot ChatUI 管理会话（用户名 astrbot）直接放行私聊陪伴，
+        # 不触发"老大不让我跟陌生人说话哦"的未授权拒绝。
+        if isinstance(user, dict):
+            bypass_uid = _single_line(user.get("user_id"), 160)
+            bypass_nick = _single_line(user.get("nickname"), 40)
+            if bypass_uid.lower() == "astrbot" or bypass_nick.lower() == "astrbot":
+                gate = req036_private_companion_gate(
+                    user,
+                    getattr(self, "private_companion_disabled_reply", DEFAULT_UNAUTHORIZED_PRIVATE_REPLY),
+                )
+                gate["allowed"] = True
+                gate["code"] = "chatui_astrbot_bypass"
+                gate["reply"] = ""
+                caps = gate.get("capabilities")
+                if isinstance(caps, dict):
+                    caps["private_companion_enabled"] = True
+                    caps["proactive_private_enabled"] = True
+                    caps["effective_proactive_private_enabled"] = True
+                return gate
         gate = req036_private_companion_gate(
             user,
             getattr(self, "private_companion_disabled_reply", DEFAULT_UNAUTHORIZED_PRIVATE_REPLY),

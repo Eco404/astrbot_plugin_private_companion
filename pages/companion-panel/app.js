@@ -21523,6 +21523,7 @@ function renderExternalAbilities() {
   box.innerHTML = items.map((item) => {
     const configText = JSON.stringify(item.config || {}, null, 2);
     const schemaRows = externalAbilitySchemaRows(item.config_schema || {});
+    const configFields = externalAbilityConfigFields(item.config_schema || {}, item.config || {});
     return `
       <article class="external-ability-card ${item.enabled ? "is-enabled" : ""} ${item.available ? "" : "is-unavailable"}">
         <header>
@@ -21543,7 +21544,7 @@ function renderExternalAbilities() {
           <label class="toggle-row"><input name="enabled" type="checkbox" ${item.enabled ? "checked" : ""} ${item.available ? "" : "disabled"} /> <span>加入主动候选</span></label>
           <label>触发权重（%）<input name="share_probability" type="number" min="0" max="100" step="1" value="${escapeHtml(displaySettingValue('share_probability', Number(item.share_probability ?? 0)))}" /></label>
           <label>最小间隔小时 <input name="min_interval_hours" type="number" min="0" step="0.5" value="${escapeHtml(item.min_interval_hours ?? 0)}" /></label>
-          <label class="wide-field">自定义配置 <textarea name="config" rows="5">${escapeHtml(configText)}</textarea></label>
+          ${configFields ? `<div class="external-ability-config-fields wide-field">${configFields}</div>` : `<label class="wide-field">自定义配置 <textarea name="config" rows="5">${escapeHtml(configText)}</textarea></label>`}
           ${schemaRows ? `<div class="external-ability-schema wide-field">${schemaRows}</div>` : ""}
           <button type="submit">保存外部能力</button>
         </form>
@@ -21561,6 +21562,47 @@ function externalAbilitySchemaRows(schema) {
     const desc = item.description || item.desc || item.help || "";
     return `<span><b>${escapeHtml(label)}</b>${desc ? `：${escapeHtml(desc)}` : ""}<small>${escapeHtml(key)}</small></span>`;
   }).join("");
+}
+
+function externalAbilityConfigFields(schema, config) {
+  const entries = Object.entries(schema || {});
+  if (!entries.length) return "";
+  return entries.slice(0, 16).map(([key, raw]) => {
+    const item = raw && typeof raw === "object" ? raw : {};
+    const label = item.label || item.title || key;
+    const desc = item.description || item.desc || item.help || "";
+    const type = item.type || "text";
+    const value = config && config[key] !== undefined ? config[key] : (item.default !== undefined ? item.default : (type === "bool" ? false : ""));
+    const esc = escapeHtml;
+    let control = "";
+    if (type === "bool") {
+      control = `<label class="toggle-row"><input type="checkbox" data-cfg-key="${esc(key)}" data-cfg-type="bool" ${value ? "checked" : ""} /> <span>${esc(label)}</span></label>`;
+    } else if (type === "select") {
+      const options = Array.isArray(item.options) ? item.options : [];
+      control = `<label>${esc(label)} <select data-cfg-key="${esc(key)}" data-cfg-type="select">${options.map((o) => {
+        const ov = typeof o === "object" && o !== null ? o.value : o;
+        const ol = typeof o === "object" && o !== null ? (o.label || o.value) : o;
+        return `<option value="${esc(ov)}" ${String(value) === String(ov) ? "selected" : ""}>${esc(ol)}</option>`;
+      }).join("")}</select></label>`;
+    } else if (type === "number") {
+      control = `<label>${esc(label)} <input type="number" step="any" data-cfg-key="${esc(key)}" data-cfg-type="number" value="${esc(value === null || value === undefined ? "" : value)}" /></label>`;
+    } else {
+      control = `<label>${esc(label)} <input type="text" data-cfg-key="${esc(key)}" data-cfg-type="text" value="${esc(value === null || value === undefined ? "" : value)}" /></label>`;
+    }
+    return `${control}${desc ? `<small>${esc(desc)}</small>` : ""}`;
+  }).join("");
+}
+
+function collectExternalAbilityConfig(form) {
+  const config = {};
+  form.querySelectorAll("[data-cfg-key]").forEach((el) => {
+    const key = el.dataset.cfgKey;
+    const type = el.dataset.cfgType || "text";
+    if (type === "bool") config[key] = el.checked;
+    else if (type === "number") { const v = Number(el.value); config[key] = Number.isFinite(v) ? v : 0; }
+    else config[key] = el.value;
+  });
+  return config;
 }
 
 function markModuleFormDirty(form) {
@@ -34837,16 +34879,21 @@ document.addEventListener("submit", async (event) => {
   const button = event.submitter || form.querySelector("button[type='submit']");
   const name = form.dataset.externalAbilityForm || "";
   let config = {};
-  const rawConfig = form.querySelector('[name="config"]')?.value || "{}";
-  try {
-    config = JSON.parse(rawConfig || "{}");
-  } catch (error) {
-    showToast("自定义配置必须是 JSON 对象", "error");
-    return;
-  }
-  if (!config || typeof config !== "object" || Array.isArray(config)) {
-    showToast("自定义配置必须是 JSON 对象", "error");
-    return;
+  const cfgEls = form.querySelectorAll("[data-cfg-key]");
+  if (cfgEls.length) {
+    config = collectExternalAbilityConfig(form);
+  } else {
+    const rawConfig = form.querySelector('[name="config"]')?.value || "{}";
+    try {
+      config = JSON.parse(rawConfig || "{}");
+    } catch (error) {
+      showToast("自定义配置必须是 JSON 对象", "error");
+      return;
+    }
+    if (!config || typeof config !== "object" || Array.isArray(config)) {
+      showToast("自定义配置必须是 JSON 对象", "error");
+      return;
+    }
   }
   await runAction(() => postJson("/external_ability/update", {
     name,
