@@ -282,6 +282,27 @@ class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
         self.assertFalse(host._is_target_private_user("10001", {"auto_enabled": True, "manual_disabled": True}))
         self.assertTrue(host._is_target_private_user("10001", {"auto_enabled": True, "manual_disabled": False}))
 
+    def test_auto_profile_can_grant_private_without_proactive_permission(self) -> None:
+        host = _AutoProfileHost()
+        host.enable_auto_user_profile_creation = True
+        host.auto_enable_companion_for_new_users = True
+        host.default_proactive_enabled = False
+
+        user, created = host._ensure_auto_private_user_profile(
+            SimpleNamespace(unified_msg_origin="telegram:FriendMessage:10002"),
+            user_id="10002",
+            now=456.0,
+        )
+
+        self.assertTrue(created)
+        self.assertTrue(user["enabled"])
+        self.assertTrue(user["auto_enabled"])
+        self.assertEqual(0, user["proactive_daily_limit"])
+        capabilities = user["unified_profile_capabilities"]
+        self.assertTrue(capabilities["private_companion_enabled"])
+        self.assertFalse(capabilities["proactive_private_enabled"])
+        self.assertEqual("private_auto_default", capabilities["grant_source"])
+
     def test_private_profiles_are_isolated_by_platform_and_bot_account(self) -> None:
         host = _AutoProfileHost()
         host.enable_auto_user_profile_creation = True
@@ -500,6 +521,9 @@ class Req027UserProfileRelationshipPolicyTests(unittest.TestCase):
         self.assertIn('data-feature-open="${escapeHtml(key)}"', source)
         schema = (ROOT / "_conf_schema.json").read_text(encoding="utf-8")
         self.assertIn("新用户最小档案", schema)
+        self.assertIn("新用户默认私聊权限", schema)
+        self.assertIn('privateEnabled ? "关闭私聊权限" : "授予私聊权限"', source)
+        self.assertIn('detail.proactive_private_enabled ? "关闭主动权限" : "授予主动权限"', source)
         self.assertIn("启用好感度系统", source)
         self.assertIn("用户档案", html)
         self.assertIn("记忆插件协同", html)

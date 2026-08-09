@@ -2679,7 +2679,7 @@ class CoreStoreMixin:
         sender_display_name: str = "",
         now: float | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
-        """Create a minimal private profile without granting implicit authority."""
+        """Create a minimal private profile using the configured permission defaults."""
         raw_user_id = str(user_id or "").strip()
         identity_normalizer = getattr(self, "_normalize_private_identity_id", None)
         normalized_user_id = identity_normalizer(raw_user_id) if callable(identity_normalizer) else ""
@@ -2742,15 +2742,35 @@ class CoreStoreMixin:
         # must not bypass the ledger or overwrite an explicitly configured role.
         user["nickname"] = self._auto_profile_nickname(canonical_user_id, sender_display_name)
         user["style"] = _single_line(getattr(self, "default_style", "温柔"), 24) or "温柔"
-        user["auto_enabled"] = False
+        auto_companion_enabled = bool(
+            getattr(self, "auto_enable_companion_for_new_users", True)
+        )
+        default_proactive_enabled = bool(
+            auto_companion_enabled
+            and getattr(self, "default_proactive_enabled", False)
+        )
+        user["auto_enabled"] = auto_companion_enabled
         user["manual_enabled"] = False
         user["manual_disabled"] = False
-        user["enabled"] = False
+        user["enabled"] = auto_companion_enabled
         user["private_memory_enabled"] = False
         user["cross_group_memory_enabled"] = False
-        user["proactive_daily_limit"] = 0
-        user["proactive_boundary_note"] = "自动建档默认不主动触达"
-        ensure_new_profile_capabilities(user)
+        user["proactive_daily_limit"] = (
+            max(0, min(30, _safe_int(getattr(self, "default_proactive_daily_limit", 0), 0)))
+            if default_proactive_enabled
+            else 0
+        )
+        user["proactive_boundary_note"] = (
+            "自动建档按配置允许主动触达"
+            if default_proactive_enabled
+            else "自动建档默认不主动触达"
+        )
+        ensure_new_profile_capabilities(
+            user,
+            private_companion_enabled=auto_companion_enabled,
+            proactive_private_enabled=default_proactive_enabled,
+            grant_source=("private_auto_default" if auto_companion_enabled else "default_closed"),
+        )
         user["last_seen"] = max(_safe_float(user.get("last_seen"), 0), created_at)
         user["last_activity_at"] = max(_safe_float(user.get("last_activity_at"), 0), created_at)
         self._note_private_user_umo(canonical_user_id, user, getattr(event, "unified_msg_origin", ""))

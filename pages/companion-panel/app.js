@@ -1610,8 +1610,8 @@ const safeFeatureKeys = [
 const configLabels = {
   auto_profile_platforms: "自动建档平台",
   default_nickname_strategy: "新用户默认称呼来源",
-  auto_enable_companion_for_new_users: "新用户自动授予私聊陪伴（兼容项）",
-  default_proactive_enabled: "新用户默认允许主动陪伴",
+  auto_enable_companion_for_new_users: "新用户默认私聊权限",
+  default_proactive_enabled: "新用户默认主动权限",
   default_proactive_daily_limit: "新用户默认每日主动上限",
   portrait_global_mode: "全局智能画像模式",
   default_interaction_band: "默认互动状态",
@@ -3046,7 +3046,7 @@ const featureSettingSections = {
   enable_auto_user_profile_creation: [
     {
       title: "自动建档范围",
-      note: "只建立统一用户档案；新用户的私聊陪伴和主动陪伴仍默认关闭，须在用户页单独授权。",
+      note: "建立统一用户档案；默认授予被动私聊权限，主动陪伴保持关闭，之后仍可在用户页单独调整。",
       keys: ["auto_profile_platforms", "default_nickname_strategy", "auto_enable_companion_for_new_users", "default_proactive_enabled", "default_proactive_daily_limit"],
     },
   ],
@@ -14360,8 +14360,8 @@ async function renderUserDetail(forceFetch = false) {
         <div><span class="eyebrow">${escapeHtml(detail.relationship_role_label || "PERSON")}</span><h2>${escapeHtml(detail.display_name || detail.nickname || detail.user_id)}</h2><span class="mono muted">${escapeHtml(detail.user_id)}</span></div>
       </div>
       <div class="user-detail-actions">
-        <button data-user-action="toggle" class="${privateEnabled ? "secondary-button" : "primary-button"}">${escapeHtml(privateEnabled ? "私聊陪伴已开" : "启用私聊陪伴")}</button>
-        <button data-user-action="toggle_proactive" class="${detail.proactive_private_enabled ? "secondary-button" : "ghost-button"}" ${privateEnabled ? "" : "disabled"}>${escapeHtml(detail.proactive_private_enabled ? "主动陪伴已开" : "开启主动陪伴")}</button>
+        <button data-user-action="toggle" class="${privateEnabled ? "secondary-button" : "primary-button"}">${escapeHtml(privateEnabled ? "关闭私聊权限" : "授予私聊权限")}</button>
+        <button data-user-action="toggle_proactive" class="${detail.proactive_private_enabled ? "secondary-button" : "ghost-button"}" ${privateEnabled ? "" : "disabled"}>${escapeHtml(detail.proactive_private_enabled ? "关闭主动权限" : "授予主动权限")}</button>
         <button type="button" class="icon-button" data-copy-current-user="${escapeHtml(detail.user_id)}" aria-label="复制用户 ID" title="复制用户 ID">⧉</button>
       </div>
     </header>

@@ -307,7 +307,7 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.worldview_adaptation_prompt = self._cfg_str(c, "worldview_adaptation_prompt", "")
     self.default_nickname = self._cfg_str(c, "default_nickname", "你", "你")
     self.enable_auto_user_profile_creation = self._cfg_bool(c, "enable_auto_user_profile_creation", True)
-    self.auto_enable_companion_for_new_users = self._cfg_bool(c, "auto_enable_companion_for_new_users", False)
+    self.auto_enable_companion_for_new_users = self._cfg_bool(c, "auto_enable_companion_for_new_users", True)
     self.auto_profile_platforms = self._cfg_raw(
         c,
         "auto_profile_platforms",

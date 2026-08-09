@@ -211,14 +211,14 @@
       "enable_auto_user_profile_creation": {
         "description": "新用户最小档案",
         "type": "bool",
-        "hint": "默认开启。首次收到允许范围内的真实私聊消息时建立统一用户档案；建档不会自动授予私聊陪伴、主动陪伴、主要用户、跨用户查询或 P4 权限。群聊档案仍由统一群聊观测链路建立。",
+        "hint": "默认开启。首次收到允许范围内的真实私聊消息时建立统一用户档案；是否授予私聊和主动权限由下方新用户默认项控制。建档不会授予主要用户、跨用户查询或 P4 权限。群聊档案仍由统一群聊观测链路建立。",
         "default": true
       },
       "auto_enable_companion_for_new_users": {
-        "description": "自动接管新用户陪伴",
+        "description": "新用户默认私聊权限",
         "type": "bool",
-        "hint": "兼容旧配置。REQ-036 下新建档案仍默认关闭私聊陪伴，必须由管理员在用户档案中明确授权。",
-        "default": false,
+        "hint": "开启后，新私聊用户建档时自动获得被动私聊回复权限；不会同时开启主动陪伴。现有用户权限不受影响。",
+        "default": true,
         "condition": "enable_auto_user_profile_creation"
       },
       "private_companion_disabled_reply": {
@@ -258,9 +258,9 @@
         "condition": "enable_auto_user_profile_creation"
       },
       "default_proactive_enabled": {
-        "description": "允许新用户主动关心",
+        "description": "新用户默认主动权限",
         "type": "bool",
-        "hint": "仅在同时开启自动接管新用户陪伴时才可能生效；默认关闭。",
+        "hint": "仅在新用户默认私聊权限开启时生效；默认关闭，因此新用户可以正常私聊，但不会被主动联系。",
         "default": false,
         "condition": "enable_auto_user_profile_creation"
       },

@@ -209,15 +209,28 @@ def normalize_capabilities(value: Any, *, default_source: str = "default_closed"
     return result
 
 
-def ensure_new_profile_capabilities(user: dict[str, Any]) -> dict[str, Any]:
-    """Install the default-closed state for a newly observed profile only."""
+def ensure_new_profile_capabilities(
+    user: dict[str, Any],
+    *,
+    private_companion_enabled: bool = False,
+    proactive_private_enabled: bool = False,
+    grant_source: str = "default_closed",
+) -> dict[str, Any]:
+    """Install explicit defaults for a newly observed profile only."""
     if not isinstance(user, dict):
-        return default_capabilities()
+        return default_capabilities(grant_source=grant_source)
     existing = user.get("unified_profile_capabilities")
     if isinstance(existing, dict):
         normalized = normalize_capabilities(existing)
     else:
-        normalized = default_capabilities()
+        normalized = default_capabilities(grant_source=grant_source)
+    private_enabled = bool(private_companion_enabled)
+    normalized["private_companion_enabled"] = private_enabled
+    normalized["proactive_private_enabled"] = bool(
+        private_enabled and proactive_private_enabled
+    )
+    normalized["grant_source"] = _text(grant_source, 80) or "default_closed"
+    normalized["updated_at"] = _now()
     user["unified_profile_capabilities"] = normalized
     # These legacy aliases remain readable by older code, but cannot reopen a
     # REQ-036 profile after it has been created.
