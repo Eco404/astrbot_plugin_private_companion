@@ -2006,6 +2006,8 @@ class ProactiveEngineMixin:
             interaction.get("expression_band") or "",
             contact.get("mode") or "",
             "ignored=0" if ignored <= 0 else "ignored=1" if ignored == 1 else "ignored=2+",
+            _single_line(user.get("last_user_message"), 160).casefold(),
+            f"last_user_at={int(_safe_float(user.get('last_user_message_at'), 0))}",
             persona,
             worldview,
         ]
@@ -2218,7 +2220,46 @@ class ProactiveEngineMixin:
             )
         return ""
 
-    def _format_proactive_model_judge_prompt(self, user: dict[str, Any]) -> str:
+    @staticmethod
+    def _format_proactive_user_message_freshness(
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> str:
+        check_now = _now_ts() if now is None else now
+        current_time = datetime.fromtimestamp(check_now).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        last_user_at = _safe_float(user.get("last_user_message_at"), 0)
+        if last_user_at <= 0:
+            return "\n".join(
+                (
+                    f"- 当前时间：{current_time}",
+                    "- 最近用户消息时间：未知；只能把消息原文当历史记录，不能推断为刚刚发生。",
+                )
+            )
+        age_seconds = max(0.0, check_now - last_user_at)
+        if age_seconds < 60:
+            age_text = f"{int(age_seconds)} 秒前"
+        elif age_seconds < 3600:
+            age_text = f"{age_seconds / 60:.1f} 分钟前"
+        elif age_seconds < 86400:
+            age_text = f"{age_seconds / 3600:.2f} 小时前"
+        else:
+            age_text = f"{age_seconds / 86400:.2f} 天前"
+        last_user_time = datetime.fromtimestamp(last_user_at).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        return "\n".join(
+            (
+                f"- 当前时间：{current_time}",
+                f"- 最近用户消息时间：{last_user_time}（{age_text}）",
+                "- 最近用户消息是带时间的历史原文，不等于用户当前仍处于当时状态。跨越明显时段后，旧的晚安、吃饭、出门、忙碌等内容不能改写成用户刚刚说过或正在发生。",
+            )
+        )
+
+    def _format_proactive_model_judge_prompt(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> str:
         persona = str(self._get_default_persona_prompt() or "").strip()
         worldview = str(self._format_worldview_adaptation_prompt() or "").strip()
         boundary = self._format_private_user_boundary_hint(user) if isinstance(user, dict) else ""
@@ -2238,6 +2279,7 @@ class ProactiveEngineMixin:
         inner_voice = self._format_persona_voice_channel_prompt("inner") if callable(getattr(self, "_format_persona_voice_channel_prompt", None)) else ""
         role = self._private_user_role(user)
         nickname = _single_line(user.get("nickname"), 40) or self.default_nickname
+        message_freshness = self._format_proactive_user_message_freshness(user, now=now)
         planned_route = PROACTIVE_ROUTE_REGISTRY.route_for(
             reason=user.get("planned_proactive_reason"),
             source=user.get("planned_proactive_source"),
@@ -2265,6 +2307,8 @@ class ProactiveEngineMixin:
  - 如果只是“想你了/来看看/在不在/忙不忙”且没有具体由头,必须优先 rewrite，而不是 defer/drop。
  - 连续未回应只影响语气和长度：改成一句低压、完整、不追问的表达，不能仅凭未回应就 defer/drop。
  - 当前完整产生/发送路线是 {planned_route.key}（{planned_route.label}）。rewrite 只能优化这条路线内部的 action/topic/motive；不要把 planned_reason 改成另一类路线，也不要把事务、安全或续聊改写成普通关怀。
+ - planned_reason 是内部原因键；没有同路线的现有原因键可用时保持原值，不得把“用户已道晚安”之类自然语言判断写进 planned_reason。
+ - 角色设定、世界观、记忆摘要和旧消息都不能证明用户当前做过什么。只有带时间的最近用户原文明确支持时，才能写“用户刚刚说过/正在做”；否则保留原计划方向或只改 topic/motive。
 
 【角色设定】
 {_single_line(persona, 1800) or "（未读取到显式人格,按自然私聊陪伴角色处理）"}
@@ -2288,6 +2332,9 @@ class ProactiveEngineMixin:
 - 最近用户消息：{_single_line(user.get("last_user_message"), 160) or "（无）"}
 - 最近 Bot 消息：{_single_line(user.get("last_companion_message"), 160) or "（无）"}
 - Bot 当前开口欲/主动表达温度：{_safe_float(inner_readiness.get("score"), 0.55):.2f}｜{_single_line(inner_readiness.get("label"), 60)}｜{_single_line(inner_readiness.get("detail"), 180)}
+
+【消息时效】
+{message_freshness}
 
 【当前主动计划】
 - route：{planned_route.key}（{planned_route.label}）
@@ -2326,7 +2373,7 @@ class ProactiveEngineMixin:
         daily_limit = _safe_int(getattr(self, "proactive_persona_judge_max_daily", 12), 12, 0, 100)
         if daily_limit <= 0 or self._proactive_persona_judge_calls_today() >= daily_limit:
             return {"decision": "send", "score": 0, "reason": "模型日预算已满，使用本地规则", "local": True}
-        prompt = self._format_proactive_model_judge_prompt(user)
+        prompt = self._format_proactive_model_judge_prompt(user, now=check_now)
         memory_getter = getattr(self, "_memory_companion_compose_feature_context", None)
         if callable(memory_getter):
             user_id = _single_line(user.get("user_id") or user.get("id"), 80)

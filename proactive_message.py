@@ -18565,6 +18565,31 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             f"platform_id={platform_id or '-'} type={message_type or '-'} session_id={session_id or '-'} platform={platform_desc}"
         )
 
+    def _apply_proactive_tts_message_scope(self, event: Any, chain: list[Any]) -> bool:
+        feature_enabled = getattr(self, "_feature_enabled_or_temp_unlocked", None)
+        tts_enabled = (
+            feature_enabled("enable_tts_enhancement")
+            if callable(feature_enabled)
+            else bool(getattr(self, "enable_tts_enhancement", False))
+        )
+        if (
+            not tts_enabled
+            or str(getattr(self, "tts_message_scope", "replies_only") or "replies_only").lower()
+            != "replies_and_proactive"
+        ):
+            return False
+        if any(isinstance(component, Record) for component in chain) or any(
+            bool(getattr(component, "_private_companion_skip_tts_enhancement", False))
+            for component in chain
+        ):
+            return False
+        try:
+            setattr(event, "_private_companion_tts_request_applied", True)
+            setattr(event, "_private_companion_tts_forced_by_message_scope", True)
+        except Exception:
+            return False
+        return True
+
     async def _trigger_proactive_decorating_hooks(self, umo: str, chain: list[Any]) -> list[Any]:
         if not self.enable_proactive_decorating_hooks or not chain:
             return chain
@@ -18588,6 +18613,11 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             event = AstrMessageEvent("", message_obj, platform.meta(), message_obj.session_id)
             event.set_result(self._build_result_from_chain(chain))
             setattr(event, "_private_companion_proactive_delivery_umo", umo)
+            if self._apply_proactive_tts_message_scope(event, chain):
+                logger.info(
+                    "[PrivateCompanion] 主动消息按 TTS 生效范围进入强化链: session=%s",
+                    _single_line(umo, 120) or "unknown",
+                )
             for component in chain:
                 raw_full_text = getattr(component, "_private_companion_proactive_full_text", "")
                 if not raw_full_text:

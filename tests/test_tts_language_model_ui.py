@@ -33,6 +33,11 @@ class TtsLanguageModelUiTests(unittest.TestCase):
             self.assertIn(key, self.api)
         self.assertIn('postJson("/settings/update", { settings: { ...ttsStrategyValues(), ...savedRouteValues } })', self.script)
 
+    def test_tts_scope_can_include_all_proactive_messages(self) -> None:
+        self.assertIn('key: "tts_message_scope"', self.script)
+        self.assertIn('["replies_and_proactive", "普通回复 + 所有主动消息"]', self.script)
+        self.assertIn('"tts_message_scope"', self.api)
+
     def test_tts_drafts_do_not_trap_main_navigation(self) -> None:
         self.assertIn("function discardUnsavedTtsProviderChanges()", self.script)
         self.assertIn("if (ttsDirty) discardUnsavedTtsProviderChanges();", self.script)
@@ -113,7 +118,7 @@ class TtsLanguageModelUiTests(unittest.TestCase):
         self.assertIn("white-space: nowrap;", mobile)
 
     def test_assets_use_cache_busted_urls(self) -> None:
-        self.assertIn('./app.css?v=20260804-reference-guided-dialog-v6', self.html)
+        self.assertRegex(self.html, r'<link rel="stylesheet" href="\./app\.css\?v=[^" ]+"')
         self.assertRegex(self.html, r'<script src="\./app\.js\?v=[^" ]+"')
 
     def test_navigation_does_not_force_the_window_scroll_position(self) -> None:

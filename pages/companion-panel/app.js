@@ -1264,7 +1264,7 @@ const featureMeta = {
   enable_private_reading_preference_influence: ["私密偏好影响", "评分样本足够后，把稳定偏好作为私聊私密互动的弱背景。"],
   enable_unanswered_screen_peek_followup: ["沉默后窥屏", "主动消息后用户长时间没回、且 Bot 正好无聊时，可免日次数窥屏确认用户在做什么。"],
   enable_goodnight_screen_check: ["晚安识屏提醒", "互道晚安后等待一次识屏判断；仅在明确仍活跃时轻声提醒休息。"],
-  enable_tts_enhancement: ["TTS强化", "支持中文聊天文本搭配外语语音块，统一处理生成路径、<tts> 标签规范化、语种控制、朗读文本清洗和主用户触发。"],
+  enable_tts_enhancement: ["TTS强化", "支持中文聊天文本搭配外语语音块，统一处理生成路径、<tts> 标签规范化、语种控制与朗读文本清洗；生效范围可配置为普通回复，或普通回复加全部主动消息。"],
   enable_proactive_quote_trigger_message: ["引用触发消息", "群聊回复、群主动插话和可追溯的私聊主动消息会引用触发消息；普通群回复可只在首次或对象变化时引用。"],
   enable_reply_interception_forward: ["回复拦截转发", "把插件阻断、回复改写和主动消息拦截情况发送到指定私聊或群聊。"],
   enable_creative_writing: ["私下创作", "闲暇时可选地因生活小事、日记碎片或梦境灵感写一点文本作品。"],
@@ -1690,6 +1690,7 @@ const configLabels = {
   tts_fishaudio_emotion_mode: "Fish Audio 情绪控制",
   tts_delivery_mode: "语音发送形态",
   tts_foreign_text_mode: "外语文字显示",
+  tts_message_scope: "TTS消息生效范围",
   tts_conversion_scope: "语音转换范围",
   tts_conversion_provider_id: "TTS文本转换模型",
   tts_extra_prompt: "TTS补充规则",
@@ -3036,7 +3037,7 @@ const featureSettingGroups = {
   enable_private_reading_preference_influence: ["private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_unanswered_screen_peek_followup: ["unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_goodnight_screen_check: ["goodnight_screen_check_delay_minutes"],
-  enable_tts_enhancement: ["tts_delivery_mode", "tts_voice_language", "tts_fishaudio_model", "tts_fishaudio_emotion_mode", "tts_foreign_text_mode", "tts_conversion_scope", "tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt", "tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability", "enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
+  enable_tts_enhancement: ["tts_delivery_mode", "tts_voice_language", "tts_fishaudio_model", "tts_fishaudio_emotion_mode", "tts_foreign_text_mode", "tts_message_scope", "tts_conversion_scope", "tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt", "tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability", "enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
   enable_tts_local_playback: ["enable_tts_local_playback_live_only", "tts_local_playback_volume", "tts_local_playback_min_interval_seconds"],
   enable_creative_writing: ["enable_creative_work_read_guard", "creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects", "creative_direction_prompt"],
   creative_hidden_mode: ["creative_share_probability"],
@@ -3787,7 +3788,7 @@ const featureSettingSections = {
     {
       title: "1. 最终发送效果",
       note: "先决定用户实际收到什么：只听语音还是语音配文字，以及外语文字如何显示。",
-      keys: ["tts_delivery_mode", "tts_voice_language", "tts_foreign_text_mode", "tts_conversion_scope"],
+      keys: ["tts_delivery_mode", "tts_voice_language", "tts_foreign_text_mode", "tts_message_scope", "tts_conversion_scope"],
     },
     {
       title: "2. Fish Audio 表现力",
@@ -25532,7 +25533,7 @@ function featureImpactLines(key) {
   } else if (key === "enable_proactive_quote_trigger_message") {
     lines.push(["场景", "群回复 / 群主动 / 私聊主动"]);
   } else if (key === "enable_tts_enhancement") {
-    lines.push(["场景", "私聊 / 群聊 / 主动语音"]);
+    lines.push(["场景", "私聊回复 / 群聊回复 / 可选全部私聊主动"]);
   } else if (["enable_screen_glance_action", "enable_poke_action", "enable_voice_action"].includes(key)) {
     lines.push(["场景", "私聊主动动作"]);
   } else if (key.startsWith("enable_group_") || key === "enable_atrelay_tools" || key === "enable_cross_user_memory_bridge" || key === "enable_worldbook_member_recognition") {
@@ -27797,6 +27798,7 @@ const ttsStrategyMeta = [
   { key: "tts_generation_mode", label: "生成路径", type: "select", default: "fast_tag", group: "core", options: [["fast_tag", "快速标签"], ["postprocess", "后处理判断与翻译"]], hint: "快速标签延迟更低；后处理更适合统一判断、翻译和改写。" },
   { key: "tts_voice_language", label: "当前语音语种", type: "select", default: "ja", group: "core", options: [["zh", "中文"], ["ja", "日语"], ["en", "英语"]], hint: "也可以通过“陪伴 TTS语种”指令即时切换。" },
   { key: "tts_delivery_mode", label: "发送形态", type: "select", default: "voice_and_text", group: "core", options: [["voice_only", "仅发送语音"], ["voice_and_text", "语音和文字都发送"]], hint: "合成失败时始终保留文字兜底。" },
+  { key: "tts_message_scope", label: "消息生效范围", type: "select", default: "replies_only", group: "core", options: [["replies_only", "仅普通回复"], ["replies_and_proactive", "普通回复 + 所有主动消息"]], hint: "包含主动消息后，每条主动正文都会复用当前 TTS 策略；已有主动语音不会重复合成。" },
   { key: "tts_foreign_text_mode", label: "外语文字显示", type: "select", default: "translation", group: "content", options: [["original", "显示朗读原文"], ["translation", "显示中文译文"], ["bilingual", "原文和中文都显示"]], hint: "仅在日语或英语语音且保留文字时影响显示。" },
   { key: "tts_conversion_scope", label: "转换范围", type: "select", default: "partial", group: "content", options: [["partial", "局部转换"], ["full", "整条回复"]], hint: "局部转换只选择适合听的一段；全量转换覆盖整条回复。" },
   { key: "tts_conversion_provider_id", label: "文本转换模型", type: "llm_provider", default: "", group: "content", hint: "用于后处理判断、翻译、语种修正和中文释义，不负责合成音频。" },

@@ -67,6 +67,67 @@ class _MediaSendHarness(ProactiveMessageMixin):
 
 
 class ProactiveVoiceTtsDedupTests(unittest.IsolatedAsyncioTestCase):
+    def test_proactive_scope_marks_plain_message_for_tts_enhancement(self):
+        harness = _MediaSendHarness()
+        harness.enable_tts_enhancement = True
+        harness.tts_message_scope = "replies_and_proactive"
+        event = SimpleNamespace()
+
+        applied = harness._apply_proactive_tts_message_scope(
+            event,
+            [Plain("所有主动正文都进入 TTS。")],
+        )
+
+        self.assertTrue(applied)
+        self.assertTrue(event._private_companion_tts_request_applied)
+        self.assertTrue(event._private_companion_tts_forced_by_message_scope)
+
+    def test_proactive_scope_does_not_duplicate_prebuilt_voice(self):
+        harness = _MediaSendHarness()
+        harness.enable_tts_enhancement = True
+        harness.tts_message_scope = "replies_and_proactive"
+        event = SimpleNamespace()
+
+        applied = harness._apply_proactive_tts_message_scope(
+            event,
+            [Record(file="voice.wav"), Plain("已有主动语音。")],
+        )
+
+        self.assertFalse(applied)
+        self.assertFalse(hasattr(event, "_private_companion_tts_request_applied"))
+
+    async def test_proactive_scope_forces_fast_tag_tts_without_legacy_auto_voice(self):
+        harness = _TtsHarness()
+        harness.tts_generation_mode = "fast_tag"
+        harness.tts_conversion_scope = "full"
+        harness.tts_frequency_control_mode = "global"
+        harness.tts_constraint_mode = "weak"
+        harness.tts_voice_language = "zh"
+        harness.tts_delivery_mode = "voice_and_text"
+        harness.tts_foreign_text_mode = "translation"
+        harness.auto_voice_enabled = False
+        harness._tts_auto_voice_last_at = {}
+        harness._tts_trigger_probability_allows = lambda _event, reason="": True
+        harness._process_tts_tags = AsyncMock(return_value=[Record(file="voice.wav")])
+        plain = Plain("主动消息完整正文。")
+
+        class Event:
+            unified_msg_origin = "default:FriendMessage:10001"
+            message_str = ""
+            _private_companion_tts_forced_by_message_scope = True
+
+            def get_result(self):
+                return SimpleNamespace(chain=[plain])
+
+        result = await harness._maybe_convert_plain_reply_to_tts(plain.text, Event())
+
+        self.assertEqual(1, len(result))
+        harness._process_tts_tags.assert_awaited_once()
+        self.assertEqual(
+            "<tts>主动消息完整正文。</tts>",
+            harness._process_tts_tags.await_args.args[0],
+        )
+
     async def test_prebuilt_voice_suppresses_tts_for_companion_text(self):
         harness = _MediaSendHarness()
         record = Record(file="voice.wav")

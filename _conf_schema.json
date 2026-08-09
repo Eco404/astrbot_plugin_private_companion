@@ -3815,6 +3815,12 @@
     "default": false,
     "invisible": true
   },
+  "tts_message_scope": {
+    "description": "Legacy flat config: TTS消息生效范围",
+    "type": "string",
+    "default": "replies_only",
+    "invisible": true
+  },
   "tts_synthesis_backend": {
     "description": "Legacy flat config: TTS语音合成后端",
     "type": "string",
@@ -10637,6 +10643,23 @@
         "type": "bool",
         "hint": "支持中文聊天文本搭配外语语音块：标签外保留中文显示，<pc_tts> 内按配置语种朗读；外语语音块后若缺少中文含义，会在发送前自动补中文释义。统一处理生成路径、语种控制、发送前朗读文本清洗和主用户触发。语音可由 AstrBot TTS provider 或 MiMo TTS Voice Clone 插件生成。",
         "default": false
+      },
+      "tts_message_scope": {
+        "description": "TTS消息生效范围",
+        "type": "string",
+        "default": "replies_only",
+        "options": [
+          "replies_only",
+          "replies_and_proactive"
+        ],
+        "labels": [
+          "仅普通回复",
+          "普通回复和所有主动消息"
+        ],
+        "hint": "选择包含主动消息后，插件内部主动私聊的完整正文也会进入同一套 TTS 强化链。已有主动语音动作不会重复合成；分段主动消息只生成一次完整语音，合成失败仍保留文字。",
+        "condition": {
+          "enable_tts_enhancement": true
+        }
       },
       "tts_synthesis_backend": {
         "description": "TTS语音合成后端",

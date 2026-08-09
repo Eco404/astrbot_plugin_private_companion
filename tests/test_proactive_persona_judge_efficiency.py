@@ -37,7 +37,7 @@ class _JudgeHarness(ProactiveEngineMixin):
         self.llm_calls += 1
         return '{"decision":"send","score":88,"reason":"自然"}'
 
-    def _format_proactive_model_judge_prompt(self, user):
+    def _format_proactive_model_judge_prompt(self, user, *, now=None):
         return "judge"
 
     def _normalize_legacy_proactive_text(self, value, limit=40):
@@ -99,6 +99,28 @@ class ProactivePersonaJudgeEfficiencyTests(unittest.IsolatedAsyncioTestCase):
             harness._planned_proactive_model_judge_signature(_user(planned_proactive_impulse_id="a")),
             harness._planned_proactive_model_judge_signature(_user(planned_proactive_impulse_id="b")),
         )
+
+    def test_signature_changes_when_latest_user_message_changes(self):
+        harness = _JudgeHarness()
+        before = _user(last_user_message="晚安", last_user_message_at=1_000.0)
+        after = _user(last_user_message="我醒了", last_user_message_at=2_000.0)
+
+        self.assertNotEqual(
+            harness._planned_proactive_model_judge_signature(before),
+            harness._planned_proactive_model_judge_signature(after),
+        )
+
+    def test_stale_goodnight_is_labeled_as_historical_context(self):
+        last_user_at = 1_786_223_649.0
+        context = _JudgeHarness._format_proactive_user_message_freshness(
+            {"last_user_message": "晚安星缘", "last_user_message_at": last_user_at},
+            now=last_user_at + 12.79 * 3600,
+        )
+
+        self.assertIn("12.79 小时前", context)
+        self.assertIn("历史原文", context)
+        self.assertIn("旧的晚安", context)
+        self.assertIn("不能改写成用户刚刚说过", context)
 
     def test_multi_entry_cache_survives_current_plan_fields_being_cleared(self):
         harness = _JudgeHarness()

@@ -89,6 +89,34 @@ class SegmentedExternalShareTests(unittest.TestCase):
         self.assertIn("心里那个塞得满满的角落", segments[4])
         self.assertTrue(segments[-1].endswith("腾出了一小块位置呢。"))
 
+    def test_logged_meal_care_text_uses_current_segmentation_config(self) -> None:
+        harness = _SegmentHarness()
+        harness.enable_segmented_proactive_reply = True
+        harness.segmented_proactive_threshold = 500
+        harness.segmented_proactive_min_segment_chars = 5
+        harness.segmented_proactive_max_segments = 5
+        harness.segmented_proactive_split_mode = "words"
+        harness.segmented_proactive_regex = r"(?<=[。！？!?…~～])\s*|\n+"
+        harness.segmented_proactive_split_words = [
+            "。", "？", "！", "~", "?", ".", "!", ";", "；", "……", "（", "“", "，", "…"
+        ]
+        harness.enable_segmented_proactive_content_cleanup = True
+        harness.segmented_proactive_content_cleanup_scope = "all"
+        harness.segmented_proactive_content_cleanup_rule = ""
+        harness.segmented_proactive_content_cleanup_words = ["。", "，"]
+        harness.enable_segmented_proactive_content_replacement = False
+        harness.segmented_proactive_content_replacements = []
+
+        segments = harness._split_proactive_text(
+            "烛雨大人～ 我这会儿在吃炒饭呢。 晚上记得乖乖吃饭，今晚可不许再熬夜了哦，笨蛋。"
+        )
+
+        self.assertGreater(len(segments), 1)
+        self.assertEqual(
+            "".join(segments).replace("～", "").replace("，", ""),
+            "烛雨大人我这会儿在吃炒饭呢晚上记得乖乖吃饭今晚可不许再熬夜了哦笨蛋",
+        )
+
     def test_creative_excerpt_is_atomic_but_surrounding_chat_still_segments(self) -> None:
         excerpt = (
             "「笔尖落下去，墨迹在空白页上洇出一个小点，停了一拍，才慢慢拖成第一笔。"

@@ -343,6 +343,14 @@ class TtsEnhancementMixin:
 
     def _load_tts_enhancement_config(self, config: Any) -> None:
         self.enable_tts_enhancement = self._cfg_bool(config, "enable_tts_enhancement", False)
+        self.tts_message_scope = self._cfg_str(
+            config,
+            "tts_message_scope",
+            "replies_only",
+            "replies_only",
+        ).lower()
+        if self.tts_message_scope not in {"replies_only", "replies_and_proactive"}:
+            self.tts_message_scope = "replies_only"
         raw_synthesis_backend = self._cfg_str(
             config,
             "tts_synthesis_backend",
@@ -1840,6 +1848,8 @@ class TtsEnhancementMixin:
 
     def _event_tts_request_signal(self, event: Any) -> tuple[str, str, str]:
         raw_text = str(getattr(event, "message_str", "") or "").strip()
+        if bool(getattr(event, "_private_companion_tts_forced_by_message_scope", False)):
+            return "positive", "configured_proactive_scope", raw_text
         text = raw_text.lower()
         if not text:
             return "uncertain", "", ""
