@@ -10,3 +10,5 @@ sounddevice>=0.5,<1
 soundfile>=0.12,<1
 # Reality Touch camera capture uses OpenCV VideoCapture without GUI components.
 opencv-python-headless>=4.10,<5
+# Enumerates camera names and OpenCV indexes without capturing a frame.
+cv2-enumerate-cameras>=1.3,<2

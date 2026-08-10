@@ -472,7 +472,7 @@ class PrivateCompanionPageApi(
             "relationship_changes": changes,
             "current_interaction": interaction,
             "expression_decision": expression,
-            "relationship_positive_stage_cap_key": getattr(self.plugin, "relationship_positive_stage_cap_key", "deeply_bonded"),
+            "relationship_positive_stage_cap_key": getattr(self.plugin, "relationship_positive_stage_cap_key", "close"),
             "normal_interaction_band_cap": getattr(self.plugin, "normal_interaction_band_cap", "warm"),
             "relationship_basis": {"band": basis},
             "relationship_stage": self._single_line(relationship_stage, 24) or "unclassified",
@@ -4360,16 +4360,17 @@ class PrivateCompanionPageApi(
         user_id = self._single_line(payload.get("user_id"), 120)
         if action not in {
             "save", "save_policy", "disable", "stop_session", "cancel_reminder", "test", "select_output",
-            "save_camera_config", "save_camera_policy", "test_camera",
+            "save_camera_config", "save_camera_policy", "test_camera", "scan_cameras",
         }:
             return self._error("不支持的现实触及操作")
-        if action not in {"select_output", "save_camera_config"} and not user_id:
+        if action not in {"select_output", "save_camera_config", "scan_cameras"} and not user_id:
             return self._error("请选择私聊用户")
         snapshotter = getattr(self.plugin, "_reality_touch_page_snapshot", None)
         updater = getattr(self.plugin, "_reality_touch_update_alarm", None)
         policy_updater = getattr(self.plugin, "_reality_touch_update_policy", None)
         camera_policy_updater = getattr(self.plugin, "_reality_touch_update_camera_policy", None)
         camera_snapshotter = getattr(self.plugin, "_reality_touch_camera_snapshot_for_user", None)
+        camera_scanner = getattr(self.plugin, "_reality_touch_scan_camera_devices", None)
         device_selector = getattr(self.plugin, "_reality_touch_select_audio_device", None)
         wakeup_player = getattr(self.plugin, "_play_wakeup_alarm", None)
         test_audio_player = getattr(self.plugin, "_play_reality_touch_test_audio", None)
@@ -4382,10 +4383,23 @@ class PrivateCompanionPageApi(
         test_kind = ""
         cancel_reminder_id = ""
         message = ""
+        camera_preview_data_url = ""
         try:
+            if action == "scan_cameras":
+                if not callable(camera_scanner):
+                    return self._error("当前插件实例不支持摄像头设备枚举", status_code=503)
+                catalog = await asyncio.to_thread(camera_scanner)
+                async with self.plugin._data_lock:
+                    snapshot = deepcopy(snapshotter())
+                snapshot["message"] = (
+                    f"已发现 {len(catalog.get('devices') or [])} 个摄像头入口"
+                    if catalog.get("devices")
+                    else self._single_line(catalog.get("error"), 180) or "没有发现摄像头设备"
+                )
+                return self._ok(snapshot)
             if action == "save_camera_config":
                 camera_enabled = self._normalize_bool_value(payload.get("camera_enabled"))
-                camera_index = _safe_int(payload.get("camera_index"), 0, 0, 32)
+                camera_index = _safe_int(payload.get("camera_index"), 0, 0, 100000)
                 min_interval = _safe_int(payload.get("min_interval_seconds"), 60, 10, 3600)
                 capture_timeout = _safe_int(payload.get("capture_timeout_seconds"), 5, 2, 20)
                 analysis_timeout = _safe_int(payload.get("analysis_timeout_seconds"), 25, 5, 90)
@@ -4436,7 +4450,7 @@ class PrivateCompanionPageApi(
                 elif action == "save_camera_policy":
                     if not callable(camera_policy_updater):
                         return self._error("当前插件实例不支持摄像头用户策略", status_code=503)
-                    camera_policy_updater(user, payload)
+                    camera_policy_updater(user, payload, user_id=user_id)
                     self.plugin._save_data_sync()
                     message = "现实触及摄像头用户策略已保存"
                 elif action == "disable":
@@ -4490,10 +4504,14 @@ class PrivateCompanionPageApi(
                 result = await camera_snapshotter(
                     user_id,
                     self._single_line(payload.get("purpose"), 120) or "管理员从现实触及页面手动测试单帧读取",
+                    include_preview=True,
                 )
                 if result.get("status") != "success":
                     return self._error(self._single_line(result.get("message"), 200) or "摄像头单帧读取失败")
                 observation = result.get("observation") if isinstance(result.get("observation"), dict) else {}
+                camera_preview_data_url = str(result.get("preview_data_url") or "")
+                if not camera_preview_data_url.startswith("data:image/jpeg;base64,"):
+                    camera_preview_data_url = ""
                 message = "摄像头单帧读取完成：" + (
                     self._single_line(observation.get("summary"), 180) or "已记录有限状态"
                 )
@@ -4520,6 +4538,13 @@ class PrivateCompanionPageApi(
 
             async with self.plugin._data_lock:
                 snapshot = deepcopy(snapshotter())
+            if camera_preview_data_url:
+                snapshot["camera_preview"] = {
+                    "user_id": user_id,
+                    "captured_at": int(time.time()),
+                    "data_url": camera_preview_data_url,
+                    "ephemeral": True,
+                }
             snapshot["message"] = message
             return self._ok(snapshot)
         except ValueError as exc:
@@ -21587,7 +21612,7 @@ class PrivateCompanionPageApi(
             return
         if key == "relationship_positive_stage_cap_key":
             old_key = normalize_relationship_positive_stage_cap_key(
-                getattr(self.plugin, key, "deeply_bonded")
+                getattr(self.plugin, key, "close")
             )
             new_key = normalize_relationship_positive_stage_cap_key(value)
             self._set_config_value(key, new_key)

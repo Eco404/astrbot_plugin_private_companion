@@ -55,7 +55,7 @@ RELATIONSHIP_POSITIVE_STAGE_CAP_KEYS = (
     "intimate",
     "deeply_bonded",
 )
-DEFAULT_RELATIONSHIP_POSITIVE_STAGE_CAP_KEY = "deeply_bonded"
+DEFAULT_RELATIONSHIP_POSITIVE_STAGE_CAP_KEY = "close"
 _POSITIVE_STAGE_SCORE_MAX = {
     "familiar": 599,
     "close": 899,

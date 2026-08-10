@@ -1945,15 +1945,83 @@ class PrivateCompanionPlugin(
 
     def _persona_window_bindings(self) -> dict[str, str]:
         raw = self._cfg_raw(getattr(self, "config", {}), "multi_persona_window_bindings", {})
-        if not isinstance(raw, dict):
-            return {}
         result: dict[str, str] = {}
-        for window, persona in raw.items():
+        if isinstance(raw, dict):
+            for window, persona in raw.items():
+                window_key = str(window or "").strip()
+                pid = self._sanitize_persona_id(persona)
+                if window_key and pid:
+                    result[window_key] = pid
+        persisted = getattr(self, "_persona_window_bindings_persisted", None)
+        if not isinstance(persisted, dict):
+            persisted = self._load_persona_window_bindings_store_sync()
+            self._persona_window_bindings_persisted = persisted
+        for window, persona in persisted.items():
             window_key = str(window or "").strip()
             pid = self._sanitize_persona_id(persona)
             if window_key and pid:
                 result[window_key] = pid
         return result
+
+    def _persona_window_bindings_store_path(self) -> Path:
+        configured = str(getattr(self, "_persona_window_bindings_file", "") or "").strip()
+        if configured:
+            return Path(configured)
+        data_dir = str(getattr(self, "data_dir", "") or "").strip()
+        if data_dir:
+            return Path(data_dir) / "persona_window_bindings.json"
+        profiles_dir = Path(str(getattr(self, "_persona_profiles_dir", "persona_profiles")))
+        return profiles_dir.parent / "persona_window_bindings.json"
+
+    def _load_persona_window_bindings_store_sync(self) -> dict[str, str]:
+        path = self._persona_window_bindings_store_path()
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            raw = payload.get("bindings") if isinstance(payload, dict) and "bindings" in payload else payload
+            if not isinstance(raw, dict):
+                return {}
+            result: dict[str, str] = {}
+            for window, persona in raw.items():
+                window_key = _single_line(window, 240)
+                pid = self._sanitize_persona_id(persona)
+                if window_key and pid:
+                    result[window_key] = pid
+            return result
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 多人格窗口绑定持久化文件读取失败，回退到插件配置: %s",
+                _single_line(exc, 160),
+            )
+            return {}
+
+    def _save_persona_window_bindings_store_sync(self, bindings: dict[str, str] | None = None) -> bool:
+        source = bindings if isinstance(bindings, dict) else self._persona_window_bindings()
+        normalized: dict[str, str] = {}
+        for window, persona in source.items():
+            window_key = _single_line(window, 240)
+            pid = self._sanitize_persona_id(persona)
+            if window_key and pid:
+                normalized[window_key] = pid
+        path = self._persona_window_bindings_store_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        payload = {
+            "version": 1,
+            "updated_at": _now_ts(),
+            "bindings": normalized,
+        }
+        try:
+            temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temp, path)
+            self._persona_window_bindings_persisted = dict(normalized)
+            return True
+        finally:
+            try:
+                temp.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _persona_id_for_event(self, event: Any) -> tuple[str, str]:
         umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
@@ -2018,7 +2086,15 @@ class PrivateCompanionPlugin(
                 if umo:
                     bindings[umo] = pid
                     _set_into_config(self.config, "multi_persona_window_bindings", bindings)
+                    self._persona_window_bindings_persisted = dict(bindings)
                     self._persona_window_claims[umo] = pid
+                    try:
+                        self._save_persona_window_bindings_store_sync(bindings)
+                    except Exception as exc:
+                        logger.warning(
+                            "[PrivateCompanion] 自动会话人格绑定独立落盘失败: %s",
+                            _single_line(exc, 120),
+                        )
                     saver = getattr(self, "_save_config_if_possible", None)
                     if callable(saver):
                         try:
@@ -2259,6 +2335,9 @@ class PrivateCompanionPlugin(
                     {},
                 )
             ),
+            "persisted_bindings": deepcopy(
+                getattr(self, "_persona_window_bindings_persisted", {})
+            ),
             "claims": deepcopy(getattr(self, "_persona_window_claims", {})),
             "conflicts": deepcopy(getattr(self, "_persona_window_conflicts", {})),
             "page_current_persona_id": str(
@@ -2289,6 +2368,10 @@ class PrivateCompanionPlugin(
             )
         except Exception as exc:
             errors.append(f"binding:{_single_line(exc, 80)}")
+        persisted_bindings = snapshot.get("persisted_bindings")
+        self._persona_window_bindings_persisted = deepcopy(
+            persisted_bindings if isinstance(persisted_bindings, dict) else {}
+        )
 
         for attr, key in (
             ("_persona_window_claims", "claims"),
@@ -2409,6 +2492,7 @@ class PrivateCompanionPlugin(
         if window:
             bindings[window] = pid
             _set_into_config(self.config, "multi_persona_window_bindings", bindings)
+            self._persona_window_bindings_persisted = dict(bindings)
             self._persona_window_claims[window] = pid
             self._persona_window_conflicts.pop(window, None)
         self._ensure_persona_profile(pid)
@@ -2469,8 +2553,20 @@ class PrivateCompanionPlugin(
                     return result
 
                 saver = getattr(self, "_save_config_if_possible", None)
+                binding_store_saved = False
+                try:
+                    binding_store_saved = bool(
+                        self._save_persona_window_bindings_store_sync(
+                            self._persona_window_bindings()
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[PrivateCompanion] 人格窗口绑定独立落盘失败: %s",
+                        _single_line(exc, 120),
+                    )
                 config_saved = False
-                if callable(saver):
+                if binding_store_saved and callable(saver):
                     try:
                         config_saved = bool(await saver())
                     except Exception as exc:
@@ -2478,11 +2574,24 @@ class PrivateCompanionPlugin(
                             "[PrivateCompanion] 人格窗口绑定保存失败: %s",
                             _single_line(exc, 120),
                         )
-                if config_saved:
+                if binding_store_saved and config_saved:
+                    result["binding_store_saved"] = True
                     result["config_saved"] = True
                     return result
 
                 rollback = self._restore_persona_window_switch_snapshot(snapshot or {})
+                rollback_binding_store_saved = False
+                try:
+                    rollback_binding_store_saved = bool(
+                        self._save_persona_window_bindings_store_sync(
+                            self._persona_window_bindings()
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[PrivateCompanion] 人格窗口绑定独立存储回滚失败: %s",
+                        _single_line(exc, 120),
+                    )
                 rollback_config_saved = False
                 if callable(saver):
                     try:
@@ -2492,14 +2601,16 @@ class PrivateCompanionPlugin(
                             "[PrivateCompanion] 人格窗口绑定回滚保存失败: %s",
                             _single_line(exc, 120),
                         )
-                message = "窗口绑定配置未落盘，已回滚本次切换并清理临时缓存"
-                if not rollback.get("ok"):
+                message = "窗口绑定未完整落盘，已回滚本次切换并清理临时缓存"
+                if not rollback.get("ok") or not rollback_binding_store_saved:
                     message = "窗口绑定配置未落盘，且资料回滚未完整完成，请检查日志"
                 return {
                     "ok": False,
                     "message": message,
                     "config_saved": False,
+                    "binding_store_saved": binding_store_saved,
                     "rolled_back": bool(rollback.get("ok")),
+                    "rollback_binding_store_saved": rollback_binding_store_saved,
                     "rollback_config_saved": rollback_config_saved,
                     "window_key": window_key,
                     "persona_id": target_id,
@@ -7665,14 +7776,19 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 {"status": "forbidden", "message": "现实触及摄像头只允许当前已授权用户的私聊任务调用"},
                 ensure_ascii=False,
             )
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        user_id = resolver(event) if callable(resolver) else _single_line(event.get_sender_id(), 160)
+        if not self._reality_touch_camera_user_eligible(user_id):
+            return json.dumps(
+                {"status": "forbidden", "message": "主机摄像头只允许 AstrBot 管理员或主要用户本人使用"},
+                ensure_ascii=False,
+            )
         purpose_text = _single_line(purpose, 120)
         if not purpose_text:
             return json.dumps(
                 {"status": "error", "message": "必须说明本次摄像头单帧读取的明确目的"},
                 ensure_ascii=False,
             )
-        resolver = getattr(self, "_private_user_id_for_event", None)
-        user_id = resolver(event) if callable(resolver) else _single_line(event.get_sender_id(), 160)
         snapshotter = getattr(self, "_reality_touch_camera_snapshot_for_user", None)
         if not callable(snapshotter):
             return json.dumps(
@@ -12131,6 +12247,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         instruction = (
             "【当前会话回复边界】这是普通私聊或群聊的被动回复。请直接输出一次最终正文；"
             "不要调用 `send_message_to_user` 给当前会话发文字，也不要在工具调用后重复输出同一正文。"
+            "该工具已从本次请求中移除；即使历史消息里出现过它，也不要调用、补写或猜测该工具调用。"
             "需要跨会话主动发送时，使用 PrivateCompanion 专用发送工具；官方 Cron 任务不受此边界影响。"
         )
         if marker not in prompt and hasattr(req, "system_prompt"):
@@ -13854,7 +13971,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 if changed:
                     self._save_data_sync()
             elif action in wakeup_alarm_actions:
-                response, wakeup_test_requested = self._wakeup_alarm_command(user, value)
+                camera_command_requested = bool(
+                    re.sub(r"\s+", "", str(value or "")).lower().startswith(
+                        ("摄像头", "确认摄像头", "读取摄像头", "测试摄像头", "撤销摄像头", "取消摄像头")
+                    )
+                )
+                if camera_command_requested and not self._reality_touch_camera_user_eligible(user_id):
+                    response = "主机摄像头只允许 AstrBot 管理员或主要用户本人授权和使用。"
+                    wakeup_test_requested = False
+                else:
+                    response, wakeup_test_requested = self._wakeup_alarm_command(user, value)
                 feature_enabled = bool(getattr(self, "enable_experimental_bluetooth_wakeup", False))
                 if not feature_enabled:
                     wakeup_test_requested = False
@@ -14368,7 +14494,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
                 user = users.get(user_id) if isinstance(users, dict) else None
                 if isinstance(user, dict):
-                    confirmation_reply = pending_confirmation_handler(user, feedback_text)
+                    pending = user.get("reality_touch_pending_consent")
+                    camera_pending = isinstance(pending, dict) and pending.get("capability") == self._REALITY_TOUCH_CAMERA_CAPABILITY
+                    if camera_pending and not self._reality_touch_camera_user_eligible(user_id):
+                        user.pop("reality_touch_pending_consent", None)
+                        self._save_data_sync()
+                        confirmation_reply = "主机摄像头只允许 AstrBot 管理员或主要用户本人授权和使用。"
+                    else:
+                        confirmation_reply = pending_confirmation_handler(user, feedback_text)
             if confirmation_reply:
                 await self._reply(event, confirmation_reply)
                 event.stop_event()

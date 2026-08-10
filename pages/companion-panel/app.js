@@ -24469,7 +24469,7 @@ function featureSwitchItem(key) {
 }
 
 function relationshipStageCapLabel(key) {
-  return ({ familiar: "熟悉", close: "亲近", intimate: "亲密", deeply_bonded: "深度联结" })[String(key)] || "深度联结";
+  return ({ familiar: "熟悉", close: "亲近", intimate: "亲密", deeply_bonded: "深度联结" })[String(key)] || "亲近";
 }
 
 function normalInteractionCapLabel(key) {
@@ -24490,7 +24490,7 @@ function featureRelatedSettings(key) {
   const fallbackValue = (name) => {
     const defaults = {
       relationship_stage_policy: [],
-      relationship_positive_stage_cap_key: "deeply_bonded",
+      relationship_positive_stage_cap_key: "close",
       normal_interaction_band_cap: "warm",
       enable_flirt_content_tier: true,
       enable_adult_content_tier: false,
@@ -33109,7 +33109,20 @@ function renderRealityTouchDevicePanel() {
   const camera = data.camera || {};
   const cameraState = user?.camera || {};
   const cameraBackend = camera.backend || {};
-  const canTestCamera = Boolean(data.global_enabled && camera.global_enabled && cameraState.consented && cameraState.enabled && cameraBackend.available);
+  const cameraDevices = Array.isArray(camera.devices) ? camera.devices : [];
+  const currentCameraIndex = Number(camera.camera_index ?? 0);
+  const cameraIndexOptions = cameraDevices.map((device) => `
+    <option value="${Number(device.index)}" ${Number(device.index) === currentCameraIndex ? "selected" : ""}>
+      ${escapeHtml(device.name || `摄像头 ${device.index}`)}${device.backend ? ` · ${escapeHtml(device.backend)}` : ""}${device.virtual ? " · 虚拟" : ""} · 索引 ${Number(device.index)}
+    </option>
+  `).join("");
+  const cameraIndexKnown = cameraDevices.some((device) => Number(device.index) === currentCameraIndex);
+  const cameraPreview = data.camera_preview
+    && String(data.camera_preview.user_id || "") === String(user?.user_id || "")
+    && String(data.camera_preview.data_url || "").startsWith("data:image/jpeg;base64,")
+    ? data.camera_preview
+    : null;
+  const canTestCamera = Boolean(data.global_enabled && camera.global_enabled && cameraState.eligible && cameraState.consented && cameraState.enabled && cameraBackend.available);
   return `
     <article class="exp-detail-card reality-device-card">
       <div class="reality-touch-section-head">
@@ -33141,23 +33154,30 @@ function renderRealityTouchDevicePanel() {
         <div><span>环境感知</span><h3>摄像头单帧读取</h3></div>
         <span class="reality-audio-backend ${cameraBackend.available ? "ready" : "limited"}">${cameraBackend.available ? "单帧后端可用" : "后端不可用"}</span>
       </div>
-      <p class="reality-device-intro">不会自动枚举摄像头，避免状态刷新时无意点亮设备。每次任务只读取一帧并立即释放；画面可能发送给已配置视觉模型，插件不保存原图。</p>
+      <p class="reality-device-intro">页面不会自动扫描。点击“扫描摄像头”只读取设备名称和 OpenCV 索引，不采集画面；真正可用性由授权后的单帧测试确认。</p>
       <form class="reality-device-controls" data-reality-touch-camera-config>
         <label class="reality-enable-field">
           <input type="checkbox" name="camera_enabled" ${camera.global_enabled ? "checked" : ""}>
           <span><b>启用摄像头能力总开关</b><small>仍需当前用户单独授权并开启用户策略。</small></span>
         </label>
-        <label><span>摄像头索引</span><input type="number" name="camera_index" min="0" max="32" step="1" value="${Number(camera.camera_index ?? 0)}"></label>
+        <label><span>摄像头设备</span><select name="camera_index">${cameraIndexKnown ? "" : `<option value="${currentCameraIndex}" selected>当前手动索引 ${currentCameraIndex}</option>`}${cameraIndexOptions || `<option value="${currentCameraIndex}">尚未扫描 · 当前索引 ${currentCameraIndex}</option>`}</select></label>
         <label><span>最小读取间隔</span><input type="number" name="min_interval_seconds" min="10" max="3600" step="10" value="${Number(camera.min_interval_seconds ?? 60)}"></label>
         <label><span>读取超时</span><input type="number" name="capture_timeout_seconds" min="2" max="20" step="1" value="${Number(camera.capture_timeout_seconds ?? 5)}"></label>
         <label><span>视觉分析超时</span><input type="number" name="analysis_timeout_seconds" min="5" max="90" step="5" value="${Number(camera.analysis_timeout_seconds ?? 25)}"></label>
         <button type="submit" class="primary">保存摄像头配置</button>
-        <button type="button" data-reality-touch-camera-test ${canTestCamera ? "" : "disabled"}>手动读取单帧</button>
+        <button type="button" data-reality-touch-camera-scan ${cameraBackend.enumerator_available ? "" : "disabled"}>扫描摄像头</button>
+        <button type="button" data-reality-touch-camera-test ${canTestCamera ? "" : "disabled"}>读取并预览单帧</button>
       </form>
       <div class="reality-device-status ${cameraBackend.available ? "" : "error"}">
         <b>${camera.global_enabled ? `当前使用摄像头索引 ${Number(camera.camera_index ?? 0)}` : "摄像头能力总开关关闭"}</b>
-        <span>${escapeHtml(cameraBackend.error || camera.boundary || "只返回在场、活动类型、可打扰性与光线等有限状态。")}</span>
+        <span>${escapeHtml(camera.devices_error || cameraBackend.error || (camera.devices_scanned_at ? `上次扫描发现 ${cameraDevices.length} 个入口；同一实体摄像头可能因 DirectShow/Media Foundation 显示多个索引。` : "尚未扫描设备。扫描不会采集画面。"))}</span>
       </div>
+      ${cameraPreview ? `
+        <figure class="reality-camera-preview">
+          <img src="${escapeHtml(cameraPreview.data_url)}" alt="本次摄像头单帧临时预览">
+          <figcaption><b>本次临时预览</b><span>仅保留在当前页面内存中；刷新或离开页面即消失，不写入插件数据和磁盘。</span></figcaption>
+        </figure>
+      ` : ""}
     </article>
   `;
 }
@@ -33184,6 +33204,7 @@ function renderRealityTouchSettings() {
   const confirmed = toBool(consent.confirmed);
   const command = String(data.confirmation_command || "");
   const cameraState = user.camera || {};
+  const cameraEligible = toBool(cameraState.eligible);
   const cameraConfirmed = toBool(cameraState.consented);
   const cameraCommand = String(data.camera?.confirmation_command || "");
   const options = users.map((item) => {
@@ -33222,18 +33243,18 @@ function renderRealityTouchSettings() {
       ${confirmed ? "" : `<div class="reality-command-box"><code>${escapeHtml(command)}</code></div>`}
       <section class="reality-consent-strip ${cameraConfirmed ? "ok" : "pending"}">
         <div>
-          <b>${cameraConfirmed ? "用户已单独授权摄像头单帧" : "摄像头仍需独立确认"}</b>
-          <span>${cameraConfirmed ? `仅授权 camera_single_frame · 协议 v${escapeHtml(String(cameraState.consent_version || 1))}` : "音频授权不会自动开放摄像头。请由该用户在私聊中手动发送完整命令。"}</span>
+          <b>${!cameraEligible ? "该用户不能访问主机摄像头" : cameraConfirmed ? "主机管理用户已授权摄像头单帧" : "摄像头仍需主机管理用户独立确认"}</b>
+          <span>${!cameraEligible ? "摄像头观察的是运行 AstrBot 的主机环境，只允许 AstrBot 管理员或关系角色明确设为 owner 的主要用户使用。普通私聊、目标用户名单与主动权限均不会授予摄像头访问。" : cameraConfirmed ? `仅授权 camera_single_frame · 协议 v${escapeHtml(String(cameraState.consent_version || 1))}` : "音频授权不会自动开放摄像头。请由主机管理用户在自己的私聊中发起确认。"}</span>
         </div>
-        ${cameraConfirmed ? `<span class="reality-consent-time">${cameraState.confirmed_at ? escapeHtml(formatDailyReviewTime(cameraState.confirmed_at)) : "已记录"}</span>` : `<button type="button" data-reality-touch-camera-copy>复制摄像头确认命令</button>`}
+        ${!cameraEligible ? "" : cameraConfirmed ? `<span class="reality-consent-time">${cameraState.confirmed_at ? escapeHtml(formatDailyReviewTime(cameraState.confirmed_at)) : "已记录"}</span>` : `<button type="button" data-reality-touch-camera-copy>复制摄像头确认命令</button>`}
       </section>
-      ${cameraConfirmed ? "" : `<div class="reality-command-box"><code>${escapeHtml(cameraCommand)}</code></div>`}
+      ${cameraEligible && !cameraConfirmed ? `<div class="reality-command-box"><code>${escapeHtml(cameraCommand)}</code></div>` : ""}
       <form class="reality-policy-form" data-reality-touch-camera-policy-form>
         <label class="reality-enable-field">
-          <input type="checkbox" name="reality_camera_enabled" ${cameraState.enabled ? "checked" : ""} ${cameraConfirmed ? "" : "disabled"}>
-          <span><b>允许该用户的明确任务读取单帧</b><small>仍受摄像头总开关、读取冷却和任务目的约束；关闭后保留授权但不再读取。</small></span>
+          <input type="checkbox" name="reality_camera_enabled" ${cameraState.enabled ? "checked" : ""} ${cameraEligible && cameraConfirmed ? "" : "disabled"}>
+          <span><b>允许该主机管理用户的明确任务读取单帧</b><small>普通私聊用户不能获得此能力；仍受摄像头总开关、读取冷却和任务目的约束。</small></span>
         </label>
-        <button type="submit" ${cameraConfirmed ? "" : "disabled"}>保存摄像头用户策略</button>
+        <button type="submit" ${cameraEligible && cameraConfirmed ? "" : "disabled"}>保存摄像头用户策略</button>
       </form>
       <form class="reality-policy-form" data-reality-touch-policy-form>
         <label class="reality-enable-field">
@@ -33366,22 +33387,19 @@ function renderRealityTouchRuntime() {
         <span class="reality-global-state ${data.global_enabled ? "on" : "off"}">${data.global_enabled ? "总开关已开启" : "总开关已关闭"}</span>
       </div>
       <div class="reality-runtime-stats">
-        <div><span>可见用户</span><b>${escapeHtml(String(counts.users || 0))}</b></div>
-        <div><span>已确认</span><b>${escapeHtml(String(counts.consented || 0))}</b></div>
-        <div><span>主动语音扩展</span><b>${escapeHtml(String(counts.proactive_voice || 0))}</b></div>
+        <div><span>可配置私聊用户</span><b>${escapeHtml(String(counts.users || 0))}</b></div>
+        <div><span>音频已授权</span><b>${escapeHtml(String(counts.consented || 0))}</b></div>
         <div><span>摄像头已授权</span><b>${escapeHtml(String(counts.camera_consented || 0))}</b></div>
-        <div><span>摄像头策略开启</span><b>${escapeHtml(String(counts.camera_enabled || 0))}</b></div>
-        <div><span>计划场景</span><b>${escapeHtml(String(counts.enabled || 0))}</b></div>
-        <div><span>已排期</span><b>${escapeHtml(String(counts.scheduled || 0))}</b></div>
-        <div><span>官方现实提醒</span><b>${escapeHtml(String(counts.custom_scheduled || 0))}</b></div>
+        <div><span>待执行提醒</span><b>${escapeHtml(String(Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0)))}</b></div>
       </div>
       ${user ? `
         <dl class="reality-runtime-detail">
           <div><dt>当前用户</dt><dd>${escapeHtml(user.label || user.user_id || "-")}</dd></div>
           <div><dt>音频授权</dt><dd>${consent.local_audio ? "已授权 local_audio" : "未授权"}</dd></div>
           <div><dt>主动语音</dt><dd>${user.policy?.proactive_voice_enabled ? "同步到现实设备" : "未开放"}</dd></div>
-          <div><dt>摄像头授权</dt><dd class="${cameraState.consented ? "" : "denied"}">${cameraState.consented ? "已授权 camera_single_frame" : "未授权，且不会继承音频授权"}</dd></div>
-          <div><dt>摄像头策略</dt><dd>${cameraState.enabled ? "允许明确任务读取单帧" : "关闭"}</dd></div>
+          <div><dt>摄像头资格</dt><dd class="${cameraState.eligible ? "" : "denied"}">${cameraState.eligible ? "主机管理用户" : "普通私聊用户，不开放主机摄像头"}</dd></div>
+          <div><dt>摄像头授权</dt><dd class="${cameraState.consented ? "" : "denied"}">${cameraState.consented ? "已授权 camera_single_frame" : "未授权，且不会继承音频或主动权限"}</dd></div>
+          <div><dt>摄像头策略</dt><dd>${cameraState.eligible && cameraState.enabled ? "允许明确任务读取单帧" : "关闭"}</dd></div>
           <div><dt>最近单帧观察</dt><dd>${cameraObservation.at ? `${cameraObservation.success ? "成功" : "失败"} · ${escapeHtml(cameraObservation.summary || cameraObservation.error || "已记录")}` : "暂无记录"}</dd></div>
           <div><dt>播放目标</dt><dd>${escapeHtml(data.audio_output?.label || "跟随系统默认输出")}</dd></div>
           <div><dt>起床提醒模板</dt><dd>${alarm.time ? `${escapeHtml(alarm.time)} · ${escapeHtml(dayText)}` : "未设置"}</dd></div>
@@ -34081,6 +34099,18 @@ function bindRealityTouchActions(root) {
         purpose: "管理员从现实触及页面手动测试单帧读取",
       }),
       "摄像头单帧读取完成，原图未保存",
+      event.currentTarget,
+      { reload: false },
+    );
+    if (result) {
+      state.realityTouch = result;
+      renderExperimentalPage();
+    }
+  });
+  root.querySelector("[data-reality-touch-camera-scan]")?.addEventListener("click", async (event) => {
+    const result = await runAction(
+      () => postJson("/reality-touch/update", { action: "scan_cameras" }),
+      "摄像头设备清单已刷新",
       event.currentTarget,
       { reload: false },
     );

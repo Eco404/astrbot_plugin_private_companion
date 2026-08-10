@@ -285,7 +285,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     return self._error("owner_exclusive relationship does not accept an exact score")
                 if relationship_score is not None and relationship_score > 0 and role != "owner":
                     positive_cap = relationship_positive_score_cap(
-                        getattr(self.plugin, "relationship_positive_stage_cap_key", "deeply_bonded")
+                        getattr(self.plugin, "relationship_positive_stage_cap_key", "close")
                     )
                     if relationship_score > positive_cap:
                         return self._error(

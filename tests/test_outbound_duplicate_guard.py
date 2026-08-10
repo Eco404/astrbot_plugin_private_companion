@@ -89,6 +89,36 @@ class OutboundDuplicateGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(duplicate.is_stopped())
 
+    def test_same_inbound_duplicate_survives_slow_failed_tool_loop(self) -> None:
+        first = _Event("唔，省流版：这是个 AstrBot 插件")
+        candidate = self.plugin._outbound_text_duplicate_candidate(first)
+
+        self.assertEqual(
+            "",
+            self.plugin._reserve_outbound_text_candidate(candidate, now=100.0),
+        )
+        self.plugin._confirm_outbound_text_candidate(candidate, now=101.0)
+
+        retry = _Event("唔，省流版：这是个 AstrBot 插件")
+        retry_candidate = self.plugin._outbound_text_duplicate_candidate(retry)
+        self.assertEqual(
+            "sent",
+            self.plugin._reserve_outbound_text_candidate(retry_candidate, now=126.0),
+        )
+
+    def test_slow_repeat_from_a_new_inbound_message_is_not_blocked(self) -> None:
+        first = _Event("我再说明一次。")
+        candidate = self.plugin._outbound_text_duplicate_candidate(first)
+        self.plugin._reserve_outbound_text_candidate(candidate, now=100.0)
+        self.plugin._confirm_outbound_text_candidate(candidate, now=101.0)
+
+        later = _Event("我再说明一次。", message_id="message-2")
+        later_candidate = self.plugin._outbound_text_duplicate_candidate(later)
+        self.assertEqual(
+            "",
+            self.plugin._reserve_outbound_text_candidate(later_candidate, now=126.0),
+        )
+
     async def test_partial_primary_send_is_not_confirmed_as_complete_outbound_text(
         self,
     ) -> None:

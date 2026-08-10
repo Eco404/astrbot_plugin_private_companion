@@ -505,6 +505,12 @@ def test_relationship_stage_boundaries_are_stable() -> None:
     assert {score: relationship_stage_for_score(score)["phase"]["key"] for score in expected} == expected
 
 
+def test_ordinary_user_relationship_cap_defaults_to_close() -> None:
+    assert normalize_relationship_positive_stage_cap_key(None) == "close"
+    assert normalize_relationship_positive_stage_cap_key("unknown") == "close"
+    assert relationship_positive_score_cap(None) == 899
+
+
 def test_ledger_deduplicates_caps_and_decays_toward_zero() -> None:
     user = {"relationship_score": 598, "relationship_role": "friend"}
     first = apply_relationship_event(user, 9, reason_code="helpful_reply", event_id="message-1", now=1_700_000_000)

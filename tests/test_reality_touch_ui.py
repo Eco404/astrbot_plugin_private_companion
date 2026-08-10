@@ -19,6 +19,7 @@ class RealityTouchUiTests(unittest.TestCase):
         cls.primary_css = (ROOT / "pages" / "companion-panel" / "app.css").read_text(encoding="utf-8")
         cls.localized_css = (ROOT / "pages" / "陪伴面板" / "app.css").read_text(encoding="utf-8")
         cls.api = (ROOT / "page_api.py").read_text(encoding="utf-8")
+        cls.main = (ROOT / "main.py").read_text(encoding="utf-8")
         cls.settings = (ROOT / "page_api_settings.py").read_text(encoding="utf-8")
         cls.proactive = (ROOT / "proactive_message.py").read_text(encoding="utf-8")
         cls.requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
@@ -61,13 +62,18 @@ class RealityTouchUiTests(unittest.TestCase):
             "data-reality-touch-camera-config",
             "data-reality-touch-camera-policy-form",
             "data-reality-touch-camera-test",
+            "data-reality-touch-camera-scan",
+            "扫描摄像头",
+            "读取并预览单帧",
+            "reality-camera-preview",
+            "刷新或离开页面即消失",
             "camera_single_frame",
             "叫醒偏好（可选）",
             "每次触发时按人格、关系与当天语境动态生成",
             "生成并试听",
             "主动语音同步到所选设备",
             "这是现实触及的一个使用示例",
-            "未授权，且不会继承音频授权",
+            "未授权，且不会继承音频或主动权限",
             "自定义现实触及提醒",
             "官方 Cron",
             "data-reality-touch-reminder-cancel",
@@ -75,6 +81,10 @@ class RealityTouchUiTests(unittest.TestCase):
             self.assertIn(marker, self.primary)
         self.assertIn(".reality-touch-grid", self.primary_css)
         self.assertIn(".reality-consent-strip", self.primary_css)
+
+    def test_host_camera_uses_stricter_identity_boundary_than_private_management(self) -> None:
+        self.assertIn("普通私聊、目标用户名单与主动权限均不会授予摄像头访问", self.primary)
+        self.assertGreaterEqual(self.main.count("_reality_touch_camera_user_eligible(user_id)"), 3)
 
     def test_page_api_can_read_save_and_normalize_switch(self) -> None:
         self.assertGreaterEqual(self.api.count(f'"{KEY}"'), 3)
@@ -86,11 +96,13 @@ class RealityTouchUiTests(unittest.TestCase):
             '("/reality-touch", self.get_reality_touch',
             '("/reality-touch/update", self.update_reality_touch',
             '"save_camera_config", "save_camera_policy", "test_camera"',
+            '"scan_cameras"',
             '"该用户尚未在私聊中完成现实触及知情确认"',
             'action == "cancel_reminder"',
             "await test_audio_player(",
             "await wakeup_player(",
             "await camera_snapshotter(",
+            "include_preview=True",
         ):
             self.assertIn(marker, self.api)
 
@@ -105,6 +117,7 @@ class RealityTouchUiTests(unittest.TestCase):
         self.assertIn("sounddevice>=", self.requirements)
         self.assertIn("soundfile>=", self.requirements)
         self.assertIn("opencv-python-headless>=", self.requirements)
+        self.assertIn("cv2-enumerate-cameras>=", self.requirements)
 
 
 if __name__ == "__main__":

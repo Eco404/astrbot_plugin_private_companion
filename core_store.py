@@ -2483,7 +2483,7 @@ class CoreStoreMixin:
             user.get("relationship_role"),
         )
         positive_cap = normalize_relationship_positive_stage_cap_key(
-            getattr(self, "relationship_positive_stage_cap_key", "deeply_bonded")
+            getattr(self, "relationship_positive_stage_cap_key", "close")
         )
         interaction_cap = normalize_normal_interaction_band_cap(
             getattr(self, "normal_interaction_band_cap", "warm")
@@ -2597,7 +2597,7 @@ class CoreStoreMixin:
             event_window_seconds=int(getattr(self, "relationship_event_window_minutes", 30)) * 60,
             positive_event_cap=int(getattr(self, "relationship_positive_event_cap", 4)),
             negative_event_cap=int(getattr(self, "relationship_negative_event_cap", 12)),
-            positive_stage_cap_key=getattr(self, "relationship_positive_stage_cap_key", "deeply_bonded"),
+            positive_stage_cap_key=getattr(self, "relationship_positive_stage_cap_key", "close"),
             timezone_name=getattr(self, "environment_perception_timezone", None),
         )
         if result.get("changed") or score_migration.get("changed"):

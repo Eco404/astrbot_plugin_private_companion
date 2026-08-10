@@ -120,6 +120,8 @@ class TtsToolFullScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["send_message_to_user"], removed)
         self.assertEqual(["pc_manage_memo"], [tool.name for tool in req.func_tool.tools])
         self.assertIn("直接输出一次最终正文", req.system_prompt)
+        self.assertIn("该工具已从本次请求中移除", req.system_prompt)
+        self.assertIn("即使历史消息里出现过它", req.system_prompt)
 
     def test_passive_reply_boundary_keeps_official_cron_sender(self):
         harness = _PassiveBoundaryHarness()

@@ -680,7 +680,7 @@ class WakeupAlarmMixin(RealityTouchCameraMixin, RealityTouchAudioMixin):
                 "local_audio": self._reality_touch_capability_consented(user, "local_audio"),
                 "camera": self._reality_touch_camera_consented(user),
             },
-            "camera": self._reality_touch_camera_user_snapshot(user),
+            "camera": self._reality_touch_camera_user_snapshot(user, user_id=str(user_id)),
             "policy": {
                 "proactive_voice_enabled": bool(policy.get("proactive_voice_enabled")),
                 "playback_volume": _safe_int(

@@ -141,6 +141,24 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self._persona_data_profiles: dict[str, dict[str, Any]] = {}
     self._persona_window_claims: dict[str, str] = {}
     self._persona_window_conflicts: dict[str, dict[str, str]] = {}
+    self._persona_window_bindings_file = os.path.join(self.data_dir, "persona_window_bindings.json")
+    binding_loader = getattr(self, "_load_persona_window_bindings_store_sync", None)
+    self._persona_window_bindings_persisted = binding_loader() if callable(binding_loader) else {}
+    binding_getter = getattr(self, "_persona_window_bindings", None)
+    binding_saver = getattr(self, "_save_persona_window_bindings_store_sync", None)
+    effective_bindings = binding_getter() if callable(binding_getter) else {}
+    if (
+        effective_bindings
+        and effective_bindings != self._persona_window_bindings_persisted
+        and callable(binding_saver)
+    ):
+        try:
+            binding_saver(effective_bindings)
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 旧版多人格窗口绑定迁移到独立存储失败: %s",
+                _single_line(exc, 120),
+            )
     self._page_current_persona_id = self.multi_persona_primary_id
     self.storage_backend = self._cfg_str(c, "storage_backend", "json", "json").strip().lower() or "json"
     if self.storage_backend not in {"json", "sqlite"}:
@@ -339,7 +357,7 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
         c, "enable_experimental_bluetooth_wakeup", False
     )
     self.enable_reality_touch_camera = self._cfg_bool(c, "enable_reality_touch_camera", False)
-    self.reality_touch_camera_index = self._cfg_int(c, "reality_touch_camera_index", 0, 0, 32)
+    self.reality_touch_camera_index = self._cfg_int(c, "reality_touch_camera_index", 0, 0, 100000)
     self.reality_touch_camera_min_interval_seconds = self._cfg_int(
         c, "reality_touch_camera_min_interval_seconds", 60, 10, 3600
     )
@@ -359,7 +377,7 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
         self._cfg_raw(c, "relationship_stage_policy", [])
     )
     self.relationship_positive_stage_cap_key = normalize_relationship_positive_stage_cap_key(
-        self._cfg_raw(c, "relationship_positive_stage_cap_key", "deeply_bonded")
+        self._cfg_raw(c, "relationship_positive_stage_cap_key", "close")
     )
     self.normal_interaction_band_cap = self._cfg_str(c, "normal_interaction_band_cap", "warm")
     if self.normal_interaction_band_cap not in {"relaxed", "lively", "warm"}:

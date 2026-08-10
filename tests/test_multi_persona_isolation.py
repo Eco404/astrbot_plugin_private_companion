@@ -639,6 +639,44 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("alt", plugin._persona_window_bindings()[window])
             plugin._save_config_if_possible.assert_awaited_once()
 
+    async def test_window_binding_survives_reload_when_astrbot_drops_dynamic_object_keys(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            window = "default:FriendMessage:reload-persistence"
+
+            result = await plugin._switch_persona_for_window_async(
+                "alt",
+                window_key=window,
+                persist=True,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["binding_store_saved"])
+            stored = json.loads(
+                (Path(root) / "persona_window_bindings.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("alt", stored["bindings"][window])
+
+            reloaded = _plugin_harness(root)
+            reloaded.config["multi_persona_window_bindings"] = {}
+            self.assertEqual("alt", reloaded._persona_window_bindings()[window])
+
+    async def test_existing_config_binding_can_be_migrated_to_reload_store(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            window = "default:GroupMessage:legacy-config-binding"
+            plugin.config["multi_persona_window_bindings"] = {window: "main"}
+
+            self.assertTrue(
+                plugin._save_persona_window_bindings_store_sync(
+                    plugin._persona_window_bindings()
+                )
+            )
+
+            reloaded = _plugin_harness(root)
+            reloaded.config["multi_persona_window_bindings"] = {}
+            self.assertEqual("main", reloaded._persona_window_bindings()[window])
+
     async def test_page_route_reads_selected_persona_users_and_schedule(self):
         with tempfile.TemporaryDirectory() as root:
             plugin = _plugin_harness(root)

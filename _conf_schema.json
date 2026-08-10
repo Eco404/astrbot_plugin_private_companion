@@ -292,7 +292,7 @@
         "options": ["familiar", "close", "intimate", "deeply_bonded"],
         "labels": ["熟悉", "亲近", "亲密", "深度联结"],
         "hint": "普通用户（非主要用户）的正向亲密度不会超过所选阶段，面板手动调分超限会明确报错。下调时既有正分按旧上限与新上限比例只压缩一次；主要用户不受此上限及下调影响（专属联结模式下分数固定冻结）；负分不受影响。",
-        "default": "deeply_bonded"
+        "default": "close"
       },
       "normal_interaction_band_cap": {
         "description": "普通用户互动温度上限",
@@ -11609,7 +11609,7 @@
       "reality_touch_camera_index": {
         "description": "摄像头索引",
         "type": "int",
-        "hint": "通常内置或默认摄像头为 0；若主机有多个摄像头，可依次尝试 1、2。状态刷新不会自动探测设备，避免无意点亮摄像头。",
+        "hint": "在现实触及页面手动点击“扫描摄像头”后选择设备。页面刷新不会自动扫描；部分 Windows 后端会返回 700、1400 等带后端编码的 OpenCV 索引。",
         "default": 0,
         "condition": {
           "enable_experimental_bluetooth_wakeup": true,

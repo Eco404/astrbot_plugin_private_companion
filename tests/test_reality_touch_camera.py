@@ -14,6 +14,8 @@ from astrbot_plugin_private_companion.wakeup_alarm import WakeupAlarmMixin
 class CameraHarness(WakeupAlarmMixin):
     def __init__(self) -> None:
         self.data = {"users": {"u": {}}}
+        self.owner_user_ids = {"u"}
+        self.admin_user_ids: set[str] = set()
         self.enable_experimental_bluetooth_wakeup = True
         self.enable_reality_touch_camera = True
         self.reality_touch_camera_index = 0
@@ -26,8 +28,44 @@ class CameraHarness(WakeupAlarmMixin):
     def _save_data_sync(self) -> None:
         self.save_count += 1
 
+    def _permission_identity_id(self, user_id) -> str:
+        value = str(user_id or "").strip()
+        return value if value in self.data["users"] else ""
+
+    def _is_configured_admin_user_id(self, user_id) -> bool:
+        return self._permission_identity_id(user_id) in self.admin_user_ids
+
+    def _relationship_owner_user_ids(self) -> set[str]:
+        return set(self.owner_user_ids)
+
 
 class RealityTouchCameraConsentTests(unittest.TestCase):
+    def test_camera_eligibility_does_not_inherit_target_or_proactive_permission(self) -> None:
+        harness = CameraHarness()
+        harness.owner_user_ids.clear()
+        harness.target_user_ids = ["u"]
+        harness.data["users"]["u"]["proactive_private_enabled"] = True
+        self.assertFalse(harness._reality_touch_camera_user_eligible("u"))
+
+    def test_camera_eligibility_accepts_admin_or_explicit_owner(self) -> None:
+        harness = CameraHarness()
+        self.assertTrue(harness._reality_touch_camera_user_eligible("u"))
+        harness.owner_user_ids.clear()
+        harness.admin_user_ids.add("u")
+        self.assertTrue(harness._reality_touch_camera_user_eligible("u"))
+
+    def test_ineligible_user_cannot_enable_camera_policy(self) -> None:
+        harness = CameraHarness()
+        harness.owner_user_ids.clear()
+        user = harness.data["users"]["u"]
+        user["reality_touch_camera_consent"] = {
+            "confirmed": True,
+            "version": 1,
+            "granted_capabilities": ["camera_single_frame"],
+        }
+        with self.assertRaisesRegex(ValueError, "只允许 AstrBot 管理员或主要用户"):
+            harness._reality_touch_update_camera_policy(user, {"camera_enabled": True}, user_id="u")
+
     def test_audio_consent_does_not_grant_camera(self) -> None:
         harness = CameraHarness()
         user = {"reality_touch_consent": {"confirmed": True, "version": 1, "granted_capabilities": ["local_audio"]}}
@@ -95,6 +133,32 @@ class RealityTouchCameraConsentTests(unittest.TestCase):
 
 
 class RealityTouchCameraCaptureTests(unittest.TestCase):
+    def test_device_catalog_is_only_enumerated_on_explicit_refresh(self) -> None:
+        harness = CameraHarness()
+        enumerate_calls = 0
+
+        class CameraInfo:
+            index = 1400
+            name = "FHD Webcam"
+
+        def enumerate_cameras():
+            nonlocal enumerate_calls
+            enumerate_calls += 1
+            return [CameraInfo()]
+
+        fake_enumerator = types.SimpleNamespace(enumerate_cameras=enumerate_cameras)
+        fake_cv2 = types.SimpleNamespace(
+            videoio_registry=types.SimpleNamespace(getBackendName=lambda _code: "MSMF")
+        )
+        with patch.dict(sys.modules, {"cv2": fake_cv2, "cv2_enumerate_cameras": fake_enumerator}):
+            self.assertEqual([], harness._reality_touch_camera_devices(refresh=False)["devices"])
+            self.assertEqual(0, enumerate_calls)
+            catalog = harness._reality_touch_camera_devices(refresh=True)
+        self.assertEqual(1, enumerate_calls)
+        self.assertEqual(1400, catalog["devices"][0]["index"])
+        self.assertEqual("FHD Webcam", catalog["devices"][0]["name"])
+        self.assertEqual("MSMF", catalog["devices"][0]["backend"])
+
     def test_capture_reads_one_frame_and_always_releases_device(self) -> None:
         harness = CameraHarness()
 
@@ -176,6 +240,17 @@ class RealityTouchCameraSnapshotTests(unittest.IsolatedAsyncioTestCase):
         result = await self.harness._reality_touch_camera_snapshot_for_user("u", "判断是否适合主动问候")
         self.assertEqual("forbidden", result["status"])
 
+    async def test_legacy_consent_cannot_bypass_current_camera_eligibility(self) -> None:
+        self.grant()
+        self.harness.owner_user_ids.clear()
+        self.user["proactive_private_enabled"] = True
+        snapshot = self.harness._reality_touch_camera_user_snapshot(self.user, user_id="u")
+        self.assertFalse(snapshot["eligible"])
+        self.assertFalse(snapshot["consented"])
+        self.assertFalse(snapshot["enabled"])
+        result = await self.harness._reality_touch_camera_snapshot_for_user("u", "测试历史授权边界")
+        self.assertEqual("forbidden", result["status"])
+
     async def test_snapshot_returns_only_limited_state_and_enforces_cooldown(self) -> None:
         self.grant()
         self.harness._capture_reality_touch_camera_frame = lambda: {
@@ -208,6 +283,29 @@ class RealityTouchCameraSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(latest["success"])
         self.assertNotIn("jpeg_bytes", latest)
         self.assertNotIn("path", latest)
+
+    async def test_page_preview_is_opt_in_and_not_written_to_user_data(self) -> None:
+        self.grant()
+        self.harness._capture_reality_touch_camera_frame = lambda: {
+            "jpeg_bytes": b"one-frame-preview",
+            "width": 320,
+            "height": 240,
+            "brightness": "normal",
+        }
+        self.harness._analyze_reality_touch_camera_frame = AsyncMock(return_value={
+            "presence": "uncertain", "activity": "unknown", "interruptibility": "unknown",
+            "brightness": "normal", "confidence": 0.0, "analyzed": False,
+            "width": 320, "height": 240, "summary": "有限状态不可确定",
+        })
+        result = await self.harness._reality_touch_camera_snapshot_for_user(
+            "u",
+            "管理员页面手动预览",
+            include_preview=True,
+        )
+        self.assertTrue(result["preview_data_url"].startswith("data:image/jpeg;base64,"))
+        persisted = json.dumps(self.user, ensure_ascii=False)
+        self.assertNotIn("preview_data_url", persisted)
+        self.assertNotIn("one-frame-preview", persisted)
 
 
 if __name__ == "__main__":

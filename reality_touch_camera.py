@@ -40,6 +40,19 @@ class RealityTouchCameraMixin:
             and self._REALITY_TOUCH_CAMERA_CAPABILITY in capabilities
         )
 
+    def _reality_touch_camera_user_eligible(self, user_id: Any) -> bool:
+        """Only a host manager/owner may bind the host camera to a chat identity."""
+        resolver = getattr(self, "_permission_identity_id", None)
+        permission_id = resolver(user_id) if callable(resolver) else ""
+        if not permission_id:
+            return False
+        admin_checker = getattr(self, "_is_configured_admin_user_id", None)
+        if callable(admin_checker) and admin_checker(permission_id):
+            return True
+        owner_getter = getattr(self, "_relationship_owner_user_ids", None)
+        owner_ids = owner_getter() if callable(owner_getter) else set()
+        return permission_id in set(owner_ids or ())
+
     def _reality_touch_camera_confirmation_prompt(self) -> str:
         return (
             "摄像头是现实触及的独立高风险能力，不会继承音频授权。启用后也只允许按明确任务读取单帧，"
@@ -131,7 +144,15 @@ class RealityTouchCameraMixin:
             user["reality_touch_camera_policy"] = policy
         return policy
 
-    def _reality_touch_update_camera_policy(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    def _reality_touch_update_camera_policy(
+        self,
+        user: dict[str, Any],
+        payload: dict[str, Any],
+        *,
+        user_id: str = "",
+    ) -> dict[str, Any]:
+        if not self._reality_touch_camera_user_eligible(user_id):
+            raise ValueError("主机摄像头只允许 AstrBot 管理员或主要用户本人使用")
         enabled = bool(payload.get("camera_enabled"))
         if enabled and not self._reality_touch_camera_consented(user):
             raise ValueError("该用户尚未在私聊中完成摄像头独立知情确认")
@@ -145,15 +166,83 @@ class RealityTouchCameraMixin:
         try:
             import cv2  # type: ignore
 
+            try:
+                import cv2_enumerate_cameras  # type: ignore  # noqa: F401
+                enumerator_available = True
+            except Exception:
+                enumerator_available = False
+
             version = _single_line(getattr(cv2, "__version__", ""), 40)
-            return {"available": True, "backend": "opencv", "version": version, "error": ""}
+            return {
+                "available": True,
+                "backend": "opencv",
+                "version": version,
+                "enumerator_available": enumerator_available,
+                "error": "" if enumerator_available else "缺少摄像头名称枚举依赖，仍可手动填写索引",
+            }
         except Exception as exc:
             return {
                 "available": False,
                 "backend": "unavailable",
                 "version": "",
+                "enumerator_available": False,
                 "error": "当前 AstrBot 运行环境缺少 OpenCV 摄像头依赖" + (f"：{_single_line(exc, 120)}" if exc else ""),
             }
+
+    def _reality_touch_camera_devices(self, *, refresh: bool = False) -> dict[str, Any]:
+        """Return a cached device catalog; enumerate only after an explicit page action."""
+        store_getter = getattr(self, "_reality_touch_store", None)
+        store = store_getter() if callable(store_getter) else {}
+        cached = store.get("camera_device_catalog") if isinstance(store, dict) else None
+        if not refresh:
+            return dict(cached) if isinstance(cached, dict) else {"devices": [], "scanned_at": 0, "error": ""}
+        try:
+            import cv2  # type: ignore
+            from cv2_enumerate_cameras import enumerate_cameras  # type: ignore
+
+            devices: list[dict[str, Any]] = []
+            seen: set[int] = set()
+            for info in enumerate_cameras():
+                index = _safe_int(getattr(info, "index", -1), -1, -1, 100000)
+                if index < 0 or index in seen:
+                    continue
+                seen.add(index)
+                api_code = (index // 100) * 100
+                backend_name = ""
+                registry = getattr(cv2, "videoio_registry", None)
+                backend_getter = getattr(registry, "getBackendName", None)
+                if callable(backend_getter) and api_code > 0:
+                    try:
+                        backend_name = _single_line(backend_getter(api_code), 40)
+                    except Exception:
+                        backend_name = ""
+                name = _single_line(getattr(info, "name", ""), 100) or f"摄像头 {index}"
+                devices.append(
+                    {
+                        "index": index,
+                        "name": name,
+                        "backend": backend_name,
+                        "virtual": any(marker in name.lower() for marker in ("virtual", "vtube", "obs")),
+                    }
+                )
+            catalog = {
+                "devices": devices,
+                "scanned_at": _now_ts(),
+                "error": "" if devices else "没有枚举到摄像头设备",
+            }
+        except Exception as exc:
+            catalog = {
+                "devices": [],
+                "scanned_at": _now_ts(),
+                "error": "摄像头设备枚举失败：" + (_single_line(exc, 160) or "未知错误"),
+            }
+        if isinstance(store, dict):
+            store["camera_device_catalog"] = catalog
+            self._save_data_sync()
+        return dict(catalog)
+
+    def _reality_touch_scan_camera_devices(self) -> dict[str, Any]:
+        return self._reality_touch_camera_devices(refresh=True)
 
     def _capture_reality_touch_camera_frame(self) -> dict[str, Any]:
         """Capture exactly one frame and always release the device."""
@@ -161,7 +250,7 @@ class RealityTouchCameraMixin:
             import cv2  # type: ignore
         except Exception as exc:
             raise RuntimeError("当前 AstrBot 运行环境缺少 OpenCV 摄像头依赖") from exc
-        index = _safe_int(getattr(self, "reality_touch_camera_index", 0), 0, 0, 32)
+        index = _safe_int(getattr(self, "reality_touch_camera_index", 0), 0, 0, 100000)
         capture = cv2.VideoCapture(index)
         try:
             if not capture or not capture.isOpened():
@@ -331,7 +420,13 @@ class RealityTouchCameraMixin:
         policy["audit"] = history[-20:]
         return item
 
-    async def _reality_touch_camera_snapshot_for_user(self, user_id: str, purpose: str) -> dict[str, Any]:
+    async def _reality_touch_camera_snapshot_for_user(
+        self,
+        user_id: str,
+        purpose: str,
+        *,
+        include_preview: bool = False,
+    ) -> dict[str, Any]:
         purpose_text = _single_line(purpose, 120)
         if not purpose_text:
             return {"status": "error", "message": "摄像头读取必须提供明确目的"}
@@ -348,6 +443,8 @@ class RealityTouchCameraMixin:
             user = users.get(str(user_id)) if isinstance(users, dict) else None
             if not isinstance(user, dict):
                 return {"status": "error", "message": "没有找到对应的私聊用户"}
+            if not self._reality_touch_camera_user_eligible(user_id):
+                return {"status": "forbidden", "message": "主机摄像头只允许 AstrBot 管理员或主要用户本人使用"}
             if not self._reality_touch_camera_consented(user):
                 return {"status": "forbidden", "message": "该用户尚未完成摄像头独立知情确认"}
             policy = self._reality_touch_camera_policy(user)
@@ -368,6 +465,11 @@ class RealityTouchCameraMixin:
                     asyncio.to_thread(self._capture_reality_touch_camera_frame),
                     timeout=capture_timeout,
                 )
+                preview_data_url = ""
+                if include_preview:
+                    jpeg_bytes = frame.get("jpeg_bytes")
+                    if isinstance(jpeg_bytes, (bytes, bytearray)) and jpeg_bytes:
+                        preview_data_url = "data:image/jpeg;base64," + base64.b64encode(bytes(jpeg_bytes)).decode("ascii")
                 observation = await self._analyze_reality_touch_camera_frame(frame, purpose_text)
                 item = self._record_reality_touch_camera_observation(
                     user,
@@ -376,7 +478,10 @@ class RealityTouchCameraMixin:
                     observation=observation,
                 )
                 self._save_data_sync()
-                return {"status": "success", "message": "已完成一次单帧有限状态观察", "observation": item}
+                result = {"status": "success", "message": "已完成一次单帧有限状态观察", "observation": item}
+                if preview_data_url:
+                    result["preview_data_url"] = preview_data_url
+                return result
             except asyncio.TimeoutError:
                 message = "摄像头单帧读取超时"
             except Exception as exc:
@@ -385,27 +490,33 @@ class RealityTouchCameraMixin:
             self._save_data_sync()
             return {"status": "error", "message": message}
 
-    def _reality_touch_camera_user_snapshot(self, user: dict[str, Any]) -> dict[str, Any]:
+    def _reality_touch_camera_user_snapshot(self, user: dict[str, Any], *, user_id: str = "") -> dict[str, Any]:
         consent = self._reality_touch_camera_consent(user)
         policy = self._reality_touch_camera_policy(user)
         latest = policy.get("last_observation") if isinstance(policy.get("last_observation"), dict) else {}
+        eligible = self._reality_touch_camera_user_eligible(user_id)
         return {
-            "consented": self._reality_touch_camera_consented(user),
+            "eligible": eligible,
+            "consented": eligible and self._reality_touch_camera_consented(user),
             "consent_version": _safe_int(consent.get("version"), 0, 0),
             "confirmed_at": _safe_int(consent.get("confirmed_at"), 0, 0),
-            "enabled": bool(policy.get("enabled")),
+            "enabled": eligible and bool(policy.get("enabled")),
             "last_attempt_at": _safe_int(policy.get("last_attempt_at"), 0, 0),
             "last_observation": dict(latest),
         }
 
     def _reality_touch_camera_page_snapshot(self) -> dict[str, Any]:
+        catalog = self._reality_touch_camera_devices(refresh=False)
         return {
             "global_enabled": bool(getattr(self, "enable_reality_touch_camera", False)),
-            "camera_index": _safe_int(getattr(self, "reality_touch_camera_index", 0), 0, 0, 32),
+            "camera_index": _safe_int(getattr(self, "reality_touch_camera_index", 0), 0, 0, 100000),
             "min_interval_seconds": _safe_int(getattr(self, "reality_touch_camera_min_interval_seconds", 60), 60, 10, 3600),
             "capture_timeout_seconds": _safe_int(getattr(self, "reality_touch_camera_capture_timeout_seconds", 5), 5, 2, 20),
             "analysis_timeout_seconds": _safe_int(getattr(self, "reality_touch_camera_analysis_timeout_seconds", 25), 25, 5, 90),
             "confirmation_command": "陪伴 现实触及 摄像头确认",
             "backend": self._reality_touch_camera_backend_snapshot(),
+            "devices": list(catalog.get("devices") or []),
+            "devices_scanned_at": _safe_int(catalog.get("scanned_at"), 0, 0),
+            "devices_error": _single_line(catalog.get("error"), 180),
             "boundary": "仅按明确任务读取单帧；可能发送给已配置视觉模型；不持续录像、不做人脸识别或情绪读脸；插件默认不保存原图。",
         }

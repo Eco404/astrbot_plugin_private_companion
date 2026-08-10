@@ -28570,6 +28570,30 @@ pre {
   background: var(--accent-soft);
 }
 
+.reality-camera-preview {
+  margin: 16px 0 0;
+  display: grid;
+  gap: 10px;
+}
+
+.reality-camera-preview img {
+  display: block;
+  width: min(100%, 720px);
+  max-height: 520px;
+  object-fit: contain;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: #111;
+}
+
+.reality-camera-preview figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .reality-device-status.error {
   border-left-color: var(--danger);
   background: rgba(247, 224, 221, 0.66);

@@ -1138,13 +1138,24 @@ class EventDispatchMixin:
             self._recent_outbound_text_guard = cache
         for key, value in list(cache.items()):
             ts = _safe_float(value.get("ts"), 0) if isinstance(value, dict) else 0
-            if ts <= 0 or now - ts > 12.0:
+            # One AstrBot agent turn may remain alive while a failed or removed
+            # tool call is reported back to the model. Keep exact candidates
+            # long enough to cover that retry without widening normal
+            # cross-message duplicate suppression.
+            if ts <= 0 or now - ts > 120.0:
                 cache.pop(key, None)
         previous = cache.get(signature)
         if isinstance(previous, dict) and self._outbound_duplicate_sources_match(candidate, previous):
             age = max(0.0, now - _safe_float(previous.get("ts"), 0))
             state = _single_line(previous.get("state"), 20) or "pending"
-            window = 5.0 if state == "sent" else 2.0
+            message_id = _single_line(candidate.get("message_id"), 120)
+            previous_message_id = _single_line(previous.get("message_id"), 120)
+            same_inbound_message = bool(
+                message_id
+                and previous_message_id
+                and message_id == previous_message_id
+            )
+            window = 120.0 if same_inbound_message else (5.0 if state == "sent" else 2.0)
             if age <= window:
                 return state
         cache[signature] = {
