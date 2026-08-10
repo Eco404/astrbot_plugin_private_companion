@@ -768,14 +768,22 @@ class MemoryCompanionAdapterMixin:
     def _memory_companion_bind_namespace_epoch(
         self,
         bridge: Any,
-        namespace: Any,
         *,
         operation_id: str,
+        migration_epoch: str,
+        policy_version: str,
         expected_previous_epoch: str = "",
     ) -> dict[str, Any]:
-        payload, error = self._memory_companion_namespace_payload(namespace)
-        if error:
-            return {"ok": False, "state": "rejected", "code": error}
+        operation = str(operation_id or "").strip()
+        epoch = str(migration_epoch or "").strip()
+        policy = str(policy_version or "").strip()
+        previous = str(expected_previous_epoch or "").strip()
+        token_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+        if (
+            not token_pattern.fullmatch(operation) or not token_pattern.fullmatch(epoch)
+            or not token_pattern.fullmatch(policy) or (previous and not token_pattern.fullmatch(previous))
+        ):
+            return {"ok": False, "state": "rejected", "code": "namespace_epoch_binding_invalid"}
         capability = self._memory_companion_emotion_producer_capability(bridge)
         if capability is None:
             return {"ok": False, "state": "forbidden", "code": "producer_capability_unavailable"}
@@ -788,10 +796,10 @@ class MemoryCompanionAdapterMixin:
         try:
             result = binder(
                 capability,
-                operation_id=operation_id,
-                expected_previous_epoch=expected_previous_epoch,
-                migration_epoch=payload["migration_epoch"],
-                policy_version=payload["policy_version"],
+                operation_id=operation,
+                expected_previous_epoch=previous,
+                migration_epoch=epoch,
+                policy_version=policy,
             )
         except Exception:
             return {"ok": False, "state": "degraded", "code": "namespace_epoch_bind_exception"}

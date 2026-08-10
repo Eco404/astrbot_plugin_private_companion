@@ -125,16 +125,15 @@ class NamespaceCapabilityTests(unittest.TestCase):
         self.assertEqual("namespace_capability_unavailable", unavailable["code"])
         self.assertFalse(any(call[0] == "upsert" for call in bridge.calls))
 
-        invalid = _context().to_dict()
-        invalid.pop("group_id")
         rejected = host._memory_companion_bind_namespace_epoch(
-            bridge, invalid, operation_id="bind-invalid"
+            bridge, operation_id="bad operation", migration_epoch="", policy_version="req041-v1"
         )
-        self.assertEqual("namespace_context_fields_invalid", rejected["code"])
+        self.assertEqual("namespace_epoch_binding_invalid", rejected["code"])
         self.assertFalse(any(call[0] == "bind" for call in bridge.calls))
 
         bound = host._memory_companion_bind_namespace_epoch(
-            bridge, _context(), operation_id="bind-1"
+            bridge, operation_id="bind-1", migration_epoch="req041-20260810-001",
+            policy_version="req041-v1",
         )
         self.assertEqual("bound", bound["code"])
         bind_call = next(call for call in bridge.calls if call[0] == "bind")

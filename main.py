@@ -4033,6 +4033,137 @@ class PrivateCompanionPlugin(
         except Exception as exc:
             logger.warning("[PrivateCompanion] 修复热更新残留回调绑定失败: %s", _single_line(exc, 160))
 
+    def _req041_migration_source_files(self) -> list[Path]:
+        candidates: list[Path] = []
+        if str(getattr(self, "storage_backend", "json") or "json").lower() == "sqlite":
+            candidates.append(Path(str(getattr(self, "storage_sqlite_effective_path", "") or "")))
+        else:
+            candidates.append(Path(str(getattr(self, "data_file", "") or "")))
+        profiles = Path(str(getattr(self, "_persona_profiles_dir", "") or ""))
+        if profiles.is_dir():
+            candidates.extend(sorted(profiles.glob("*.json")))
+        result: list[Path] = []
+        for candidate in candidates:
+            try:
+                if candidate and candidate.is_file() and not candidate.is_symlink():
+                    result.append(candidate)
+            except OSError:
+                continue
+        return result
+
+    def _req041_compatibility_snapshot(self) -> dict[str, Any]:
+        return {
+            "auto_profile_creation": bool(getattr(self, "enable_auto_user_profile_creation", False)),
+            "private_access_policy": {
+                "passive_private_default": "legacy_effective",
+                "configured_targets_default": bool(getattr(self, "default_enable_configured_targets", False)),
+            },
+            "proactive_policy": {
+                "proactive_only": bool(getattr(self, "enable_proactive_only_mode", False)),
+                "intensity": _single_line(getattr(self, "proactive_intensity_preset", "off"), 40) or "off",
+            },
+            "tool_policy": {
+                "photo": bool(getattr(self, "enable_photo_text_action", False)),
+                "screen": bool(getattr(self, "enable_screen_glance_action", False)),
+                "poke": bool(getattr(self, "enable_poke_action", False)),
+                "voice": bool(getattr(self, "enable_voice_action", False)),
+            },
+            "content_policy": {
+                "relationship_tiers": bool(getattr(self, "enable_relationship_content_tiers", False)),
+            },
+            "owner_policy": {
+                "configured_target": _single_line(getattr(self, "target_user_id", ""), 80) != "",
+                "normal_cap_exempt": True,
+                "exclusive_mode_frozen": True,
+            },
+            "relationship_policy": {
+                "enabled": bool(getattr(self, "enable_custom_relationship_stage_policy", False)),
+                "positive_cap": _single_line(
+                    getattr(self, "relationship_positive_stage_cap_key", "deeply_bonded"), 40
+                ) or "deeply_bonded",
+                "group_ordinary_delta": 0,
+            },
+        }
+
+    async def _req041_initialize_automatic_migration(self) -> None:
+        coordinator = getattr(self, "req041_migration_coordinator", None)
+        outbox = getattr(self, "req041_migration_outbox", None)
+        if coordinator is None or outbox is None:
+            self.req041_migration_status = {
+                "required": False, "state": "degraded", "code": "migration_runtime_unavailable"
+            }
+            return
+        sources = self._req041_migration_source_files()
+        if not sources and not coordinator.status():
+            self.req041_migration_status = {
+                "required": False, "state": "not_required", "code": "new_install_no_legacy_source"
+            }
+            return
+        presence_getter = getattr(self, "_memory_companion_presence", None)
+        try:
+            presence = presence_getter() if callable(presence_getter) else {}
+        except Exception:
+            presence = {}
+        memory_version = _single_line((presence or {}).get("version"), 32) or "not-detected"
+        companion_version = _single_line((getattr(self, "plugin_identity", {}) or {}).get("version"), 32) or "unknown"
+        try:
+            async with self._data_lock:
+                status = await asyncio.to_thread(
+                    coordinator.start_or_resume,
+                    source_files=sources,
+                    policy_version="req041-v1",
+                    source_schema_version="legacy-effective",
+                    target_schema_version="req041-v1",
+                    companion_version=companion_version,
+                    memory_version=memory_version,
+                )
+            if status.get("state") == "paused":
+                self.req041_migration_status = {
+                    "required": True, "state": "paused", "code": status.get("error_code") or "migration_paused",
+                    "phase": status.get("phase", "S0"),
+                }
+                return
+            if status.get("phase") == "S1":
+                await asyncio.to_thread(coordinator.capture_compatibility, self._req041_compatibility_snapshot())
+                status = coordinator.status()
+            epoch = str(status.get("migration_epoch") or "")
+            policy = str(status.get("policy_version") or "")
+            await asyncio.to_thread(outbox.begin_epoch, epoch, policy_version=policy)
+            if status.get("phase") == "S2":
+                status = await asyncio.to_thread(coordinator.transition, "S3", checkpoint="durable_outbox_active")
+
+            remote = {"ok": False, "state": "degraded", "code": "memory_bridge_unavailable"}
+            bridge_getter = getattr(self, "_memory_companion_bridge", None)
+            bridge = bridge_getter() if callable(bridge_getter) else None
+            binder = getattr(self, "_memory_companion_bind_namespace_epoch", None)
+            if bridge is not None and callable(binder):
+                remote = binder(
+                    bridge,
+                    operation_id=f"req041-bind-{epoch}",
+                    migration_epoch=epoch,
+                    policy_version=policy,
+                )
+            self.req041_migration_status = {
+                "required": True,
+                "state": "active" if remote.get("ok") else "degraded",
+                "code": "migration_shadow_active" if remote.get("ok") else str(remote.get("code") or "memory_bind_failed")[:120],
+                "phase": status.get("phase", "S3"),
+                "memory_bound": bool(remote.get("ok")),
+                "checkpoint": status.get("checkpoint", ""),
+            }
+        except Exception as exc:
+            status = coordinator.status()
+            self.req041_migration_status = {
+                "required": bool(status),
+                "state": "paused" if status.get("state") == "paused" else "degraded",
+                "code": _single_line(exc, 120) or "migration_startup_failed",
+                "phase": status.get("phase", "S0") if status else "S0",
+            }
+            logger.warning(
+                "[PrivateCompanion] REQ-041 自动迁移启动失败，继续使用官方 legacy 路径: %s",
+                _single_line(exc, 160),
+            )
+
     async def initialize(self):
         self._repair_private_companion_handler_bindings()
         if getattr(self, "_legacy_enabled_config_disabled", False):
@@ -4080,6 +4211,10 @@ class PrivateCompanionPlugin(
                 needs_startup_save = True
         if needs_startup_save:
             self._schedule_data_save(delay=0.5)
+        self._create_startup_background_task(
+            "req041_automatic_migration",
+            self._req041_initialize_automatic_migration,
+        )
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._scheduler_loop())
             logger.info("[PrivateCompanion] 主动消息循环已启动")

@@ -68,6 +68,14 @@ def _digest(value: Any) -> str:
     return text if re.fullmatch(r"[0-9a-f]{64}", text) else ""
 
 
+def _is_sqlite_file(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            return handle.read(16) == b"SQLite format 3\x00"
+    except OSError:
+        return False
+
+
 def _safe_snapshot(value: Any, depth: int = 0) -> Any:
     if depth > 3:
         raise MigrationCoordinatorError("compatibility_snapshot_invalid")
@@ -271,22 +279,40 @@ class MigrationCoordinator:
         files_root = destination / "files"
         files_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         for source in sources:
-            before = _sha256(source)
             relative = source.relative_to(self.data_dir)
             target = files_root / relative
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             temporary = target.with_name(f".{target.name}.tmp")
-            shutil.copy2(source, temporary)
+            temporary.unlink(missing_ok=True)
+            source_kind = "sqlite" if _is_sqlite_file(source) else "file"
+            if source_kind == "sqlite":
+                source_connection = sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=15.0)
+                target_connection = sqlite3.connect(str(temporary), timeout=15.0)
+                try:
+                    source_connection.backup(target_connection)
+                    check = target_connection.execute("PRAGMA quick_check").fetchone()
+                    if check is None or str(check[0]).lower() != "ok":
+                        raise MigrationPreflightError("migration_sqlite_backup_invalid")
+                finally:
+                    target_connection.close()
+                    source_connection.close()
+                copied = _sha256(temporary)
+            else:
+                before = _sha256(source)
+                shutil.copy2(source, temporary)
+                copied = _sha256(temporary)
+                after = _sha256(source)
+                if before != copied or before != after:
+                    temporary.unlink(missing_ok=True)
+                    self.pause("migration_source_changed")
+                    raise MigrationPreflightError("migration_source_changed")
             os.chmod(temporary, 0o600)
-            copied = _sha256(temporary)
-            after = _sha256(source)
-            if before != copied or before != after:
-                temporary.unlink(missing_ok=True)
-                self.pause("migration_source_changed")
-                raise MigrationPreflightError("migration_source_changed")
             os.replace(temporary, target)
             os.chmod(target, 0o400)
-            entries.append({"name": relative.as_posix(), "bytes": target.stat().st_size, "sha256": copied})
+            entries.append({
+                "name": relative.as_posix(), "kind": source_kind,
+                "bytes": target.stat().st_size, "sha256": copied,
+            })
         manifest = {
             "schema": "req041.backup_manifest.v1", "migration_epoch": epoch,
             "source_schema_version": versions[0], "target_schema_version": versions[1],

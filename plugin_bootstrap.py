@@ -38,6 +38,8 @@ from .proactive_chat_runtime_bridge import ProactiveChatRuntimeBridge
 from .relationship_ledger import normalize_relationship_positive_stage_cap_key
 from .relationship_policy import normalize_relationship_stage_policy
 from .runtime_compat import probe_runtime_capabilities
+from .migration_coordinator import MigrationCoordinator
+from .migration_outbox import MigrationOutbox
 from .segmented_message import normalize_component_strategy
 from .unified_person_registry import UnifiedPersonRegistry
 
@@ -1877,3 +1879,12 @@ def initialize_plugin_post_runtime_state(self: Any, config: Any) -> None:
         ),
     )
     self.unified_person_registry = UnifiedPersonRegistry(self.data)
+    self.req041_migration_coordinator = MigrationCoordinator(self.data_dir)
+    self.req041_migration_outbox = MigrationOutbox(
+        Path(self.data_dir) / "req041_migration_outbox.db"
+    )
+    self.req041_migration_status = {
+        "required": False,
+        "state": "uninitialized",
+        "code": "migration_not_started",
+    }

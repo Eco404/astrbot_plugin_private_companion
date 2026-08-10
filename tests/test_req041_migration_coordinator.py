@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -85,6 +86,27 @@ class MigrationCoordinatorTests(unittest.TestCase):
         after = self._start(reopened)
         self.assertEqual(before["migration_epoch"], after["migration_epoch"])
         self.assertEqual("S1", after["phase"])
+
+    def test_sqlite_source_uses_online_backup_and_contains_wal_commits(self) -> None:
+        sqlite_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(sqlite_dir, ignore_errors=True))
+        database = sqlite_dir / "companions.db"
+        connection = sqlite3.connect(database)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE users(id TEXT PRIMARY KEY, score INTEGER)")
+        connection.execute("INSERT INTO users VALUES('u1', 7)")
+        connection.commit()
+        coordinator = MigrationCoordinator(sqlite_dir)
+        status = self._start(coordinator, source_files=[database])
+        backup = sqlite_dir / status["backup_manifest"]
+        copied = backup.parent / "files" / "companions.db"
+        copied_connection = sqlite3.connect(copied)
+        try:
+            self.assertEqual(("u1", 7), copied_connection.execute("SELECT * FROM users").fetchone())
+            self.assertEqual("ok", copied_connection.execute("PRAGMA quick_check").fetchone()[0])
+        finally:
+            copied_connection.close()
+            connection.close()
 
     def test_preflight_rejects_symlink_escape_and_insufficient_space(self) -> None:
         outside = self.data_dir.parent / f"{self.data_dir.name}-outside.json"
