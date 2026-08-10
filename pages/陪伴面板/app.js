@@ -1289,7 +1289,7 @@ const featureMeta = {
   enable_tts_enhancement: ["TTS强化", "支持中文聊天文本搭配外语语音块，统一处理生成路径、<tts> 标签规范化、语种控制与朗读文本清洗；生效范围可配置为普通回复，或普通回复加全部主动消息。"],
   enable_proactive_quote_trigger_message: ["引用触发消息", "群聊回复、群主动插话和可追溯的私聊主动消息会引用触发消息；普通群回复可只在首次或对象变化时引用。"],
   enable_reply_interception_forward: ["回复拦截转发", "把插件阻断、回复改写和主动消息拦截情况发送到指定私聊或群聊。"],
-  enable_creative_writing: ["私下创作", "闲暇时可选地因生活小事、日记碎片或梦境灵感写一点文本作品。该功能仍未经充分打磨，实际呈现效果可能不尽人意。"],
+  enable_creative_writing: ["私下创作", "闲暇时可选地因生活小事、日记碎片或梦境灵感写一点文本作品。该功能仍未经充分打磨，实际呈现效果可能不尽人意；Token 缓存命中率通常较低，建议结合预算合理规划模型。"],
   enable_creative_work_read_guard: ["创作原文读取保护", "询问书柜已有作品时先读取真实原文；关闭后不再强制调用工具或替换模型回复。"],
   creative_hidden_mode: ["低调创作模式", "默认不汇报创作，只在节点或用户询问时自然提起。"],
   enable_reaction_expression_experiment: ["表情表达实验", "主模型一次生成完整文字和隐藏表情意图，插件再按配置的位置发送合适图片；没有足够合适的候选时保持纯文字。"],
@@ -3675,7 +3675,7 @@ const featureSettingSections = {
     },
     {
       title: "创作方式",
-      note: "控制私下创作触发、是否低调提起和单次推进规模。该功能仍未经充分打磨，实际呈现效果可能不尽人意。",
+      note: "控制私下创作触发、是否低调提起和单次推进规模。该功能仍未经充分打磨，实际呈现效果可能不尽人意；立项、大纲、续写和审校等动态调用的 Token 缓存命中率通常较低，建议结合预算合理规划模型。",
       keys: ["creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects", "creative_direction_prompt"],
     },
   ],
