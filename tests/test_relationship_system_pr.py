@@ -123,7 +123,9 @@ APPLY_RELATIONSHIP_EVENT = _class_method(
     {
         "Any": Any,
         "apply_relationship_event": apply_relationship_event,
+        "logger": _Logger(),
         "migrate_legacy_relationship_score": migrate_legacy_relationship_score,
+        "_single_line": _single_line,
     },
 )
 

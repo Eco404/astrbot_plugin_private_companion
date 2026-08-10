@@ -421,6 +421,111 @@ class UnifiedPersonRegistry:
             "decision": decision.code,
         }
 
+    def formal_namespace_for_person(
+        self,
+        person_id: str,
+        *,
+        kind: str = "private",
+        group_id: str = "",
+        policy_version: str,
+        migration_epoch: str,
+        purpose: str = "relationship_write",
+    ) -> dict[str, Any]:
+        """Resolve one person's primary exact link without guessing a subject."""
+        try:
+            clean_person = _text(person_id, "person_id")
+        except ValueError:
+            return {"ok": False, "code": "identity_invalid", "context": None, "decision": "identity_invalid"}
+        with _LOCK:
+            root = _root(self._store)
+            profile = root["profiles"].get(clean_person)
+            if not isinstance(profile, dict) or profile.get("profile_status", "active") != "active":
+                return {"ok": False, "code": "profile_status_denied", "context": None, "decision": "profile_status_denied"}
+            identity_key = str(profile.get("resolved_identity_key") or "")
+            identity_keys = profile.get("identity_keys")
+            if (
+                not isinstance(identity_keys, list)
+                or any(not isinstance(item, str) for item in identity_keys)
+                or len(set(identity_keys)) != len(identity_keys)
+                or identity_key not in identity_keys
+            ):
+                return {"ok": False, "code": "identity_exact_link_invalid", "context": None, "decision": "identity_exact_link_invalid"}
+            active_keys = {
+                str(key)
+                for key, candidate in root["identity_links"].items()
+                if isinstance(candidate, dict)
+                and candidate.get("status") == "active"
+                and candidate.get("person_id") == clean_person
+            }
+            if active_keys != set(identity_keys):
+                return {"ok": False, "code": "identity_exact_link_invalid", "context": None, "decision": "identity_exact_link_invalid"}
+            for candidate_key in identity_keys:
+                candidate = root["identity_links"].get(candidate_key)
+                try:
+                    if not isinstance(candidate, dict) or candidate.get("identity_key") != candidate_key:
+                        raise ValueError("identity_link_invalid")
+                    normalized = _identity(candidate.get("identity"))
+                    if build_identity_key(normalized) != candidate_key:
+                        raise ValueError("identity_key_mismatch")
+                except (TypeError, ValueError):
+                    return {"ok": False, "code": "identity_exact_link_invalid", "context": None, "decision": "identity_exact_link_invalid"}
+            link = root["identity_links"][identity_key]
+            assurance = "explicit_linked" if link.get("identity_assurance") == "explicit_linked" else "verified"
+        context = NamespaceContext(
+            kind=kind,
+            identity_id=clean_person,
+            group_id=group_id if kind in {"group_member", "group_shared"} else "",
+            assurance=assurance,
+            profile_status="active",
+            policy_version=policy_version,
+            migration_epoch=migration_epoch,
+        )
+        decision = AssurancePolicy.authorize(context, purpose)
+        return {
+            "ok": decision.allowed,
+            "code": "namespace_resolved" if decision.allowed else decision.code,
+            "identity_key": identity_key,
+            "person_id": clean_person,
+            "context": context.to_dict(),
+            "decision": decision.code,
+        }
+
+    def matches_person_subject(self, person_id: str, subject_id: str) -> bool:
+        """Check an already-bound legacy row against exact active link subjects."""
+        try:
+            clean_person = _text(person_id, "person_id")
+            subject = _text(subject_id, "subject_id", 160)
+        except ValueError:
+            return False
+        with _LOCK:
+            root = _root(self._store)
+            for candidate in root["identity_links"].values():
+                if (
+                    not isinstance(candidate, dict)
+                    or candidate.get("status") != "active"
+                    or candidate.get("person_id") != clean_person
+                ):
+                    continue
+                try:
+                    identity = _identity(candidate.get("identity"))
+                    if build_identity_key(identity) != candidate.get("identity_key"):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                platform_subject = identity["platform_subject_id"]
+                if subject == platform_subject:
+                    return True
+                parts = subject.rsplit(":", 2)
+                if (
+                    len(parts) == 3
+                    and len(parts[2]) == 16
+                    and all(char in "0123456789abcdef" for char in parts[2].lower())
+                    and parts[0].lower() == identity["subject_namespace"].split(":", 1)[0]
+                    and parts[1] == platform_subject
+                ):
+                    return True
+        return False
+
     def create_or_link(
         self, identity: dict[str, Any], profile: dict[str, Any] | None = None,
         operation_id: str = "", actor_id: str = "companion", **_: Any,

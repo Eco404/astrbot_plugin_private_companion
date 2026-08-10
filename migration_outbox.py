@@ -218,9 +218,11 @@ class MigrationOutbox:
         if state not in MIGRATION_STATES:
             raise OutboxError("migration_state_invalid")
         with self._transaction() as conn:
-            row = conn.execute("SELECT checkpoint FROM migration_epochs WHERE migration_epoch=?", (epoch,)).fetchone()
+            row = conn.execute("SELECT state,checkpoint FROM migration_epochs WHERE migration_epoch=?", (epoch,)).fetchone()
             if row is None:
                 raise StaleMigrationEpoch("migration_epoch_missing")
+            if row["state"] == "verified" and state != "verified":
+                raise StaleMigrationEpoch("migration_epoch_closed")
             value = row["checkpoint"] if checkpoint is None else _token(checkpoint, limit=256)
             conn.execute(
                 "UPDATE migration_epochs SET state=?,checkpoint=?,updated_at=? WHERE migration_epoch=?",
@@ -289,6 +291,180 @@ class MigrationOutbox:
                 ),
             )
         return "enqueued"
+
+    def enqueue_next(
+        self,
+        *,
+        stream_key: str,
+        event_id: str,
+        namespace: NamespaceContext,
+        migration_epoch: str,
+        policy_version: str,
+        payload: dict[str, Any],
+        expected_source_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Atomically allocate the next stream revision and persist its event."""
+        stream = _token(stream_key)
+        event = _token(event_id)
+        epoch = _token(migration_epoch)
+        policy = _token(policy_version, limit=64)
+        namespace_payload = namespace.to_dict() if isinstance(namespace, NamespaceContext) else {}
+        if not stream or not event or not epoch or not policy:
+            raise OutboxError("outbox_envelope_invalid")
+        if expected_source_revision is not None and (
+            isinstance(expected_source_revision, bool)
+            or not isinstance(expected_source_revision, int)
+            or expected_source_revision < 1
+        ):
+            raise OutboxError("outbox_expected_revision_invalid")
+        if validate_namespace_context(namespace_payload):
+            raise OutboxError("outbox_namespace_invalid")
+        if namespace.migration_epoch != epoch or namespace.policy_version != policy:
+            raise StaleMigrationEpoch("outbox_namespace_epoch_mismatch")
+        encoded, digest = _payload(payload)
+        namespace_json = _canonical(namespace_payload)
+        now = float(self._clock())
+        with self._transaction() as conn:
+            self._require_epoch(conn, epoch, policy)
+            existing = conn.execute(
+                """SELECT source_revision,namespace_json,policy_version,payload_hash
+                   FROM outbox WHERE event_id=? AND migration_epoch=?""",
+                (event, epoch),
+            ).fetchone()
+            if existing is not None:
+                same = (
+                    existing["namespace_json"] == namespace_json
+                    and existing["policy_version"] == policy
+                    and existing["payload_hash"] == digest
+                )
+                if not same:
+                    raise OutboxConflict("outbox_event_conflict")
+                if expected_source_revision is not None and int(existing["source_revision"]) != expected_source_revision:
+                    raise RevisionGap(
+                        f"revision_gap:{existing['source_revision']}:{expected_source_revision}:{existing['source_revision']}"
+                    )
+                return {"status": "duplicate", "source_revision": int(existing["source_revision"])}
+            revision_row = conn.execute(
+                "SELECT revision FROM revisions WHERE stream_key=? AND migration_epoch=?",
+                (stream, epoch),
+            ).fetchone()
+            current = int(revision_row["revision"]) if revision_row is not None else 0
+            next_revision = current + 1
+            if expected_source_revision is not None and expected_source_revision != next_revision:
+                raise RevisionGap(f"revision_gap:{current}:{expected_source_revision}:{next_revision}")
+            conn.execute(
+                """INSERT INTO outbox(
+                    event_id,migration_epoch,source_revision,namespace_json,namespace_scope,policy_version,
+                    payload_json,payload_hash,state,retry_count,error_code,target_revision,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    event, epoch, next_revision, namespace_json, namespace.cache_scope(), policy,
+                    encoded, digest, "pending", 0, "", 0, now, now,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO revisions(stream_key,migration_epoch,revision,updated_at) VALUES(?,?,?,?)
+                   ON CONFLICT(stream_key,migration_epoch) DO UPDATE SET
+                       revision=excluded.revision,updated_at=excluded.updated_at""",
+                (stream, epoch, next_revision, now),
+            )
+        return {"status": "enqueued", "source_revision": next_revision}
+
+    def stream_revision(self, stream_key: str, migration_epoch: str) -> int:
+        stream, epoch = _token(stream_key), _token(migration_epoch)
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT revision FROM revisions WHERE stream_key=? AND migration_epoch=?",
+                (stream, epoch),
+            ).fetchone()
+        return int(row["revision"]) if row is not None else 0
+
+    def enqueue_next_with_tombstone(
+        self,
+        *,
+        stream_key: str,
+        event_id: str,
+        namespace: NamespaceContext,
+        migration_epoch: str,
+        policy_version: str,
+        payload: dict[str, Any],
+        tombstone_key: str,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        """Atomically append a stream event and advance its latest tombstone."""
+        stream, event = _token(stream_key), _token(event_id)
+        epoch, policy = _token(migration_epoch), _token(policy_version, limit=64)
+        object_key, reason = _token(tombstone_key), _token(reason_code, limit=80)
+        namespace_payload = namespace.to_dict() if isinstance(namespace, NamespaceContext) else {}
+        if not stream or not event or not epoch or not policy or not object_key or not reason:
+            raise OutboxError("outbox_tombstone_envelope_invalid")
+        if validate_namespace_context(namespace_payload):
+            raise OutboxError("outbox_namespace_invalid")
+        if namespace.migration_epoch != epoch or namespace.policy_version != policy:
+            raise StaleMigrationEpoch("outbox_namespace_epoch_mismatch")
+        encoded, digest = _payload(payload)
+        namespace_json = _canonical(namespace_payload)
+        now = float(self._clock())
+        with self._transaction() as conn:
+            self._require_epoch(conn, epoch, policy)
+            existing = conn.execute(
+                """SELECT source_revision,namespace_json,policy_version,payload_hash
+                   FROM outbox WHERE event_id=? AND migration_epoch=?""",
+                (event, epoch),
+            ).fetchone()
+            if existing is not None:
+                same = (
+                    existing["namespace_json"] == namespace_json
+                    and existing["policy_version"] == policy
+                    and existing["payload_hash"] == digest
+                )
+                tombstone = conn.execute(
+                    "SELECT revision,reason_code FROM tombstones WHERE object_key=? AND migration_epoch=?",
+                    (object_key, epoch),
+                ).fetchone()
+                if (
+                    not same
+                    or tombstone is None
+                    or int(tombstone["revision"]) < int(existing["source_revision"])
+                    or tombstone["reason_code"] != reason
+                ):
+                    raise OutboxConflict("outbox_tombstone_event_conflict")
+                return {"status": "duplicate", "source_revision": int(existing["source_revision"])}
+            revision_row = conn.execute(
+                "SELECT revision FROM revisions WHERE stream_key=? AND migration_epoch=?",
+                (stream, epoch),
+            ).fetchone()
+            next_revision = (int(revision_row["revision"]) if revision_row is not None else 0) + 1
+            prior_tombstone = conn.execute(
+                "SELECT revision FROM tombstones WHERE object_key=? AND migration_epoch=?",
+                (object_key, epoch),
+            ).fetchone()
+            if prior_tombstone is not None and int(prior_tombstone["revision"]) >= next_revision:
+                raise OutboxConflict("tombstone_revision_conflict")
+            conn.execute(
+                """INSERT INTO outbox(
+                    event_id,migration_epoch,source_revision,namespace_json,namespace_scope,policy_version,
+                    payload_json,payload_hash,state,retry_count,error_code,target_revision,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    event, epoch, next_revision, namespace_json, namespace.cache_scope(), policy,
+                    encoded, digest, "pending", 0, "", 0, now, now,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO revisions(stream_key,migration_epoch,revision,updated_at) VALUES(?,?,?,?)
+                   ON CONFLICT(stream_key,migration_epoch) DO UPDATE SET
+                       revision=excluded.revision,updated_at=excluded.updated_at""",
+                (stream, epoch, next_revision, now),
+            )
+            conn.execute(
+                """INSERT INTO tombstones(object_key,migration_epoch,revision,reason_code,created_at)
+                   VALUES(?,?,?,?,?)
+                   ON CONFLICT(object_key,migration_epoch) DO UPDATE SET
+                       revision=excluded.revision,reason_code=excluded.reason_code,created_at=excluded.created_at""",
+                (object_key, epoch, next_revision, reason, now),
+            )
+        return {"status": "enqueued", "source_revision": next_revision}
 
     @staticmethod
     def _item(row: sqlite3.Row) -> OutboxItem:
@@ -368,7 +544,14 @@ class MigrationOutbox:
             if row is not None:
                 if row["revision"] == revision and row["reason_code"] == reason:
                     return "duplicate"
-                raise OutboxConflict("tombstone_conflict")
+                if int(row["revision"]) >= revision:
+                    raise OutboxConflict("tombstone_conflict")
+                conn.execute(
+                    """UPDATE tombstones SET revision=?,reason_code=?,created_at=?
+                       WHERE object_key=? AND migration_epoch=?""",
+                    (revision, reason, float(self._clock()), key, epoch),
+                )
+                return "advanced"
             conn.execute(
                 "INSERT INTO tombstones(object_key,migration_epoch,revision,reason_code,created_at) VALUES(?,?,?,?,?)",
                 (key, epoch, revision, reason, float(self._clock())),

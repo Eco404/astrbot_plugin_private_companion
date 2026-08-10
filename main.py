@@ -148,6 +148,7 @@ from .person_context_contract import (
 )
 from .unified_person_registry import UnifiedPersonRegistry
 from .migration_backfill import MigrationBackfill
+from .migration_dual_write import MigrationDualWriteProducer
 from .unified_profile_contract import (
     build_person_ref as req036_build_person_ref,
     build_profile_dto as req036_build_profile_dto,
@@ -3041,12 +3042,92 @@ class PrivateCompanionPlugin(
         profile: dict[str, Any] | None = None,
         operation_id: str = "",
     ) -> dict[str, Any]:
-        return self._active_unified_person_registry().create_or_link(
+        registry = self._active_unified_person_registry()
+        result = registry.create_or_link(
             identity,
             profile=profile,
             operation_id=operation_id,
             actor_id="companion",
         )
+        self._req041_emit_identity_dual_write(
+            result,
+            action="create",
+            operation_id=operation_id,
+            registry=registry,
+        )
+        return result
+
+    def _req041_emit_identity_dual_write(
+        self,
+        result: dict[str, Any],
+        *,
+        action: str,
+        operation_id: str,
+        registry: UnifiedPersonRegistry | None = None,
+    ) -> dict[str, Any]:
+        producer = getattr(self, "req041_dual_write_producer", None)
+        if producer is None:
+            return {"status": "skipped", "code": "dual_write_not_active"}
+        active_registry = registry if isinstance(registry, UnifiedPersonRegistry) else self._active_unified_person_registry()
+        try:
+            return producer.emit_identity_change(
+                registry=active_registry,
+                result=result,
+                action=action,
+                operation_id=operation_id,
+            )
+        except Exception as exc:
+            producer.fail_closed("identity_dual_write_failed")
+            migration_status = getattr(self, "req041_migration_status", None)
+            if isinstance(migration_status, dict):
+                migration_status.update({
+                    "state": "paused",
+                    "code": "identity_dual_write_failed",
+                    "dual_write": "failed",
+                })
+            logger.warning(
+                "[PrivateCompanion] REQ-041 身份双写失败，已暂停新读切换并保留 legacy 写入: %s",
+                _single_line(exc, 160),
+            )
+            return {"status": "failed", "code": "identity_dual_write_failed"}
+
+    def _req041_emit_relationship_snapshot(
+        self,
+        user: dict[str, Any],
+        *,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        producer = getattr(self, "req041_dual_write_producer", None)
+        if producer is None:
+            return {"status": "skipped", "code": "dual_write_not_active"}
+        try:
+            try:
+                source_revision = max(0, int(user.get("req041_relationship_source_revision") or 0)) + 1
+            except (TypeError, ValueError, OverflowError):
+                source_revision = 1
+            user["req041_relationship_source_revision"] = source_revision
+            scope = self._unified_persona_domain()
+            return producer.emit_relationship_snapshot(
+                registry=self._active_unified_person_registry(),
+                user=user,
+                reason_code=reason_code,
+                source_scope=scope or "default",
+                source_revision=source_revision,
+            )
+        except Exception as exc:
+            producer.fail_closed("relationship_snapshot_dual_write_failed")
+            migration_status = getattr(self, "req041_migration_status", None)
+            if isinstance(migration_status, dict):
+                migration_status.update({
+                    "state": "paused",
+                    "code": "relationship_snapshot_dual_write_failed",
+                    "dual_write": "failed",
+                })
+            logger.warning(
+                "[PrivateCompanion] REQ-041 关系快照双写失败，已暂停新读切换并保留 legacy 写入: %s",
+                _single_line(exc, 160),
+            )
+            return {"status": "failed", "code": "relationship_snapshot_dual_write_failed"}
 
     def get_unified_person_projection(self, person_id: str) -> dict[str, Any] | None:
         return self._active_unified_person_registry().read_projection(person_id)
@@ -4118,18 +4199,24 @@ class PrivateCompanionPlugin(
                     companion_version=companion_version,
                     memory_version=memory_version,
                 )
-            if status.get("state") == "paused":
-                self.req041_migration_status = {
-                    "required": True, "state": "paused", "code": status.get("error_code") or "migration_paused",
-                    "phase": status.get("phase", "S0"),
-                }
-                return
-            if status.get("phase") == "S1":
+            if status.get("phase") == "S1" and status.get("state") != "paused":
                 await asyncio.to_thread(coordinator.capture_compatibility, self._req041_compatibility_snapshot())
                 status = coordinator.status()
             epoch = str(status.get("migration_epoch") or "")
             policy = str(status.get("policy_version") or "")
             await asyncio.to_thread(outbox.begin_epoch, epoch, policy_version=policy)
+            self.req041_dual_write_producer = MigrationDualWriteProducer(
+                outbox=outbox,
+                coordinator=coordinator,
+                migration_epoch=epoch,
+                policy_version=policy,
+            )
+            if status.get("state") == "paused":
+                self.req041_migration_status = {
+                    "required": True, "state": "paused", "code": status.get("error_code") or "migration_paused",
+                    "phase": status.get("phase", "S0"), "dual_write": "capturing_while_paused",
+                }
+                return
             if status.get("phase") == "S2":
                 status = await asyncio.to_thread(coordinator.transition, "S3", checkpoint="durable_outbox_active")
 
@@ -4210,6 +4297,7 @@ class PrivateCompanionPlugin(
                 "memory_bound": bool(remote.get("ok")),
                 "checkpoint": status.get("checkpoint", ""),
                 "s4": backfill_result,
+                "dual_write": "capturing",
             }
         except Exception as exc:
             status = coordinator.status()

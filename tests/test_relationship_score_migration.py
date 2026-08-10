@@ -214,8 +214,8 @@ def test_startup_migrates_every_record_even_without_alias_config() -> None:
 def test_alias_records_are_migrated_before_scores_are_added() -> None:
     host = _StoreHost(
         {
-            "canonical": {"user_id": "canonical", "relationship_score": 3},
-            "alias": {"user_id": "alias", "relationship_score": 16},
+            "canonical": {"user_id": "canonical", "relationship_score": 3, "req041_relationship_source_revision": 5},
+            "alias": {"user_id": "alias", "relationship_score": 16, "req041_relationship_source_revision": 3},
         },
         {"alias": "canonical"},
     )
@@ -226,6 +226,7 @@ def test_alias_records_are_migrated_before_scores_are_added() -> None:
     merged = host.data["users"]["canonical"]
     assert merged["relationship_score"] == 800
     assert merged["relationship_score_schema_version"] == RELATIONSHIP_SCORE_SCHEMA_VERSION
+    assert merged["req041_relationship_source_revision"] == 5
     assert {item["record_id"] for item in merged["relationship_score_migration_history"]} == {
         "alias",
         "canonical",

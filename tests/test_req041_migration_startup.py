@@ -13,6 +13,7 @@ from typing import Any
 
 from migration_coordinator import MigrationCoordinator
 from migration_backfill import MigrationBackfill
+from migration_dual_write import MigrationDualWriteProducer
 from migration_outbox import MigrationOutbox
 from unified_person_registry import UnifiedPersonRegistry
 
@@ -35,6 +36,7 @@ def _load_methods(*names: str) -> dict[str, Any]:
         "deepcopy": deepcopy,
         "hashlib": hashlib,
         "MigrationBackfill": MigrationBackfill,
+        "MigrationDualWriteProducer": MigrationDualWriteProducer,
         "_single_line": lambda value, limit=240: " ".join(str(value or "").split())[:limit],
         "logger": types.SimpleNamespace(warning=lambda *_args, **_kwargs: None),
     }
@@ -136,6 +138,16 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         second = host.req041_migration_coordinator.status()
         self.assertEqual(first["migration_epoch"], second["migration_epoch"])
         self.assertEqual("S4", second["phase"])
+
+    async def test_paused_restart_keeps_durable_dual_write_capture_available(self) -> None:
+        first_host = self._host()
+        await first_host._req041_initialize_automatic_migration()
+        first_host.req041_migration_coordinator.pause("test_pause")
+        restarted = self._host()
+        await restarted._req041_initialize_automatic_migration()
+        self.assertEqual("paused", restarted.req041_migration_status["state"])
+        self.assertEqual("capturing_while_paused", restarted.req041_migration_status["dual_write"])
+        self.assertIsInstance(restarted.req041_dual_write_producer, MigrationDualWriteProducer)
 
     async def test_startup_backfills_only_explicitly_linked_legacy_user(self) -> None:
         host = self._host()

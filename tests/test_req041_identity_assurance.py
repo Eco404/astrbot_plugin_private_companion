@@ -73,6 +73,42 @@ class IdentityAssuranceNamespaceTests(unittest.TestCase):
         self.assertEqual("pending", unresolved["context"]["kind"])
         self.assertNotEqual(created["person_id"], unresolved["person_id"])
 
+    def test_formal_namespace_for_person_revalidates_primary_exact_link(self) -> None:
+        created = self.registry.create_or_link(_identity("10001"), operation_id="create-1")
+        resolved = self.registry.formal_namespace_for_person(
+            created["person_id"],
+            policy_version="req041-v1",
+            migration_epoch="shadow-20260810",
+        )
+        self.assertTrue(resolved["ok"])
+        self.assertEqual("verified", resolved["context"]["assurance"])
+        root = self.store["unified_person"]
+        root["identity_links"][created["identity_key"]]["identity"]["platform_subject_id"] = "tampered"
+        rejected = self.registry.formal_namespace_for_person(
+            created["person_id"],
+            policy_version="req041-v1",
+            migration_epoch="shadow-20260810",
+        )
+        self.assertFalse(rejected["ok"])
+        self.assertEqual("identity_exact_link_invalid", rejected["code"])
+
+    def test_formal_person_rejects_unlisted_or_corrupt_secondary_link(self) -> None:
+        created = self.registry.create_or_link(_identity("10001"), operation_id="create-1")
+        self.store["unified_person"]["profiles"][created["person_id"]]["identity_keys"].append("orphan-key")
+        result = self.registry.formal_namespace_for_person(
+            created["person_id"],
+            policy_version="req041-v1",
+            migration_epoch="shadow-20260810",
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual("identity_exact_link_invalid", result["code"])
+
+    def test_person_subject_match_accepts_exact_and_scoped_key_only(self) -> None:
+        created = self.registry.create_or_link(_identity("10001"), operation_id="create-1")
+        self.assertTrue(self.registry.matches_person_subject(created["person_id"], "10001"))
+        self.assertTrue(self.registry.matches_person_subject(created["person_id"], "onebot:10001:0123456789abcdef"))
+        self.assertFalse(self.registry.matches_person_subject(created["person_id"], "other-user"))
+
 
 if __name__ == "__main__":
     unittest.main()

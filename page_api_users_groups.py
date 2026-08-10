@@ -144,13 +144,22 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             return self._error("person_id、identity 和 operation_id 均为必填项")
         try:
             async with self.plugin._data_lock:
-                result = self._page_unified_person_registry().link_identity(
+                registry = self._page_unified_person_registry()
+                result = registry.link_identity(
                     person_id,
                     identity,
                     operation_id=operation_id,
                     actor_id="page_administrator",
                 )
                 if result.get("changed"):
+                    emitter = getattr(self.plugin, "_req041_emit_identity_dual_write", None)
+                    if callable(emitter):
+                        emitter(
+                            result,
+                            action="link",
+                            operation_id=operation_id,
+                            registry=registry,
+                        )
                     self.plugin._schedule_data_save()
             if not result.get("ok"):
                 return self._error(str(result.get("code") or "统一身份链接失败"))
@@ -173,7 +182,8 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             return self._error("person_id、identity 和 operation_id 均为必填项")
         try:
             async with self.plugin._data_lock:
-                result = self._page_unified_person_registry().unlink_identity(
+                registry = self._page_unified_person_registry()
+                result = registry.unlink_identity(
                     person_id,
                     identity,
                     operation_id=operation_id,
@@ -181,6 +191,14 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     dry_run=dry_run,
                 )
                 if result.get("changed"):
+                    emitter = getattr(self.plugin, "_req041_emit_identity_dual_write", None)
+                    if callable(emitter):
+                        emitter(
+                            result,
+                            action="unlink",
+                            operation_id=operation_id,
+                            registry=registry,
+                        )
                     self.plugin._schedule_data_save()
             if not result.get("ok") and result.get("code") != "split_manual_review_required":
                 return self._error(str(result.get("code") or "统一身份解绑失败"))
@@ -484,6 +502,16 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
                     if callable(voice_refresher):
                         voice_refresher()
+                if any(
+                    key in payload
+                    for key in ("relationship_role", "relationship_mode", "relationship_score", "companion_intimacy")
+                ):
+                    snapshot_emitter = getattr(self.plugin, "_req041_emit_relationship_snapshot", None)
+                    if callable(snapshot_emitter):
+                        snapshot_emitter(
+                            user,
+                            reason_code="administrator_relationship_update",
+                        )
                 self.plugin._save_data_sync()
                 snapshot = deepcopy(user)
             result = self._user_summary(user_id, snapshot)

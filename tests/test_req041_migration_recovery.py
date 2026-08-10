@@ -101,13 +101,90 @@ class MigrationOutboxTests(unittest.TestCase):
             self.outbox.advance_revision("identity:person-a", EPOCH, expected=2, target=3)
         self.assertEqual("advanced", self.outbox.advance_revision("identity:person-a", EPOCH, expected=1, target=2))
 
+    def test_enqueue_next_allocates_revision_and_event_in_one_transaction(self) -> None:
+        first = self.outbox.enqueue_next(
+            stream_key="relationship:person-a",
+            event_id="relationship-event-1",
+            namespace=_context(),
+            migration_epoch=EPOCH,
+            policy_version=POLICY,
+            payload={"operation": "relationship_event", "applied_delta": 2},
+        )
+        replay = self.outbox.enqueue_next(
+            stream_key="relationship:person-a",
+            event_id="relationship-event-1",
+            namespace=_context(),
+            migration_epoch=EPOCH,
+            policy_version=POLICY,
+            payload={"operation": "relationship_event", "applied_delta": 2},
+        )
+        second = self.outbox.enqueue_next(
+            stream_key="relationship:person-a",
+            event_id="relationship-event-2",
+            namespace=_context(),
+            migration_epoch=EPOCH,
+            policy_version=POLICY,
+            payload={"operation": "relationship_event", "applied_delta": -1},
+        )
+        self.assertEqual({"status": "enqueued", "source_revision": 1}, first)
+        self.assertEqual({"status": "duplicate", "source_revision": 1}, replay)
+        self.assertEqual({"status": "enqueued", "source_revision": 2}, second)
+        self.assertEqual(2, self.outbox.stream_revision("relationship:person-a", EPOCH))
+        self.assertEqual([1, 2], [item.source_revision for item in self.outbox.pending(EPOCH)])
+
+    def test_enqueue_next_conflict_does_not_consume_revision(self) -> None:
+        kwargs = {
+            "stream_key": "relationship:person-a",
+            "event_id": "relationship-event-1",
+            "namespace": _context(),
+            "migration_epoch": EPOCH,
+            "policy_version": POLICY,
+        }
+        self.outbox.enqueue_next(**kwargs, payload={"operation": "relationship_event", "applied_delta": 1})
+        with self.assertRaises(OutboxConflict):
+            self.outbox.enqueue_next(**kwargs, payload={"operation": "relationship_event", "applied_delta": 9})
+        self.assertEqual(1, self.outbox.stream_revision("relationship:person-a", EPOCH))
+
+    def test_enqueue_next_expected_revision_gap_rolls_back_event_and_revision(self) -> None:
+        with self.assertRaises(RevisionGap):
+            self.outbox.enqueue_next(
+                stream_key="relationship:person-a",
+                event_id="relationship-event-gap",
+                namespace=_context(),
+                migration_epoch=EPOCH,
+                policy_version=POLICY,
+                payload={"operation": "relationship_event", "applied_delta": 1},
+                expected_source_revision=2,
+            )
+        self.assertEqual(0, self.outbox.stream_revision("relationship:person-a", EPOCH))
+        self.assertEqual([], self.outbox.pending(EPOCH))
+
     def test_tombstone_is_durable_idempotent_and_conflict_safe(self) -> None:
         self.assertEqual("created", self.outbox.add_tombstone("identity:person-a", EPOCH, revision=2, reason_code="unlink"))
         self.assertEqual("duplicate", self.outbox.add_tombstone("identity:person-a", EPOCH, revision=2, reason_code="unlink"))
+        self.assertEqual("advanced", self.outbox.add_tombstone("identity:person-a", EPOCH, revision=3, reason_code="delete"))
         with self.assertRaises(OutboxConflict):
-            self.outbox.add_tombstone("identity:person-a", EPOCH, revision=3, reason_code="delete")
+            self.outbox.add_tombstone("identity:person-a", EPOCH, revision=2, reason_code="unlink")
         reopened = MigrationOutbox(self.path)
-        self.assertEqual(2, reopened.tombstone("identity:person-a", EPOCH)["revision"])
+        self.assertEqual(3, reopened.tombstone("identity:person-a", EPOCH)["revision"])
+
+    def test_enqueue_next_with_tombstone_is_atomic_and_replay_safe(self) -> None:
+        kwargs = {
+            "stream_key": "identity:person-a",
+            "event_id": "unlink-event-1",
+            "namespace": _context(),
+            "migration_epoch": EPOCH,
+            "policy_version": POLICY,
+            "payload": {"operation": "identity_unlink", "identity_key_ref": "link-hash"},
+            "tombstone_key": "identity-link:link-hash",
+            "reason_code": "identity_unlink",
+        }
+        first = self.outbox.enqueue_next_with_tombstone(**kwargs)
+        replay = self.outbox.enqueue_next_with_tombstone(**kwargs)
+        self.assertEqual({"status": "enqueued", "source_revision": 1}, first)
+        self.assertEqual({"status": "duplicate", "source_revision": 1}, replay)
+        self.assertEqual(1, self.outbox.stream_revision("identity:person-a", EPOCH))
+        self.assertEqual(1, self.outbox.tombstone("identity-link:link-hash", EPOCH)["revision"])
 
     def test_epoch_checkpoint_survives_restart(self) -> None:
         state = self.outbox.set_epoch_state(EPOCH, "replaying", checkpoint="identity:42")
