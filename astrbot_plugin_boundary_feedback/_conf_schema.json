@@ -1,0 +1,425 @@
+﻿{
+    "basic": {
+        "description": "基础设置",
+        "type": "object",
+        "hint": "插件开关、作用对象、数据文件",
+        "items": {
+            "enabled": {
+                "description": "插件总开关",
+                "type": "bool",
+                "hint": "关闭后边界检测完全停用",
+                "default": true
+            },
+            "target_user_ids": {
+                "description": "生效对象（QQ号列表）",
+                "type": "list",
+                "hint": "留空=检测所有非主人用户；填写后只检测列表中的用户",
+                "default": []
+            },
+            "owner_user_ids": {
+                "description": "主人（QQ号列表）",
+                "type": "list",
+                "hint": "主人消息不检测；越界吐槽/告状发送给主人",
+                "default": []
+            },
+            "companion_data_path": {
+                "description": "陪伴数据文件路径",
+                "type": "string",
+                "hint": "private_companion 的 companions.json 绝对路径",
+                "default": ""
+            },
+            "backup_before_write": {
+                "description": "写入前备份",
+                "type": "bool",
+                "hint": "每次修改 companions.json 前自动备份",
+                "default": true
+            },
+            "backup_max_keep": {
+                "description": "备份保留份数",
+                "type": "int",
+                "default": 5
+            }
+        }
+    },
+    "switch": {
+        "description": "功能开关",
+        "type": "object",
+        "hint": "各子功能独立开关",
+        "items": {
+            "enable_deduct": {
+                "description": "扣分",
+                "type": "bool",
+                "hint": "越界扣好感分",
+                "default": true
+            },
+            "enable_stage": {
+                "description": "阶段反应",
+                "type": "bool",
+                "hint": "回避/禁止/反思阶段",
+                "default": true
+            },
+            "enable_apology": {
+                "description": "道歉恢复",
+                "type": "bool",
+                "default": true
+            },
+            "enable_bottom_line": {
+                "description": "底线三级惩罚",
+                "type": "bool",
+                "hint": "警告/冷落/降档",
+                "default": true
+            },
+            "enable_vent": {
+                "description": "跟亲近的人吐槽",
+                "type": "bool",
+                "hint": "写进今日生活叙事",
+                "default": true
+            },
+            "enable_notify": {
+                "description": "向主人告状",
+                "type": "bool",
+                "default": true
+            }
+        }
+    },
+    "judge": {
+        "description": "判断引擎（LLM）",
+        "type": "object",
+        "hint": "越界判断用 LLM（不用关键词），需自备 Key",
+        "items": {
+            "judge_api_key": {
+                "description": "API Key",
+                "type": "string",
+                "default": ""
+            },
+            "judge_api_base": {
+                "description": "API Base",
+                "type": "string",
+                "default": "https://api.deepseek.com/chat/completions"
+            },
+            "judge_model": {
+                "description": "模型",
+                "type": "string",
+                "hint": "建议用便宜快速的 flash 级模型",
+                "default": "deepseek-v4-flash"
+            },
+            "bottom_line_baseline": {
+                "description": "角色底线基线",
+                "type": "text",
+                "hint": "按角色剧情填写的底线描述；留空用通用版",
+                "default": ""
+            }
+        }
+    },
+    "deduct": {
+        "description": "扣分与阶段阈值",
+        "type": "object",
+        "hint": "越界扣分 + 阶段推进线",
+        "items": {
+            "deduct_light": {
+                "description": "轻微越界扣分",
+                "type": "int",
+                "default": -2
+            },
+            "deduct_mid": {
+                "description": "中度越界扣分",
+                "type": "int",
+                "default": -5
+            },
+            "deduct_severe": {
+                "description": "严重越界扣分",
+                "type": "int",
+                "default": -8
+            },
+            "stage_avoid_deduct": {
+                "description": "回避阶段阈值（累计扣分）",
+                "type": "int",
+                "default": -6
+            },
+            "stage_forbid_deduct": {
+                "description": "禁止阶段阈值",
+                "type": "int",
+                "default": -12
+            },
+            "stage_reflect_deduct": {
+                "description": "反思阶段阈值",
+                "type": "int",
+                "default": -20
+            }
+        }
+    },
+    "recover": {
+        "description": "恢复与道歉",
+        "type": "object",
+        "hint": "好感恢复机制",
+        "items": {
+            "recover_seconds_per_point": {
+                "description": "每恢复1点所需秒数",
+                "type": "int",
+                "default": 1800
+            },
+            "recover_ratio_light": {
+                "description": "轻微越界可恢复比例",
+                "type": "float",
+                "default": 0.5
+            },
+            "recover_ratio_mid": {
+                "description": "中度越界可恢复比例",
+                "type": "float",
+                "default": 0.33
+            },
+            "recover_ratio_severe": {
+                "description": "严重越界可恢复比例",
+                "type": "float",
+                "default": 0.25
+            },
+            "apology_restore_ratio": {
+                "description": "道歉恢复比例",
+                "type": "float",
+                "default": 0.6
+            },
+            "apology_speedup_multiplier": {
+                "description": "道歉后恢复加速倍数",
+                "type": "float",
+                "default": 3.0
+            },
+            "apology_duplicate_limit": {
+                "description": "同类道歉次数上限",
+                "type": "int",
+                "hint": "超过后不再接受同类道歉（信任透支）",
+                "default": 3
+            },
+            "cold_shoulder_minutes": {
+                "description": "冷落时长（分钟）",
+                "type": "int",
+                "default": 180
+            }
+        }
+    },
+    "tier": {
+        "description": "好感档位",
+        "type": "object",
+        "hint": "八维档位：扣分衰减与恢复速度（低档记仇实打实，满级信任扣得少回得快）",
+        "items": {
+            "deduct_decay": {
+                "description": "档位扣分衰减系数",
+                "type": "object",
+                "hint": "低档 1.0（实打实）→ 满级 0.5（只扣一半）",
+                "default": {
+                    "deeply_distant": 1.0,
+                    "strongly_distant": 1.0,
+                    "distant": 0.95,
+                    "acquaintance": 0.9,
+                    "familiar": 0.85,
+                    "close": 0.7,
+                    "intimate": 0.6,
+                    "deeply_bonded": 0.5
+                },
+                "items": {
+                    "deeply_distant": {
+                        "description": "极度疏离(-1200~-801)",
+                        "type": "float",
+                        "default": 1.0
+                    },
+                    "strongly_distant": {
+                        "description": "强烈疏离(-800~-401)",
+                        "type": "float",
+                        "default": 1.0
+                    },
+                    "distant": {
+                        "description": "疏离(-400~-1)",
+                        "type": "float",
+                        "default": 0.95
+                    },
+                    "acquaintance": {
+                        "description": "初识(0~199)",
+                        "type": "float",
+                        "default": 0.9
+                    },
+                    "familiar": {
+                        "description": "熟悉(200~599)",
+                        "type": "float",
+                        "default": 0.85
+                    },
+                    "close": {
+                        "description": "亲近(600~899)",
+                        "type": "float",
+                        "default": 0.7
+                    },
+                    "intimate": {
+                        "description": "亲密(900~1199)",
+                        "type": "float",
+                        "default": 0.6
+                    },
+                    "deeply_bonded": {
+                        "description": "深度联结(1200+)",
+                        "type": "float",
+                        "default": 0.5
+                    }
+                }
+            },
+            "recover_factor": {
+                "description": "档位恢复速度系数",
+                "type": "object",
+                "hint": "高档快（扣分可加回），低档慢（记仇难消）",
+                "default": {
+                    "deeply_distant": 0.5,
+                    "strongly_distant": 0.6,
+                    "distant": 0.7,
+                    "acquaintance": 0.8,
+                    "familiar": 0.9,
+                    "close": 1.0,
+                    "intimate": 1.25,
+                    "deeply_bonded": 1.5
+                },
+                "items": {
+                    "deeply_distant": {
+                        "description": "极度疏离(-1200~-801)",
+                        "type": "float",
+                        "default": 0.5
+                    },
+                    "strongly_distant": {
+                        "description": "强烈疏离(-800~-401)",
+                        "type": "float",
+                        "default": 0.6
+                    },
+                    "distant": {
+                        "description": "疏离(-400~-1)",
+                        "type": "float",
+                        "default": 0.7
+                    },
+                    "acquaintance": {
+                        "description": "初识(0~199)",
+                        "type": "float",
+                        "default": 0.8
+                    },
+                    "familiar": {
+                        "description": "熟悉(200~599)",
+                        "type": "float",
+                        "default": 0.9
+                    },
+                    "close": {
+                        "description": "亲近(600~899)",
+                        "type": "float",
+                        "default": 1.0
+                    },
+                    "intimate": {
+                        "description": "亲密(900~1199)",
+                        "type": "float",
+                        "default": 1.25
+                    },
+                    "deeply_bonded": {
+                        "description": "深度联结(1200+)",
+                        "type": "float",
+                        "default": 1.5
+                    }
+                }
+            }
+        }
+    },
+    "tone": {
+        "description": "反应语气",
+        "type": "object",
+        "hint": "各程度越界时角色的反应底色（按角色性格填写）",
+        "items": {
+            "tone_light": {
+                "description": "轻微越界（表白/好感→害羞回避）",
+                "type": "text",
+                "hint": "表白不算越界，但角色会害羞",
+                "default": "（轻微越界）突然被说这种话，有点害羞又不知所措，会支支吾吾地回避，脸红语塞。"
+            },
+            "tone_mid": {
+                "description": "中度越界（亲密举动→平静拒绝）",
+                "type": "text",
+                "hint": "亲密举动请求构成越界",
+                "default": "（中度越界）会平静地明确拒绝，划清界限，同时往后退一点。"
+            },
+            "tone_severe": {
+                "description": "严重越界（性骚扰/露骨→厌恶）",
+                "type": "text",
+                "hint": "性质变了：不是害羞而是厌恶",
+                "default": "（严重越界）觉得被冒犯了，会明显冷下来，表达厌恶和拒绝，想远离这个人。"
+            },
+            "tone_bottom_line": {
+                "description": "底线越界（恶意→受伤）",
+                "type": "text",
+                "hint": "最重的反应",
+                "default": "（底线越界）真的受伤了，会难过、恐惧、想躲起来，可能直接不理人，需要很久才能缓过来。"
+            },
+            "tone_silent": {
+                "description": "低好感越界（默默忍受型）",
+                "type": "text",
+                "hint": "低好感档位生效",
+                "default": "（低好感）会默默忍下来不表达，但心里记着，之后态度会有些不一样。"
+            },
+            "tone_communicate": {
+                "description": "高好感越界（沟通型）",
+                "type": "text",
+                "hint": "高好感档位生效",
+                "default": "（高好感）会因为信任而试着沟通，认真说出自己为什么难过、为什么生气，希望对方理解。"
+            }
+        }
+    },
+    "notify": {
+        "description": "吐槽与告状",
+        "type": "object",
+        "hint": "概率与文案（像人话的吐槽，不是功能汇报）",
+        "items": {
+            "notify_owner": {
+                "description": "向主人告状",
+                "type": "bool",
+                "default": true
+            },
+            "tattle_probability_light": {
+                "description": "告状概率·轻微",
+                "type": "float",
+                "default": 0.12
+            },
+            "tattle_probability_mid": {
+                "description": "告状概率·中度",
+                "type": "float",
+                "default": 0.3
+            },
+            "tattle_probability_severe": {
+                "description": "告状概率·严重",
+                "type": "float",
+                "default": 0.55
+            },
+            "tattle_probability_bottom_line": {
+                "description": "告状概率·底线",
+                "type": "float",
+                "default": 0.85
+            },
+            "vent_probability_light": {
+                "description": "吐槽概率·轻微",
+                "type": "float",
+                "default": 0.3
+            },
+            "vent_probability_mid": {
+                "description": "吐槽概率·中度",
+                "type": "float",
+                "default": 0.5
+            },
+            "vent_probability_severe": {
+                "description": "吐槽概率·严重",
+                "type": "float",
+                "default": 0.7
+            },
+            "vent_probability_bottom_line": {
+                "description": "吐槽概率·底线",
+                "type": "float",
+                "default": 0.9
+            },
+            "vent_scene_template": {
+                "description": "吐槽场景模板",
+                "type": "string",
+                "default": ""
+            },
+            "vent_targets": {
+                "description": "吐槽对象（亲近的人名）",
+                "type": "list",
+                "default": []
+            }
+        }
+    }
+}
