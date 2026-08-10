@@ -4495,7 +4495,13 @@ Provider 规则：{emotion_rule}
                     )
             raise
 
-    def _open_tts_audio_file_local(self, audio_path: str, *, volume: int | None = None) -> None:
+    def _open_tts_audio_file_local(
+        self,
+        audio_path: str,
+        *,
+        volume: int | None = None,
+        fade_in_ms: int = 0,
+    ) -> None:
         path = str(audio_path or "").strip()
         if not path:
             return
@@ -4509,22 +4515,29 @@ Provider 规则：{emotion_rule}
                 ),
             ),
         )
+        fade_in_ms = max(0, min(5000, _safe_int(fade_in_ms, 0)))
         if sys.platform.startswith("win"):
-            self._play_tts_audio_file_windows_silent(path, volume=volume)
+            self._play_tts_audio_file_windows_silent(path, volume=volume, fade_in_ms=fade_in_ms)
             return
         if sys.platform == "darwin":
             subprocess.run(["afplay", "-v", str(volume / 100.0), path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
             return
         subprocess.run(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-volume", str(volume), path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
-    def _play_tts_audio_file_windows_silent(self, path: str, *, volume: int = 35) -> None:
+    def _play_tts_audio_file_windows_silent(
+        self,
+        path: str,
+        *,
+        volume: int = 35,
+        fade_in_ms: int = 0,
+    ) -> None:
         source_path = path
         if Path(path).suffix.lower() == ".wav":
             path = self._prepare_windows_wav_for_playback(path)
         try:
-            if self._run_windows_media_player_script(path, use_wpf=True, volume=volume):
+            if self._run_windows_media_player_script(path, use_wpf=True, volume=volume, fade_in_ms=fade_in_ms):
                 return
-            if self._run_windows_media_player_script(path, use_wpf=False, volume=volume):
+            if self._run_windows_media_player_script(path, use_wpf=False, volume=volume, fade_in_ms=fade_in_ms):
                 return
             raise RuntimeError("Windows 后台播放器均未能播放该音频")
         finally:
@@ -4590,23 +4603,34 @@ Provider 规则：{emotion_rule}
             logger.debug("[PrivateCompanion] 修正 WAV 播放头失败，使用原文件: %s", _single_line(exc, 120))
             return path
 
-    def _run_windows_media_player_script(self, path: str, *, use_wpf: bool, volume: int = 35) -> bool:
+    def _run_windows_media_player_script(
+        self,
+        path: str,
+        *,
+        use_wpf: bool,
+        volume: int = 35,
+        fade_in_ms: int = 0,
+    ) -> bool:
         volume = max(0, min(100, int(volume)))
+        fade_in_ms = max(0, min(5000, int(fade_in_ms)))
         playback_env = os.environ.copy()
         playback_env["PRIVATE_COMPANION_TTS_AUDIO_PATH"] = str(Path(path).expanduser().resolve())
         playback_env["PRIVATE_COMPANION_TTS_VOLUME"] = str(volume)
+        playback_env["PRIVATE_COMPANION_TTS_FADE_MS"] = str(fade_in_ms)
         if use_wpf:
             script = (
                 "$p = [System.IO.Path]::GetFullPath($env:PRIVATE_COMPANION_TTS_AUDIO_PATH); "
                 "$vol = [Math]::Max(0, [Math]::Min(100, [int]$env:PRIVATE_COMPANION_TTS_VOLUME)); "
+                "$fade = [Math]::Max(0, [Math]::Min(5000, [int]$env:PRIVATE_COMPANION_TTS_FADE_MS)); "
                 "Add-Type -AssemblyName PresentationCore; "
                 "$player = New-Object System.Windows.Media.MediaPlayer; "
-                "$player.Volume = $vol / 100.0; "
+                "$player.Volume = $(if ($fade -gt 0) { 0 } else { $vol / 100.0 }); "
                 "$player.Open([Uri]::new($p)); "
                 "$deadline = (Get-Date).AddSeconds(10); "
                 "while (-not $player.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 50 }; "
                 "$duration = if ($player.NaturalDuration.HasTimeSpan) { $player.NaturalDuration.TimeSpan.TotalMilliseconds } else { 5000 }; "
                 "$player.Play(); "
+                "if ($fade -gt 0) { $stepMs = [Math]::Max(20, [int]($fade / 10)); for ($i = 1; $i -le 10; $i++) { Start-Sleep -Milliseconds $stepMs; $player.Volume = ($vol / 100.0) * ($i / 10.0) } }; "
                 "Start-Sleep -Milliseconds ([Math]::Min([Math]::Max([int]$duration + 300, 800), 90000)); "
                 "$player.Close()"
             )
@@ -4615,10 +4639,12 @@ Provider 规则：{emotion_rule}
             script = (
                 "$p = [System.IO.Path]::GetFullPath($env:PRIVATE_COMPANION_TTS_AUDIO_PATH); "
                 "$vol = [Math]::Max(0, [Math]::Min(100, [int]$env:PRIVATE_COMPANION_TTS_VOLUME)); "
+                "$fade = [Math]::Max(0, [Math]::Min(5000, [int]$env:PRIVATE_COMPANION_TTS_FADE_MS)); "
                 "$player = New-Object -ComObject WMPlayer.OCX; "
-                "$player.settings.volume = $vol; "
+                "$player.settings.volume = $(if ($fade -gt 0) { 0 } else { $vol }); "
                 "$player.URL = $p; "
                 "$player.controls.play(); "
+                "if ($fade -gt 0) { $stepMs = [Math]::Max(20, [int]($fade / 10)); for ($i = 1; $i -le 10; $i++) { Start-Sleep -Milliseconds $stepMs; $player.settings.volume = [int]($vol * $i / 10) } }; "
                 "$deadline = (Get-Date).AddSeconds(90); "
                 "while ($player.playState -notin 1,8 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }; "
                 "$player.close()"

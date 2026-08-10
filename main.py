@@ -14135,6 +14135,22 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     @_multi_persona_event_context
     async def on_private_message(self, event: AstrMessageEvent, *args, **kwargs):
+        feedback_handler = getattr(self, "_maybe_handle_wakeup_feedback", None)
+        feedback_text = str(getattr(event, "message_str", "") or "")
+        is_companion_command = feedback_text.lstrip().startswith(("陪伴", "/陪伴", "私聊陪伴", "主动陪伴"))
+        if callable(feedback_handler) and not is_companion_command:
+            raw_user_id = str(event.get_sender_id() or "").strip()
+            normalizer = getattr(self, "_canonical_private_user_id", None)
+            user_id = normalizer(raw_user_id) if callable(normalizer) else raw_user_id
+            users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+            user = users.get(user_id) if isinstance(users, dict) else None
+            if isinstance(user, dict) and await feedback_handler(
+                event,
+                user_id,
+                user,
+                feedback_text,
+            ):
+                return
         return await handle_private_message(self, event, *args, **kwargs)
 
     def _record_c3_inbound_activity(

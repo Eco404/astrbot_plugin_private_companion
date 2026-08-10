@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 import unittest
@@ -36,6 +37,7 @@ class AlarmHarness(WakeupAlarmMixin):
         self.environment_perception_timezone = "Asia/Shanghai"
         self.data = {"users": {"u": {"umo": "bot:FriendMessage:u"}}}
         self.played = 0
+        self.replies: list[str] = []
 
     def _save_data_sync(self) -> None:
         return None
@@ -43,9 +45,15 @@ class AlarmHarness(WakeupAlarmMixin):
     def _schedule_data_save(self, **kwargs) -> None:
         return None
 
-    async def _play_wakeup_alarm(self, user, alarm, *, test=False):
+    def _launch_wakeup_contact_session(self, user_id, session_id):
         self.played += 1
-        return True
+        session = self.data["users"][str(user_id)]["wakeup_alarm"]["contact_session"]
+        if session.get("status") == "pending":
+            session["next_attempt_at"] = 4_000_000_000
+        return asyncio.current_task()
+
+    async def _reply(self, event, text):
+        self.replies.append(text)
 
 
 class DynamicAlarmHarness(WakeupAlarmMixin):
@@ -75,9 +83,51 @@ class DynamicAlarmHarness(WakeupAlarmMixin):
         self.llm_calls.append({"prompt": prompt, **kwargs})
         return self.llm_result
 
-    async def _play_reality_touch_text(self, text: str, *, repeat: int, interval: int) -> bool:
-        self.audio_calls.append({"text": text, "repeat": repeat, "interval": interval})
+    async def _play_reality_touch_text(self, text: str, *, repeat: int, interval: int, **kwargs) -> bool:
+        self.audio_calls.append({"text": text, "repeat": repeat, "interval": interval, **kwargs})
         return True
+
+
+class ContactSessionHarness(DynamicAlarmHarness):
+    def __init__(self) -> None:
+        super().__init__()
+        self.data = {
+            "users": {
+                "u": {
+                    "umo": "bot:FriendMessage:u",
+                    "wakeup_alarm": {
+                        "enabled": True,
+                        "repeat_count": 1,
+                        "repeat_interval_seconds": 5,
+                        "require_acknowledgement": True,
+                        "playback_volume": 28,
+                        "volume_step": 10,
+                        "max_volume": 60,
+                        "fade_in_ms": 600,
+                        "delivery_mode": "audio_only",
+                        "contact_session": {
+                            "id": "u:session",
+                            "status": "pending",
+                            "attempt": 0,
+                            "max_attempts": 1,
+                            "next_attempt_at": 0,
+                            "messages": [],
+                        },
+                    },
+                }
+            }
+        }
+
+    def _schedule_data_save(self, **kwargs) -> None:
+        return None
+
+
+class _FeedbackEvent:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop_event(self) -> None:
+        self.stopped = True
 
 
 class WakeupAlarmTests(unittest.IsolatedAsyncioTestCase):
@@ -158,7 +208,7 @@ class WakeupAlarmTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(played)
         self.assertEqual(1, len(harness.llm_calls))
         self.assertEqual(
-            [{"text": harness.llm_result, "repeat": 3, "interval": 15}],
+            [{"text": harness.llm_result, "repeat": 3, "interval": 15, "fade_in_ms": 800, "source": "wakeup_alarm"}],
             harness.audio_calls,
         )
         call = harness.llm_calls[0]
@@ -177,6 +227,19 @@ class WakeupAlarmTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(harness.llm_calls))
         self.assertEqual(harness._WAKEUP_DEFAULT_MESSAGE, harness.audio_calls[0]["text"])
         self.assertEqual(1, harness.audio_calls[0]["repeat"])
+
+    async def test_contact_session_records_attempt_volume_and_completion(self) -> None:
+        harness = ContactSessionHarness()
+
+        await harness._run_wakeup_contact_session("u", "u:session")
+
+        session = harness.data["users"]["u"]["wakeup_alarm"]["contact_session"]
+        self.assertEqual("exhausted", session["status"])
+        self.assertEqual(1, session["attempt"])
+        self.assertEqual(28, session["last_volume"])
+        self.assertTrue(session["last_playback_success"])
+        self.assertEqual("wakeup_alarm", harness.audio_calls[0]["source"])
+        self.assertEqual(600, harness.audio_calls[0]["fade_in_ms"])
 
     async def test_tick_is_idempotent_for_one_minute(self) -> None:
         harness = AlarmHarness()
@@ -200,6 +263,62 @@ class WakeupAlarmTests(unittest.IsolatedAsyncioTestCase):
         harness._wakeup_alarm_command(user, "撤销确认")
         self.assertFalse(user["wakeup_alarm"]["enabled"])
         self.assertNotIn("reality_touch_consent", user)
+
+    async def test_awake_feedback_stops_pending_contact_session(self) -> None:
+        harness = AlarmHarness()
+        user = harness.data["users"]["u"]
+        user["wakeup_alarm"] = {
+            "enabled": True,
+            "snooze_minutes": 10,
+            "contact_session": {
+                "id": "u:202608100730",
+                "status": "pending",
+                "attempt": 1,
+                "max_attempts": 3,
+            },
+        }
+        event = _FeedbackEvent()
+
+        handled = await harness._maybe_handle_wakeup_feedback(event, "u", user, "我醒了")
+
+        self.assertTrue(handled)
+        self.assertTrue(event.stopped)
+        self.assertEqual("acknowledged", user["wakeup_alarm"]["contact_session"]["status"])
+        self.assertIn("已经醒来", harness.replies[-1])
+
+    async def test_snooze_feedback_reschedules_without_disabling_alarm(self) -> None:
+        harness = AlarmHarness()
+        user = harness.data["users"]["u"]
+        user["wakeup_alarm"] = {
+            "enabled": True,
+            "snooze_minutes": 10,
+            "contact_session": {
+                "id": "u:202608100730",
+                "status": "pending",
+                "attempt": 1,
+                "max_attempts": 3,
+            },
+        }
+        event = _FeedbackEvent()
+
+        handled = await harness._maybe_handle_wakeup_feedback(event, "u", user, "15分钟后再叫我")
+
+        self.assertTrue(handled)
+        self.assertTrue(user["wakeup_alarm"]["enabled"])
+        self.assertEqual("snoozed", user["wakeup_alarm"]["contact_session"]["status"])
+        self.assertIn("15 分钟后", harness.replies[-1])
+
+    def test_attempt_volume_increases_without_exceeding_cap(self) -> None:
+        harness = AlarmHarness()
+        alarm = {"playback_volume": 30, "volume_step": 12, "max_volume": 50}
+        self.assertEqual(30, harness._wakeup_attempt_volume(alarm, 1))
+        self.assertEqual(42, harness._wakeup_attempt_volume(alarm, 2))
+        self.assertEqual(50, harness._wakeup_attempt_volume(alarm, 3))
+
+    async def test_future_tense_awake_phrase_is_not_treated_as_confirmation(self) -> None:
+        harness = AlarmHarness()
+        intent, minutes = await harness._classify_wakeup_feedback("等我醒了以后再说", 10)
+        self.assertEqual(("other", 0), (intent, minutes))
 
 
 if __name__ == "__main__":

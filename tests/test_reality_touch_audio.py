@@ -36,6 +36,9 @@ from astrbot_plugin_private_companion.reality_touch_audio import RealityTouchAud
 class _FakeBlock:
     shape = (8, 2)
 
+    def __len__(self):
+        return 8
+
     def __mul__(self, value):
         return self
 
@@ -107,7 +110,7 @@ class AudioHarness(RealityTouchAudioMixin):
         self.default_plays = 0
         self.default_volume = None
 
-    def _open_tts_audio_file_local(self, path: str, *, volume=None) -> None:
+    def _open_tts_audio_file_local(self, path: str, *, volume=None, fade_in_ms=0) -> None:
         self.default_plays += 1
         self.default_volume = volume
 
@@ -192,7 +195,27 @@ class RealityTouchAudioTests(unittest.TestCase):
         self.assertTrue(asyncio.run(harness._play_reality_touch_test_audio()))
         harness._open_reality_touch_audio_file.assert_called_once_with(
             str(harness._REALITY_TOUCH_TEST_AUDIO_PATH),
+            volume=None,
         )
+
+    def test_missing_selected_device_falls_back_to_system_default(self) -> None:
+        harness = AudioHarness()
+        harness.data["reality_touch"] = {"audio_output_device_id": "sd:missing", "playback_volume": 22}
+        with tempfile.NamedTemporaryFile(suffix=".wav") as audio:
+            route = harness._open_reality_touch_audio_file(audio.name)
+        self.assertEqual("system_default", route["id"])
+        self.assertEqual("sd:missing", route["fallback_from"])
+        self.assertEqual(1, harness.default_plays)
+        self.assertEqual(22, harness.default_volume)
+
+    def test_proactive_voice_uses_its_independent_volume(self) -> None:
+        harness = AudioHarness()
+        user = {"consented": True}
+        harness._reality_touch_update_policy(
+            user,
+            {"proactive_voice_enabled": True, "playback_volume": 18},
+        )
+        self.assertEqual(18, user["reality_touch_policy"]["playback_volume"])
 
 
 if __name__ == "__main__":

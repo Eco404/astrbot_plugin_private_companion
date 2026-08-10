@@ -26,6 +26,8 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         "我已知晓现实触及会调用本机音频输出，并同意启用当前音频能力；"
         "未来摄像头能力需要再次单独确认"
     )
+    _WAKEUP_CONTACT_ACTIVE_STATES = {"pending", "playing", "snoozed"}
+    _WAKEUP_DELIVERY_MODES = {"audio_only", "audio_and_chat", "chat_on_failure"}
 
     def _reality_touch_consent(self, user: dict[str, Any]) -> dict[str, Any]:
         consent = user.get("reality_touch_consent")
@@ -113,6 +115,74 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
             user["wakeup_alarm"] = alarm
         return alarm
 
+    @staticmethod
+    def _wakeup_contact_session(alarm: dict[str, Any]) -> dict[str, Any]:
+        session = alarm.get("contact_session")
+        return session if isinstance(session, dict) else {}
+
+    def _wakeup_delivery_mode(self, alarm: dict[str, Any]) -> str:
+        mode = _single_line(alarm.get("delivery_mode"), 32).lower()
+        return mode if mode in self._WAKEUP_DELIVERY_MODES else "chat_on_failure"
+
+    def _wakeup_attempt_volume(self, alarm: dict[str, Any], attempt: int) -> int:
+        default_volume = self._reality_touch_playback_volume()
+        start = _safe_int(alarm.get("playback_volume"), default_volume, 0, 100)
+        step = _safe_int(alarm.get("volume_step"), 8, 0, 30)
+        maximum = _safe_int(alarm.get("max_volume"), max(start, 70), 0, 100)
+        maximum = max(start, maximum)
+        return min(maximum, start + max(0, int(attempt) - 1) * step)
+
+    def _wakeup_contact_task_registry(self) -> dict[str, asyncio.Task]:
+        registry = getattr(self, "_wakeup_contact_tasks", None)
+        if not isinstance(registry, dict):
+            registry = {}
+            self._wakeup_contact_tasks = registry
+        return registry
+
+    def _cancel_wakeup_contact_task(self, user_id: str) -> None:
+        task = self._wakeup_contact_task_registry().pop(str(user_id), None)
+        if isinstance(task, asyncio.Task) and not task.done():
+            task.cancel()
+
+    def _stop_wakeup_contact_session(self, user: dict[str, Any], *, status: str = "cancelled") -> None:
+        alarm = self._wakeup_alarm_for_user(user)
+        session = self._wakeup_contact_session(alarm)
+        if _single_line(session.get("status"), 24) in self._WAKEUP_CONTACT_ACTIVE_STATES:
+            session.update({"status": status, "completed_at": _now_ts(), "next_attempt_at": 0})
+        users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+        if isinstance(users, dict):
+            for candidate_id, candidate in users.items():
+                if candidate is user:
+                    self._cancel_wakeup_contact_task(str(candidate_id))
+                    break
+
+    def _launch_wakeup_contact_session(self, user_id: str, session_id: str) -> asyncio.Task | None:
+        user_key = str(user_id)
+        registry = self._wakeup_contact_task_registry()
+        previous = registry.get(user_key)
+        if isinstance(previous, asyncio.Task) and not previous.done():
+            return previous
+        operation = self._run_wakeup_contact_session(user_key, session_id)
+        scheduler = getattr(self, "_create_lifecycle_background_task", None)
+        if callable(scheduler):
+            task = scheduler(operation, label=f"wakeup_contact:{_single_line(user_key, 48)}")
+        else:
+            try:
+                task = asyncio.create_task(operation)
+            except RuntimeError:
+                operation.close()
+                return None
+        if isinstance(task, asyncio.Task):
+            registry[user_key] = task
+
+            def clear(finished: asyncio.Task) -> None:
+                current = self._wakeup_contact_task_registry().get(user_key)
+                if current is finished:
+                    self._wakeup_contact_task_registry().pop(user_key, None)
+
+            task.add_done_callback(clear)
+        return task
+
     def _wakeup_alarm_status_text(self, user: dict[str, Any]) -> str:
         alarm = self._wakeup_alarm_for_user(user)
         consent_text = "已确认当前音频能力" if self._reality_touch_audio_consented(user) else "尚未完成用户知情确认"
@@ -128,10 +198,14 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         day_text = "每天" if len(days) == 7 else "周" + "、".join(day_labels[int(day)] for day in days if 0 <= int(day) <= 6)
         repeat = _safe_int(alarm.get("repeat_count"), 1, 1, 6)
         interval = _safe_int(alarm.get("repeat_interval_seconds"), 20, 5, 300)
+        start_volume = _safe_int(alarm.get("playback_volume"), self._reality_touch_playback_volume(), 0, 100)
+        max_volume = _safe_int(alarm.get("max_volume"), max(start_volume, 70), 0, 100)
+        acknowledgement = "等待醒来确认" if alarm.get("require_acknowledgement", True) else "按次数播放"
         return (
             f"现实触及：起床语音已开启\n时间：{alarm.get('time', '未设置')}（{day_text}）\n"
             f"用户授权：{consent_text}（仅本机音频，不含摄像头）\n"
-            f"重复：{repeat} 次，间隔 {interval} 秒\n"
+            f"触达：最多 {repeat} 次，等待 {interval} 秒（{acknowledgement}）\n"
+            f"音量：{start_volume}% 起步，最高 {max_volume}%\n"
             f"叫醒偏好：{_single_line(alarm.get('message'), 120) or '未填写'}\n"
             f"话术：{self._WAKEUP_DYNAMIC_MESSAGE_HINT}\n"
             "播放目标：系统默认音频输出（请确认它是已连接的蓝牙音响）。"
@@ -166,6 +240,7 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         consent = self._reality_touch_consent(user)
         policy = self._reality_touch_policy(user)
         next_trigger = self._wakeup_next_trigger(alarm, now=now)
+        session = self._wakeup_contact_session(alarm)
         label = _single_line(
             user.get("display_name") or user.get("nickname") or user.get("name") or user_id,
             80,
@@ -183,6 +258,12 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
             },
             "policy": {
                 "proactive_voice_enabled": bool(policy.get("proactive_voice_enabled")),
+                "playback_volume": _safe_int(
+                    policy.get("playback_volume"),
+                    self._reality_touch_playback_volume(),
+                    0,
+                    100,
+                ),
                 "updated_at": _safe_int(policy.get("updated_at"), 0, 0),
             },
             "alarm": {
@@ -193,9 +274,34 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
                 "message_mode": "dynamic",
                 "repeat_count": _safe_int(alarm.get("repeat_count"), 1, 1, 6),
                 "repeat_interval_seconds": _safe_int(alarm.get("repeat_interval_seconds"), 20, 5, 300),
+                "require_acknowledgement": bool(alarm.get("require_acknowledgement", True)),
+                "snooze_minutes": _safe_int(alarm.get("snooze_minutes"), 10, 1, 120),
+                "playback_volume": _safe_int(
+                    alarm.get("playback_volume"),
+                    self._reality_touch_playback_volume(),
+                    0,
+                    100,
+                ),
+                "volume_step": _safe_int(alarm.get("volume_step"), 8, 0, 30),
+                "max_volume": _safe_int(alarm.get("max_volume"), 70, 0, 100),
+                "fade_in_ms": _safe_int(alarm.get("fade_in_ms"), 800, 0, 5000),
+                "delivery_mode": self._wakeup_delivery_mode(alarm),
                 "last_trigger_key": _single_line(alarm.get("last_trigger_key"), 32),
                 "next_trigger_at": int(next_trigger.timestamp()) if next_trigger else 0,
                 "next_trigger_text": next_trigger.strftime("%m-%d %H:%M") if next_trigger else "",
+                "contact_session": {
+                    "id": _single_line(session.get("id"), 96),
+                    "status": _single_line(session.get("status"), 24),
+                    "attempt": _safe_int(session.get("attempt"), 0, 0, 20),
+                    "max_attempts": _safe_int(session.get("max_attempts"), 0, 0, 20),
+                    "triggered_at": _safe_int(session.get("triggered_at"), 0, 0),
+                    "next_attempt_at": _safe_int(session.get("next_attempt_at"), 0, 0),
+                    "completed_at": _safe_int(session.get("completed_at"), 0, 0),
+                    "last_message": _single_line(session.get("last_message"), 300),
+                    "last_volume": _safe_int(session.get("last_volume"), 0, 0, 100),
+                    "last_playback_success": bool(session.get("last_playback_success")),
+                    "feedback": _single_line(session.get("feedback"), 120),
+                },
             },
         }
 
@@ -260,9 +366,31 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
                 "message": _single_line(payload.get("message"), 240),
                 "repeat_count": _safe_int(payload.get("repeat_count"), 1, 1, 6),
                 "repeat_interval_seconds": _safe_int(payload.get("repeat_interval_seconds"), 20, 5, 300),
+                "require_acknowledgement": bool(payload.get("require_acknowledgement", True)),
+                "snooze_minutes": _safe_int(payload.get("snooze_minutes"), 10, 1, 120),
+                "playback_volume": _safe_int(
+                    payload.get("playback_volume"),
+                    self._reality_touch_playback_volume(),
+                    0,
+                    100,
+                ),
+                "volume_step": _safe_int(payload.get("volume_step"), 8, 0, 30),
+                "max_volume": _safe_int(payload.get("max_volume"), 70, 0, 100),
+                "fade_in_ms": _safe_int(payload.get("fade_in_ms"), 800, 0, 5000),
+                "delivery_mode": (
+                    _single_line(payload.get("delivery_mode"), 32).lower()
+                    if _single_line(payload.get("delivery_mode"), 32).lower() in self._WAKEUP_DELIVERY_MODES
+                    else "chat_on_failure"
+                ),
             }
         )
+        alarm["max_volume"] = max(
+            _safe_int(alarm.get("playback_volume"), self._reality_touch_playback_volume(), 0, 100),
+            _safe_int(alarm.get("max_volume"), 70, 0, 100),
+        )
         alarm.pop("last_trigger_key", None)
+        if not enabled:
+            self._stop_wakeup_contact_session(user)
         return alarm
 
     def _wakeup_alarm_command(self, user: dict[str, Any], value: str) -> tuple[str, bool]:
@@ -294,10 +422,12 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         if compact in {"撤销确认", "撤销授权", "取消确认", "取消授权"}:
             user.pop("reality_touch_consent", None)
             alarm["enabled"] = False
+            self._stop_wakeup_contact_session(user)
             self._save_data_sync()
             return "已撤销现实触及授权，并关闭当前用户的起床语音。", False
         if compact in {"关闭", "取消", "停用", "off", "disable"}:
             alarm["enabled"] = False
+            self._stop_wakeup_contact_session(user)
             self._save_data_sync()
             return "已关闭现实触及的起床语音。", False
         if not self._reality_touch_audio_consented(user):
@@ -320,6 +450,12 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         alarm.setdefault("message", "")
         alarm.setdefault("repeat_count", 1)
         alarm.setdefault("repeat_interval_seconds", 20)
+        alarm.setdefault("require_acknowledgement", True)
+        alarm.setdefault("snooze_minutes", 10)
+        alarm.setdefault("volume_step", 8)
+        alarm.setdefault("max_volume", 70)
+        alarm.setdefault("fade_in_ms", 800)
+        alarm.setdefault("delivery_mode", "chat_on_failure")
         if len(parts) == 2:
             option = parts[1].strip()
             if option:
@@ -403,18 +539,35 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         now = self._wakeup_now()
         weekday = "一二三四五六日"[now.weekday()]
         preference = _single_line(alarm.get("message"), 240)
+        attempt = _safe_int(alarm.get("_contact_attempt"), 1, 1, 20)
+        max_attempts = _safe_int(alarm.get("_contact_max_attempts"), 1, 1, 20)
+        previous_messages = alarm.get("_contact_previous_messages")
+        previous_text = "\n".join(
+            f"- {_single_line(item, 240)}"
+            for item in (previous_messages if isinstance(previous_messages, list) else [])[-4:]
+            if _single_line(item, 240)
+        )
+        acknowledgement_hint = (
+            "可以自然邀请对方醒来后回一句，让系统停止后续提醒，但不要把回应写成命令或施加压力。"
+            if bool(alarm.get("require_acknowledgement", True))
+            else "不必要求对方回复。"
+        )
         prompt = (
             "请为一次现实设备上的起床提醒写出此刻真正会对用户说的话。\n"
             f"当前时间：{now.strftime('%Y-%m-%d %H:%M')}，周{weekday}\n"
+            f"这是本轮第 {attempt}/{max_attempts} 次触达。\n"
             f"用户称呼：{name or '没有可靠称呼，直接自然地说“你”'}\n"
             f"关系状态：{relationship or '没有额外关系资料，保持自然、低压力'}\n"
             f"用户设置的叫醒偏好或补充要求：{preference or '无，由你根据人格和语境自然发挥'}\n"
+            f"本轮此前已经说过的话：\n{previous_text or '无，这是第一次触达'}\n"
             f"最近对话：\n{history[-2400:] or '没有可用的最近对话，不要自行编造昨晚或今天的经历'}\n\n"
             "只输出最终说出口的一到两句短话，不要标题、引号、Markdown、括号动作、TTS 标签或解释。"
             "目标是自然地把对方叫醒，措辞应每天有变化，并贴合人格和关系距离；设置内容只提供意图和事实，"
-            "需要融入当下重新表达，不要逐字复读。可以有温度、惦记或一点生活感，但不要像通知、客服或健康打卡。"
+            "需要融入当下重新表达，不要逐字复读。后续触达要换一种说法，可以比前一次更明确一点，但仍保持温和。"
+            "可以有温度、惦记或一点生活感，但不要像通知、客服或健康打卡。"
+            f"{acknowledgement_hint}"
             "不要声称看见、监听或确认了用户正在睡觉或已经醒来，不编造天气、日程和昨晚发生的事；"
-            "不要命令、训斥、内疚施压，也不要要求立即回应。"
+            "不要命令、训斥、内疚施压，也不要制造紧迫恐慌。"
         )
         system_prompt = (
             "你正在延续下面的人格，以这个人本来的口吻说一句真实、克制的叫醒话。"
@@ -466,13 +619,228 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         message = await self._generate_wakeup_alarm_message(user, alarm, test=test)
         repeat = 1 if test else _safe_int(alarm.get("repeat_count"), 1, 1, 6)
         interval = _safe_int(alarm.get("repeat_interval_seconds"), 20, 5, 300)
-        playback_kwargs = {"repeat": repeat, "interval": interval}
+        playback_kwargs = {
+            "repeat": repeat,
+            "interval": interval,
+            "fade_in_ms": _safe_int(alarm.get("fade_in_ms"), 800, 0, 5000),
+            "source": "wakeup_test" if test else "wakeup_alarm",
+        }
         if volume is not None:
             playback_kwargs["volume"] = volume
         played = await self._play_reality_touch_text(message, **playback_kwargs)
         if played:
             logger.info("[PrivateCompanion] 起床提醒场景已播放: test=%s repeat=%s", test, repeat)
         return played
+
+    async def _send_wakeup_chat_copy(self, user: dict[str, Any], message: str) -> bool:
+        umo = _single_line(user.get("umo"), 240)
+        direct_sender = getattr(self, "_send_chain_components", None)
+        sender = getattr(self, "_send_proactive_message_chain", None)
+        if not umo or (not callable(direct_sender) and not callable(sender)):
+            return False
+        try:
+            if callable(direct_sender):
+                from astrbot.api.message_components import Plain
+
+                return bool(await direct_sender(umo, [Plain(message)]))
+            outcome = await sender(umo, message)
+            if isinstance(outcome, bool):
+                return outcome
+            return bool(getattr(outcome, "delivered", False))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("[PrivateCompanion] 起床提醒聊天副本发送失败: %s", _single_line(exc, 160))
+            return False
+
+    async def _run_wakeup_contact_session(self, user_id: str, session_id: str) -> None:
+        """Run cancellable attempts until the user responds or the attempt budget is exhausted."""
+        while True:
+            users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+            user = users.get(str(user_id)) if isinstance(users, dict) else None
+            if not isinstance(user, dict):
+                return
+            alarm = user.get("wakeup_alarm") if isinstance(user.get("wakeup_alarm"), dict) else {}
+            session = self._wakeup_contact_session(alarm)
+            if _single_line(session.get("id"), 96) != session_id:
+                return
+            status = _single_line(session.get("status"), 24)
+            if status not in self._WAKEUP_CONTACT_ACTIVE_STATES:
+                return
+            now_ts = _now_ts()
+            next_attempt_at = _safe_int(session.get("next_attempt_at"), 0, 0)
+            if next_attempt_at > now_ts:
+                await asyncio.sleep(max(0.2, next_attempt_at - now_ts))
+                continue
+
+            attempt = _safe_int(session.get("attempt"), 0, 0, 20) + 1
+            maximum = _safe_int(
+                session.get("max_attempts"),
+                _safe_int(alarm.get("repeat_count"), 1, 1, 6),
+                1,
+                6,
+            )
+            if attempt > maximum:
+                session.update({"status": "exhausted", "completed_at": _now_ts(), "next_attempt_at": 0})
+                self._schedule_data_save(delay=0.2)
+                return
+
+            previous = session.get("messages") if isinstance(session.get("messages"), list) else []
+            alarm_for_attempt = copy.deepcopy(alarm)
+            alarm_for_attempt["_contact_attempt"] = attempt
+            alarm_for_attempt["_contact_max_attempts"] = maximum
+            alarm_for_attempt["_contact_previous_messages"] = list(previous)
+            session.update({"status": "playing", "attempt": attempt, "last_attempt_at": _now_ts()})
+            self._schedule_data_save(delay=0.2)
+
+            message = await self._generate_wakeup_alarm_message(user, alarm_for_attempt)
+            volume = self._wakeup_attempt_volume(alarm, attempt)
+            played = await self._play_reality_touch_text(
+                message,
+                repeat=1,
+                interval=_safe_int(alarm.get("repeat_interval_seconds"), 20, 5, 300),
+                volume=volume,
+                fade_in_ms=_safe_int(alarm.get("fade_in_ms"), 800, 0, 5000),
+                source="wakeup_alarm",
+            )
+            delivery_mode = self._wakeup_delivery_mode(alarm)
+            chat_sent = False
+            if delivery_mode == "audio_and_chat" or (delivery_mode == "chat_on_failure" and not played):
+                chat_sent = await self._send_wakeup_chat_copy(user, message)
+
+            current = self._wakeup_contact_session(alarm)
+            if _single_line(current.get("id"), 96) != session_id:
+                return
+            if _single_line(current.get("status"), 24) not in self._WAKEUP_CONTACT_ACTIVE_STATES:
+                return
+            messages = current.get("messages") if isinstance(current.get("messages"), list) else []
+            messages.append(message)
+            current.update(
+                {
+                    "status": "pending",
+                    "messages": messages[-6:],
+                    "last_message": message,
+                    "last_volume": volume,
+                    "last_playback_success": played,
+                    "last_chat_success": chat_sent,
+                }
+            )
+            if attempt >= maximum or not bool(alarm.get("require_acknowledgement", True)):
+                if attempt >= maximum:
+                    current.update({"status": "exhausted", "completed_at": _now_ts(), "next_attempt_at": 0})
+                    self._schedule_data_save(delay=0.2)
+                    return
+            interval = _safe_int(alarm.get("repeat_interval_seconds"), 20, 5, 300)
+            current["next_attempt_at"] = _now_ts() + interval
+            self._schedule_data_save(delay=0.2)
+
+    async def _classify_wakeup_feedback(self, text: str, default_snooze: int) -> tuple[str, int]:
+        compact = re.sub(r"[\s，,。.!！?？~～]+", "", str(text or "")).lower()
+        if not compact:
+            return "other", 0
+        duration = re.search(r"(\d{1,3})\s*(小时|分钟|分)(?:钟)?后", str(text or ""))
+        if duration and any(marker in compact for marker in ("叫", "提醒", "喊", "再睡", "晚点")):
+            value = int(duration.group(1)) * (60 if duration.group(2) == "小时" else 1)
+            return "snooze", max(1, min(120, value))
+        if any(marker in compact for marker in ("稍后叫", "等会叫", "过会叫", "晚点叫", "再睡会", "还没醒", "没醒呢")):
+            return "snooze", default_snooze
+        if any(marker in compact for marker in ("今天不用叫", "今天别叫", "停止这次", "这次取消", "不用再叫")):
+            return "stop", 0
+        explicit_awake = re.fullmatch(
+            r"(?:好|好啦|嗯|恩)?(?:我)?(?:已经)?(?:醒了|醒啦|起了|起来了|起床了)(?:呀|啊|哦|呢|哈|谢谢)?",
+            compact,
+        )
+        if explicit_awake or compact in {"不用叫了", "别叫了我醒了", "不用提醒了我醒了"}:
+            return "awake", 0
+
+        llm_call = getattr(self, "_llm_call", None)
+        if not callable(llm_call) or len(compact) > 120:
+            return "other", 0
+        prompt = (
+            "判断下面这句用户消息是否是在回应刚刚的起床提醒。只输出一个结果："
+            "awake、snooze、stop 或 other。awake=明确已经醒来或起床；"
+            "snooze=明确还没醒、想稍后再叫；stop=只取消今天这轮提醒；"
+            "other=普通聊天、含糊表达或无法确定。宁可输出 other，不要把普通聊天误判为控制指令。\n"
+            f"用户消息：{_single_line(text, 240)}"
+        )
+        try:
+            result = _single_line(
+                await llm_call(prompt, max_tokens=12, task="wakeup_feedback_intent"),
+                24,
+            ).lower()
+        except Exception:
+            return "other", 0
+        if result.startswith("awake"):
+            return "awake", 0
+        if result.startswith("snooze"):
+            return "snooze", default_snooze
+        if result.startswith("stop"):
+            return "stop", 0
+        return "other", 0
+
+    async def _maybe_handle_wakeup_feedback(
+        self,
+        event: Any,
+        user_id: str,
+        user: dict[str, Any],
+        text: str,
+    ) -> bool:
+        alarm = user.get("wakeup_alarm") if isinstance(user.get("wakeup_alarm"), dict) else {}
+        session = self._wakeup_contact_session(alarm)
+        if _single_line(session.get("status"), 24) not in self._WAKEUP_CONTACT_ACTIVE_STATES:
+            return False
+        snooze_default = _safe_int(alarm.get("snooze_minutes"), 10, 1, 120)
+        intent, snooze_minutes = await self._classify_wakeup_feedback(text, snooze_default)
+        if intent == "other":
+            return False
+
+        now_ts = _now_ts()
+        if intent == "snooze":
+            minutes = max(1, min(120, snooze_minutes or snooze_default))
+            session.update(
+                {
+                    "status": "snoozed",
+                    "feedback": _single_line(text, 120),
+                    "feedback_at": now_ts,
+                    "next_attempt_at": now_ts + minutes * 60,
+                }
+            )
+            reply = f"好，{minutes} 分钟后再叫你。这期间不会继续播放。"
+        elif intent == "awake":
+            session.update(
+                {
+                    "status": "acknowledged",
+                    "feedback": _single_line(text, 120),
+                    "feedback_at": now_ts,
+                    "completed_at": now_ts,
+                    "next_attempt_at": 0,
+                }
+            )
+            reply = "好，收到你已经醒来的确认了，今天这轮提醒已经停止。"
+        else:
+            session.update(
+                {
+                    "status": "cancelled",
+                    "feedback": _single_line(text, 120),
+                    "feedback_at": now_ts,
+                    "completed_at": now_ts,
+                    "next_attempt_at": 0,
+                }
+            )
+            reply = "好，今天这轮提醒已取消，不影响之后设定的日期。"
+
+        self._cancel_wakeup_contact_task(user_id)
+        self._schedule_data_save(delay=0.1)
+        if intent == "snooze":
+            self._launch_wakeup_contact_session(user_id, _single_line(session.get("id"), 96))
+        replier = getattr(self, "_reply", None)
+        if callable(replier):
+            await replier(event, reply)
+        try:
+            event.stop_event()
+        except Exception:
+            pass
+        return True
 
     async def _run_wakeup_alarm_tick(self) -> None:
         if not bool(getattr(self, "enable_experimental_bluetooth_wakeup", False)):
@@ -483,7 +851,7 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         now = self._wakeup_now()
         minute_key = now.strftime("%Y-%m-%d %H:%M")
         check_window = max(90, _safe_int(getattr(self, "check_interval_seconds", 60), 60, 30) + 15)
-        for user in list(users.values()):
+        for user_id, user in list(users.items()):
             if not isinstance(user, dict) or not user.get("umo"):
                 continue
             alarm = user.get("wakeup_alarm")
@@ -491,6 +859,18 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
                 continue
             if not self._reality_touch_audio_consented(user):
                 continue
+            session = self._wakeup_contact_session(alarm)
+            session_status = _single_line(session.get("status"), 24)
+            session_id = _single_line(session.get("id"), 96)
+            session_due = _safe_int(session.get("next_attempt_at"), 0, 0) <= _now_ts()
+            running_task = self._wakeup_contact_task_registry().get(str(user_id))
+            if (
+                session_id
+                and session_status in self._WAKEUP_CONTACT_ACTIVE_STATES
+                and session_due
+                and not (isinstance(running_task, asyncio.Task) and not running_task.done())
+            ):
+                self._launch_wakeup_contact_session(str(user_id), session_id)
             alarm_time = self._wakeup_parse_time(alarm.get("time"))
             if not alarm.get("enabled") or not alarm_time:
                 continue
@@ -502,13 +882,20 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
             if now.weekday() not in days or alarm.get("last_trigger_key") == minute_key:
                 continue
             alarm["last_trigger_key"] = minute_key
+            session_id = f"{user_id}:{now.strftime('%Y%m%d%H%M')}"
+            alarm["contact_session"] = {
+                "id": session_id,
+                "status": "pending",
+                "attempt": 0,
+                "max_attempts": _safe_int(alarm.get("repeat_count"), 1, 1, 6),
+                "triggered_at": _now_ts(),
+                "next_attempt_at": _now_ts(),
+                "messages": [],
+            }
             self._schedule_data_save(delay=0.2)
-            operation = self._play_wakeup_alarm(copy.deepcopy(user), copy.deepcopy(alarm))
-            scheduler = getattr(self, "_create_lifecycle_background_task", None)
-            if callable(scheduler):
-                scheduler(operation, label="wakeup_alarm_playback")
-            else:
-                await operation
+            task = self._launch_wakeup_contact_session(str(user_id), session_id)
+            if task is None:
+                await self._run_wakeup_contact_session(str(user_id), session_id)
 
     async def _test_wakeup_alarm(self, user: dict[str, Any]) -> None:
         alarm = self._wakeup_alarm_for_user(user)

@@ -4303,7 +4303,7 @@ class PrivateCompanionPageApi(
         payload = await request.get_json(silent=True) or {}
         action = self._single_line(payload.get("action"), 24).lower()
         user_id = self._single_line(payload.get("user_id"), 120)
-        if action not in {"save", "save_policy", "disable", "test", "select_output"}:
+        if action not in {"save", "save_policy", "disable", "stop_session", "test", "select_output"}:
             return self._error("不支持的现实触及操作")
         if action != "select_output" and not user_id:
             return self._error("请选择私聊用户")
@@ -4356,8 +4356,18 @@ class PrivateCompanionPageApi(
                         user["wakeup_alarm"] = alarm
                     alarm["enabled"] = False
                     alarm.pop("last_trigger_key", None)
+                    stopper = getattr(self.plugin, "_stop_wakeup_contact_session", None)
+                    if callable(stopper):
+                        stopper(user)
                     self.plugin._save_data_sync()
                     message = "已关闭该用户的起床语音"
+                elif action == "stop_session":
+                    stopper = getattr(self.plugin, "_stop_wakeup_contact_session", None)
+                    if not callable(stopper):
+                        return self._error("当前插件实例不支持停止触达会话", status_code=503)
+                    stopper(user)
+                    self.plugin._save_data_sync()
+                    message = "已停止该用户当前这轮触达，不影响之后的闹钟"
                 else:
                     test_kind = "device" if self._single_line(payload.get("test_kind"), 24).lower() == "device" else "scenario"
                     consented = getattr(self.plugin, "_reality_touch_audio_consented", lambda _: False)(user)
@@ -4370,6 +4380,8 @@ class PrivateCompanionPageApi(
                     alarm_for_test = deepcopy(alarm)
                     if "message" in payload:
                         alarm_for_test["message"] = self._single_line(payload.get("message"), 240)
+                    if "fade_in_ms" in payload:
+                        alarm_for_test["fade_in_ms"] = _safe_int(payload.get("fade_in_ms"), 800, 0, 5000)
 
             if action == "test":
                 if test_kind == "device":

@@ -32769,7 +32769,7 @@ function renderRealityTouchDevicePanel() {
       </label>
       <div class="reality-device-status ${audio.selected_device_missing ? "error" : ""}">
         <b>${audio.selected_device_missing ? "所选设备当前离线" : `当前路由：${escapeHtml(audio.label || "跟随系统默认输出")}`}</b>
-        <span>${escapeHtml(audio.error || (audio.backend_available ? "设备离线时播放会失败，不会自动改投其他设备。" : "安装音频路由依赖并重载插件后，可选择具体耳机、扬声器或蓝牙音响。"))}</span>
+        <span>${escapeHtml(audio.error || (audio.backend_available ? "指定设备离线或播放失败时，会自动回退到系统默认输出并记录诊断。" : "安装音频路由依赖并重载插件后，可选择具体耳机、扬声器或蓝牙音响。"))}</span>
       </div>
     </article>
   `;
@@ -32833,6 +32833,11 @@ function renderRealityTouchSettings() {
           <input type="checkbox" name="reality_proactive_voice" ${user.policy?.proactive_voice_enabled ? "checked" : ""} ${formDisabled}>
           <span><b>将 Bot 的主动语音同步到所选设备</b><small>仅当主动引擎本轮选择 voice 动作时播放；仍受主动频率、免打扰和用户授权约束。</small></span>
         </label>
+        <label class="reality-device-volume compact">
+          <span>主动语音播放音量 <output data-reality-touch-proactive-volume-output>${Number(user.policy?.playback_volume ?? data.audio_output?.playback_volume ?? 35)}%</output></span>
+          <input type="range" name="reality_proactive_volume" data-reality-touch-proactive-volume min="0" max="100" step="1" value="${Number(user.policy?.playback_volume ?? data.audio_output?.playback_volume ?? 35)}" ${formDisabled}>
+          <small>仅影响主动陪伴语音同步，不影响闹钟和固定测试音频。</small>
+        </label>
         <button type="submit" ${formDisabled}>保存主动语音策略</button>
       </form>
       <div class="reality-scenario-head">
@@ -32846,19 +32851,56 @@ function renderRealityTouchSettings() {
             <input type="time" name="reality_time" value="${escapeHtml(alarm.time || "07:30")}" ${formDisabled} required>
           </label>
           <label class="reality-field">
-            <span>重复播放</span>
+            <span>最多触达</span>
             <select name="reality_repeat_count" ${formDisabled}>
               ${[1, 2, 3, 4, 5, 6].map((count) => `<option value="${count}" ${Number(alarm.repeat_count || 1) === count ? "selected" : ""}>${count} 次</option>`).join("")}
             </select>
           </label>
           <label class="reality-field">
-            <span>重复间隔</span>
+            <span>确认等待</span>
             <input type="number" name="reality_repeat_interval" min="5" max="300" step="5" value="${escapeHtml(String(alarm.repeat_interval_seconds || 20))}" ${formDisabled}>
             <small>5-300 秒</small>
+          </label>
+          <label class="reality-field">
+            <span>稍后再叫</span>
+            <input type="number" name="reality_snooze_minutes" min="1" max="120" step="1" value="${escapeHtml(String(alarm.snooze_minutes || 10))}" ${formDisabled}>
+            <small>默认分钟数</small>
+          </label>
+          <label class="reality-field">
+            <span>起始音量</span>
+            <input type="number" name="reality_playback_volume" min="0" max="100" step="1" value="${escapeHtml(String(alarm.playback_volume ?? data.audio_output?.playback_volume ?? 35))}" ${formDisabled}>
+            <small>0-100%</small>
+          </label>
+          <label class="reality-field">
+            <span>每轮增量</span>
+            <input type="number" name="reality_volume_step" min="0" max="30" step="1" value="${escapeHtml(String(alarm.volume_step ?? 8))}" ${formDisabled}>
+            <small>每次增加百分比</small>
+          </label>
+          <label class="reality-field">
+            <span>最高音量</span>
+            <input type="number" name="reality_max_volume" min="0" max="100" step="1" value="${escapeHtml(String(alarm.max_volume ?? 70))}" ${formDisabled}>
+            <small>不会超过此值</small>
+          </label>
+          <label class="reality-field">
+            <span>淡入时间</span>
+            <input type="number" name="reality_fade_in_ms" min="0" max="5000" step="100" value="${escapeHtml(String(alarm.fade_in_ms ?? 800))}" ${formDisabled}>
+            <small>毫秒，0 表示关闭</small>
+          </label>
+          <label class="reality-field">
+            <span>聊天触达</span>
+            <select name="reality_delivery_mode" ${formDisabled}>
+              <option value="chat_on_failure" ${alarm.delivery_mode === "chat_on_failure" ? "selected" : ""}>音频失败时发消息</option>
+              <option value="audio_only" ${alarm.delivery_mode === "audio_only" ? "selected" : ""}>仅本机音频</option>
+              <option value="audio_and_chat" ${alarm.delivery_mode === "audio_and_chat" ? "selected" : ""}>音频和消息都发送</option>
+            </select>
           </label>
           <label class="reality-enable-field">
             <input type="checkbox" name="reality_enabled" ${alarm.enabled ? "checked" : ""} ${formDisabled}>
             <span><b>启用该用户的起床语音</b><small>总开关关闭时保留设置但不会触发</small></span>
+          </label>
+          <label class="reality-enable-field">
+            <input type="checkbox" name="reality_require_ack" ${alarm.require_acknowledgement !== false ? "checked" : ""} ${formDisabled}>
+            <span><b>等待用户确认醒来</b><small>用户回复“醒了”会停止后续触达，也可要求稍后再叫</small></span>
           </label>
         </div>
         <fieldset class="reality-days" ${formDisabled}>
@@ -32887,6 +32929,9 @@ function renderRealityTouchRuntime() {
   const counts = data.counts || {};
   const consent = user?.consent || {};
   const alarm = user?.alarm || {};
+  const contact = alarm.contact_session || {};
+  const playback = data.audio_output?.last_playback || {};
+  const contactStatusText = ({ pending: "等待确认", playing: "正在播放", snoozed: "稍后再叫", acknowledged: "已确认醒来", cancelled: "本轮已取消", exhausted: "已到最大次数" })[String(contact.status || "")] || String(contact.status || "");
   const dayLabels = ["一", "二", "三", "四", "五", "六", "日"];
   const dayText = Array.isArray(alarm.days) && alarm.days.length === 7
     ? "每天"
@@ -32914,11 +32959,14 @@ function renderRealityTouchRuntime() {
           <div><dt>起床提醒模板</dt><dd>${alarm.time ? `${escapeHtml(alarm.time)} · ${escapeHtml(dayText)}` : "未设置"}</dd></div>
           <div><dt>下次触发</dt><dd>${escapeHtml(alarm.next_trigger_text || (alarm.enabled ? "等待调度刷新" : "闹钟已关闭"))}</dd></div>
           <div><dt>最近触发</dt><dd>${escapeHtml(alarm.last_trigger_key || "暂无记录")}</dd></div>
+          <div><dt>本轮触达</dt><dd>${contact.status ? `${escapeHtml(contactStatusText)} · ${escapeHtml(String(contact.attempt || 0))}/${escapeHtml(String(contact.max_attempts || 0))} · ${escapeHtml(String(contact.last_volume || 0))}%` : "暂无会话"}</dd></div>
+          <div><dt>最近播放</dt><dd>${playback.at ? `${playback.success ? "成功" : "失败"} · ${escapeHtml(playback.device_name || playback.device_id || "未知设备")} · ${escapeHtml(String(playback.volume ?? "-"))}%${playback.fallback_from ? " · 已回退默认输出" : ""}` : "暂无记录"}</dd></div>
         </dl>
+        ${["pending", "playing", "snoozed"].includes(String(contact.status || "")) ? `<button type="button" class="danger soft" data-reality-touch-stop-session>停止当前这轮触达</button>` : ""}
       ` : `<div class="exp-settings-empty">暂无用户运行态。</div>`}
       <div class="reality-boundary-note">
         <b>设备边界</b>
-        <span>插件可以把音频直接路由到已选择的电脑输出端点，但不会扫描或配对蓝牙设备。请先在操作系统中完成连接；设备离线或主机休眠时不会改投其他设备。</span>
+        <span>插件可以把音频直接路由到已选择的电脑输出端点，但不会扫描或配对蓝牙设备。请先在操作系统中完成连接；指定设备离线时会回退系统默认输出，主机休眠时仍无法播放。</span>
       </div>
     </article>
   `;
@@ -33543,6 +33591,11 @@ function bindRealityTouchActions(root) {
     if (output) output.textContent = `${Number(event.currentTarget.value || 0)}%`;
   });
   const policyForm = root.querySelector("[data-reality-touch-policy-form]");
+  const proactiveVolumeInput = root.querySelector("[data-reality-touch-proactive-volume]");
+  proactiveVolumeInput?.addEventListener("input", (event) => {
+    const output = root.querySelector("[data-reality-touch-proactive-volume-output]");
+    if (output) output.textContent = `${Number(event.currentTarget.value || 0)}%`;
+  });
   policyForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const user = selectedRealityTouchUser();
@@ -33553,6 +33606,7 @@ function bindRealityTouchActions(root) {
         action: "save_policy",
         user_id: user.user_id,
         proactive_voice_enabled: Boolean(policyForm.elements.reality_proactive_voice?.checked),
+        playback_volume: Number(policyForm.elements.reality_proactive_volume?.value ?? 35),
       }),
       "主动语音现实触及策略已保存",
       button,
@@ -33578,6 +33632,13 @@ function bindRealityTouchActions(root) {
       message: form.elements.reality_message?.value || "",
       repeat_count: Number(form.elements.reality_repeat_count?.value || 1),
       repeat_interval_seconds: Number(form.elements.reality_repeat_interval?.value || 20),
+      require_acknowledgement: Boolean(form.elements.reality_require_ack?.checked),
+      snooze_minutes: Number(form.elements.reality_snooze_minutes?.value || 10),
+      playback_volume: Number(form.elements.reality_playback_volume?.value ?? 35),
+      volume_step: Number(form.elements.reality_volume_step?.value ?? 8),
+      max_volume: Number(form.elements.reality_max_volume?.value ?? 70),
+      fade_in_ms: Number(form.elements.reality_fade_in_ms?.value ?? 800),
+      delivery_mode: form.elements.reality_delivery_mode?.value || "chat_on_failure",
     };
     const button = form.querySelector('button[type="submit"]');
     const result = await runAction(
@@ -33602,7 +33663,10 @@ function bindRealityTouchActions(root) {
           user_id: user.user_id,
           test_kind: control.dataset.realityTouchTestKind || "scenario",
           message: root.querySelector('[name="reality_message"]')?.value || "",
-          playback_volume: Number(root.querySelector("[data-reality-touch-volume]")?.value ?? 35),
+          playback_volume: control.dataset.realityTouchTestKind === "device"
+            ? Number(root.querySelector("[data-reality-touch-volume]")?.value ?? 35)
+            : Number(root.querySelector('[name="reality_playback_volume"]')?.value ?? 35),
+          fade_in_ms: Number(root.querySelector('[name="reality_fade_in_ms"]')?.value ?? 800),
         }),
         control.dataset.realityTouchTestKind === "device"
           ? "固定测试音频已发送到所选电脑音频输出设备"
@@ -33625,6 +33689,20 @@ function bindRealityTouchActions(root) {
       () => postJson("/reality-touch/update", { action: "disable", user_id: user.user_id }),
       "该用户的起床语音已关闭",
       button,
+      { reload: false },
+    );
+    if (result) {
+      state.realityTouch = result;
+      renderExperimentalPage();
+    }
+  });
+  root.querySelector("[data-reality-touch-stop-session]")?.addEventListener("click", async (event) => {
+    const user = selectedRealityTouchUser();
+    if (!user) return;
+    const result = await runAction(
+      () => postJson("/reality-touch/update", { action: "stop_session", user_id: user.user_id }),
+      "当前这轮触达已停止",
+      event.currentTarget,
       { reload: false },
     );
     if (result) {

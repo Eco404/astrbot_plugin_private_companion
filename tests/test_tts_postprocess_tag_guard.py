@@ -1567,6 +1567,7 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
                 r"C:\temp\带 空格\voice.wav",
                 use_wpf=True,
                 volume=37,
+                fade_in_ms=800,
             )
 
         self.assertTrue(succeeded)
@@ -1576,6 +1577,7 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("$args", args[-1])
         self.assertIn("$env:PRIVATE_COMPANION_TTS_AUDIO_PATH", args[-1])
         self.assertEqual(kwargs["env"]["PRIVATE_COMPANION_TTS_VOLUME"], "37")
+        self.assertEqual(kwargs["env"]["PRIVATE_COMPANION_TTS_FADE_MS"], "800")
         self.assertTrue(kwargs["env"]["PRIVATE_COMPANION_TTS_AUDIO_PATH"].endswith("voice.wav"))
 
     def test_windows_playback_removes_temporary_repaired_wav(self):

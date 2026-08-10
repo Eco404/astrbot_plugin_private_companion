@@ -128,6 +128,8 @@ class RealityTouchAudioMixin:
             "selected_device_name": _single_line(selected.get("name"), 160),
             "selected_device_missing": missing,
             "playback_volume": self._reality_touch_playback_volume(),
+            "automatic_fallback": True,
+            "last_playback": dict(store.get("last_playback")) if isinstance(store.get("last_playback"), dict) else {},
             "device_management": bool(catalog.get("backend_available")),
             "camera_granted": False,
         }
@@ -169,8 +171,41 @@ class RealityTouchAudioMixin:
         devices = catalog.get("devices") if isinstance(catalog.get("devices"), list) else []
         selected = next((item for item in devices if item.get("id") == selected_id), None)
         if selected is None:
-            raise RuntimeError("已选择的音频输出设备当前不可用")
+            default = next(
+                (item for item in devices if item.get("id") == self._REALITY_TOUCH_DEFAULT_DEVICE_ID),
+                None,
+            )
+            if default is None:
+                raise RuntimeError("已选择的音频输出设备当前不可用，且系统默认输出不可用")
+            selected = dict(default)
+            selected["fallback_from"] = selected_id
+            logger.warning("[PrivateCompanion] 所选现实触及设备离线，回退系统默认输出: device=%s", selected_id)
         return selected
+
+    def _record_reality_touch_playback(
+        self,
+        *,
+        source: str,
+        success: bool,
+        volume: Any = None,
+        route: dict[str, Any] | None = None,
+        error: Any = None,
+    ) -> None:
+        store = self._reality_touch_store()
+        route = route if isinstance(route, dict) else {}
+        store["last_playback"] = {
+            "source": _single_line(source, 40) or "reality_touch",
+            "success": bool(success),
+            "at": _now_ts(),
+            "volume": self._reality_touch_playback_volume(volume),
+            "device_id": _single_line(route.get("id"), 96),
+            "device_name": _single_line(route.get("name"), 160),
+            "fallback_from": _single_line(route.get("fallback_from"), 96),
+            "error": _single_line(error, 200),
+        }
+        saver = getattr(self, "_schedule_data_save", None)
+        if callable(saver):
+            saver(delay=0.2)
 
     @staticmethod
     def _resample_reality_touch_audio(frames: Any, source_rate: int, target_rate: int) -> Any:
@@ -197,7 +232,8 @@ class RealityTouchAudioMixin:
         *,
         device_id: str = "",
         volume: Any = None,
-    ) -> None:
+        fade_in_ms: Any = 0,
+    ) -> dict[str, Any]:
         path = str(audio_path or "").strip()
         if not path or not Path(path).is_file():
             raise RuntimeError("待播放音频文件不存在")
@@ -208,11 +244,18 @@ class RealityTouchAudioMixin:
                 raise RuntimeError("当前插件实例没有系统默认音频播放能力")
             playback_volume = self._reality_touch_playback_volume(volume)
             try:
-                fallback(path, volume=playback_volume)
+                fallback(
+                    path,
+                    volume=playback_volume,
+                    fade_in_ms=_safe_int(fade_in_ms, 0, 0, 5000),
+                )
             except TypeError:
                 # Keep compatibility with older host mixins exposing the old signature.
-                fallback(path)
-            return
+                try:
+                    fallback(path, volume=playback_volume)
+                except TypeError:
+                    fallback(path)
+            return selected
 
         try:
             import sounddevice as sd
@@ -220,30 +263,69 @@ class RealityTouchAudioMixin:
         except Exception as exc:
             raise RuntimeError("指定设备播放需要 sounddevice 和 soundfile") from exc
 
-        volume = self._reality_touch_playback_volume(volume) / 100.0
+        playback_gain = self._reality_touch_playback_volume(volume) / 100.0
+        fade_ms = _safe_int(fade_in_ms, 0, 0, 5000)
         max_channels = max(1, _safe_int(selected.get("max_output_channels"), 2, 1))
-        with sf.SoundFile(path) as audio:
-            channels = max(1, min(int(audio.channels), max_channels))
-            source_rate = max(1, int(audio.samplerate))
-            target_rate = max(1, _safe_int(selected.get("sample_rate"), source_rate, 1))
-            with sd.OutputStream(
-                device=int(selected.get("runtime_index")),
-                samplerate=target_rate,
-                channels=channels,
-                dtype="float32",
-            ) as stream:
-                if target_rate != source_rate:
-                    frames = audio.read(dtype="float32", always_2d=True)
-                    if frames.shape[1] > channels:
-                        frames = frames.mean(axis=1, keepdims=True) if channels == 1 else frames[:, :channels]
-                    frames = self._resample_reality_touch_audio(frames, source_rate, target_rate)
-                    for start in range(0, len(frames), 4096):
-                        stream.write(frames[start:start + 4096] * volume)
-                    return
-                for block in audio.blocks(blocksize=4096, dtype="float32", always_2d=True):
-                    if block.shape[1] > channels:
-                        block = block.mean(axis=1, keepdims=True) if channels == 1 else block[:, :channels]
-                    stream.write(block * volume)
+        try:
+            with sf.SoundFile(path) as audio:
+                channels = max(1, min(int(audio.channels), max_channels))
+                source_rate = max(1, int(audio.samplerate))
+                target_rate = max(1, _safe_int(selected.get("sample_rate"), source_rate, 1))
+                fade_samples = round(target_rate * fade_ms / 1000)
+                written = 0
+
+                def scaled(block: Any) -> Any:
+                    nonlocal written
+                    import numpy as np
+
+                    gain = playback_gain
+                    if fade_samples > 0 and written < fade_samples:
+                        positions = np.arange(written, written + len(block), dtype=np.float32)
+                        ramp = np.minimum(1.0, positions / max(1, fade_samples)).reshape(-1, 1)
+                        written += len(block)
+                        return block * ramp * gain
+                    written += len(block)
+                    return block * gain
+
+                with sd.OutputStream(
+                    device=int(selected.get("runtime_index")),
+                    samplerate=target_rate,
+                    channels=channels,
+                    dtype="float32",
+                ) as stream:
+                    if target_rate != source_rate:
+                        frames = audio.read(dtype="float32", always_2d=True)
+                        if frames.shape[1] > channels:
+                            frames = frames.mean(axis=1, keepdims=True) if channels == 1 else frames[:, :channels]
+                        frames = self._resample_reality_touch_audio(frames, source_rate, target_rate)
+                        for start in range(0, len(frames), 4096):
+                            stream.write(scaled(frames[start:start + 4096]))
+                        return selected
+                    for block in audio.blocks(blocksize=4096, dtype="float32", always_2d=True):
+                        if block.shape[1] > channels:
+                            block = block.mean(axis=1, keepdims=True) if channels == 1 else block[:, :channels]
+                        stream.write(scaled(block))
+            return selected
+        except Exception as exc:
+            fallback = getattr(self, "_open_tts_audio_file_local", None)
+            if not callable(fallback):
+                raise
+            logger.warning(
+                "[PrivateCompanion] 指定音频设备播放失败，回退系统默认输出: device=%s error=%s",
+                _single_line(selected.get("name"), 120),
+                _single_line(exc, 160),
+            )
+            playback_volume = self._reality_touch_playback_volume(volume)
+            try:
+                fallback(path, volume=playback_volume, fade_in_ms=fade_ms)
+            except TypeError:
+                fallback(path, volume=playback_volume)
+            route = {
+                "id": self._REALITY_TOUCH_DEFAULT_DEVICE_ID,
+                "name": "跟随系统默认输出",
+                "fallback_from": _single_line(selected.get("id"), 96),
+            }
+            return route
 
     def _reality_touch_policy(self, user: dict[str, Any]) -> dict[str, Any]:
         policy = user.get("reality_touch_policy")
@@ -268,6 +350,7 @@ class RealityTouchAudioMixin:
             raise ValueError("该用户尚未在私聊中完成现实触及知情确认")
         policy = self._reality_touch_policy(user)
         policy["proactive_voice_enabled"] = enabled
+        policy["playback_volume"] = self._reality_touch_playback_volume(payload.get("playback_volume"))
         policy["updated_at"] = _now_ts()
         return policy
 
@@ -278,28 +361,37 @@ class RealityTouchAudioMixin:
         repeat: int = 1,
         interval: int = 20,
         volume: Any = None,
+        fade_in_ms: Any = 0,
+        source: str = "reality_touch",
     ) -> bool:
         synthesizer = getattr(self, "_synthesize_realtime_voice", None)
         if not callable(synthesizer):
             logger.warning("[PrivateCompanion] 现实触及缺少 TTS 合成能力")
+            self._record_reality_touch_playback(source=source, success=False, volume=volume, error="缺少 TTS 合成能力")
             return False
+        route: dict[str, Any] = {}
         try:
             result = await synthesizer(text, source="reality_touch", play_local=False)
             audio_path = str(result.get("audio_path") or "") if isinstance(result, dict) else ""
             if not audio_path:
+                self._record_reality_touch_playback(source=source, success=False, volume=volume, error="TTS 未返回音频文件")
                 return False
             for index in range(max(1, min(6, int(repeat)))):
-                if volume is None:
-                    await asyncio.to_thread(self._open_reality_touch_audio_file, audio_path)
-                else:
-                    await asyncio.to_thread(self._open_reality_touch_audio_file, audio_path, volume=volume)
+                route = await asyncio.to_thread(
+                    self._open_reality_touch_audio_file,
+                    audio_path,
+                    volume=volume,
+                    fade_in_ms=fade_in_ms,
+                )
                 if index + 1 < repeat:
                     await asyncio.sleep(max(5, min(300, int(interval))))
+            self._record_reality_touch_playback(source=source, success=True, volume=volume, route=route)
             return True
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("[PrivateCompanion] 现实触及音频播放失败: %s", _single_line(exc, 160))
+            self._record_reality_touch_playback(source=source, success=False, volume=volume, route=route, error=exc)
             return False
 
     async def _play_reality_touch_test_audio(self, volume: Any = None) -> bool:
@@ -308,15 +400,14 @@ class RealityTouchAudioMixin:
             logger.warning("[PrivateCompanion] 现实触及固定测试音频不存在: %s", path.name)
             return False
         try:
-            if volume is None:
-                await asyncio.to_thread(self._open_reality_touch_audio_file, str(path))
-            else:
-                await asyncio.to_thread(self._open_reality_touch_audio_file, str(path), volume=volume)
+            route = await asyncio.to_thread(self._open_reality_touch_audio_file, str(path), volume=volume)
+            self._record_reality_touch_playback(source="device_test", success=True, volume=volume, route=route)
             return True
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("[PrivateCompanion] 现实触及固定测试音频播放失败: %s", _single_line(exc, 160))
+            self._record_reality_touch_playback(source="device_test", success=False, volume=volume, error=exc)
             return False
 
     async def _mirror_reality_touch_proactive_voice(
@@ -330,9 +421,14 @@ class RealityTouchAudioMixin:
         if not path or not Path(path).is_file():
             logger.warning("[PrivateCompanion] 主动语音现实触及缺少本地音频文件")
             return False
+        volume: Any = None
         try:
-            await asyncio.to_thread(self._open_reality_touch_audio_file, path)
+            policy = self._reality_touch_policy(user)
+            volume = policy.get("playback_volume")
+            route = await asyncio.to_thread(self._open_reality_touch_audio_file, path, volume=volume)
+            self._record_reality_touch_playback(source="proactive_voice", success=True, volume=volume, route=route)
             return True
         except Exception as exc:
             logger.warning("[PrivateCompanion] 主动语音同步到现实设备失败: %s", _single_line(exc, 160))
+            self._record_reality_touch_playback(source="proactive_voice", success=False, volume=volume, error=exc)
             return False
