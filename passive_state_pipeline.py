@@ -55,6 +55,7 @@ async def inject_humanized_state(
     self._repair_incomplete_tool_context_groups(event, req)
     self._sanitize_private_companion_prompt_artifacts_in_request(event, req)
     self._append_deepseek_tool_protocol_guard(event, req)
+    self._append_passive_reply_tool_boundary(event, req)
     self._remember_external_llm_request_for_token_stats(event, req)
     proactive_only_limited = self._proactive_only_limited_passive_event(event)
     if self._proactive_only_blocks_passive_event(event, "llm_request"):
@@ -303,6 +304,21 @@ async def inject_humanized_state(
                         group_context_text = passive_group_formatter(group, sender_id, str(event.message_str or ""))
                     else:
                         group_context_text = self._format_group_context_for_prompt(group, sender_id, str(event.message_str or ""))
+                    slang_embedding_builder = getattr(self, "_group_slang_embedding_context", None)
+                    if callable(slang_embedding_builder):
+                        try:
+                            slang_embedding_text = await slang_embedding_builder(
+                                group,
+                                str(event.message_str or ""),
+                            )
+                        except Exception as exc:
+                            logger.debug(
+                                "[PrivateCompanion] 群黑话嵌入上下文生成失败: %s",
+                                _single_line(exc, 120),
+                            )
+                            slang_embedding_text = ""
+                        if slang_embedding_text:
+                            group_context_text = f"{group_context_text}\n\n{slang_embedding_text}".strip()
                     high_intensity_for_context = getattr(event, "private_companion_group_high_intensity", None)
                     if isinstance(high_intensity_for_context, dict) and high_intensity_for_context.get("active"):
                         group_context_text = self._compact_high_intensity_prompt_lines(

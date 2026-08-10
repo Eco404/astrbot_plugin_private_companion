@@ -287,6 +287,55 @@ class ReactionLibraryPageApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("asset-a", parsed[0]["id"])
         self.assertEqual(["吐槽"], parsed[0]["intents"])
 
+    async def test_analysis_prefers_configured_plugin_vision_over_astrbot_caption(self) -> None:
+        completion = json.dumps(
+            [
+                {
+                    "image_index": 1,
+                    "name": "插件模型识别",
+                    "description": "插件识图模型完成表情识别",
+                    "tags": ["插件识图"],
+                    "emotions": ["开心"],
+                    "intents": ["接梗"],
+                }
+            ],
+            ensure_ascii=False,
+        )
+        plugin_provider = SimpleNamespace(
+            text_chat=AsyncMock(
+                return_value=SimpleNamespace(completion_text=completion)
+            )
+        )
+        astrbot_provider = SimpleNamespace(
+            text_chat=AsyncMock(
+                return_value=SimpleNamespace(completion_text=completion)
+            )
+        )
+        plugin = SimpleNamespace(plugin_vision_provider_id="plugin-vision")
+        plugin._private_image_visual_provider_candidates = lambda _umo: [
+            ("astrbot-vision", "astrbot_image_caption", ""),
+            ("plugin-vision", "plugin_vision", ""),
+        ]
+        plugin._private_image_provider_by_id = lambda provider_id: {
+            "plugin-vision": plugin_provider,
+            "astrbot-vision": astrbot_provider,
+        }.get(provider_id)
+        plugin._provider_supports_image = lambda _provider: True
+        plugin._private_image_provider_timeout_seconds = lambda *_args: 0.0
+        plugin._can_run_llm_task = lambda *_args, **_kwargs: True
+        api = PrivateCompanionPageApi(plugin)
+
+        parsed, provider_id, error = await api._call_reaction_library_analysis_provider(
+            [{"id": "asset-a", "filename": "a.png"}],
+            ["data:image/png;base64,AA=="],
+        )
+
+        self.assertEqual("", error)
+        self.assertEqual("plugin-vision", provider_id)
+        self.assertEqual("插件模型识别", parsed[0]["name"])
+        plugin_provider.text_chat.assert_awaited_once()
+        astrbot_provider.text_chat.assert_not_awaited()
+
     async def test_background_analysis_uses_visual_provider_and_completes_item(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             library = ReactionAssetLibrary(folder)

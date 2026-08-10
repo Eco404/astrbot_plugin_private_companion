@@ -142,6 +142,29 @@ class LearningPageUiTests(unittest.TestCase):
         self.assertIn("支持片段", self.script)
         self.assertIn("与人格/事实边界冲突，不会自动使用", self.script)
 
+    def test_expression_library_supports_share_and_import_workflow(self) -> None:
+        learning_panel = self.html.split('id="panel-learning"', 1)[1].split('id="panel-group"', 1)[0]
+        self.assertIn('data-expression-share-open', self.script)
+        self.assertIn('data-expression-import-open', self.script)
+        self.assertIn('id="expressionShareDialog"', learning_panel)
+        self.assertIn('id="expressionImportDialog"', learning_panel)
+        self.assertIn('data-expression-import-preview-action', learning_panel)
+        self.assertIn('data-expression-import-apply', learning_panel)
+        self.assertIn('postJson("/expression-library/share"', self.script)
+        self.assertIn('postJson("/expression-library/import/preview"', self.script)
+        self.assertIn('postJson("/expression-library/import/apply"', self.script)
+        self.assertIn('state.expressionImportPreview = null', self.script)
+        self.assertIn('.expression-transfer-dialog', self.css)
+
+    def test_expression_transfer_assets_are_mirrored(self) -> None:
+        english_root = ROOT / "pages" / "companion-panel"
+        for filename in ("index.html", "app.js", "app.css"):
+            self.assertEqual(
+                (PAGE_ROOT / filename).read_bytes(),
+                (english_root / filename).read_bytes(),
+                f"两套表达学习页面资源必须保持一致: {filename}",
+            )
+
     def test_observations_remain_non_injecting_secondary_material(self) -> None:
         self.assertIn("这不是情境表达或语法习惯", self.script)
         self.assertIn("未归纳观察", self.script)

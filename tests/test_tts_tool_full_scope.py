@@ -61,7 +61,74 @@ class _ResponseHarness(TtsToolSanitizerMixin):
         return None
 
 
+class _ToolSet:
+    def __init__(self, *names: str) -> None:
+        self.tools = [SimpleNamespace(name=name) for name in names]
+
+    def remove_tool(self, name: str) -> None:
+        self.tools = [tool for tool in self.tools if tool.name != name]
+
+
+class _PassiveBoundaryHarness:
+    _append_passive_reply_tool_boundary = PrivateCompanionPlugin._append_passive_reply_tool_boundary
+    _finalize_passive_reply_tool_boundary = PrivateCompanionPlugin._finalize_passive_reply_tool_boundary
+    _tool_set_tool_names = staticmethod(PrivateCompanionPlugin._tool_set_tool_names)
+    _tool_set_has_named_tool = staticmethod(PrivateCompanionPlugin._tool_set_has_named_tool)
+    _event_requires_direct_same_session_tool_delivery = staticmethod(
+        TtsToolSanitizerMixin._event_requires_direct_same_session_tool_delivery
+    )
+
+
+class _CronEvent:
+    def get_platform_name(self) -> str:
+        return "cron"
+
+
 class TtsToolFullScopeTests(unittest.IsolatedAsyncioTestCase):
+    def test_passive_reply_boundary_removes_sender_added_after_request_hook(self):
+        harness = _PassiveBoundaryHarness()
+        initial_req = SimpleNamespace(func_tool=_ToolSet("pc_manage_memo"), system_prompt="原提示")
+        final_req = SimpleNamespace(
+            func_tool=_ToolSet("send_message_to_user", "pc_manage_memo"),
+            system_prompt=initial_req.system_prompt,
+        )
+
+        class Event:
+            unified_msg_origin = "default:GroupMessage:10001"
+
+            def get_extra(self, key, default=None):
+                return final_req if key == "provider_request" else default
+
+        event = Event()
+        self.assertEqual([], harness._append_passive_reply_tool_boundary(event, initial_req))
+
+        removed = harness._finalize_passive_reply_tool_boundary(event)
+
+        self.assertEqual(["send_message_to_user"], removed)
+        self.assertEqual(["pc_manage_memo"], [tool.name for tool in final_req.func_tool.tools])
+
+    def test_passive_reply_boundary_removes_current_session_sender(self):
+        harness = _PassiveBoundaryHarness()
+        event = SimpleNamespace(unified_msg_origin="default:GroupMessage:10001")
+        req = SimpleNamespace(
+            func_tool=_ToolSet("send_message_to_user", "pc_manage_memo"),
+            system_prompt="原提示",
+        )
+
+        removed = harness._append_passive_reply_tool_boundary(event, req)
+
+        self.assertEqual(["send_message_to_user"], removed)
+        self.assertEqual(["pc_manage_memo"], [tool.name for tool in req.func_tool.tools])
+        self.assertIn("直接输出一次最终正文", req.system_prompt)
+
+    def test_passive_reply_boundary_keeps_official_cron_sender(self):
+        harness = _PassiveBoundaryHarness()
+        event = _CronEvent()
+        req = SimpleNamespace(func_tool=_ToolSet("send_message_to_user"), system_prompt="原提示")
+
+        self.assertEqual([], harness._append_passive_reply_tool_boundary(event, req))
+        self.assertEqual(["send_message_to_user"], [tool.name for tool in req.func_tool.tools])
+
     async def test_photo_tool_empty_placeholder_chain_is_stopped_before_send(self):
         harness = _ResponseHarness()
 

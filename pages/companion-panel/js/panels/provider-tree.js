@@ -1,4 +1,6 @@
 window.PrivateCompanionProviderTree = (() => {
+  const embeddingProviderKeys = new Set(["EMBEDDING_PROVIDER_ID", "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"]);
+
   function providerValuesForRender(context) {
     const { state } = context;
     return {
@@ -137,14 +139,14 @@ window.PrivateCompanionProviderTree = (() => {
 
   function providerSelect(context, key, value) {
     const { state, noFallbackProviderKeys, optionalNoFallbackProviderKeys, escapeHtml } = context;
-    const embeddingProvider = key === "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID";
+    const embeddingProvider = embeddingProviderKeys.has(key);
     const providerItems = embeddingProvider
       ? (state.availableEmbeddingProviders || [])
       : state.availableProviders;
     const known = providerItems.some((item) => item.id === value);
     const customValue = value && !known ? value : "";
     const options = [
-      `<option value="">${embeddingProvider ? "留空自动探测" : noFallbackProviderKeys.has(key) || optionalNoFallbackProviderKeys.has(key) ? "留空不启用" : "留空自动回退"}</option>`,
+      `<option value="">${key === "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID" ? "留空继承通用模型/自动探测" : embeddingProvider ? "留空不启用" : noFallbackProviderKeys.has(key) || optionalNoFallbackProviderKeys.has(key) ? "留空不启用" : "留空自动回退"}</option>`,
       ...providerItems.map((item) => {
         const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
         return `<option value="${escapeHtml(item.id)}" ${item.id === value ? "selected" : ""}>${escapeHtml(label)}</option>`;
@@ -190,7 +192,7 @@ window.PrivateCompanionProviderTree = (() => {
   function resolveProviderId(context, key, values = currentProviderValues(context)) {
     const { noFallbackProviderKeys, optionalNoFallbackProviderKeys } = context;
     if (values[key]) return values[key];
-    if (key === "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID") return "";
+    if (embeddingProviderKeys.has(key)) return "";
     if (noFallbackProviderKeys.has(key)) return "";
     if (optionalNoFallbackProviderKeys.has(key)) return "";
     const mode = typeof context.currentProviderConfigMode === "function"
@@ -351,11 +353,11 @@ window.PrivateCompanionProviderTree = (() => {
     const selected = providers[key] || "";
     const resolved = resolveProviderId(context, key, providers);
     const configured = Boolean(selected);
-    const embeddingProvider = key === "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID";
+    const embeddingProvider = embeddingProviderKeys.has(key);
     const noFallback = noFallbackProviderKeys.has(key);
     const optionalNoFallback = optionalNoFallbackProviderKeys.has(key);
     const group = providerGroupByKey[key];
-    const statusLabel = configured ? "已单独配置" : (embeddingProvider ? "自动探测" : (noFallback ? "未配置" : (optionalNoFallback ? "可选未启用" : "自动回退")));
+    const statusLabel = configured ? "已单独配置" : (key === "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID" ? "继承通用/自动探测" : (embeddingProvider ? "未配置" : (noFallback ? "未配置" : (optionalNoFallback ? "可选未启用" : "自动回退"))));
     const guide = providerGuides[key] || {};
     const preference = providerPreferenceMeta[guide.preference || "balanced"];
     const impact = providerPassiveImpactMeta[guide.passiveImpact || ""];
@@ -406,7 +408,7 @@ window.PrivateCompanionProviderTree = (() => {
           </label>`}
           <div class="provider-current">
             <span>当前使用</span>
-            <b>${escapeHtml(resolved || (embeddingProvider ? "自动探测可用嵌入模型" : (noFallback ? "未配置" : (optionalNoFallback ? "未启用" : "AstrBot 默认模型"))))}</b>
+            <b>${escapeHtml(resolved || (key === "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID" ? "继承通用模型 / 自动探测" : (embeddingProvider ? "未配置" : (noFallback ? "未配置" : (optionalNoFallback ? "未启用" : "AstrBot 默认模型")))))}</b>
           </div>
           ${providerGuideMarkup(context, key)}
           <div class="provider-row">
@@ -429,10 +431,7 @@ window.PrivateCompanionProviderTree = (() => {
     const passiveSensitive = keys.filter((key) => providerGuides[key]?.passiveImpact === "direct").length;
     const speedRecommended = keys.filter((key) => providerNeedsLowLatency(key)).length;
     const qualityRecommended = keys.filter((key) => providerGuides[key]?.preference === "quality").length;
-    const providerConfigMode = currentProviderConfigMode();
-    const genericVision = providerConfigMode === "quick"
-      ? (providers.PLUGIN_VISION_PROVIDER_ID || "跟随 AstrBot 本体/工具转述")
-      : (providers.NARRATION_PROVIDER_ID || "工具结果转述 / 主模型");
+    const genericVision = providers.PLUGIN_VISION_PROVIDER_ID || "跟随 AstrBot 本体图片转文字";
     const readingVisionAvailable = visibleConfigKey("PRIVATE_READING_VISION_PROVIDER_ID");
     const readingVision = providers.PRIVATE_READING_VISION_PROVIDER_ID || "未配置";
     const vision = readingVisionAvailable
@@ -574,7 +573,7 @@ window.PrivateCompanionProviderTree = (() => {
     const quickVision = providers.PLUGIN_VISION_PROVIDER_ID || "未配置";
     const main = resolveProviderId(context, "LLM_PROVIDER_ID", providers) || "AstrBot 默认模型";
     const mai = resolveProviderId(context, "MAI_STYLE_PROVIDER_ID", providers) || main;
-    const pluginVision = providers.NARRATION_PROVIDER_ID || "跟随工具结果转述 / 主模型";
+    const pluginVision = providers.PLUGIN_VISION_PROVIDER_ID || "跟随 AstrBot 本体图片转文字";
     if (mode === "quick") {
       const readingVisionNode = visibleConfigKey("PRIVATE_READING_VISION_PROVIDER_ID")
         ? `
@@ -607,7 +606,7 @@ window.PrivateCompanionProviderTree = (() => {
       <div class="flow-lane">
         <span class="flow-node primary">默认图片转述<br><b>AstrBot 本体配置</b></span>
         <span class="flow-arrow">→</span>
-        <span class="flow-node ${providers.NARRATION_PROVIDER_ID ? "primary" : "inherited"}">插件识图链路<br><b>${escapeHtml(pluginVision)}</b></span>
+        <span class="flow-node ${providers.PLUGIN_VISION_PROVIDER_ID ? "primary" : "inherited"}">插件识图链路<br><b>${escapeHtml(pluginVision)}</b></span>
       </div>
       <div class="flow-tasks">
         ${tasks.map(([key, label]) => {
@@ -645,9 +644,12 @@ window.PrivateCompanionProviderTree = (() => {
     document.querySelectorAll("[data-provider-select]").forEach((select) => {
       syncProviderInput(context, select);
       select.addEventListener("change", () => {
+        const custom = select.value === "__custom__";
         syncProviderInput(context, select);
         rememberProviderDraft(context, select.dataset.providerSelect);
-        renderProviders(context);
+        // Keep the manual field mounted so the just-selected custom option is
+        // not immediately replaced by a render based on its still-empty value.
+        if (!custom) renderProviders(context);
       });
     });
     document.querySelectorAll("[data-provider-key]").forEach((input) => {
@@ -656,9 +658,10 @@ window.PrivateCompanionProviderTree = (() => {
     document.querySelectorAll("[data-provider-fallback-select]").forEach((select) => {
       syncProviderFallbackInput(context, select);
       select.addEventListener("change", () => {
+        const custom = select.value === "__custom__";
         syncProviderFallbackInput(context, select);
         rememberProviderFallbackDraft(context, select.dataset.providerFallbackSelect);
-        renderProviders(context);
+        if (!custom) renderProviders(context);
       });
     });
     document.querySelectorAll("[data-provider-fallback-key]").forEach((input) => {
@@ -750,6 +753,7 @@ window.PrivateCompanionProviderTree = (() => {
     currentProviderFallbackValues,
     currentDeepseekPeakValues,
     resolveProviderId,
+    bindProviderTests,
     testProvider: (context, key) => testProvider(context, key),
   };
 })();

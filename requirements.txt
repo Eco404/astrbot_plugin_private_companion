@@ -8,3 +8,5 @@ lunarcalendar>=0.0.9
 numpy>=1.26,<3
 sounddevice>=0.5,<1
 soundfile>=0.12,<1
+# Reality Touch camera capture uses OpenCV VideoCapture without GUI components.
+opencv-python-headless>=4.10,<5

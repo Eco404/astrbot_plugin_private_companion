@@ -530,6 +530,27 @@ class _RuntimeHarness(LlmToolActionsMixin):
         return None
 
 
+class _EmbeddingProvider:
+    def __init__(self, provider_id: str) -> None:
+        self.provider_id = provider_id
+
+    async def get_embeddings(self, texts: list[str]):
+        return {
+            "data": [
+                {"embedding": [float(index + 1), 1.0]}
+                for index, _text in enumerate(texts)
+            ]
+        }
+
+
+class _EmbeddingContext:
+    def __init__(self, providers: dict[str, _EmbeddingProvider]) -> None:
+        self.providers = providers
+
+    def get_embedding_provider_by_id(self, provider_id: str):
+        return self.providers.get(provider_id)
+
+
 class ReactionAssetRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
     def test_cached_library_does_not_shadow_runtime_accessor(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -634,6 +655,40 @@ class ReactionAssetRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(preferred_lookup["cache_hit"])
             self.assertFalse(other_lookup["cache_hit"])
             self.assertTrue(cached_other_lookup["cache_hit"])
+
+    async def test_embedding_provider_inheritance_and_reaction_override(self) -> None:
+        shared = _EmbeddingProvider("embedding-shared")
+        override = _EmbeddingProvider("embedding-reaction")
+        harness = _RuntimeHarness("")
+        harness.context = _EmbeddingContext(
+            {shared.provider_id: shared, override.provider_id: override}
+        )
+        harness.embedding_provider_id = shared.provider_id
+        harness.reaction_expression_embedding_provider_id = ""
+
+        shared_provider, shared_id = await harness._shared_embedding_provider()
+        inherited_provider, inherited_id = await harness._reaction_embedding_provider()
+
+        self.assertIs(shared, shared_provider)
+        self.assertEqual(shared.provider_id, shared_id)
+        self.assertIs(shared, inherited_provider)
+        self.assertEqual(shared.provider_id, inherited_id)
+
+        harness.reaction_expression_embedding_provider_id = override.provider_id
+        reaction_provider, reaction_id = await harness._reaction_embedding_provider()
+
+        self.assertIs(override, reaction_provider)
+        self.assertEqual(override.provider_id, reaction_id)
+
+    async def test_embedding_batch_accepts_openai_style_data_rows(self) -> None:
+        provider = _EmbeddingProvider("embedding-shared")
+        harness = _RuntimeHarness("")
+
+        vectors = await harness._reaction_embedding_vectors(provider, ["开心", "难过"])
+
+        self.assertEqual(2, len(vectors))
+        self.assertAlmostEqual(1.0, sum(value * value for value in vectors[0]))
+        self.assertAlmostEqual(1.0, sum(value * value for value in vectors[1]))
 
 
 if __name__ == "__main__":

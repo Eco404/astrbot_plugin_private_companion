@@ -3998,7 +3998,37 @@
     "description": "现实触及：主动能力设备扩展",
     "type": "bool",
     "default": false,
-    "hint": "开启后，可将 Bot 的主动语音动作路由到用户选择的电脑音频输出设备，并运行起床提醒等计划模板。每位用户仍须完成版本化知情确认；当前确认只授权本机音频，不包含未来的摄像头能力。蓝牙连接和配对仍由操作系统管理。",
+    "hint": "开启后，可将 Bot 的主动能力连接到本机设备。音频与摄像头必须分别由用户完成知情确认；摄像头仅按明确任务读取单帧，默认不保存原图。蓝牙连接和配对仍由操作系统管理。",
+    "invisible": true
+  },
+  "enable_reality_touch_camera": {
+    "description": "现实触及：启用摄像头单帧能力",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "reality_touch_camera_index": {
+    "description": "现实触及：摄像头索引",
+    "type": "int",
+    "default": 0,
+    "invisible": true
+  },
+  "reality_touch_camera_min_interval_seconds": {
+    "description": "现实触及：摄像头读取最小间隔",
+    "type": "int",
+    "default": 60,
+    "invisible": true
+  },
+  "reality_touch_camera_capture_timeout_seconds": {
+    "description": "现实触及：摄像头读取超时",
+    "type": "int",
+    "default": 5,
+    "invisible": true
+  },
+  "reality_touch_camera_analysis_timeout_seconds": {
+    "description": "现实触及：视觉有限状态分析超时",
+    "type": "int",
+    "default": 25,
     "invisible": true
   },
   "enable_tts_local_playback_live_only": {
@@ -4319,6 +4349,12 @@
     "default": "regex",
     "invisible": true
   },
+  "segmented_proactive_match_width_variants": {
+    "description": "Legacy flat config: 分段词自动匹配全角半角标点",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
   "segmented_proactive_regex": {
     "description": "Legacy flat config: 主动分段正则表达式",
     "type": "string",
@@ -4502,6 +4538,12 @@
     "default": "",
     "invisible": true
   },
+  "EMBEDDING_PROVIDER_ID": {
+    "description": "Legacy flat config: 通用语义嵌入模型",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
   "provider_config_mode": {
     "description": "Legacy flat config: 模型配置模式",
     "type": "string",
@@ -4612,6 +4654,13 @@
         "type": "text",
         "hint": "用于匹配 Provider ID、名称、模型名、类型和 API Base；每行或逗号分隔。",
         "default": "deepseek,深度求索"
+      },
+      "EMBEDDING_PROVIDER_ID": {
+        "description": "通用语义嵌入模型",
+        "type": "string",
+        "hint": "选择 AstrBot 中支持 Embedding 的 Provider。供表情语义召回、群内黑话近义匹配等需要向量理解的功能共用；各功能仍以本地规则和已确认事实为主，向量只做软召回。留空时会兼容旧版表情嵌入模型配置，否则不调用普通聊天模型代替。",
+        "default": "",
+        "_special": "select_provider"
       },
       "FAST_RESPONSE_PROVIDER_ID": {
         "description": "快速响应模型",
@@ -11545,8 +11594,72 @@
       "enable_experimental_bluetooth_wakeup": {
         "description": "启用现实触及",
         "type": "bool",
-        "hint": "默认关闭。开启后开放现实触及设备路由与主动语音扩展；每位用户仍须在私聊中手动完成版本化知情确认。管理员可选择电脑音频输出设备，并单独启用主动语音同步或起床提醒等计划场景。当前授权范围仅为本机音频，不包含摄像头；未来摄像头能力必须再次单独确认。",
+        "hint": "默认关闭。开启后开放现实触及设备路由。音频和摄像头是相互独立的能力，用户必须分别在私聊中手动确认；页面开关不能代替授权。",
         "default": false
+      },
+      "enable_reality_touch_camera": {
+        "description": "启用摄像头单帧读取",
+        "type": "bool",
+        "hint": "独立默认关闭。即使现实触及和本机音频已经启用，仍需同时开启此开关，并由当前用户单独确认摄像头授权。只允许任务触发的单帧读取；画面可能发送给已配置视觉模型做有限状态分析，插件默认不保存原图。",
+        "default": false,
+        "condition": {
+          "enable_experimental_bluetooth_wakeup": true
+        }
+      },
+      "reality_touch_camera_index": {
+        "description": "摄像头索引",
+        "type": "int",
+        "hint": "通常内置或默认摄像头为 0；若主机有多个摄像头，可依次尝试 1、2。状态刷新不会自动探测设备，避免无意点亮摄像头。",
+        "default": 0,
+        "condition": {
+          "enable_experimental_bluetooth_wakeup": true,
+          "enable_reality_touch_camera": true
+        }
+      },
+      "reality_touch_camera_min_interval_seconds": {
+        "description": "摄像头最小读取间隔（秒）",
+        "type": "int",
+        "hint": "同一用户两次单帧读取之间的最小间隔。技术层会强制执行，最低 10 秒。",
+        "slider": {
+          "min": 10,
+          "max": 3600,
+          "step": 10
+        },
+        "default": 60,
+        "condition": {
+          "enable_experimental_bluetooth_wakeup": true,
+          "enable_reality_touch_camera": true
+        }
+      },
+      "reality_touch_camera_capture_timeout_seconds": {
+        "description": "摄像头读取超时（秒）",
+        "type": "int",
+        "hint": "设备被占用或驱动无响应时停止等待。建议保持 5 秒。",
+        "slider": {
+          "min": 2,
+          "max": 20,
+          "step": 1
+        },
+        "default": 5,
+        "condition": {
+          "enable_experimental_bluetooth_wakeup": true,
+          "enable_reality_touch_camera": true
+        }
+      },
+      "reality_touch_camera_analysis_timeout_seconds": {
+        "description": "摄像头有限状态分析超时（秒）",
+        "type": "int",
+        "hint": "视觉模型只返回在场、活动类型、可打扰性和光线等有限状态；超时后仅保留本地光线与分辨率结果。",
+        "slider": {
+          "min": 5,
+          "max": 90,
+          "step": 5
+        },
+        "default": 25,
+        "condition": {
+          "enable_experimental_bluetooth_wakeup": true,
+          "enable_reality_touch_camera": true
+        }
       },
       "enable_reaction_expression_experiment": {
         "description": "启用表情表达实验",
@@ -11678,10 +11791,10 @@
         }
       },
       "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID": {
-        "description": "表情语义嵌入模型",
+        "description": "表情嵌入模型覆盖",
         "type": "string",
         "_special": "select_provider",
-        "hint": "选择 AstrBot 中支持 Embedding 的 Provider。留空时自动探测第一个可用嵌入模型；只用于表情素材的语义召回，不会改变主聊天模型。",
+        "hint": "可选。仅在表情素材需要使用不同的 Embedding Provider 时填写；留空时继承模型页的通用语义嵌入模型，再兼容自动探测可用嵌入模型。不会改变主聊天模型。",
         "default": "",
         "condition": {
           "enable_reaction_expression_experiment": true,
@@ -12481,6 +12594,16 @@
         "default": "regex",
         "condition": {
           "enable_segmented_proactive_reply": true
+        }
+      },
+      "segmented_proactive_match_width_variants": {
+        "description": "自动匹配全角/半角标点",
+        "type": "bool",
+        "hint": "仅在分段词列表模式生效。开启后，配置任一常见半角或全角标点时，会同时匹配它的宽度变体；分段清理词也使用同一规则。不会改写实际发送的正文。",
+        "default": true,
+        "condition": {
+          "enable_segmented_proactive_reply": true,
+          "segmented_proactive_split_mode": "words"
         }
       },
       "segmented_proactive_regex": {

@@ -23,6 +23,58 @@ class _SegmentTtsHarness(TtsEnhancementMixin, ProactiveMessageMixin, EventDispat
 
 
 class SegmentedExternalShareTests(unittest.TestCase):
+    @staticmethod
+    def _width_variant_harness(*, enabled: bool) -> _SegmentHarness:
+        harness = _SegmentHarness()
+        harness.enable_segmented_proactive_reply = True
+        harness.segmented_proactive_threshold = 500
+        harness.segmented_proactive_min_segment_chars = 1
+        harness.segmented_proactive_max_segments = 5
+        harness.segmented_proactive_split_mode = "words"
+        harness.segmented_proactive_regex = r".*?[。？！~…\n]+|.+$"
+        harness.segmented_proactive_split_words = ["~"]
+        harness.segmented_proactive_match_width_variants = enabled
+        harness.enable_segmented_proactive_content_cleanup = False
+        harness.segmented_proactive_content_cleanup_scope = "all"
+        harness.segmented_proactive_content_cleanup_rule = ""
+        harness.segmented_proactive_content_cleanup_words = []
+        harness.enable_segmented_proactive_content_replacement = False
+        harness.segmented_proactive_content_replacements = []
+        return harness
+
+    def test_word_segmentation_width_variant_matching_is_configurable(self) -> None:
+        enabled = self._width_variant_harness(enabled=True)
+        disabled = self._width_variant_harness(enabled=False)
+        source = "第一段～第二段"
+
+        self.assertEqual(["第一段～", "第二段"], enabled._split_proactive_text(source))
+        self.assertEqual([source], disabled._split_proactive_text(source))
+
+    def test_width_variant_matching_supports_reverse_and_common_punctuation(self) -> None:
+        harness = self._width_variant_harness(enabled=True)
+        cases = (
+            (["～"], "第一段~第二段"),
+            (["!"], "第一段！第二段"),
+            (["，"], "第一段,第二段"),
+            (["."], "第一段。第二段"),
+            (["("], "第一段（第二段"),
+        )
+        for split_words, source in cases:
+            with self.subTest(split_words=split_words, source=source):
+                harness.segmented_proactive_split_words = split_words
+                self.assertEqual(2, len(harness._split_proactive_text(source)))
+
+    def test_width_variant_matching_also_applies_to_cleanup_words(self) -> None:
+        harness = self._width_variant_harness(enabled=True)
+        harness.segmented_proactive_split_words = [","]
+        harness.enable_segmented_proactive_content_cleanup = True
+        harness.segmented_proactive_content_cleanup_words = [","]
+
+        self.assertEqual(
+            ["第一段", "第二段"],
+            harness._split_proactive_text("第一段，第二段"),
+        )
+
     def test_external_shares_follow_segmenting_config(self) -> None:
         for reason in (
             "bili_video_share",

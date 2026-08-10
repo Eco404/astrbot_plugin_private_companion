@@ -15,18 +15,16 @@ from astrbot.api import logger
 
 from .helpers import _now_ts, _safe_int, _single_line
 from .reality_touch_audio import RealityTouchAudioMixin
+from .reality_touch_camera import RealityTouchCameraMixin
 
 
-class WakeupAlarmMixin(RealityTouchAudioMixin):
+class WakeupAlarmMixin(RealityTouchCameraMixin, RealityTouchAudioMixin):
     """Schedule local TTS contact without coupling to a Bluetooth vendor API."""
 
     _WAKEUP_DEFAULT_MESSAGE = "早上好，该起床啦。先坐起来喝口水，再慢慢开始今天吧。"
     _WAKEUP_DYNAMIC_MESSAGE_HINT = "每次触发时按人格、关系与当天语境动态生成"
     _REALITY_TOUCH_CONSENT_VERSION = 1
-    _REALITY_TOUCH_CONFIRMATION_TEXT = (
-        "我已知晓现实触及会调用本机音频输出，并同意启用当前音频能力；"
-        "未来摄像头能力需要再次单独确认"
-    )
+    _REALITY_TOUCH_CONFIRMATION_TEXT = "我理解风险并确认授权"
     _WAKEUP_CONTACT_ACTIVE_STATES = {"pending", "playing", "snoozed"}
     _WAKEUP_DELIVERY_MODES = {"audio_only", "audio_and_chat", "chat_on_failure"}
 
@@ -49,27 +47,40 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
 
     def _reality_touch_confirmation_prompt(self) -> str:
         return (
-            "现实触及会让插件主动调用本机设备。当前版本只使用系统默认音频输出；"
-            "未来若增加摄像头能力，仍会要求再次单独确认，不会沿用本次授权。\n"
-            "请由用户本人手动输入完整确认信息：\n"
-            f"陪伴 现实触及 确认 {self._REALITY_TOUCH_CONFIRMATION_TEXT}"
+            "现实触及会让插件主动调用本机设备。当前音频能力使用管理员选择的电脑输出设备；"
+            "摄像头是另一项独立能力，必须再次单独确认，不会沿用本次授权。\n"
+            "风险说明展示后，用户本人只需在 10 分钟内单独发送：\n"
+            f"{self._REALITY_TOUCH_CONFIRMATION_TEXT}"
         )
 
     @staticmethod
     def _reality_touch_confirmation_valid(text: str) -> bool:
         compact = re.sub(r"[\s，,。.!！;；:：]+", "", str(text or ""))
-        if any(marker in compact for marker in ("不同意", "拒绝", "不授权", "取消授权")):
-            return False
-        return all(
-            checks
-            for checks in (
-                "现实触及" in compact,
-                any(marker in compact for marker in ("音频", "音响", "声音输出")),
-                "摄像头" in compact,
-                any(marker in compact for marker in ("再次确认", "单独确认", "另行确认")),
-                any(marker in compact for marker in ("同意", "确认启用", "授权")),
+        return compact == "我理解风险并确认授权"
+
+    def _reality_touch_apply_pending_confirmation(self, user: dict[str, Any], text: str) -> str | None:
+        if not self._reality_touch_confirmation_valid(text):
+            return None
+        pending = user.get("reality_touch_pending_consent")
+        if not isinstance(pending, dict):
+            return None
+        if _safe_int(pending.get("expires_at"), 0, 0) < _now_ts():
+            user.pop("reality_touch_pending_consent", None)
+            self._save_data_sync()
+            return "这次授权确认已经过期，请重新打开对应能力的风险说明。"
+        capability = _single_line(pending.get("capability"), 40)
+        if capability == self._REALITY_TOUCH_CAMERA_CAPABILITY:
+            reply, _ = self._reality_touch_camera_command(
+                user,
+                f"摄像头确认 {self._REALITY_TOUCH_CAMERA_CONFIRMATION_TEXT}",
             )
-        )
+            return reply
+        if capability == "local_audio":
+            reply, _ = self._wakeup_alarm_command(user, f"确认 {self._REALITY_TOUCH_CONFIRMATION_TEXT}")
+            return reply
+        user.pop("reality_touch_pending_consent", None)
+        self._save_data_sync()
+        return "没有找到可确认的现实触及能力，请重新打开对应风险说明。"
 
     @staticmethod
     def _wakeup_parse_time(value: Any) -> str:
@@ -667,8 +678,9 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
                 "version": _safe_int(consent.get("version"), 0, 0),
                 "confirmed_at": _safe_int(consent.get("confirmed_at"), 0, 0),
                 "local_audio": self._reality_touch_capability_consented(user, "local_audio"),
-                "camera": self._reality_touch_capability_consented(user, "camera"),
+                "camera": self._reality_touch_camera_consented(user),
             },
+            "camera": self._reality_touch_camera_user_snapshot(user),
             "policy": {
                 "proactive_voice_enabled": bool(policy.get("proactive_voice_enabled")),
                 "playback_volume": _safe_int(
@@ -742,6 +754,8 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         )
         consented = sum(1 for row in rows if row.get("consent", {}).get("confirmed"))
         proactive_voice = sum(1 for row in rows if row.get("policy", {}).get("proactive_voice_enabled"))
+        camera_consented = sum(1 for row in rows if row.get("camera", {}).get("consented"))
+        camera_enabled = sum(1 for row in rows if row.get("camera", {}).get("enabled"))
         enabled = sum(1 for row in rows if row.get("alarm", {}).get("enabled"))
         scheduled = sum(1 for row in rows if row.get("alarm", {}).get("next_trigger_at"))
         custom_scheduled = sum(
@@ -753,14 +767,17 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         return {
             "global_enabled": bool(getattr(self, "enable_experimental_bluetooth_wakeup", False)),
             "consent_version": self._REALITY_TOUCH_CONSENT_VERSION,
-            "confirmation_command": f"陪伴 现实触及 确认 {self._REALITY_TOUCH_CONFIRMATION_TEXT}",
+            "confirmation_command": "陪伴 现实触及 确认",
             "default_message": self._WAKEUP_DEFAULT_MESSAGE,
             "dynamic_message_hint": self._WAKEUP_DYNAMIC_MESSAGE_HINT,
             "audio_output": self._reality_touch_audio_snapshot(),
+            "camera": self._reality_touch_camera_page_snapshot(),
             "counts": {
                 "users": len(rows),
                 "consented": consented,
                 "proactive_voice": proactive_voice,
+                "camera_consented": camera_consented,
+                "camera_enabled": camera_enabled,
                 "enabled": enabled,
                 "scheduled": scheduled,
                 "custom_scheduled": custom_scheduled,
@@ -814,20 +831,35 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
             self._stop_wakeup_contact_session(user)
         return alarm
 
-    def _wakeup_alarm_command(self, user: dict[str, Any], value: str) -> tuple[str, bool]:
+    def _wakeup_alarm_command(self, user: dict[str, Any], value: str) -> tuple[str, Any]:
         """Apply a chat command. Returns (reply, play_test_now)."""
         text = str(value or "").strip()
+        camera_result = self._reality_touch_camera_command(user, text)
+        if camera_result is not None:
+            return camera_result
         compact = re.sub(r"\s+", "", text).lower()
         alarm = self._wakeup_alarm_for_user(user)
         if not text or compact in {"查看", "状态", "status"}:
             return self._wakeup_alarm_status_text(user), False
         if compact in {"确认", "同意", "授权"}:
+            user["reality_touch_pending_consent"] = {
+                "capability": "local_audio",
+                "requested_at": _now_ts(),
+                "expires_at": _now_ts() + 600,
+            }
+            self._save_data_sync()
             return self._reality_touch_confirmation_prompt(), False
         if text.startswith("确认"):
             confirmation = text[len("确认"):].strip()
             if not self._reality_touch_confirmation_valid(confirmation):
+                user["reality_touch_pending_consent"] = {
+                    "capability": "local_audio",
+                    "requested_at": _now_ts(),
+                    "expires_at": _now_ts() + 600,
+                }
+                self._save_data_sync()
                 return (
-                    "确认信息不完整，需要同时明确现实触及、本机音频、摄像头需再次单独确认和本人同意。\n"
+                    "确认口令不正确，请在阅读风险说明后手动输入“我理解风险并确认授权”。\n"
                     + self._reality_touch_confirmation_prompt()
                 ), False
             user["reality_touch_consent"] = {
@@ -838,20 +870,39 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
                 "granted_capabilities": ["local_audio"],
                 "camera_granted": False,
             }
+            user.pop("reality_touch_pending_consent", None)
             self._save_data_sync()
             return "现实触及知情确认已记录。当前只授权本机音频能力，未授权摄像头。", False
-        if compact in {"撤销确认", "撤销授权", "取消确认", "取消授权"}:
+        if compact in {"撤销音频确认", "撤销音频授权", "取消音频确认", "取消音频授权"}:
             user.pop("reality_touch_consent", None)
+            pending = user.get("reality_touch_pending_consent")
+            if isinstance(pending, dict) and pending.get("capability") == "local_audio":
+                user.pop("reality_touch_pending_consent", None)
             alarm["enabled"] = False
             self._stop_wakeup_contact_session(user)
             self._save_data_sync()
-            return "已撤销现实触及授权，并关闭当前用户的起床语音。", False
+            return "已撤销现实触及音频授权，并关闭当前用户的起床语音；摄像头独立授权不受影响。", False
+        if compact in {"撤销确认", "撤销授权", "取消确认", "取消授权", "撤销全部授权", "撤销现实触及授权"}:
+            user.pop("reality_touch_consent", None)
+            user.pop("reality_touch_camera_consent", None)
+            user.pop("reality_touch_pending_consent", None)
+            self._reality_touch_camera_policy(user)["enabled"] = False
+            alarm["enabled"] = False
+            self._stop_wakeup_contact_session(user)
+            self._save_data_sync()
+            return "已撤销现实触及的音频与摄像头授权，并关闭当前用户的设备触达。", False
         if compact in {"关闭", "取消", "停用", "off", "disable"}:
             alarm["enabled"] = False
             self._stop_wakeup_contact_session(user)
             self._save_data_sync()
             return "已关闭现实触及的起床语音。", False
         if not self._reality_touch_audio_consented(user):
+            user["reality_touch_pending_consent"] = {
+                "capability": "local_audio",
+                "requested_at": _now_ts(),
+                "expires_at": _now_ts() + 600,
+            }
+            self._save_data_sync()
             return self._reality_touch_confirmation_prompt(), False
         if compact in {"测试", "试听", "test"}:
             if not alarm.get("enabled") or not self._wakeup_parse_time(alarm.get("time")):

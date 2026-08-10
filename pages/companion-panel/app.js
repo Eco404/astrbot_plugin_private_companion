@@ -60,6 +60,10 @@ const state = {
   expressionLibraryType: "all",
   expressionLibraryQuery: "",
   expressionLibraryArchiveOpen: false,
+  expressionShareItems: [],
+  expressionSharePack: null,
+  expressionImportPack: null,
+  expressionImportPreview: null,
   expressionLibraryVisibleCounts: {
     pending: 8,
     rules: 12,
@@ -255,6 +259,7 @@ const providerLabels = {
   FAST_RESPONSE_PROVIDER_ID: "快速响应模型",
   COMPLEX_REASONING_PROVIDER_ID: "复杂推理模型",
   CREATIVE_MODEL_PROVIDER_ID: "创作模型",
+  EMBEDDING_PROVIDER_ID: "通用语义嵌入模型",
   LLM_PROVIDER_ID: "主模型",
   MAI_STYLE_PROVIDER_ID: "陪伴通用模型",
   DAILY_PLAN_PROVIDER_ID: "日程生成",
@@ -287,7 +292,7 @@ const providerLabels = {
   FORWARD_MESSAGE_PROVIDER_ID: "合并消息转述",
   PLUGIN_VISION_PROVIDER_ID: "插件识图模型",
   PRIVATE_READING_VISION_PROVIDER_ID: "夹层阅读视觉模型",
-  REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID: "表情语义嵌入模型",
+  REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID: "表情嵌入模型覆盖",
   NEWS_PROVIDER_ID: "新闻整理",
   WEB_EXPLORATION_PROVIDER_ID: "搜索决策/整理",
 };
@@ -379,6 +384,7 @@ const quickProviderKeys = new Set([
 
 const alwaysVisibleProviderKeys = new Set([
   "PRIVATE_READING_VISION_PROVIDER_ID",
+  "EMBEDDING_PROVIDER_ID",
 ]);
 
 const setupGuideQuickProviderKeys = [
@@ -487,7 +493,7 @@ function inferProviderConfigMode(overview = state.overview || {}) {
     ...(state.providerDraft || {}),
   };
   const hasPrecisionProvider = Object.keys(providerLabels)
-    .some((key) => !quickProviderKeys.has(key) && visibleConfigKey(key) && Boolean(providers[key]));
+    .some((key) => !quickProviderKeys.has(key) && !alwaysVisibleProviderKeys.has(key) && visibleConfigKey(key) && Boolean(providers[key]));
   return hasPrecisionProvider ? "precision" : "quick";
 }
 
@@ -520,8 +526,8 @@ function syncProviderConfigModeControls() {
   if (hint) {
     const tokenCostHint = "插件功能通常会携带较多动态上下文，Token 缓存命中率可能较低，请结合调用频率和预算合理规划模型。";
     hint.textContent = quick
-      ? `${tokenCostHint} 快速配置显示通用场景模型；插件识图和夹层阅读视觉模型各自独立。`
-      : `${tokenCostHint} 精准配置显示各任务单独 Provider；独立识图不会跟随文本模型改写。`;
+      ? `${tokenCostHint} 快速配置显示通用场景模型；插件识图、夹层阅读视觉和通用嵌入模型各自独立。`
+      : `${tokenCostHint} 精准配置显示各任务单独 Provider；独立识图与通用嵌入不会跟随文本模型改写。`;
   }
 }
 
@@ -1104,10 +1110,18 @@ const providerGuides = {
   REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID: {
     preference: "speed",
     passiveImpact: "conditional",
-    purpose: "把表情素材元数据和当前沟通意图转换为向量，用于补充关键词难以覆盖的语义近似召回。",
+    purpose: "仅在表情模块需要独立模型时覆盖通用语义嵌入模型；把素材元数据和沟通意图转换为向量。",
     fit: "必须是 AstrBot 已加载且支持 Embedding 接口的 Provider；轻量、低延迟模型即可。",
     note: "向量只参与软加分；失败、超时或未建索引时自动使用本地语义与关键词匹配。",
-    fallback: "留空时自动探测可用嵌入模型，不会回退到普通聊天模型。",
+    fallback: "留空时继承通用语义嵌入模型，再兼容自动探测，不会回退到普通聊天模型。",
+  },
+  EMBEDDING_PROVIDER_ID: {
+    preference: "speed",
+    passiveImpact: "conditional",
+    purpose: "为表情语义召回、群内黑话近义匹配等能力提供共用向量。",
+    fit: "必须是 AstrBot 已加载且支持 Embedding 接口的 Provider；轻量、低延迟模型即可。",
+    note: "向量只负责软召回，词义和发送决策仍由已有事实、提示词与本地规则约束。",
+    fallback: "留空时兼容旧表情嵌入配置；没有可用模型就退回关键词和精确匹配。",
   },
   NEWS_PROVIDER_ID: {
     preference: "speed",
@@ -1157,10 +1171,16 @@ const providerGroups = [
     keys: ["GROUP_INTERJECT_PROVIDER_ID", "GROUP_EPISODE_PROVIDER_ID", "GROUP_SLANG_PROVIDER_ID", "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID", "GROUP_MEMBER_SAFETY_PROVIDER_ID", "FORWARD_MESSAGE_PROVIDER_ID"],
   },
   {
+    id: "semantic",
+    title: "嵌入与语义",
+    desc: "为多个模块提供共用向量能力；只做软召回，不代替聊天模型和已确认事实。",
+    keys: ["EMBEDDING_PROVIDER_ID"],
+  },
+  {
     id: "media",
     title: "视觉与外界信息",
     desc: "识图、新闻和主动搜索相关模型。",
-    keys: ["PRIVATE_READING_VISION_PROVIDER_ID", "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID", "NEWS_PROVIDER_ID", "WEB_EXPLORATION_PROVIDER_ID"],
+    keys: ["PRIVATE_READING_VISION_PROVIDER_ID", "NEWS_PROVIDER_ID", "WEB_EXPLORATION_PROVIDER_ID"],
   },
 ];
 
@@ -1298,7 +1318,7 @@ const featureMeta = {
   enable_experimental_motivation_model: ["动机调度模型", "实验性功能第二项：结合驱力、诱因和唤醒状态，对主动计划做轻量调权，并在主动排障中显示判断依据。"],
   enable_personality_iteration_experiment: ["角色贴合校准", "实验性功能第三项：基于艾森克 PEN、大五人格、依恋风格和自我决定理论，帮用户判断行为是否贴近角色，并提示该怎么调整。"],
   enable_daily_case_review_experiment: ["每日逐案复盘", "实验性功能：为普通回复、未回复、主动消息、TTS 和成员风控建立短期匿名案例，供每日巡视逐案判断。"],
-  enable_experimental_bluetooth_wakeup: ["现实触及", "把本机音频设备作为 Bot 主动能力的现实出口；可选择电脑输出设备，起床提醒只是其中一个计划场景。"],
+  enable_experimental_bluetooth_wakeup: ["现实触及", "把电脑音频与摄像头单帧观察接入 Bot 主动能力；两类设备分别授权，起床提醒只是其中一个计划场景。"],
 };
 
 const featurePublicKeyAliases = {
@@ -1826,6 +1846,7 @@ const configLabels = {
   segmented_proactive_face_strategy: "平台表情位置",
   segmented_proactive_other_strategy: "其他附件位置",
   segmented_proactive_split_mode: "分段模式",
+  segmented_proactive_match_width_variants: "自动匹配全角/半角",
   segmented_proactive_regex: "分段正则",
   segmented_proactive_split_words: "分段词列表",
   enable_segmented_proactive_content_cleanup: "分段内容清理",
@@ -2256,7 +2277,7 @@ const configLabels = {
   reaction_expression_low_latency_mode: "低延迟选择模式",
   reaction_expression_candidate_limit: "表情检索说法上限",
   reaction_expression_embedding_enabled: "启用表情语义召回",
-  REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID: "表情语义嵌入模型",
+  REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID: "表情嵌入模型覆盖",
   reaction_expression_embedding_timeout_ms: "表情嵌入超时",
   reaction_expression_embedding_candidate_limit: "表情向量扫描上限",
   reaction_expression_embedding_score_threshold: "表情语义相似度阈值",
@@ -2310,7 +2331,7 @@ const configDescriptions = {
   reaction_expression_low_latency_mode: "开启时复用本地素材评分的短时缓存，适合高频对话；关闭后每次都重新按标签、情绪和沟通用途评分，不会调用额外模型。",
   reaction_expression_candidate_limit: "主模型一次最多提供多少条不同检索说法，用来补充情绪和沟通意图；无论填写多少，插件仍只执行一次图库检索。建议保持 4 到 8 条。",
   reaction_expression_embedding_enabled: "使用可配置的 Embedding Provider 理解隐含情绪和沟通用途；未配置、未建索引或调用失败时自动回退关键词检索。",
-  REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID: "只列出 AstrBot 当前已加载且支持向量生成的 Provider；留空时自动探测第一个可用嵌入模型。",
+  REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID: "只列出 AstrBot 当前已加载且支持向量生成的 Provider；留空时继承模型页的通用语义嵌入模型。",
   reaction_expression_embedding_timeout_ms: "查询向量超过该时间会跳过语义层并回退关键词；0 表示不限制。",
   reaction_expression_embedding_candidate_limit: "每次最多扫描多少张已建立向量的素材，不影响关键词检索。",
   reaction_expression_embedding_score_threshold: "低于该相似度的素材不会获得语义加分，建议 0.35 到 0.55。",
@@ -2345,7 +2366,7 @@ const configDescriptions = {
   enable_experimental_motivation_model: "实验性功能第二项。开启后，主动计划会额外按驱力、诱因和唤醒适配做轻量调权：驱力代表 Bot 内部想开口，诱因代表这个候选是否有值得说的外部价值，唤醒代表当前状态是否适合行动。默认关闭。",
   enable_personality_iteration_experiment: "实验性功能第三项。开启后，排障页会用艾森克 PEN、大五人格、依恋风格和自我决定理论检查 Bot 当前行为是否贴近角色基线：例如主动是否过强、沉默后是否焦虑追问、群聊边界是否过亲密、主动是否缺少具体由头。默认只给建议；若开启“允许自主调节参数”，会临时覆盖少量主动策略参数。",
   enable_daily_case_review_experiment: "实验性逐案复盘。开启后，每日巡视会从短期脱敏案例账本中抽取普通回复、未回复、主动消息、TTS 和成员风控案例，逐项判断相关性、完整性、语气、时机与误伤风险。默认关闭，不记录用户 ID、群号、会话 ID、消息 ID或音频路径。",
-  enable_experimental_bluetooth_wakeup: "现实触及总开关。开启后开放本机设备触及能力；每位用户仍须在私聊中手动完成知情确认。当前能力为可选择输出设备的本机主动语音，起床提醒只是一个计划模板，明确不包含摄像头。",
+  enable_experimental_bluetooth_wakeup: "现实触及总开关。开启后开放本机音频与任务触发的摄像头单帧能力；每位用户仍须在私聊中分别完成知情确认。摄像头默认独立关闭，不持续录像且默认不保存原图。",
   enable_personality_iteration_auto_tune: "角色贴合校准的子选项。开启后，排障/实验页刷新时可根据诊断结果临时调节主动上限、空闲判定、最小间隔、主动人格放行阈值和主动复核强度；不会改写人格正文或世界知识。用户手动修改这些参数后会记录为新的手动值；关闭角色贴合校准或关闭本项时恢复到用户最后一次手动设置的值。",
   enable_maslow_schedule_influence: "需求强化功能的子选项，默认关闭。开启后，日程生成器会把需求层级当作轻量倾向，影响今天更偏休息、探索、等待、准备或低打扰互动；不会把层级术语写进日程正文。",
   maslow_motivation_strength: "控制需求强化对主动候选排序的影响。0 只记录层级不改排序；35 为温和默认；100 会更明显偏向有明确由头的关系、状态或成长类念头。",
@@ -2592,6 +2613,7 @@ const configDescriptions = {
   segmented_proactive_face_strategy: "控制平台原生 Face/Emoji 组件，不影响表情包素材库。",
   segmented_proactive_other_strategy: "文件、视频等其他附件默认单独发送，减少平台对混合消息链的兼容差异。",
   segmented_proactive_split_mode: "regex 使用正则切句；words 使用分段词列表，更适合清理句号、空格等固定分隔符。网址会自动保护，不会被按点号或斜杠拆开。",
+  segmented_proactive_match_width_variants: "仅在分段词列表模式生效。开启后，~／～、,／，、!／！等常见标点只需配置一种写法，分段和清理都会匹配另一种；不会改写发送正文。",
   segmented_proactive_regex: "分段模式为 regex 时使用的切分正则。",
   segmented_proactive_split_words: "分段模式为 words 时使用的分段词。推荐一行一个；中文逗号要单独写一行，或写“逗号”。英文点号会把连续 ... 当成一个省略号边界；配置了“……”时会自动兼容单个“…”。网址内部字符会自动保护，完整网址结束处可作为自然断点；括号、标题引号和 <image>/<video> 这类尖括号媒体块内部字符会跳过。",
   enable_segmented_proactive_content_cleanup: "开启后会在分段时清理分隔符或无意义字符。",
@@ -2996,7 +3018,7 @@ const featureSettingGroups = {
   enable_daily_diary: ["daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_busy_reply_gate: ["busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes"],
-  enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
+  enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy", "segmented_proactive_split_mode", "segmented_proactive_match_width_variants", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection", "enable_passive_state_continuity_anchor"],
   enable_passive_state_delta_injection: ["enable_passive_state_continuity_anchor"],
   enable_health_state: ["humanized_state_intensity"],
@@ -3697,7 +3719,7 @@ const featureSettingSections = {
     {
       title: "切分规则",
       note: "决定主动消息什么时候拆、按什么拆，以及短片段是否并回去。",
-      keys: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words"],
+      keys: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_split_mode", "segmented_proactive_match_width_variants", "segmented_proactive_regex", "segmented_proactive_split_words"],
     },
     {
       title: "发送方式",
@@ -4089,6 +4111,7 @@ const featureSettingTypes = {
   segmented_proactive_face_strategy: { type: "select", options: [["inline", "嵌入正文"], ["separate", "单独发送"], ["previous", "跟随上段"], ["next", "跟随下段"]] },
   segmented_proactive_other_strategy: { type: "select", options: [["inline", "嵌入正文"], ["separate", "单独发送"], ["previous", "跟随上段"], ["next", "跟随下段"]] },
   segmented_proactive_split_mode: { type: "select", options: [["regex", "正则"], ["words", "分段词列表"]] },
+  segmented_proactive_match_width_variants: { type: "checkbox" },
   segmented_proactive_interval_method: { type: "select", options: [["log", "按字数对数"], ["random", "随机"]] },
   segmented_proactive_content_cleanup_scope: { type: "select", options: [["all", "全段清理"], ["trailing", "仅句尾清理"]] },
   natural_language_photo_generation_mode: { type: "select", options: [["tool_first", "工具优先：主链调用 pc_generate_photo"], ["rule_fast", "规则快判：插件前置接管"], ["off", "关闭：不做非指令生图"]] },
@@ -5446,9 +5469,9 @@ function loadOptionalClassicScript(relativePath, retry = 0) {
 
 const optionalModuleLoaders = {
   providerTree: [
-    () => loadOptionalClassicScript("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1", 0),
-    () => loadOptionalClassicScript("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1", 1),
-    () => loadOptionalClassicScript("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1", 2),
+    () => loadOptionalClassicScript("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1&manual=provider-input-v2", 0),
+    () => loadOptionalClassicScript("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1&manual=provider-input-v2", 1),
+    () => loadOptionalClassicScript("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1&manual=provider-input-v2", 2),
   ],
   qzonePanel: [
     () => loadOptionalClassicScript("./js/panels/qzone-panel.js?v=20260810-qzone-classic-loader-v1", 0),
@@ -15264,6 +15287,10 @@ function renderExpressionLibraryView() {
             `).join("")}
           </div>
         </div>
+        <div class="expression-library-transfer-actions" role="toolbar" aria-label="表达规则分享与导入">
+          <button type="button" class="secondary-button" data-expression-share-open>分享</button>
+          <button type="button" class="secondary-button" data-expression-import-open>导入</button>
+        </div>
       </div>
       <div class="expression-library-search-tools">
         <div class="expression-library-search-wrap">
@@ -15335,8 +15362,313 @@ function renderExpressionLibraryView() {
   root.querySelector("[data-open-expression-review]")?.addEventListener("click", () => {
     switchExpressionWorkspaceView("review", { focus: true });
   });
+  root.querySelector("[data-expression-share-open]")?.addEventListener("click", openExpressionShareDialog);
+  root.querySelector("[data-expression-import-open]")?.addEventListener("click", openExpressionImportDialog);
   bindExpressionLibraryActions(library, root);
   renderExpressionReviewWorkspace();
+}
+
+function expressionShareGroups(scope = "current") {
+  const groups = expressionRuleGroups(state.expressionLibrary, false);
+  if (scope === "all") return groups;
+  const filter = ["all", "private", "group"].includes(state.expressionLibraryFilter)
+    ? state.expressionLibraryFilter
+    : "all";
+  const type = ["all", "style", "grammar"].includes(state.expressionLibraryType)
+    ? state.expressionLibraryType
+    : "all";
+  const query = String(state.expressionLibraryQuery || "").trim().toLowerCase();
+  return groups.filter((item) => expressionLibraryItemMatches(item, filter, type, query));
+}
+
+function expressionShareItems(groups) {
+  return (Array.isArray(groups) ? groups : []).map((group) => ({
+    source_type: group?.source_type || "private",
+    source_id: group?.source_id || "",
+    rule_family_id: group?.family_id || group?.id || "",
+  })).filter((item) => item.source_id && item.rule_family_id);
+}
+
+function setExpressionSharePackage(pack = null, summary = "") {
+  const dialog = $("#expressionShareDialog");
+  if (!dialog) return;
+  state.expressionSharePack = pack;
+  const json = dialog.querySelector("[data-expression-share-json]");
+  if (json) json.value = pack ? JSON.stringify(pack, null, 2) : "";
+  const summaryBox = dialog.querySelector("[data-expression-share-summary]");
+  if (summaryBox) summaryBox.textContent = summary || "准备生成分享包。";
+  dialog.querySelectorAll("[data-expression-share-copy], [data-expression-share-download]").forEach((button) => {
+    button.disabled = !pack;
+  });
+}
+
+function updateExpressionShareScopeSummary() {
+  const dialog = $("#expressionShareDialog");
+  if (!dialog) return;
+  const scope = dialog.querySelector('[name="expression_share_scope"]:checked')?.value || "current";
+  const groups = expressionShareGroups(scope);
+  state.expressionShareItems = expressionShareItems(groups);
+  const label = scope === "all" ? "全部已启用表达" : "当前筛选结果";
+  setExpressionSharePackage(null, `${label}包含 ${groups.length} 个可分享规则组。`);
+}
+
+function openExpressionShareDialog() {
+  const dialog = $("#expressionShareDialog");
+  if (!dialog) return;
+  const currentScope = dialog.querySelector('[name="expression_share_scope"][value="current"]');
+  if (currentScope) currentScope.checked = true;
+  updateExpressionShareScopeSummary();
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function expressionImportTargetValue(value) {
+  const text = String(value || "");
+  const separator = text.indexOf(":");
+  if (separator <= 0) return { target_source_type: "", target_source_id: "" };
+  return {
+    target_source_type: text.slice(0, separator),
+    target_source_id: text.slice(separator + 1),
+  };
+}
+
+function expressionImportTargetOptions() {
+  const users = (Array.isArray(state.users) ? state.users : []).map((user) => {
+    const id = String(user?.user_id || "").trim();
+    const name = String(user?.display_name || user?.nickname || user?.name || id || "未命名用户").trim();
+    return id ? { value: `private:${id}`, label: `${name} · 私聊`, id } : null;
+  }).filter(Boolean);
+  const groups = (Array.isArray(state.groups) ? state.groups : []).map((group) => {
+    const id = String(group?.group_id || "").trim();
+    const name = String(group?.display_name || group?.name || group?.group_name || group?.title || id || "未命名群聊").trim();
+    return id ? { value: `group:${id}`, label: `${name} · 群聊`, id } : null;
+  }).filter(Boolean);
+  return { users, groups };
+}
+
+function renderExpressionImportTargets() {
+  const select = $("#expressionImportDialog")?.querySelector("[data-expression-import-target]");
+  if (!select) return;
+  const previous = select.value;
+  const { users, groups } = expressionImportTargetOptions();
+  select.innerHTML = `
+    <option value="">选择导入落点</option>
+    ${users.length ? `<optgroup label="私聊用户">${users.map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)} · ${escapeHtml(item.id)}</option>`).join("")}</optgroup>` : ""}
+    ${groups.length ? `<optgroup label="群聊">${groups.map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)} · ${escapeHtml(item.id)}</option>`).join("")}</optgroup>` : ""}
+  `;
+  const preferred = [previous, state.selectedUserId ? `private:${state.selectedUserId}` : "", state.selectedGroupId ? `group:${state.selectedGroupId}` : ""]
+    .find((value) => value && [...select.options].some((option) => option.value === value));
+  if (preferred) select.value = preferred;
+  if (!users.length && !groups.length) {
+    select.innerHTML = `<option value="">暂无可用用户或群聊</option>`;
+  }
+  updateExpressionImportControls();
+}
+
+function expressionImportPackageFromInput() {
+  const text = $("#expressionImportDialog")?.querySelector("[data-expression-import-json]")?.value || "";
+  if (!String(text).trim()) throw new Error("请选择文件或粘贴分享包 JSON");
+  let parsed;
+  try {
+    parsed = JSON.parse(String(text).replace(/^\uFEFF/, ""));
+  } catch (error) {
+    throw new Error("分享包 JSON 格式不正确");
+  }
+  const pack = parsed?.schema
+    ? parsed
+    : (parsed?.package?.schema ? parsed.package : (parsed?.data?.package?.schema ? parsed.data.package : null));
+  if (!pack) throw new Error("没有找到可识别的表达分享包");
+  return pack;
+}
+
+function invalidateExpressionImportPreview(message = "内容已变化，请重新预览。") {
+  state.expressionImportPack = null;
+  state.expressionImportPreview = null;
+  const dialog = $("#expressionImportDialog");
+  if (!dialog) return;
+  const preview = dialog.querySelector("[data-expression-import-preview]");
+  if (preview) preview.innerHTML = escapeHtml(message);
+  const apply = dialog.querySelector("[data-expression-import-apply]");
+  if (apply) apply.disabled = true;
+  updateExpressionImportControls();
+}
+
+function updateExpressionImportControls() {
+  const dialog = $("#expressionImportDialog");
+  if (!dialog) return;
+  const hasContent = Boolean(dialog.querySelector("[data-expression-import-json]")?.value.trim());
+  const hasTarget = Boolean(dialog.querySelector("[data-expression-import-target]")?.value);
+  const previewButton = dialog.querySelector("[data-expression-import-preview-action]");
+  const applyButton = dialog.querySelector("[data-expression-import-apply]");
+  if (previewButton) previewButton.disabled = !(hasContent && hasTarget);
+  if (applyButton) applyButton.disabled = !(state.expressionImportPreview?.importable_rule_count > 0);
+}
+
+function renderExpressionImportPreview(preview) {
+  const box = $("#expressionImportDialog")?.querySelector("[data-expression-import-preview]");
+  if (!box) return;
+  if (!preview) {
+    box.textContent = "选择目标并粘贴或选择文件后，点击“预览导入”。";
+    return;
+  }
+  const rejected = Array.isArray(preview.rejected) ? preview.rejected : [];
+  box.innerHTML = `
+    <div class="expression-import-preview-head">
+      <div><span>分享包</span><b>${escapeHtml(preview.title || "表达分享包")}</b></div>
+      <em>${Number(preview.importable_group_count || 0) ? "可以导入" : "没有新增规则"}</em>
+    </div>
+    <div class="expression-import-preview-stats">
+      <span><b>${escapeHtml(preview.group_count || 0)}</b>规则组</span>
+      <span><b>${escapeHtml(preview.importable_rule_count || 0)}</b>可导入规则</span>
+      <span><b>${escapeHtml(preview.duplicate_rule_count || 0)}</b>重复规则</span>
+      <span><b>${escapeHtml(preview.rejected_count || 0)}</b>无效项</span>
+    </div>
+    ${rejected.length ? `<details><summary>查看未通过项</summary><ul>${rejected.map((item) => `<li>第 ${escapeHtml(Number(item?.index || 0) + 1)} 组：${escapeHtml(item?.reason || "格式无效")}</li>`).join("")}</ul></details>` : ""}
+  `;
+}
+
+async function openExpressionImportDialog() {
+  const dialog = $("#expressionImportDialog");
+  if (!dialog) return;
+  state.expressionImportPack = null;
+  state.expressionImportPreview = null;
+  const form = dialog.querySelector("[data-expression-import-form]");
+  form?.reset();
+  renderExpressionImportPreview(null);
+  renderExpressionImportTargets();
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+  if (!state.lazyLoaded.userGroupLists) {
+    const result = await loadUserGroupLists(loadAllRequestSeq, { showErrors: true });
+    if (result) renderExpressionImportTargets();
+  }
+}
+
+async function generateExpressionSharePackage(button) {
+  const dialog = $("#expressionShareDialog");
+  if (!dialog) return;
+  const scope = dialog.querySelector('[name="expression_share_scope"]:checked')?.value || "current";
+  const groups = expressionShareGroups(scope);
+  const items = expressionShareItems(groups);
+  if (scope === "current" && (!groups.length || !items.length)) {
+    setExpressionSharePackage(null, "当前筛选结果中没有可分享的已启用规则组。");
+    showToast("当前筛选结果没有可分享规则", "error");
+    return;
+  }
+  const payload = { title: dialog.querySelector('[name="title"]')?.value || "我的表达分享" };
+  if (scope === "current") payload.items = items;
+  setActionBusy(button, true);
+  try {
+    const result = await postJson("/expression-library/share", payload);
+    state.expressionShareItems = items;
+    setExpressionSharePackage(
+      result.package,
+      `已生成 ${Number(result.group_count || 0)} 个规则组、${Number(result.rule_count || 0)} 条抽象规则。`,
+    );
+    showToast("表达分享包已生成");
+  } catch (error) {
+    setExpressionSharePackage(null, error.message || "分享包生成失败");
+    showToast(`生成失败：${error.message}`, "error");
+  } finally {
+    setActionBusy(button, false);
+  }
+}
+
+async function previewExpressionImport(button) {
+  const dialog = $("#expressionImportDialog");
+  if (!dialog) return;
+  try {
+    const pack = expressionImportPackageFromInput();
+    const target = expressionImportTargetValue(dialog.querySelector("[data-expression-import-target]")?.value);
+    if (!target.target_source_id) throw new Error("请选择导入目标");
+    setActionBusy(button, true);
+    const preview = await postJson("/expression-library/import/preview", { package: pack, ...target });
+    state.expressionImportPack = pack;
+    state.expressionImportPreview = preview;
+    renderExpressionImportPreview(preview);
+    updateExpressionImportControls();
+  } catch (error) {
+    state.expressionImportPack = null;
+    state.expressionImportPreview = null;
+    const box = dialog.querySelector("[data-expression-import-preview]");
+    if (box) box.innerHTML = `<span class="expression-transfer-error">${escapeHtml(error.message || "预览失败")}</span>`;
+    updateExpressionImportControls();
+    showToast(`预览失败：${error.message}`, "error");
+  } finally {
+    setActionBusy(button, false);
+  }
+}
+
+async function applyExpressionImport(button) {
+  const dialog = $("#expressionImportDialog");
+  if (!dialog || !state.expressionImportPack || !state.expressionImportPreview) return;
+  const target = expressionImportTargetValue(dialog.querySelector("[data-expression-import-target]")?.value);
+  const destination = dialog.querySelector('[name="expression_import_destination"]:checked')?.value || "pending";
+  if (destination === "learned" && !window.confirm("这些表达将跳过审核并立即参与回复，确定直接启用吗？")) return;
+  setActionBusy(button, true);
+  try {
+    const result = await postJson("/expression-library/import/apply", {
+      package: state.expressionImportPack,
+      ...target,
+      destination,
+    });
+    state.expressionLibrary = result;
+    state.expressionImportPack = null;
+    state.expressionImportPreview = null;
+    if (typeof dialog.close === "function") dialog.close();
+    else dialog.removeAttribute("open");
+    renderExpressionLibraryView();
+    switchExpressionWorkspaceView(destination === "pending" ? "review" : "library", { focus: true });
+    showToast(result.message || "表达规则已导入");
+  } catch (error) {
+    showToast(`导入失败：${error.message}`, "error");
+  } finally {
+    setActionBusy(button, false);
+  }
+}
+
+function bindExpressionTransferDialogs() {
+  const shareDialog = $("#expressionShareDialog");
+  const importDialog = $("#expressionImportDialog");
+  shareDialog?.querySelector("[data-expression-share-form]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void generateExpressionSharePackage(event.currentTarget.querySelector("[data-expression-share-generate]"));
+  });
+  shareDialog?.querySelectorAll('[name="expression_share_scope"]').forEach((input) => input.addEventListener("change", updateExpressionShareScopeSummary));
+  shareDialog?.querySelectorAll("[data-expression-share-close]").forEach((button) => button.addEventListener("click", () => shareDialog.close()));
+  shareDialog?.querySelector("[data-expression-share-copy]")?.addEventListener("click", () => {
+    void copyTextToClipboard(JSON.stringify(state.expressionSharePack, null, 2), "表达分享包已复制");
+  });
+  shareDialog?.querySelector("[data-expression-share-download]")?.addEventListener("click", () => {
+    if (!state.expressionSharePack) return;
+    const date = new Date().toISOString().slice(0, 10);
+    downloadJson(`private-companion-expression-pack-${date}.json`, state.expressionSharePack);
+    showToast("表达分享包已下载");
+  });
+
+  importDialog?.querySelector("[data-expression-import-form]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void applyExpressionImport(event.currentTarget.querySelector("[data-expression-import-apply]"));
+  });
+  importDialog?.querySelectorAll("[data-expression-import-close]").forEach((button) => button.addEventListener("click", () => importDialog.close()));
+  importDialog?.querySelector("[data-expression-import-preview-action]")?.addEventListener("click", (event) => {
+    void previewExpressionImport(event.currentTarget);
+  });
+  importDialog?.querySelector("[data-expression-import-file]")?.addEventListener("change", async (event) => {
+    const file = event.currentTarget.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const textarea = importDialog.querySelector("[data-expression-import-json]");
+      if (textarea) textarea.value = text;
+      invalidateExpressionImportPreview("文件已读取，请选择目标后预览。");
+    } catch (error) {
+      showToast(`文件读取失败：${error.message}`, "error");
+    }
+  });
+  importDialog?.querySelector("[data-expression-import-json]")?.addEventListener("input", () => invalidateExpressionImportPreview());
+  importDialog?.querySelector("[data-expression-import-target]")?.addEventListener("change", () => invalidateExpressionImportPreview("导入目标已变化，请重新预览。"));
+  importDialog?.querySelectorAll('[name="expression_import_destination"]').forEach((input) => input.addEventListener("change", updateExpressionImportControls));
 }
 
 function expressionReviewRuleKey(ruleGroup, index = 0) {
@@ -22708,6 +23040,27 @@ function parseSegmentedWordList(value) {
     .filter((item) => item !== "");
 }
 
+const segmentedWidthVariantGroups = [
+  [",", "，"], [".", "．", "。"], ["?", "？"], ["!", "！"], [";", "；"], [":", "："], ["~", "～"],
+  ["(", "（"], [")", "）"], ["[", "［"], ["]", "］"], ["{", "｛"], ["}", "｝"], ["<", "＜"], [">", "＞"],
+  ["\"", "＂"], ["'", "＇"], ["\\", "＼"], ["/", "／"], ["|", "｜"], ["+", "＋"], ["-", "－"], ["=", "＝"],
+  ["*", "＊"], ["&", "＆"], ["%", "％"], ["#", "＃"], ["@", "＠"], ["$", "＄"], ["^", "＾"], ["_", "＿"],
+];
+
+function expandSegmentedWidthVariantWords(words) {
+  const expanded = [...new Set((words || []).filter((item) => item !== ""))];
+  const present = new Set(expanded);
+  segmentedWidthVariantGroups.forEach((variants) => {
+    if (!variants.some((variant) => present.has(variant))) return;
+    variants.forEach((variant) => {
+      if (present.has(variant)) return;
+      expanded.push(variant);
+      present.add(variant);
+    });
+  });
+  return expanded;
+}
+
 function decodeSegmentedReplacementToken(value, replacement = false) {
   const raw = String(value ?? "");
   const trimmed = raw.trim();
@@ -22999,6 +23352,7 @@ function segmentedPreviewValues(root = document) {
     "reaction_expression_delivery_mode",
     "segmented_proactive_other_strategy",
     "segmented_proactive_split_mode",
+    "segmented_proactive_match_width_variants",
     "segmented_proactive_regex",
     "segmented_proactive_split_words",
     "enable_segmented_proactive_content_cleanup",
@@ -23019,6 +23373,9 @@ function segmentedPreviewValues(root = document) {
   });
   values.enable_segmented_proactive_reply = toBool(values.enable_segmented_proactive_reply);
   values.segmented_proactive_send_as_forward = toBool(values.segmented_proactive_send_as_forward);
+  values.segmented_proactive_match_width_variants = values.segmented_proactive_match_width_variants == null
+    ? true
+    : toBool(values.segmented_proactive_match_width_variants);
   values.enable_segmented_proactive_content_cleanup = toBool(values.enable_segmented_proactive_content_cleanup);
   values.enable_segmented_proactive_content_replacement = toBool(values.enable_segmented_proactive_content_replacement);
   values.segmented_proactive_content_cleanup_scope = String(values.segmented_proactive_content_cleanup_scope || "all");
@@ -23059,7 +23416,9 @@ function simulateSegmentedProactive(text, values) {
   const cleanupScope = String(values.segmented_proactive_content_cleanup_scope || "all");
   const minChars = Math.max(1, Number(values.segmented_proactive_min_segment_chars || 8));
   const maxSegments = Math.max(1, Number(values.segmented_proactive_max_segments || 3));
-  const cleanupWords = parseSegmentedWordList(values.segmented_proactive_content_cleanup_words);
+  const cleanupWords = values.segmented_proactive_match_width_variants
+    ? expandSegmentedWidthVariantWords(parseSegmentedWordList(values.segmented_proactive_content_cleanup_words))
+    : parseSegmentedWordList(values.segmented_proactive_content_cleanup_words);
   const [protectedNormalized, protectedUrls] = protectSegmentedUrls(normalized);
   let protectedSplitHits = 0;
   let cleanupRegex = null;
@@ -23124,7 +23483,9 @@ function simulateSegmentedProactive(text, values) {
   let rawSegments = [];
   try {
     if (splitMode === "words") {
-      const splitWords = parseSegmentedWordList(values.segmented_proactive_split_words);
+      const splitWords = values.segmented_proactive_match_width_variants
+        ? expandSegmentedWidthVariantWords(parseSegmentedWordList(values.segmented_proactive_split_words))
+        : parseSegmentedWordList(values.segmented_proactive_split_words);
       if (!splitWords.includes("\n")) splitWords.push("\n");
       if (!splitWords.length) return { segments: [normalized], status: "分段模式为 words，但分段词为空。" };
       protectedSplitHits = segmentedProtectedSplitWordCount(normalized, splitWords);
@@ -23331,6 +23692,7 @@ function updateSegmentedConfigVisibility(root = document) {
   const intervalMethod = String(values.segmented_proactive_interval_method || "log");
   const visibility = {
     segmented_proactive_regex: mode === "regex",
+    segmented_proactive_match_width_variants: mode === "words",
     segmented_proactive_split_words: mode === "words",
     segmented_proactive_content_cleanup_scope: cleanupEnabled,
     segmented_proactive_content_cleanup_rule: cleanupEnabled && mode === "regex",
@@ -24923,13 +25285,13 @@ function qweatherConsoleLinksHtml() {
 
 function featureProviderSelect(key, value, accessibility = {}) {
   const current = String(value || "").trim();
-  const providerItems = key === "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"
+  const providerItems = ["EMBEDDING_PROVIDER_ID", "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"].includes(key)
     ? state.availableEmbeddingProviders
     : state.availableProviders;
   const known = providerItems.some((item) => item.id === current);
   const customValue = current && !known ? current : "";
   const options = [
-    `<option value="">${key === "ADULT_CONTENT_PROVIDER_ID" ? "未配置（成人档不可用）" : key === "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID" ? "留空自动探测" : "留空自动回退"}</option>`,
+    `<option value="">${key === "ADULT_CONTENT_PROVIDER_ID" ? "未配置（成人档不可用）" : ["EMBEDDING_PROVIDER_ID", "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"].includes(key) ? "留空使用本地匹配/兼容旧配置" : "留空自动回退"}</option>`,
     ...providerItems.map((item) => {
       const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
       return `<option value="${escapeHtml(item.id)}" ${item.id === current ? "selected" : ""}>${escapeHtml(label)}</option>`;
@@ -27267,7 +27629,10 @@ function featureDetailPage(key) {
     : "";
   const paramCardHtml = showParamCard ? `
         <article class="feature-detail-card feature-detail-card-params">
-          <h3>关联参数</h3>
+          <div class="feature-param-card-head">
+            <h3>关联参数</h3>
+            ${featureModelConfigShortcutHtml(key)}
+          </div>
           <form class="feature-param-list ${key === "enable_tts_enhancement" ? "tts-config-layout" : ""}" data-feature-param-form="${escapeHtml(key)}">
             ${libraryDraftInput}
             ${settingsRows}
@@ -30122,20 +30487,21 @@ const experimentalFeatureMeta = {
   enable_experimental_bluetooth_wakeup: {
     label: "现实触及",
     index: "设备实验",
-    shortDesc: "把电脑音频输出设备接入 Bot 的主动能力；可同步主动语音，也可运行起床提醒等计划场景。当前不授予摄像头能力。",
+    shortDesc: "把电脑音频输出与摄像头单帧环境观察接入 Bot 的主动能力；起床提醒只是一个计划场景。",
     theory: [
       { name: "双重启用", desc: "管理员开启总开关，用户本人在私聊手动提交版本化确认。", impact: "任一条件缺失时都不会调用本机设备。" },
-      { name: "分能力授权", desc: "当前确认只写入 local_audio，camera 保持未授权。", impact: "未来摄像头能力必须使用独立确认，不能继承本次同意。" },
+      { name: "分能力授权", desc: "音频写入 local_audio，摄像头写入 camera_single_frame，两者分别确认和撤销。", impact: "摄像头不能继承音频授权，撤销其中一项也不会误伤另一项。" },
       { name: "显式设备路由", desc: "管理员从电脑当前可用的输出端点中选择现实触及目标；蓝牙连接和配对仍由操作系统管理。", impact: "主动语音只发往已保存的设备，设备离线时不会偷偷回退到别的音响。" },
     ],
     effects: [
       { trigger: "总开关开启且用户完成确认", behavior: "保存当前授权版本与 local_audio 能力", result: "允许用户设置并测试起床语音" },
       { trigger: "主动引擎选择语音动作", behavior: "复用同一份 TTS 音频并路由到所选电脑输出设备", result: "Bot 的主动语音从现实设备播放" },
+      { trigger: "明确任务需要判断是否适合互动", behavior: "在独立开关、授权和冷却通过后读取一帧，只返回有限状态", result: "主动能力可选择现在开口、延后或保持安静" },
       { trigger: "到达起床提醒等计划时间", behavior: "计划模板调用同一个主动语音能力", result: "所选音响按场景内容播放语音" },
       { trigger: "撤销确认或确认版本失效", behavior: "关闭该用户闹钟并阻止设备调用", result: "已有设置也保持静默" },
     ],
-    caution: "默认关闭。开启页面开关不等于用户授权；必须在对应私聊中完成确认。当前不调用摄像头，后续摄像头能力必须再次单独确认。",
-    runtimeHint: "开启后先选择电脑音频输出设备，再由用户私聊完成确认。可单独允许主动语音同步，并按需启用起床提醒模板；页面不能代替用户授权。",
+    caution: "默认关闭。页面开关不等于用户授权；音频与摄像头必须分别确认。摄像头只读取单帧，不做人脸识别、身份比对、情绪读脸或后台持续监控。",
+    runtimeHint: "先选择音频输出；如需环境观察，再单独开启摄像头、设置索引，并让用户私聊发送摄像头确认命令。页面不能代替用户授权。",
   },
   enable_daily_case_review_experiment: {
     label: "每日逐案复盘",
@@ -30255,15 +30621,15 @@ function experimentalVisualSpec(key) {
       question: "在什么授权范围内，Bot 才能主动影响现实设备？",
       flow: [
         ["开放", "管理员在实验页开启现实触及总开关。"],
-        ["确认", "用户本人在私聊手动确认当前音频能力和未来摄像头需另行授权。"],
-        ["路由", "管理员选择电脑音频输出设备，并为用户开放主动语音或具体计划场景。"],
-        ["触发", "主动动作或计划模板调用 TTS；授权缺失、设备不可用或主机休眠时保持静默。"],
+        ["确认", "用户本人在私聊分别确认本机音频和摄像头单帧能力。"],
+        ["路由", "管理员选择电脑音频输出，并按需开启摄像头索引与用户策略。"],
+        ["触发", "主动任务按目的调用音频或单帧观察；授权、开关或冷却缺失时保持静默。"],
       ],
       axes: [
         ["管理员开关", "实验页总开关", "决定系统是否开放现实触及运行能力。"],
         ["用户授权", "版本化 local_audio", "决定对应用户是否允许本机音频调用。"],
         ["设备路由", "电脑输出端点", "决定主动语音实际从哪个音响或耳机播放。"],
-        ["摄像头权限", "未授权", "未来实现时必须新增独立确认流程。"],
+        ["摄像头权限", "camera_single_frame", "只允许任务触发单帧和有限状态，不保留原图。"],
       ],
       verify: [["用户私聊", "private"], ["语音设置", "voice"]],
     },
@@ -30370,9 +30736,9 @@ function experimentalRuntimeSignals(key) {
     return {
       primary: enabled ? "已开放" : "未开放",
       label: "总开关",
-      detail: enabled ? "等待用户私聊确认与时间设置" : "不会调用本机设备",
+      detail: enabled ? "等待用户分别确认音频与摄像头能力" : "不会调用本机设备",
       tone: enabled ? "ok" : "idle",
-      bars: [["系统开放", enabled ? 1 : 0, 1], ["摄像头授权", 0, 1]],
+      bars: [["系统开放", enabled ? 1 : 0, 1], ["分能力授权", enabled ? 1 : 0, 1]],
     };
   }
   if (key === "enable_reaction_expression_experiment") {
@@ -32740,6 +33106,10 @@ function renderRealityTouchDevicePanel() {
   `).join("");
   const user = selectedRealityTouchUser();
   const canTest = Boolean(data.global_enabled && user?.consent?.confirmed);
+  const camera = data.camera || {};
+  const cameraState = user?.camera || {};
+  const cameraBackend = camera.backend || {};
+  const canTestCamera = Boolean(data.global_enabled && camera.global_enabled && cameraState.consented && cameraState.enabled && cameraBackend.available);
   return `
     <article class="exp-detail-card reality-device-card">
       <div class="reality-touch-section-head">
@@ -32766,6 +33136,29 @@ function renderRealityTouchDevicePanel() {
         <span>${escapeHtml(audio.error || (audio.backend_available ? "指定设备离线或播放失败时，会自动回退到系统默认输出并记录诊断。" : "安装音频路由依赖并重载插件后，可选择具体耳机、扬声器或蓝牙音响。"))}</span>
       </div>
     </article>
+    <article class="exp-detail-card reality-device-card">
+      <div class="reality-touch-section-head">
+        <div><span>环境感知</span><h3>摄像头单帧读取</h3></div>
+        <span class="reality-audio-backend ${cameraBackend.available ? "ready" : "limited"}">${cameraBackend.available ? "单帧后端可用" : "后端不可用"}</span>
+      </div>
+      <p class="reality-device-intro">不会自动枚举摄像头，避免状态刷新时无意点亮设备。每次任务只读取一帧并立即释放；画面可能发送给已配置视觉模型，插件不保存原图。</p>
+      <form class="reality-device-controls" data-reality-touch-camera-config>
+        <label class="reality-enable-field">
+          <input type="checkbox" name="camera_enabled" ${camera.global_enabled ? "checked" : ""}>
+          <span><b>启用摄像头能力总开关</b><small>仍需当前用户单独授权并开启用户策略。</small></span>
+        </label>
+        <label><span>摄像头索引</span><input type="number" name="camera_index" min="0" max="32" step="1" value="${Number(camera.camera_index ?? 0)}"></label>
+        <label><span>最小读取间隔</span><input type="number" name="min_interval_seconds" min="10" max="3600" step="10" value="${Number(camera.min_interval_seconds ?? 60)}"></label>
+        <label><span>读取超时</span><input type="number" name="capture_timeout_seconds" min="2" max="20" step="1" value="${Number(camera.capture_timeout_seconds ?? 5)}"></label>
+        <label><span>视觉分析超时</span><input type="number" name="analysis_timeout_seconds" min="5" max="90" step="5" value="${Number(camera.analysis_timeout_seconds ?? 25)}"></label>
+        <button type="submit" class="primary">保存摄像头配置</button>
+        <button type="button" data-reality-touch-camera-test ${canTestCamera ? "" : "disabled"}>手动读取单帧</button>
+      </form>
+      <div class="reality-device-status ${cameraBackend.available ? "" : "error"}">
+        <b>${camera.global_enabled ? `当前使用摄像头索引 ${Number(camera.camera_index ?? 0)}` : "摄像头能力总开关关闭"}</b>
+        <span>${escapeHtml(cameraBackend.error || camera.boundary || "只返回在场、活动类型、可打扰性与光线等有限状态。")}</span>
+      </div>
+    </article>
   `;
 }
 
@@ -32790,9 +33183,13 @@ function renderRealityTouchSettings() {
   const customReminders = Array.isArray(user.custom_reminders) ? user.custom_reminders : [];
   const confirmed = toBool(consent.confirmed);
   const command = String(data.confirmation_command || "");
+  const cameraState = user.camera || {};
+  const cameraConfirmed = toBool(cameraState.consented);
+  const cameraCommand = String(data.camera?.confirmation_command || "");
   const options = users.map((item) => {
     const selected = String(item.user_id) === String(user.user_id) ? "selected" : "";
-    const suffix = item.consent?.confirmed ? " · 已确认" : " · 待确认";
+    const granted = [item.consent?.confirmed ? "音频" : "", item.camera?.consented ? "摄像头" : ""].filter(Boolean);
+    const suffix = granted.length ? ` · 已授权${granted.join("+")}` : " · 待确认";
     return `<option value="${escapeHtml(item.user_id)}" ${selected}>${escapeHtml((item.label || item.user_id) + suffix)}</option>`;
   }).join("");
   const dayLabels = ["一", "二", "三", "四", "五", "六", "日"];
@@ -32823,6 +33220,21 @@ function renderRealityTouchSettings() {
         ${confirmed ? `<span class="reality-consent-time">${consent.confirmed_at ? escapeHtml(formatDailyReviewTime(consent.confirmed_at)) : "已记录"}</span>` : `<button type="button" data-reality-touch-copy>复制确认命令</button>`}
       </section>
       ${confirmed ? "" : `<div class="reality-command-box"><code>${escapeHtml(command)}</code></div>`}
+      <section class="reality-consent-strip ${cameraConfirmed ? "ok" : "pending"}">
+        <div>
+          <b>${cameraConfirmed ? "用户已单独授权摄像头单帧" : "摄像头仍需独立确认"}</b>
+          <span>${cameraConfirmed ? `仅授权 camera_single_frame · 协议 v${escapeHtml(String(cameraState.consent_version || 1))}` : "音频授权不会自动开放摄像头。请由该用户在私聊中手动发送完整命令。"}</span>
+        </div>
+        ${cameraConfirmed ? `<span class="reality-consent-time">${cameraState.confirmed_at ? escapeHtml(formatDailyReviewTime(cameraState.confirmed_at)) : "已记录"}</span>` : `<button type="button" data-reality-touch-camera-copy>复制摄像头确认命令</button>`}
+      </section>
+      ${cameraConfirmed ? "" : `<div class="reality-command-box"><code>${escapeHtml(cameraCommand)}</code></div>`}
+      <form class="reality-policy-form" data-reality-touch-camera-policy-form>
+        <label class="reality-enable-field">
+          <input type="checkbox" name="reality_camera_enabled" ${cameraState.enabled ? "checked" : ""} ${cameraConfirmed ? "" : "disabled"}>
+          <span><b>允许该用户的明确任务读取单帧</b><small>仍受摄像头总开关、读取冷却和任务目的约束；关闭后保留授权但不再读取。</small></span>
+        </label>
+        <button type="submit" ${cameraConfirmed ? "" : "disabled"}>保存摄像头用户策略</button>
+      </form>
       <form class="reality-policy-form" data-reality-touch-policy-form>
         <label class="reality-enable-field">
           <input type="checkbox" name="reality_proactive_voice" ${user.policy?.proactive_voice_enabled ? "checked" : ""} ${formDisabled}>
@@ -32940,6 +33352,8 @@ function renderRealityTouchRuntime() {
   const alarm = user?.alarm || {};
   const contact = alarm.contact_session || {};
   const playback = data.audio_output?.last_playback || {};
+  const cameraState = user?.camera || {};
+  const cameraObservation = cameraState.last_observation || {};
   const contactStatusText = ({ pending: "等待确认", playing: "正在播放", snoozed: "稍后再叫", acknowledged: "已确认醒来", cancelled: "本轮已取消", exhausted: "已到最大次数" })[String(contact.status || "")] || String(contact.status || "");
   const dayLabels = ["一", "二", "三", "四", "五", "六", "日"];
   const dayText = Array.isArray(alarm.days) && alarm.days.length === 7
@@ -32955,6 +33369,8 @@ function renderRealityTouchRuntime() {
         <div><span>可见用户</span><b>${escapeHtml(String(counts.users || 0))}</b></div>
         <div><span>已确认</span><b>${escapeHtml(String(counts.consented || 0))}</b></div>
         <div><span>主动语音扩展</span><b>${escapeHtml(String(counts.proactive_voice || 0))}</b></div>
+        <div><span>摄像头已授权</span><b>${escapeHtml(String(counts.camera_consented || 0))}</b></div>
+        <div><span>摄像头策略开启</span><b>${escapeHtml(String(counts.camera_enabled || 0))}</b></div>
         <div><span>计划场景</span><b>${escapeHtml(String(counts.enabled || 0))}</b></div>
         <div><span>已排期</span><b>${escapeHtml(String(counts.scheduled || 0))}</b></div>
         <div><span>官方现实提醒</span><b>${escapeHtml(String(counts.custom_scheduled || 0))}</b></div>
@@ -32964,7 +33380,9 @@ function renderRealityTouchRuntime() {
           <div><dt>当前用户</dt><dd>${escapeHtml(user.label || user.user_id || "-")}</dd></div>
           <div><dt>音频授权</dt><dd>${consent.local_audio ? "已授权 local_audio" : "未授权"}</dd></div>
           <div><dt>主动语音</dt><dd>${user.policy?.proactive_voice_enabled ? "同步到现实设备" : "未开放"}</dd></div>
-          <div><dt>摄像头</dt><dd class="denied">未授权，且不会继承音频授权</dd></div>
+          <div><dt>摄像头授权</dt><dd class="${cameraState.consented ? "" : "denied"}">${cameraState.consented ? "已授权 camera_single_frame" : "未授权，且不会继承音频授权"}</dd></div>
+          <div><dt>摄像头策略</dt><dd>${cameraState.enabled ? "允许明确任务读取单帧" : "关闭"}</dd></div>
+          <div><dt>最近单帧观察</dt><dd>${cameraObservation.at ? `${cameraObservation.success ? "成功" : "失败"} · ${escapeHtml(cameraObservation.summary || cameraObservation.error || "已记录")}` : "暂无记录"}</dd></div>
           <div><dt>播放目标</dt><dd>${escapeHtml(data.audio_output?.label || "跟随系统默认输出")}</dd></div>
           <div><dt>起床提醒模板</dt><dd>${alarm.time ? `${escapeHtml(alarm.time)} · ${escapeHtml(dayText)}` : "未设置"}</dd></div>
           <div><dt>下次触发</dt><dd>${escapeHtml(alarm.next_trigger_text || (alarm.enabled ? "等待调度刷新" : "闹钟已关闭"))}</dd></div>
@@ -32976,10 +33394,19 @@ function renderRealityTouchRuntime() {
       ` : `<div class="exp-settings-empty">暂无用户运行态。</div>`}
       <div class="reality-boundary-note">
         <b>设备边界</b>
-        <span>插件可以把音频直接路由到已选择的电脑输出端点，但不会扫描或配对蓝牙设备。请先在操作系统中完成连接；指定设备离线时会回退系统默认输出，主机休眠时仍无法播放。</span>
+        <span>音频由操作系统管理设备连接。摄像头只在明确任务下读取一帧并立即释放，可能发送给已配置视觉模型做有限状态分析，插件默认不保存原图；不做人脸识别、身份比对、情绪读脸、OCR 或后台持续监控。</span>
       </div>
     </article>
   `;
+}
+
+function featureModelConfigShortcutHtml(key) {
+  const target = {
+    enable_photo_text_action: ["image", "前往生图模型"],
+    enable_tts_enhancement: ["tts", "前往语音模型"],
+  }[key];
+  if (!target) return "";
+  return `<button type="button" class="feature-model-config-jump" data-model-config-jump="${target[0]}">${target[1]} <span aria-hidden="true">→</span></button>`;
 }
 
 function renderExperimentalSettings(key) {
@@ -33040,7 +33467,10 @@ function renderExperimentalSettings(key) {
   const ungroupedHtml = ungroupedItems.map(settingRow).join("");
   return `
     <article id="experimentalSettings" class="exp-detail-card exp-settings-card">
-      <h3>参数配置</h3>
+      <div class="feature-param-card-head">
+        <h3>参数配置</h3>
+        ${featureModelConfigShortcutHtml(key)}
+      </div>
       <form class="feature-param-list" data-exp-param-form="${escapeHtml(key)}">
         ${groupedHtml}
         ${ungroupedHtml}
@@ -33565,6 +33995,9 @@ function bindRealityTouchActions(root) {
   root.querySelector("[data-reality-touch-copy]")?.addEventListener("click", () => {
     void copyTextToClipboard(state.realityTouch?.confirmation_command || "", "确认命令已复制");
   });
+  root.querySelector("[data-reality-touch-camera-copy]")?.addEventListener("click", () => {
+    void copyTextToClipboard(state.realityTouch?.camera?.confirmation_command || "", "摄像头确认命令已复制");
+  });
   root.querySelectorAll("[data-reality-touch-refresh]").forEach((button) => {
     button.addEventListener("click", async () => {
       setActionBusy(button, true);
@@ -33587,6 +34020,67 @@ function bindRealityTouchActions(root) {
         playback_volume: Number(root.querySelector("[data-reality-touch-volume]")?.value ?? 35),
       }),
       "电脑音频输出设备与音量已保存",
+      event.currentTarget,
+      { reload: false },
+    );
+  if (result) {
+      state.realityTouch = result;
+      renderExperimentalPage();
+    }
+  });
+  const cameraConfigForm = root.querySelector("[data-reality-touch-camera-config]");
+  cameraConfigForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = cameraConfigForm.querySelector('button[type="submit"]');
+    const result = await runAction(
+      () => postJson("/reality-touch/update", {
+        action: "save_camera_config",
+        camera_enabled: Boolean(cameraConfigForm.elements.camera_enabled?.checked),
+        camera_index: Number(cameraConfigForm.elements.camera_index?.value ?? 0),
+        min_interval_seconds: Number(cameraConfigForm.elements.min_interval_seconds?.value ?? 60),
+        capture_timeout_seconds: Number(cameraConfigForm.elements.capture_timeout_seconds?.value ?? 5),
+        analysis_timeout_seconds: Number(cameraConfigForm.elements.analysis_timeout_seconds?.value ?? 25),
+      }),
+      "摄像头单帧配置已保存",
+      button,
+      { reload: false },
+    );
+    if (result) {
+      state.realityTouch = result;
+      renderExperimentalPage();
+    }
+  });
+  const cameraPolicyForm = root.querySelector("[data-reality-touch-camera-policy-form]");
+  cameraPolicyForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const user = selectedRealityTouchUser();
+    if (!user) return;
+    const button = cameraPolicyForm.querySelector('button[type="submit"]');
+    const result = await runAction(
+      () => postJson("/reality-touch/update", {
+        action: "save_camera_policy",
+        user_id: user.user_id,
+        camera_enabled: Boolean(cameraPolicyForm.elements.reality_camera_enabled?.checked),
+      }),
+      "摄像头用户策略已保存",
+      button,
+      { reload: false },
+    );
+    if (result) {
+      state.realityTouch = result;
+      renderExperimentalPage();
+    }
+  });
+  root.querySelector("[data-reality-touch-camera-test]")?.addEventListener("click", async (event) => {
+    const user = selectedRealityTouchUser();
+    if (!user) return;
+    const result = await runAction(
+      () => postJson("/reality-touch/update", {
+        action: "test_camera",
+        user_id: user.user_id,
+        purpose: "管理员从现实触及页面手动测试单帧读取",
+      }),
+      "摄像头单帧读取完成，原图未保存",
       event.currentTarget,
       { reload: false },
     );
@@ -34143,10 +34637,40 @@ function switchTab(tabName) {
   ensureTabData(tabName).catch((error) => showToast(`页面数据加载失败：${error.message}`, "error"));
 }
 
+function openModelConfigSection(section) {
+  const target = ["image", "tts"].includes(String(section || "")) ? String(section) : "providers";
+  const previousSection = state.modelsSection;
+  state.modelsSection = target;
+  switchTab("models");
+  if (state.activeTab !== "models" && !activeTabTransition) {
+    state.modelsSection = previousSection;
+    return false;
+  }
+  const reveal = () => {
+    if (state.activeTab !== "models") return;
+    renderProviders();
+    const tab = document.querySelector(`[data-models-section="${target}"]`);
+    tab?.focus({ preventScroll: true });
+    tab?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+  };
+  if (state.activeTab === "models") reveal();
+  else void activeTabTransition?.finished.then(reveal, () => {});
+  return true;
+}
+
 document.querySelectorAll(".annotations .tab[data-tab]").forEach((button) => {
   button.addEventListener("click", () => {
     switchTab(button.dataset.tab);
   });
+});
+
+document.addEventListener("click", (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("[data-model-config-jump]")
+    : null;
+  if (!button) return;
+  event.preventDefault();
+  openModelConfigSection(button.dataset.modelConfigJump);
 });
 
 document.addEventListener("click", (event) => {
@@ -35426,6 +35950,7 @@ document.querySelectorAll("[data-dialog-close]").forEach((button) => button.addE
 document.querySelectorAll(".pc-dialog").forEach((dialog) => dialog.addEventListener("click", (event) => {
   if (event.target === dialog) dialog.close();
 }));
+bindExpressionTransferDialogs();
 $("#groupFilter").addEventListener("input", renderGroups);
 $("#worldbookMemberFilter").addEventListener("input", renderWorldbook);
 $("#featureFilter").addEventListener("input", renderFeatureSwitches);

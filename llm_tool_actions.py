@@ -4701,10 +4701,8 @@ class LlmToolActionsMixin:
             160,
         )
 
-    async def _reaction_embedding_provider(self) -> tuple[Any, str]:
-        configured = _single_line(
-            getattr(self, "reaction_expression_embedding_provider_id", ""), 160
-        )
+    async def _embedding_provider_for_configured_id(self, configured_id: Any = "") -> tuple[Any, str]:
+        configured = _single_line(configured_id, 160)
         context = getattr(self, "context", None)
         if context is None:
             return None, configured
@@ -4735,7 +4733,7 @@ class LlmToolActionsMixin:
                 ):
                     return provider, configured
             logger.warning(
-                "[PrivateCompanion] 表情 Embedding Provider 不可用，回退关键词检索: provider_id=%s",
+                "[PrivateCompanion] Embedding Provider 不可用，回退本地语义与关键词: provider_id=%s",
                 configured,
             )
             return None, configured
@@ -4754,6 +4752,24 @@ class LlmToolActionsMixin:
             if self._is_reaction_embedding_provider(provider):
                 return provider, self._reaction_embedding_provider_runtime_id(provider) or "<auto>"
         return None, ""
+
+    async def _shared_embedding_provider(self) -> tuple[Any, str]:
+        configured = _single_line(
+            getattr(self, "embedding_provider_id", "")
+            or getattr(self, "reaction_expression_embedding_provider_id", ""),
+            160,
+        )
+        if not configured:
+            return None, ""
+        return await self._embedding_provider_for_configured_id(configured)
+
+    async def _reaction_embedding_provider(self) -> tuple[Any, str]:
+        configured = _single_line(
+            getattr(self, "reaction_expression_embedding_provider_id", "")
+            or getattr(self, "embedding_provider_id", ""),
+            160,
+        )
+        return await self._embedding_provider_for_configured_id(configured)
 
     async def _reaction_embedding_vector(self, provider: Any, text: str) -> list[float]:
         if not self._is_reaction_embedding_provider(provider):
@@ -4781,6 +4797,57 @@ class LlmToolActionsMixin:
                 except TypeError:
                     payload = await wait_result(get_batch([_single_line(text, 1800)]))
         return ReactionAssetLibrary.normalize_embedding_vector(payload)
+
+    async def _reaction_embedding_vectors(self, provider: Any, texts: list[str]) -> list[list[float]]:
+        cleaned = [_single_line(item, 1800) for item in texts if _single_line(item, 1800)]
+        if not cleaned or not self._is_reaction_embedding_provider(provider):
+            return []
+        if len(cleaned) == 1:
+            vector = await self._reaction_embedding_vector(provider, cleaned[0])
+            return [vector] if vector else []
+
+        limit = max(0, _safe_int(getattr(self, "reaction_expression_embedding_timeout_ms", 5000), 5000, 0))
+
+        async def wait_result(value: Any) -> Any:
+            if not inspect.isawaitable(value):
+                return value
+            if limit <= 0:
+                return await value
+            return await asyncio.wait_for(value, timeout=limit / 1000.0)
+
+        payload: Any = None
+        get_embeddings = getattr(provider, "get_embeddings", None)
+        get_batch = getattr(provider, "get_embeddings_batch", None)
+        if callable(get_embeddings):
+            payload = await wait_result(get_embeddings(cleaned))
+        elif callable(get_batch):
+            try:
+                payload = await wait_result(
+                    get_batch(cleaned, batch_size=min(32, len(cleaned)), tasks_limit=2, max_retries=1)
+                )
+            except TypeError:
+                payload = await wait_result(get_batch(cleaned))
+        else:
+            return await asyncio.gather(
+                *(self._reaction_embedding_vector(provider, item) for item in cleaned)
+            )
+
+        rows = payload
+        if isinstance(payload, dict):
+            rows = next(
+                (payload.get(key) for key in ("data", "embeddings", "vectors") if isinstance(payload.get(key), list)),
+                payload,
+            )
+        elif not isinstance(payload, (list, tuple)):
+            for attribute in ("data", "embeddings", "vectors"):
+                value = getattr(payload, attribute, None)
+                if isinstance(value, (list, tuple)):
+                    rows = value
+                    break
+        if not isinstance(rows, (list, tuple)):
+            return []
+        vectors = [ReactionAssetLibrary.normalize_embedding_vector(item) for item in rows]
+        return vectors if len(vectors) == len(cleaned) and all(vectors) else []
 
     async def _reaction_embedding_backfill(self, library: Any, provider: Any, provider_id: str) -> None:
         try:

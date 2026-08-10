@@ -692,6 +692,9 @@ class PrivateCompanionPageApi(
             ("/overview", self.get_overview, ["GET"], "Private Companion Page overview"),
             ("/expression-library", self.get_expression_library, ["GET"], "Private Companion Page expression library"),
             ("/expression-library/update", self.update_expression_library, ["POST"], "Private Companion Page update expression library"),
+            ("/expression-library/share", self.share_expression_library, ["POST"], "Private Companion Page share expression library"),
+            ("/expression-library/import/preview", self.preview_expression_library_import, ["POST"], "Private Companion Page preview expression library import"),
+            ("/expression-library/import/apply", self.apply_expression_library_import, ["POST"], "Private Companion Page apply expression library import"),
             ("/users", self.list_users, ["GET"], "Private Companion Page users"),
             ("/user", self.get_user, ["GET"], "Private Companion Page user detail"),
             ("/user/update", self.update_user, ["POST"], "Private Companion Page update user"),
@@ -1677,11 +1680,11 @@ class PrivateCompanionPageApi(
 
     @staticmethod
     def _vision_provider_test_image_data_url() -> str:
-        # A tiny valid PNG keeps the connection test cheap while still forcing
-        # the Provider through its real multimodal request path.
+        # Keep the connection test cheap while satisfying visual providers such
+        # as Qwen-VL that reject 1x1 placeholders (both sides are 32 pixels).
         return (
             "data:image/png;base64,"
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAmElEQVR42mP8//8/Ay0BEwONwdC3gAWZo5e4kCqGXpofP0A+wLSfVIAZBqOpiJw4wBWsaHGDS5w0HyBHGjHsEVhUIIcvMWxyIhmXfiLz4/COA73EhcSUr/iVDYIgwu8Jgl5kIiP9kKSSqHyANZThglTIBxCDsIYGQV+yEB8CaBYQGYAsDGRV5RTVB9RqW9ApHzCOtk0H3AIAj19C2ZNGr00AAAAASUVORK5CYII="
         )
 
     def _visual_provider_for_test(self, provider_id: str) -> Any:
@@ -1758,17 +1761,59 @@ class PrivateCompanionPageApi(
             )
         return results
 
+    def _reaction_library_analysis_provider_candidates(self) -> list[tuple[str, str, str]]:
+        """Prefer the plugin-owned vision card for reaction asset metadata."""
+        candidates_getter = getattr(self.plugin, "_private_image_visual_provider_candidates", None)
+        inherited = candidates_getter("") if callable(candidates_getter) else []
+        inherited_rows = inherited if isinstance(inherited, list) else []
+        configured_id = self._single_line(getattr(self.plugin, "plugin_vision_provider_id", ""), 160)
+        fallback_getter = getattr(self.plugin, "_model_fallback_provider_id", None)
+        configured_fallback_id = (
+            self._single_line(
+                fallback_getter("PLUGIN_VISION_PROVIDER_ID", configured_id),
+                160,
+            )
+            if configured_id and callable(fallback_getter)
+            else ""
+        )
+
+        ordered: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
+
+        def append(provider_id: Any, source: Any, prompt: Any = "") -> None:
+            clean_id = self._single_line(provider_id, 160)
+            if not clean_id or clean_id in seen:
+                return
+            seen.add(clean_id)
+            ordered.append(
+                (
+                    clean_id,
+                    self._single_line(source, 80),
+                    str(prompt or "").strip(),
+                )
+            )
+
+        append(configured_id, "plugin_vision")
+        append(configured_fallback_id, "plugin_vision_fallback")
+        for row in inherited_rows:
+            if not isinstance(row, (list, tuple)) or not row:
+                continue
+            append(
+                row[0],
+                row[1] if len(row) > 1 else "",
+                row[2] if len(row) > 2 else "",
+            )
+        return ordered
+
     async def _call_reaction_library_analysis_provider(
         self,
         items: list[dict[str, Any]],
         image_urls: list[str],
     ) -> tuple[list[dict[str, Any]], str, str]:
-        candidates_getter = getattr(self.plugin, "_private_image_visual_provider_candidates", None)
         provider_getter = getattr(self.plugin, "_private_image_provider_by_id", None)
         supports_image = getattr(self.plugin, "_provider_supports_image", None)
         cooldown_check = getattr(self.plugin, "_private_image_provider_in_failure_cooldown", None)
-        candidates = candidates_getter("") if callable(candidates_getter) else []
-        candidate_rows = candidates if isinstance(candidates, list) else []
+        candidate_rows = self._reaction_library_analysis_provider_candidates()
         prompt = self._reaction_library_analysis_prompt(items)
         last_error = "未配置可用的视觉模型"
         seen: set[str] = set()
@@ -1788,8 +1833,18 @@ class PrivateCompanionPageApi(
             ),
             "",
         )
+        configured_visual_id = self._single_line(
+            getattr(self.plugin, "plugin_vision_provider_id", ""),
+            160,
+        )
         visual_key_getter = getattr(self.plugin, "_private_image_visual_provider_card_key", None)
-        visual_provider_key = visual_key_getter() if callable(visual_key_getter) else "PLUGIN_VISION_PROVIDER_ID"
+        visual_provider_key = (
+            "PLUGIN_VISION_PROVIDER_ID"
+            if configured_visual_id
+            else visual_key_getter()
+            if callable(visual_key_getter)
+            else "PLUGIN_VISION_PROVIDER_ID"
+        )
         for row in candidate_rows:
             if not isinstance(row, (list, tuple)) or not row:
                 continue
@@ -4303,13 +4358,18 @@ class PrivateCompanionPageApi(
         payload = await request.get_json(silent=True) or {}
         action = self._single_line(payload.get("action"), 24).lower()
         user_id = self._single_line(payload.get("user_id"), 120)
-        if action not in {"save", "save_policy", "disable", "stop_session", "cancel_reminder", "test", "select_output"}:
+        if action not in {
+            "save", "save_policy", "disable", "stop_session", "cancel_reminder", "test", "select_output",
+            "save_camera_config", "save_camera_policy", "test_camera",
+        }:
             return self._error("不支持的现实触及操作")
-        if action != "select_output" and not user_id:
+        if action not in {"select_output", "save_camera_config"} and not user_id:
             return self._error("请选择私聊用户")
         snapshotter = getattr(self.plugin, "_reality_touch_page_snapshot", None)
         updater = getattr(self.plugin, "_reality_touch_update_alarm", None)
         policy_updater = getattr(self.plugin, "_reality_touch_update_policy", None)
+        camera_policy_updater = getattr(self.plugin, "_reality_touch_update_camera_policy", None)
+        camera_snapshotter = getattr(self.plugin, "_reality_touch_camera_snapshot_for_user", None)
         device_selector = getattr(self.plugin, "_reality_touch_select_audio_device", None)
         wakeup_player = getattr(self.plugin, "_play_wakeup_alarm", None)
         test_audio_player = getattr(self.plugin, "_play_reality_touch_test_audio", None)
@@ -4323,6 +4383,28 @@ class PrivateCompanionPageApi(
         cancel_reminder_id = ""
         message = ""
         try:
+            if action == "save_camera_config":
+                camera_enabled = self._normalize_bool_value(payload.get("camera_enabled"))
+                camera_index = _safe_int(payload.get("camera_index"), 0, 0, 32)
+                min_interval = _safe_int(payload.get("min_interval_seconds"), 60, 10, 3600)
+                capture_timeout = _safe_int(payload.get("capture_timeout_seconds"), 5, 2, 20)
+                analysis_timeout = _safe_int(payload.get("analysis_timeout_seconds"), 25, 5, 90)
+                self._set_config_value("enable_reality_touch_camera", camera_enabled)
+                self._set_config_value("reality_touch_camera_index", camera_index)
+                self._set_config_value("reality_touch_camera_min_interval_seconds", min_interval)
+                self._set_config_value("reality_touch_camera_capture_timeout_seconds", capture_timeout)
+                self._set_config_value("reality_touch_camera_analysis_timeout_seconds", analysis_timeout)
+                self.plugin.enable_reality_touch_camera = camera_enabled
+                self.plugin.reality_touch_camera_index = camera_index
+                self.plugin.reality_touch_camera_min_interval_seconds = min_interval
+                self.plugin.reality_touch_camera_capture_timeout_seconds = capture_timeout
+                self.plugin.reality_touch_camera_analysis_timeout_seconds = analysis_timeout
+                if not await self._save_config_if_possible():
+                    return self._error("摄像头配置已更新到运行态，但写入插件配置失败")
+                async with self.plugin._data_lock:
+                    snapshot = deepcopy(snapshotter())
+                snapshot["message"] = "现实触及摄像头配置已保存"
+                return self._ok(snapshot)
             if action == "select_output":
                 if not callable(device_selector):
                     return self._error("当前插件实例不支持选择音频输出设备", status_code=503)
@@ -4351,6 +4433,12 @@ class PrivateCompanionPageApi(
                     policy_updater(user, payload)
                     self.plugin._save_data_sync()
                     message = "现实触及主动语音策略已保存"
+                elif action == "save_camera_policy":
+                    if not callable(camera_policy_updater):
+                        return self._error("当前插件实例不支持摄像头用户策略", status_code=503)
+                    camera_policy_updater(user, payload)
+                    self.plugin._save_data_sync()
+                    message = "现实触及摄像头用户策略已保存"
                 elif action == "disable":
                     alarm = user.get("wakeup_alarm")
                     if not isinstance(alarm, dict):
@@ -4374,6 +4462,9 @@ class PrivateCompanionPageApi(
                     cancel_reminder_id = self._single_line(payload.get("reminder_id"), 40)
                     if not cancel_reminder_id:
                         return self._error("缺少现实触及提醒 ID")
+                elif action == "test_camera":
+                    if not callable(camera_snapshotter):
+                        return self._error("当前插件实例没有摄像头单帧能力", status_code=503)
                 else:
                     test_kind = "device" if self._single_line(payload.get("test_kind"), 24).lower() == "device" else "scenario"
                     consented = getattr(self.plugin, "_reality_touch_audio_consented", lambda _: False)(user)
@@ -4395,6 +4486,17 @@ class PrivateCompanionPageApi(
                 if not await reminder_canceller(user_id, reminder_id=cancel_reminder_id):
                     return self._error("取消失败，任务可能已经开始执行或已结束")
                 message = "现实触及官方提醒已取消"
+            elif action == "test_camera":
+                result = await camera_snapshotter(
+                    user_id,
+                    self._single_line(payload.get("purpose"), 120) or "管理员从现实触及页面手动测试单帧读取",
+                )
+                if result.get("status") != "success":
+                    return self._error(self._single_line(result.get("message"), 200) or "摄像头单帧读取失败")
+                observation = result.get("observation") if isinstance(result.get("observation"), dict) else {}
+                message = "摄像头单帧读取完成：" + (
+                    self._single_line(observation.get("summary"), 180) or "已记录有限状态"
+                )
             elif action == "test":
                 if test_kind == "device":
                     if not callable(test_audio_player):
@@ -14615,7 +14717,7 @@ class PrivateCompanionPageApi(
         start = time.time()
         logger.info("[PrivateCompanionPage][test:%s][type:provider_connection] 开始执行测试", request_id)
         try:
-            if key == "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID":
+            if key in {"EMBEDDING_PROVIDER_ID", "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"}:
                 provider = await self._embedding_provider_for_test(provider_id)
                 vector_getter = getattr(self.plugin, "_reaction_embedding_vector", None)
                 if provider is None or not callable(vector_getter):
@@ -14656,7 +14758,7 @@ class PrivateCompanionPageApi(
                 step_name = "模型调用"
             elapsed_ms = int((time.time() - start) * 1000)
             ok = bool(text)
-            embedding_test = key == "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"
+            embedding_test = key in {"EMBEDDING_PROVIDER_ID", "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"}
             vision_test = key in {"PLUGIN_VISION_PROVIDER_ID", "PRIVATE_READING_VISION_PROVIDER_ID"}
             result = {
                 "ok": ok,
@@ -15690,6 +15792,364 @@ class PrivateCompanionPageApi(
                 "feedback_negative": negative_feedback_count,
             },
         }
+
+    @staticmethod
+    def _expression_share_value_list(value: Any, *, limit: int = 8) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        result: list[str] = []
+        for raw in value:
+            item = re.sub(r"\s+", " ", str(raw or "")).strip()[:32]
+            if item and item not in result:
+                result.append(item)
+            if len(result) >= limit:
+                break
+        return result
+
+    def _expression_share_rule(self, raw: Any) -> tuple[dict[str, Any] | None, str]:
+        if not isinstance(raw, dict):
+            return None, "规则格式无效"
+        rule = {
+            "kind": self._single_line(raw.get("kind") or raw.get("type"), 16).lower(),
+            "label": self._single_line(raw.get("label"), 100),
+            "situation": self._single_line(raw.get("situation"), 100),
+            "pattern": self._single_line(raw.get("pattern") or raw.get("style"), 100),
+            "instruction": self._single_line(raw.get("instruction"), 160),
+            "keywords": self._expression_share_value_list(raw.get("keywords") or raw.get("tags")),
+            "signals": self._expression_share_value_list(raw.get("signals")),
+            "channels": self._expression_share_value_list(raw.get("channels")),
+            "relationship_stages": self._expression_share_value_list(raw.get("relationship_stages")),
+            "emotion_gates": self._expression_share_value_list(raw.get("emotion_gates")),
+            "intent": self._single_line(raw.get("intent"), 32).lower() or "any",
+            "avoid": self._single_line(raw.get("avoid"), 160),
+            "persona_conflict": bool(raw.get("persona_conflict", False)),
+        }
+        validator = getattr(self.plugin, "_expression_rule_definition_is_valid", None)
+        if callable(validator) and not validator(rule):
+            return None, "规则不是有效的可复用表达或具体语法"
+        serialized = json.dumps(rule, ensure_ascii=False).lower()
+        unsafe_markers = (
+            "ignore previous", "ignore all previous", "system prompt", "developer message",
+            "忽略之前", "忽略以上", "无视之前", "系统提示词", "开发者消息",
+            "调用工具", "tool_calls", "<system", "</system",
+        )
+        if any(marker in serialized for marker in unsafe_markers):
+            return None, "规则含有指令污染内容"
+        return rule, ""
+
+    def _expression_share_target(
+        self,
+        source_type: Any,
+        source_id: Any,
+        *,
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        target_type = self._single_line(source_type, 16).lower()
+        target_id = self._single_line(source_id, 80)
+        root = data if isinstance(data, dict) else self.plugin.data
+        collection = root.get("groups" if target_type == "group" else "users")
+        if target_type not in {"private", "group"} or not target_id or not isinstance(collection, dict):
+            return None
+        target = collection.get(target_id)
+        return target if isinstance(target, dict) else None
+
+    def _normalize_expression_share_pack(self, raw_pack: Any) -> dict[str, Any]:
+        pack = raw_pack if isinstance(raw_pack, dict) else {}
+        if self._single_line(pack.get("schema"), 80) != "private-companion-expression-pack":
+            raise ValueError("不是可识别的表达分享文件")
+        if self._int(pack.get("version")) != 1:
+            raise ValueError("表达分享文件版本不受支持")
+        raw_groups = pack.get("rule_groups")
+        if not isinstance(raw_groups, list) or not raw_groups:
+            raise ValueError("分享文件中没有表达规则")
+        if len(raw_groups) > 200:
+            raise ValueError("单次最多导入 200 个表达规则组")
+        groups: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        seen_group_signatures: set[str] = set()
+        for index, raw_group in enumerate(raw_groups):
+            if not isinstance(raw_group, dict):
+                rejected.append({"index": index, "reason": "规则组格式无效"})
+                continue
+            raw_rules = raw_group.get("rules")
+            if not isinstance(raw_rules, list) or not raw_rules:
+                rejected.append({"index": index, "reason": "规则组为空"})
+                continue
+            rules: list[dict[str, Any]] = []
+            kinds: set[str] = set()
+            for raw_rule in raw_rules[:4]:
+                normalized, reason = self._expression_share_rule(raw_rule)
+                if normalized is None:
+                    rejected.append({"index": index, "reason": reason})
+                    continue
+                kind = normalized["kind"]
+                if kind in kinds:
+                    rejected.append({"index": index, "reason": f"规则组含有重复的 {kind} 组件"})
+                    continue
+                kinds.add(kind)
+                rules.append(normalized)
+            if not rules:
+                continue
+            signature = hashlib.sha256(
+                json.dumps(rules, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            if signature in seen_group_signatures:
+                continue
+            seen_group_signatures.add(signature)
+            groups.append(
+                {
+                    "id": f"shared-{signature[:16]}",
+                    "label": self._single_line(raw_group.get("label"), 100)
+                    or rules[0].get("label")
+                    or rules[0].get("situation"),
+                    "signature": signature,
+                    "rules": rules,
+                }
+            )
+        if not groups:
+            reason = rejected[0].get("reason") if rejected else "没有可导入的有效规则"
+            raise ValueError(str(reason))
+        return {
+            "schema": "private-companion-expression-pack",
+            "version": 1,
+            "title": self._single_line(pack.get("title"), 80) or "表达分享包",
+            "rule_groups": groups,
+            "rejected": rejected,
+        }
+
+    def _expression_import_candidates(self, normalized_pack: dict[str, Any]) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        imported_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+        for group in normalized_pack.get("rule_groups", []):
+            if not isinstance(group, dict):
+                continue
+            family_key = f"shared_{self._single_line(group.get('signature'), 24)}"
+            for raw_rule in group.get("rules", []):
+                if not isinstance(raw_rule, dict):
+                    continue
+                fingerprint = hashlib.sha256(
+                    json.dumps(raw_rule, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+                rule = dict(raw_rule)
+                rule.update(
+                    {
+                        "id": f"shared-{fingerprint[:20]}",
+                        "family_key": family_key,
+                        "evidence_count": 1,
+                        "review_status": "pending",
+                        "shared_import": True,
+                        "imported_at": imported_at,
+                    }
+                )
+                candidates.append(rule)
+        assigner = getattr(self.plugin, "_assign_expression_rule_families", None)
+        if callable(assigner):
+            assigner(candidates)
+        return candidates
+
+    def _expression_import_preview(
+        self,
+        normalized_pack: dict[str, Any],
+        target: dict[str, Any],
+    ) -> dict[str, Any]:
+        profile = target.get("expression_profile") if isinstance(target.get("expression_profile"), dict) else {}
+        existing = [
+            item
+            for storage in ("learned_rules", "pending_rules")
+            for item in (profile.get(storage) if isinstance(profile.get(storage), list) else [])
+            if isinstance(item, dict)
+        ]
+        duplicate_analyzer = getattr(self.plugin, "_expression_rule_duplicate_analysis", None)
+        signature_getter = getattr(self.plugin, "_expression_rule_signature", None)
+        candidates = self._expression_import_candidates(normalized_pack)
+        duplicate_ids: set[str] = set()
+        for candidate in candidates:
+            candidate_signature = signature_getter(candidate) if callable(signature_getter) else ""
+            for current in existing:
+                current_signature = signature_getter(current) if callable(signature_getter) else ""
+                if candidate_signature and candidate_signature == current_signature:
+                    duplicate_ids.add(str(candidate.get("id") or ""))
+                    break
+                analysis = duplicate_analyzer(current, candidate) if callable(duplicate_analyzer) else {}
+                if isinstance(analysis, dict) and (
+                    analysis.get("auto_merge") or self._float(analysis.get("confidence")) >= 0.9
+                ):
+                    duplicate_ids.add(str(candidate.get("id") or ""))
+                    break
+        importable = [item for item in candidates if str(item.get("id") or "") not in duplicate_ids]
+        family_ids = {
+            self._single_line(item.get("family_id"), 100)
+            for item in importable
+            if self._single_line(item.get("family_id"), 100)
+        }
+        return {
+            "title": normalized_pack.get("title") or "表达分享包",
+            "group_count": len(normalized_pack.get("rule_groups", [])),
+            "rule_count": len(candidates),
+            "importable_group_count": len(family_ids),
+            "importable_rule_count": len(importable),
+            "duplicate_rule_count": len(duplicate_ids),
+            "rejected_count": len(normalized_pack.get("rejected", [])),
+            "rejected": normalized_pack.get("rejected", [])[:20],
+            "candidates": importable,
+        }
+
+    async def share_expression_library(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        raw_items = payload.get("items")
+        if raw_items is not None and not isinstance(raw_items, list):
+            return self._error("分享范围格式无效")
+        if isinstance(raw_items, list) and not raw_items:
+            return self._error("当前范围没有可分享的已启用表达")
+        if isinstance(raw_items, list) and len(raw_items) > 200:
+            return self._error("单次最多分享 200 个表达规则组")
+        try:
+            async with self.plugin._data_lock:
+                snapshot = deepcopy(self.plugin.data)
+            selected = {
+                (
+                    self._single_line(item.get("source_type"), 16),
+                    self._single_line(item.get("source_id"), 80),
+                    self._single_line(item.get("rule_family_id"), 100),
+                )
+                for item in raw_items or []
+                if isinstance(item, dict)
+            }
+            groups: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for source_type, collection_key in (("private", "users"), ("group", "groups")):
+                collection = snapshot.get(collection_key)
+                if not isinstance(collection, dict):
+                    continue
+                for source_id, source in collection.items():
+                    profile = source.get("expression_profile") if isinstance(source, dict) else None
+                    learned = profile.get("learned_rules") if isinstance(profile, dict) and isinstance(profile.get("learned_rules"), list) else []
+                    raw_groups = self.plugin._expression_rule_groups(learned) if callable(getattr(self.plugin, "_expression_rule_groups", None)) else [[item] for item in learned]
+                    for raw_group in raw_groups:
+                        family_id = self._single_line((raw_group[0] if raw_group else {}).get("family_id"), 100)
+                        if selected and (source_type, self._single_line(source_id, 80), family_id) not in selected:
+                            continue
+                        rules: list[dict[str, Any]] = []
+                        for raw_rule in raw_group:
+                            rule, _ = self._expression_share_rule(raw_rule)
+                            if rule is not None:
+                                rules.append(rule)
+                        if not rules:
+                            continue
+                        signature = hashlib.sha256(
+                            json.dumps(rules, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                        ).hexdigest()
+                        if signature in seen:
+                            continue
+                        seen.add(signature)
+                        groups.append(
+                            {
+                                "id": f"group-{len(groups) + 1:03d}",
+                                "label": rules[0].get("label") or rules[0].get("situation"),
+                                "rules": rules,
+                            }
+                        )
+            if not groups:
+                return self._error("当前范围没有可分享的已启用表达")
+            pack = {
+                "schema": "private-companion-expression-pack",
+                "version": 1,
+                "title": self._single_line(payload.get("title"), 80) or "我的表达分享",
+                "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "privacy": "仅包含抽象表达规则，不包含用户、群聊、原始消息、证据、反馈或使用记录。",
+                "rule_groups": groups,
+            }
+            return self._ok({"package": pack, "group_count": len(groups), "rule_count": sum(len(item["rules"]) for item in groups)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 生成表达分享包失败: {exc}", exc_info=True)
+            return self._exception_error("生成表达分享包失败")
+
+    async def preview_expression_library_import(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        try:
+            normalized = self._normalize_expression_share_pack(payload.get("package"))
+            async with self.plugin._data_lock:
+                target = self._expression_share_target(payload.get("target_source_type"), payload.get("target_source_id"))
+                if target is None:
+                    return self._error("请选择有效的导入目标")
+                preview = self._expression_import_preview(normalized, target)
+            return self._ok(preview)
+        except ValueError as exc:
+            return self._error(str(exc))
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 预览表达导入失败: {exc}", exc_info=True)
+            return self._exception_error("预览表达导入失败")
+
+    async def apply_expression_library_import(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        destination = self._single_line(payload.get("destination"), 16).lower() or "pending"
+        if destination not in {"pending", "learned"}:
+            return self._error("导入方式无效")
+        try:
+            normalized = self._normalize_expression_share_pack(payload.get("package"))
+            async with self.plugin._data_lock:
+                target = self._expression_share_target(payload.get("target_source_type"), payload.get("target_source_id"))
+                if target is None:
+                    return self._error("请选择有效的导入目标")
+                preview = self._expression_import_preview(normalized, target)
+                candidates = [dict(item) for item in preview.get("candidates", []) if isinstance(item, dict)]
+                if not candidates:
+                    result = self._expression_library_summary(deepcopy(self.plugin.data))
+                    result["message"] = "没有需要导入的新表达，目标中已存在相同规则"
+                    result["import"] = preview
+                    return self._ok(result)
+                profile = target.setdefault("expression_profile", {})
+                if not isinstance(profile, dict):
+                    profile = {}
+                    target["expression_profile"] = profile
+                if destination == "learned":
+                    for item in candidates:
+                        item["review_status"] = "approved"
+                        item["approved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    merger = getattr(self.plugin, "_merge_learned_expression_rules", None)
+                    if callable(merger):
+                        merger(
+                            profile,
+                            candidates,
+                            batch_key=f"share-import:{hashlib.sha1(json.dumps(normalized, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()[:20]}",
+                            now=time.time(),
+                        )
+                    else:
+                        learned = profile.get("learned_rules") if isinstance(profile.get("learned_rules"), list) else []
+                        profile["learned_rules"] = candidates + learned
+                    refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
+                    if callable(refresher):
+                        refresher()
+                else:
+                    pending = profile.get("pending_rules") if isinstance(profile.get("pending_rules"), list) else []
+                    profile["pending_rules"] = candidates + pending
+                    backfiller = getattr(self.plugin, "_backfill_expression_rule_families", None)
+                    if callable(backfiller):
+                        backfiller(profile)
+                    deduper = getattr(self.plugin, "_deduplicate_expression_rule_families", None)
+                    if callable(deduper):
+                        deduper(profile["pending_rules"])
+                limit = max(24, self._int(getattr(self.plugin, "max_learned_expression_items", 60)) * 2)
+                storage_key = "learned_rules" if destination == "learned" else "pending_rules"
+                stored = profile.get(storage_key) if isinstance(profile.get(storage_key), list) else []
+                profile[storage_key] = stored[:limit]
+                profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                self.plugin._save_data_sync()
+                snapshot = deepcopy(self.plugin.data)
+            result = self._expression_library_summary(snapshot)
+            imported_groups = self._int(preview.get("importable_group_count"))
+            result["message"] = (
+                f"已导入 {imported_groups} 个表达规则组并直接启用"
+                if destination == "learned"
+                else f"已将 {imported_groups} 个表达规则组加入审核队列"
+            )
+            result["import"] = {**preview, "destination": destination}
+            return self._ok(result)
+        except ValueError as exc:
+            return self._error(str(exc))
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 导入表达分享包失败: {exc}", exc_info=True)
+            return self._exception_error("导入表达分享包失败")
 
     async def get_expression_library(self) -> dict[str, Any]:
         try:
@@ -17154,6 +17614,7 @@ class PrivateCompanionPageApi(
             "FAST_RESPONSE_PROVIDER_ID",
             "COMPLEX_REASONING_PROVIDER_ID",
             "CREATIVE_MODEL_PROVIDER_ID",
+            "EMBEDDING_PROVIDER_ID",
             "LLM_PROVIDER_ID",
             "MAI_STYLE_PROVIDER_ID",
             "DAILY_PLAN_PROVIDER_ID",
@@ -17201,6 +17662,8 @@ class PrivateCompanionPageApi(
             values["CREATIVE_MODEL_PROVIDER_ID"] = str(getattr(self.plugin, "creative_model_provider_id", "") or "")
         if not values.get("PLUGIN_VISION_PROVIDER_ID"):
             values["PLUGIN_VISION_PROVIDER_ID"] = str(getattr(self.plugin, "plugin_vision_provider_id", "") or "")
+        if not values.get("EMBEDDING_PROVIDER_ID"):
+            values["EMBEDDING_PROVIDER_ID"] = str(getattr(self.plugin, "embedding_provider_id", "") or "")
         if not values.get("PRIVATE_READING_VISION_PROVIDER_ID"):
             values["PRIVATE_READING_VISION_PROVIDER_ID"] = str(
                 getattr(self.plugin, "private_reading_vision_provider_id", "") or ""
@@ -17916,6 +18379,14 @@ class PrivateCompanionPageApi(
             add("ok", "群聊名单", f"当前为{'白名单' if mode == 'whitelist' else '黑名单'}模式，白名单 {len(whitelist)} 个，黑名单 {len(blacklist)} 个。")
 
         available_ids = {str(item.get("id") or "") for item in self._available_provider_items()}
+        try:
+            available_ids.update(
+                str(item.get("id") or "")
+                for item in await self._available_embedding_provider_items()
+                if str(item.get("id") or "")
+            )
+        except Exception:
+            pass
         configured = {key: value for key, value in self._provider_settings().items() if str(value or "").strip()}
         missing = [value for value in configured.values() if available_ids and value not in available_ids]
         if configured and not available_ids:
@@ -21326,6 +21797,7 @@ class PrivateCompanionPageApi(
             "FAST_RESPONSE_PROVIDER_ID": "fast_response_provider_id",
             "COMPLEX_REASONING_PROVIDER_ID": "complex_reasoning_provider_id",
             "CREATIVE_MODEL_PROVIDER_ID": "creative_model_provider_id",
+            "EMBEDDING_PROVIDER_ID": "embedding_provider_id",
             "LLM_PROVIDER_ID": "llm_provider_id",
             "MAI_STYLE_PROVIDER_ID": "mai_style_provider_id",
             "DAILY_PLAN_PROVIDER_ID": "daily_plan_provider_id",

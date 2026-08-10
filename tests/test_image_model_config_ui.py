@@ -92,6 +92,16 @@ class ImageModelConfigUiTests(unittest.TestCase):
             self.script,
         )
 
+    def test_photo_feature_has_direct_image_model_config_shortcut(self) -> None:
+        self.assertIn(
+            'enable_photo_text_action: ["image", "前往生图模型"]',
+            self.script,
+        )
+        self.assertIn('data-model-config-jump="${target[0]}"', self.script)
+        self.assertIn("function openModelConfigSection(section)", self.script)
+        self.assertIn("state.modelsSection = target;", self.script)
+        self.assertIn('switchTab("models");', self.script)
+
     def test_legacy_backup_api_switch_is_not_rendered_as_orphan_feature(self) -> None:
         self.assertIn(
             'enable_backup_external_image_api: "enable_photo_text_action"',

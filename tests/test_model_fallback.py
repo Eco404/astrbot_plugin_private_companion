@@ -438,6 +438,68 @@ process.stdout.write(JSON.stringify(values));
         )
         self.assertEqual(json.loads(result.stdout), {})
 
+    def test_manual_provider_selection_keeps_custom_inputs_mounted(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is unavailable")
+        provider_tree_path = Path(__file__).resolve().parents[1] / "pages" / "陪伴面板" / "js" / "panels" / "provider-tree.js"
+        script = f"""
+global.window = {{}};
+const fs = require("fs");
+eval(fs.readFileSync({json.dumps(str(provider_tree_path), ensure_ascii=False)}, "utf8"));
+function control(value, dataset) {{
+  return {{ value, dataset, hidden: true, focused: false, listeners: {{}},
+    focus() {{ this.focused = true; }},
+    addEventListener(name, callback) {{ this.listeners[name] = callback; }} }};
+}}
+const primarySelect = control("", {{ providerSelect: "LLM_PROVIDER_ID" }});
+const primaryInput = control("", {{ providerKey: "LLM_PROVIDER_ID" }});
+const fallbackSelect = control("", {{ providerFallbackSelect: "LLM_PROVIDER_ID" }});
+const fallbackInput = control("", {{ providerFallbackKey: "LLM_PROVIDER_ID" }});
+const document = {{
+  querySelectorAll(selector) {{
+    if (selector === "[data-provider-select]") return [primarySelect];
+    if (selector === "[data-provider-key]") return [primaryInput];
+    if (selector === "[data-provider-fallback-select]") return [fallbackSelect];
+    if (selector === "[data-provider-fallback-key]") return [fallbackInput];
+    return [];
+  }},
+  querySelector(selector) {{
+    if (selector === '[data-provider-key="LLM_PROVIDER_ID"]') return primaryInput;
+    if (selector === '[data-provider-fallback-key="LLM_PROVIDER_ID"]') return fallbackInput;
+    return null;
+  }},
+}};
+const state = {{ providerDraft: {{}}, providerFallbackDraft: {{}} }};
+window.PrivateCompanionProviderTree.bindProviderTests({{ document, state }});
+primarySelect.value = "__custom__";
+primarySelect.listeners.change();
+fallbackSelect.value = "__custom__";
+fallbackSelect.listeners.change();
+process.stdout.write(JSON.stringify({{
+  primaryVisible: !primaryInput.hidden,
+  primaryFocused: primaryInput.focused,
+  fallbackVisible: !fallbackInput.hidden,
+  fallbackFocused: fallbackInput.focused,
+}}));
+"""
+        result = subprocess.run(
+            [node, "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "primaryVisible": True,
+                "primaryFocused": True,
+                "fallbackVisible": True,
+                "fallbackFocused": True,
+            },
+        )
+
     def test_precision_ui_fallback_ignores_hidden_quick_provider_values(self) -> None:
         node = shutil.which("node")
         if not node:

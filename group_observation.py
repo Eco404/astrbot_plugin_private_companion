@@ -2421,6 +2421,127 @@ class GroupObservationMixin:
                 )
         return "\n".join(lines)
 
+    async def _group_slang_embedding_context(self, group: dict[str, Any], text: Any) -> str:
+        """Soft-retrieve confirmed group slang meanings for an unfamiliar short expression."""
+        if not bool(getattr(self, "enable_group_slang_meanings", False)):
+            return ""
+        cleaned = _single_line(text, 160)
+        meanings = group.get("slang_meanings") if isinstance(group, dict) else None
+        if not cleaned or not isinstance(meanings, dict) or not meanings:
+            return ""
+        candidates = self._group_slang_candidates_from_text(cleaned)
+        if not candidates:
+            return ""
+
+        eligible: list[tuple[str, str]] = []
+        known_terms: set[str] = set()
+        for raw_term, item in list(meanings.items())[:40]:
+            if not isinstance(item, dict):
+                continue
+            term = _single_line(raw_term, 24)
+            meaning = _single_line(item.get("meaning"), 100)
+            usage = _single_line(item.get("usage"), 80)
+            confidence = min(1.0, _safe_float(item.get("confidence"), 1.0, 0.0))
+            if (
+                not term
+                or not meaning
+                or confidence < 0.55
+                or self._is_uncertain_group_slang_meaning(meaning, usage)
+                or self._group_text_blocked_by_injection_guard(f"{term} {meaning} {usage}")
+            ):
+                continue
+            known_terms.add(term.casefold())
+            eligible.append((term, f"群内表达：{term}；含义：{meaning}" + (f"；用法：{usage}" if usage else "")))
+        unknown = [item for item in candidates if item.casefold() not in known_terms]
+        if not unknown or not eligible:
+            return ""
+
+        provider_getter = getattr(self, "_shared_embedding_provider", None)
+        vector_getter = getattr(self, "_reaction_embedding_vector", None)
+        vectors_getter = getattr(self, "_reaction_embedding_vectors", None)
+        if not callable(provider_getter) or not callable(vector_getter):
+            return ""
+        try:
+            provider, provider_id = await provider_getter()
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 群黑话嵌入模型解析失败: %s", _single_line(exc, 120))
+            return ""
+        if provider is None or not provider_id:
+            return ""
+
+        cache = getattr(self, "_shared_embedding_vector_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            setattr(self, "_shared_embedding_vector_cache", cache)
+
+        async def vector_for(value: str) -> list[float]:
+            key = f"{provider_id}\n{value}"
+            cached = cache.get(key)
+            if isinstance(cached, list) and cached:
+                return cached
+            vector = await vector_getter(provider, value)
+            if vector:
+                if len(cache) >= 256:
+                    for stale_key in list(cache)[:64]:
+                        cache.pop(stale_key, None)
+                cache[key] = vector
+            return vector
+
+        async def vectors_for(values: list[str]) -> list[list[float]]:
+            results: list[list[float]] = [[] for _item in values]
+            missing_indexes: list[int] = []
+            missing_values: list[str] = []
+            for index, value in enumerate(values):
+                cached = cache.get(f"{provider_id}\n{value}")
+                if isinstance(cached, list) and cached:
+                    results[index] = cached
+                else:
+                    missing_indexes.append(index)
+                    missing_values.append(value)
+            if missing_values:
+                if callable(vectors_getter):
+                    generated = await vectors_getter(provider, missing_values)
+                else:
+                    generated = await asyncio.gather(*(vector_for(value) for value in missing_values))
+                if len(generated) != len(missing_values):
+                    return []
+                for index, value, vector in zip(missing_indexes, missing_values, generated):
+                    if not vector:
+                        return []
+                    if len(cache) >= 256:
+                        for stale_key in list(cache)[:64]:
+                            cache.pop(stale_key, None)
+                    cache[f"{provider_id}\n{value}"] = vector
+                    results[index] = vector
+            return results
+
+        query_text = f"群聊里出现的新表达：{'、'.join(unknown[:4])}；原句：{cleaned}"
+        try:
+            query_vector = await vector_for(query_text)
+            if not query_vector:
+                return ""
+            ranked: list[tuple[float, str, str]] = []
+            selected = eligible[:12]
+            vectors = await vectors_for([meaning_text for _term, meaning_text in selected])
+            for (term, meaning_text), vector in zip(selected, vectors):
+                if not vector or len(vector) != len(query_vector):
+                    continue
+                score = sum(left * right for left, right in zip(query_vector, vector))
+                if score >= 0.68:
+                    ranked.append((score, term, meaning_text))
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 群黑话向量软召回失败: %s", _single_line(exc, 120))
+            return ""
+        if not ranked:
+            return ""
+        ranked.sort(reverse=True)
+        lines = ["【群内黑话语义近似（仅作软参考）】"]
+        for score, term, meaning_text in ranked[:2]:
+            detail = meaning_text.split("；含义：", 1)[-1]
+            lines.append(f"- 当前“{unknown[0]}”可能接近本群“{term}”：{detail}（相似度 {score:.2f}）")
+        lines.append("只有结合当前原句确实说得通时才采用；不要把向量近似当成确定词义或用户纠正。")
+        return "\n".join(lines)
+
     def _is_uncertain_group_slang_meaning(self, meaning: str = "", usage: str = "") -> bool:
         text = _single_line(f"{meaning} {usage}", 180)
         if not text:

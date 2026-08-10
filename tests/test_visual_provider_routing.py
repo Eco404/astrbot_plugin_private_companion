@@ -619,17 +619,39 @@ class VisualProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.timeout_call["timeout_key"], "PLUGIN_VISION_PROVIDER_ID")
         self.assertEqual(harness.timeout_call["provider_id"], "quick-vision")
 
-    def test_precision_image_vision_uses_narration_fallback_card(self) -> None:
+    def test_precision_image_vision_keeps_independent_plugin_vision_card(self) -> None:
+        harness = _PrivateImageRouteHarness(
+            "precision",
+            {
+                "PLUGIN_VISION_PROVIDER_ID": "vision-backup",
+                "NARRATION_PROVIDER_ID": "narration-backup",
+            },
+        )
+        candidates = harness._private_image_base_visual_provider_candidates()
+        self.assertEqual(candidates[1][:2], ("quick-vision", "plugin_vision"))
+        self.assertEqual(candidates[2][:2], ("vision-backup", "plugin_vision_fallback"))
+        self.assertEqual(harness._private_image_provider_timeout_seconds(), 17)
+        self.assertEqual(harness.timeout_call["timeout_key"], "PLUGIN_VISION_PROVIDER_ID")
+        self.assertEqual(harness.timeout_call["provider_id"], "quick-vision")
+
+    def test_precision_image_vision_never_uses_text_model_when_vision_is_empty(self) -> None:
         harness = _PrivateImageRouteHarness(
             "precision",
             {"NARRATION_PROVIDER_ID": "narration-backup"},
         )
+        harness.plugin_vision_provider_id = ""
+        harness.astrbot_provider_settings = {
+            "default_image_caption_provider_id": "astrbot-vision",
+        }
+
         candidates = harness._private_image_base_visual_provider_candidates()
-        self.assertEqual(candidates[1][:2], ("precision-vision", "plugin_vision"))
-        self.assertEqual(candidates[2][:2], ("narration-backup", "plugin_vision_fallback"))
-        self.assertEqual(harness._private_image_provider_timeout_seconds(), 17)
-        self.assertEqual(harness.timeout_call["timeout_key"], "NARRATION_PROVIDER_ID")
-        self.assertEqual(harness.timeout_call["provider_id"], "precision-vision")
+
+        self.assertEqual(
+            [(provider_id, source) for provider_id, source, _prompt in candidates if provider_id],
+            [("astrbot-vision", "astrbot_image_caption")],
+        )
+        self.assertNotIn("precision-vision", [provider_id for provider_id, _source, _prompt in candidates])
+        self.assertNotIn("narration-backup", [provider_id for provider_id, _source, _prompt in candidates])
 
     def test_reading_vision_always_uses_its_dedicated_card(self) -> None:
         quick = _PrivateReadingRouteHarness(

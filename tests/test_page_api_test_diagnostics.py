@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import struct
 import time
 import unittest
 from pathlib import Path
@@ -155,7 +157,37 @@ class PageApiTestDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("图片输入", result["steps"][0]["name"])
         call_kwargs = provider.text_chat.await_args.kwargs
         self.assertEqual(1, len(call_kwargs["image_urls"]))
-        self.assertTrue(call_kwargs["image_urls"][0].startswith("data:image/png;base64,"))
+        image_url = call_kwargs["image_urls"][0]
+        self.assertTrue(image_url.startswith("data:image/png;base64,"))
+        raw = base64.b64decode(image_url.partition(",")[2])
+        width, height = struct.unpack(">II", raw[16:24])
+        self.assertGreater(width, 10)
+        self.assertGreater(height, 10)
+
+    async def test_shared_embedding_provider_uses_vector_connection_test(self) -> None:
+        provider = SimpleNamespace(get_embedding=AsyncMock())
+        self.api._embedding_provider_for_test = AsyncMock(return_value=provider)
+        self.api.plugin._reaction_embedding_vector = AsyncMock(return_value=[0.6, 0.8])
+        fake_request = SimpleNamespace(
+            get_json=AsyncMock(
+                return_value={
+                    "key": "EMBEDDING_PROVIDER_ID",
+                    "provider_id": "embedding-provider",
+                }
+            )
+        )
+
+        with patch("astrbot_plugin_private_companion.page_api.request", fake_request):
+            response = await self.api.test_provider()
+
+        result = response["data"]
+        self.assertTrue(result["ok"])
+        self.assertEqual("向量生成", result["steps"][0]["name"])
+        self.assertEqual("Embedding Provider 已返回有效向量", result["detail"])
+        self.api.plugin._reaction_embedding_vector.assert_awaited_once_with(
+            provider,
+            "开心 安慰 抱抱 表情语义测试",
+        )
 
     def test_empty_timeout_error_gets_actionable_visual_message(self) -> None:
         text = self.api._visual_call_error_text(asyncio.TimeoutError(), timeout=12)

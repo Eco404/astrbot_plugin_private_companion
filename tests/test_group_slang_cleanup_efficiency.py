@@ -34,6 +34,25 @@ class _GroupSlangLearningHarness(GroupObservationMixin):
         return set()
 
 
+class _GroupSlangEmbeddingHarness(_GroupSlangLearningHarness):
+    enable_group_slang_meanings = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.vector_calls: list[str] = []
+
+    async def _shared_embedding_provider(self):
+        return object(), "embedding-main"
+
+    async def _reaction_embedding_vector(self, _provider, text: str) -> list[float]:
+        self.vector_calls.append(text)
+        if "新表达" in text:
+            return [1.0, 0.0]
+        if "牛啤" in text:
+            return [0.99, 0.01]
+        return [0.0, 1.0]
+
+
 class GroupSlangCleanupEfficiencyTests(unittest.TestCase):
     def test_member_name_index_is_built_once_per_group(self) -> None:
         harness = _GroupSlangCleanupHarness()
@@ -112,6 +131,24 @@ class GroupSlangCleanupEfficiencyTests(unittest.TestCase):
         item = group["slang_terms"][0]
         self.assertEqual(item["count"], 2)
         self.assertTrue(harness._group_slang_term_is_promoted(group, item))
+
+
+class GroupSlangEmbeddingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unknown_short_expression_soft_retrieves_confirmed_group_meaning(self) -> None:
+        harness = _GroupSlangEmbeddingHarness()
+        group = {
+            "slang_meanings": {
+                "牛啤": {"meaning": "很厉害、很强", "usage": "用于夸赞", "confidence": 0.92},
+                "摆烂": {"meaning": "暂时不努力了", "usage": "自嘲", "confidence": 0.9},
+            }
+        }
+
+        context = await harness._group_slang_embedding_context(group, "真的顶")
+
+        self.assertIn("仅作软参考", context)
+        self.assertIn("当前“真的顶”可能接近本群“牛啤”", context)
+        self.assertIn("不要把向量近似当成确定词义", context)
+        self.assertEqual(3, len(harness.vector_calls))
 
 
 if __name__ == "__main__":

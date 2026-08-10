@@ -464,8 +464,8 @@ class OfficialTtsSegmentingCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         plugin._plain_text_segments_from_chunks = lambda _chunks: []
         plugin._create_lifecycle_background_task = Mock()
         source = (
-            "唔…外面还在下着雨呢，这么晚了还要例行检查呀？"
-            "比折大人这次打算查点什么……还是说，其实只是睡不着想找我说话呀？"
+            "唔，我们群主大人确实是能躺着绝不坐着的类型啦～"
+            "不过能指挥大家干活也算一种本事喵"
         )
         result = MessageEventResult(chain=[Plain(source)])
 
@@ -500,6 +500,8 @@ class OfficialTtsSegmentingCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 "chunks"
             ],
         )
+        self.assertTrue("啦～" in "".join(item.text for item in expected[0]))
+        self.assertTrue("不过" in "".join(item.text for item in expected[1]))
         self.assertNotEqual(source, "".join(item.text for item in expected[0]))
         plugin._create_lifecycle_background_task.assert_not_called()
 

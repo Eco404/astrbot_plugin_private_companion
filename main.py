@@ -7641,6 +7641,47 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         prefix = "Reality touch reminder delivered: " if delivered else "Reality touch reminder failed: "
         return prefix + (_single_line(detail, 180) or "unknown result")
 
+    @filter.llm_tool(name="pc_reality_touch_camera_snapshot")
+    @_multi_persona_event_context
+    async def pc_reality_touch_camera_snapshot(
+        self,
+        event: AstrMessageEvent,
+        purpose: str,
+    ) -> str:
+        """按明确目的读取当前用户已单独授权的摄像头单帧，只返回有限环境状态。
+
+        仅当当前私聊用户明确要求查看，或已授权的主动任务确实需要判断在场、活动类型、
+        可打扰性或环境光线时调用。不要用于身份识别、情绪判断、持续观察或读取屏幕文字。
+
+        Args:
+            purpose(string): 本次读取的具体目的，例如“主动问候前判断现在是否适合打扰”。
+        """
+        try:
+            is_private = bool(getattr(event, "is_private_chat", lambda: False)())
+        except Exception:
+            is_private = False
+        if not is_private:
+            return json.dumps(
+                {"status": "forbidden", "message": "现实触及摄像头只允许当前已授权用户的私聊任务调用"},
+                ensure_ascii=False,
+            )
+        purpose_text = _single_line(purpose, 120)
+        if not purpose_text:
+            return json.dumps(
+                {"status": "error", "message": "必须说明本次摄像头单帧读取的明确目的"},
+                ensure_ascii=False,
+            )
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        user_id = resolver(event) if callable(resolver) else _single_line(event.get_sender_id(), 160)
+        snapshotter = getattr(self, "_reality_touch_camera_snapshot_for_user", None)
+        if not callable(snapshotter):
+            return json.dumps(
+                {"status": "unavailable", "message": "当前插件实例没有摄像头单帧能力"},
+                ensure_ascii=False,
+            )
+        result = await snapshotter(user_id, purpose_text)
+        return json.dumps(result, ensure_ascii=False)
+
     @filter.llm_tool(name="pc_manage_memo")
     @_multi_persona_event_context
     async def pc_manage_memo(
@@ -9817,6 +9858,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         await self._acknowledge_official_llm_timer_trigger(event)
         await self._acknowledge_official_reality_touch_trigger(event)
+        self._finalize_passive_reply_tool_boundary(event)
         if self._finalize_memo_request_tool_boundary(event):
             logger.info(
                 "[PrivateCompanion] 明确便签请求已从最终工具集移除 future_task,避免重复提醒: session=%s",
@@ -12060,6 +12102,82 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         req.system_prompt = f"{current_prompt}\n\n{marker}\n{instruction}".strip()
         return True
 
+    def _append_passive_reply_tool_boundary(self, event: AstrMessageEvent, req: ProviderRequest) -> list[str]:
+        """Keep ordinary inbound replies on the direct assistant-response path.
+
+        AstrBot may emit assistant text before executing a tool call. The generic
+        same-session sender is unnecessary for passive replies and can therefore
+        turn an empty tool retry into a duplicate visible message. Cron and
+        explicitly external proactive events retain the tool for delivery.
+        """
+        if req is None:
+            return []
+        if callable(getattr(self, "_event_requires_direct_same_session_tool_delivery", None)):
+            if self._event_requires_direct_same_session_tool_delivery(event):
+                return []
+        if str(getattr(event, "_private_companion_external_proactive_source", "") or ""):
+            return []
+        umo = _single_line(getattr(event, "unified_msg_origin", ""), 240)
+        if not umo or not any(marker in umo for marker in (":GroupMessage:", ":FriendMessage:")):
+            return []
+
+        try:
+            setattr(event, "_private_companion_passive_reply_tool_boundary", True)
+            setattr(event, "_private_companion_passive_reply_request", req)
+        except Exception:
+            pass
+        marker = "<!-- private_companion_passive_reply_tool_boundary_v1 -->"
+        prompt = str(getattr(req, "system_prompt", "") or "")
+        instruction = (
+            "【当前会话回复边界】这是普通私聊或群聊的被动回复。请直接输出一次最终正文；"
+            "不要调用 `send_message_to_user` 给当前会话发文字，也不要在工具调用后重复输出同一正文。"
+            "需要跨会话主动发送时，使用 PrivateCompanion 专用发送工具；官方 Cron 任务不受此边界影响。"
+        )
+        if marker not in prompt and hasattr(req, "system_prompt"):
+            req.system_prompt = f"{prompt}\n\n{marker}\n{instruction}".strip()
+
+        tool_set = getattr(req, "func_tool", None)
+        if tool_set is None:
+            return []
+        names = set(self._tool_set_tool_names(tool_set))
+        if "send_message_to_user" not in names and not self._tool_set_has_named_tool(tool_set, "send_message_to_user"):
+            return []
+        remove_tool = getattr(tool_set, "remove_tool", None)
+        try:
+            if callable(remove_tool):
+                remove_tool("send_message_to_user")
+            elif isinstance(getattr(tool_set, "tools", None), list):
+                tool_set.tools = [
+                    tool
+                    for tool in tool_set.tools
+                    if _single_line(getattr(tool, "name", ""), 120) != "send_message_to_user"
+                ]
+            else:
+                return []
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] 被动回复移除 send_message_to_user 失败: %s",
+                _single_line(exc, 160),
+            )
+            return []
+        logger.info(
+            "[PrivateCompanion] 已为被动回复关闭当前会话 send_message_to_user: session=%s",
+            umo,
+        )
+        return ["send_message_to_user"]
+
+    def _finalize_passive_reply_tool_boundary(self, event: AstrMessageEvent) -> list[str]:
+        if not bool(getattr(event, "_private_companion_passive_reply_tool_boundary", False)):
+            return []
+        req = getattr(event, "_private_companion_passive_reply_request", None)
+        getter = getattr(event, "get_extra", None)
+        if callable(getter):
+            try:
+                req = getter("provider_request") or req
+            except Exception:
+                pass
+        return self._append_passive_reply_tool_boundary(event, req) if req is not None else []
+
     @staticmethod
     def _tool_set_has_named_tool(tool_set: Any, tool_name: str) -> bool:
         get_tool = getattr(tool_set, "get_tool", None)
@@ -13717,7 +13835,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             else canonicalizer(fallback_user_id) if callable(canonicalizer) else fallback_user_id
         )
         user_id = _single_line(user_id, 160) or raw_user_id
-        wakeup_test_requested = False
+        wakeup_test_requested: Any = False
         async with self._data_lock:
             user = self._get_user(user_id)
             stamper = getattr(self, "_stamp_private_event_identity", None)
@@ -13949,6 +14067,25 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 response_image_path,
                 extra_components=response_extra_components,
             )
+        if (
+            action in wakeup_alarm_actions
+            and isinstance(wakeup_test_requested, dict)
+            and wakeup_test_requested.get("camera_snapshot")
+        ):
+            camera_snapshotter = getattr(self, "_reality_touch_camera_snapshot_for_user", None)
+            result = (
+                await camera_snapshotter(user_id, wakeup_test_requested.get("purpose"))
+                if callable(camera_snapshotter)
+                else {"status": "unavailable", "message": "当前插件实例没有摄像头单帧能力"}
+            )
+            observation = result.get("observation") if isinstance(result.get("observation"), dict) else {}
+            detail = _single_line(observation.get("summary"), 180)
+            await self._reply(
+                event,
+                ("单帧读取完成：" + detail) if result.get("status") == "success" and detail else _single_line(result.get("message"), 200),
+            )
+            event.stop_event()
+            return
         if action in wakeup_alarm_actions and wakeup_test_requested:
             self._create_lifecycle_background_task(
                 self._test_wakeup_alarm(user),
@@ -14222,6 +14359,20 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         feedback_handler = getattr(self, "_maybe_handle_wakeup_feedback", None)
         feedback_text = str(getattr(event, "message_str", "") or "")
         is_companion_command = feedback_text.lstrip().startswith(("陪伴", "/陪伴", "私聊陪伴", "主动陪伴"))
+        pending_confirmation_handler = getattr(self, "_reality_touch_apply_pending_confirmation", None)
+        if callable(pending_confirmation_handler) and not is_companion_command:
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            user_id = resolver(event) if callable(resolver) else str(event.get_sender_id() or "").strip()
+            confirmation_reply = None
+            async with self._data_lock:
+                users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+                user = users.get(user_id) if isinstance(users, dict) else None
+                if isinstance(user, dict):
+                    confirmation_reply = pending_confirmation_handler(user, feedback_text)
+            if confirmation_reply:
+                await self._reply(event, confirmation_reply)
+                event.stop_event()
+                return
         if callable(feedback_handler) and not is_companion_command:
             raw_user_id = str(event.get_sender_id() or "").strip()
             normalizer = getattr(self, "_canonical_private_user_id", None)

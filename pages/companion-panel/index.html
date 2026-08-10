@@ -768,6 +768,62 @@ QQ空间 = 公开札记
           <section class="expression-view-panel" role="tabpanel" aria-labelledby="expressionViewReviewTab" data-expression-view-panel="review" hidden>
             <article id="expressionReviewWorkspace" class="expression-review-workspace" aria-label="表达规则审核工作区"></article>
           </section>
+
+          <dialog id="expressionShareDialog" class="pc-dialog expression-transfer-dialog" aria-labelledby="expressionShareDialogTitle">
+            <form class="stack-form" method="dialog" data-expression-share-form>
+              <header>
+                <div>
+                  <span class="eyebrow">SHARE PACK</span>
+                  <h3 id="expressionShareDialogTitle">分享表达规则</h3>
+                  <p>导出的是可复用的抽象规则，不包含用户、群聊、原始消息、证据或反馈记录。</p>
+                </div>
+                <button type="button" class="icon-button" data-expression-share-close aria-label="关闭">×</button>
+              </header>
+              <fieldset class="expression-transfer-options">
+                <legend>分享范围</legend>
+                <label><input type="radio" name="expression_share_scope" value="current" checked /> 当前筛选结果</label>
+                <label><input type="radio" name="expression_share_scope" value="all" /> 全部已启用表达</label>
+              </fieldset>
+              <div class="expression-transfer-summary" data-expression-share-summary role="status">准备生成分享包。</div>
+              <label class="expression-transfer-title">文件标题 <input name="title" maxlength="80" placeholder="我的表达分享" /></label>
+              <label class="expression-transfer-json">分享包 JSON <textarea data-expression-share-json rows="12" readonly placeholder="点击“生成分享包”后显示"></textarea></label>
+              <footer>
+                <button type="button" class="secondary-button" data-expression-share-close>取消</button>
+                <button type="button" class="secondary-button" data-expression-share-copy disabled>复制 JSON</button>
+                <button type="button" class="secondary-button" data-expression-share-download disabled>下载 JSON</button>
+                <button type="submit" class="primary-button" data-expression-share-generate>生成分享包</button>
+              </footer>
+            </form>
+          </dialog>
+
+          <dialog id="expressionImportDialog" class="pc-dialog expression-transfer-dialog" aria-labelledby="expressionImportDialogTitle">
+            <form class="stack-form" method="dialog" data-expression-import-form>
+              <header>
+                <div>
+                  <span class="eyebrow">IMPORT PACK</span>
+                  <h3 id="expressionImportDialogTitle">导入表达规则</h3>
+                  <p>先选择分享文件和落点，再预览重复项；默认进入审核队列，确认后才会参与回复。</p>
+                </div>
+                <button type="button" class="icon-button" data-expression-import-close aria-label="关闭">×</button>
+              </header>
+              <div class="expression-transfer-input-grid">
+                <label>选择 JSON 文件 <input type="file" accept="application/json,.json" data-expression-import-file /></label>
+                <label>导入目标 <select data-expression-import-target><option value="">正在读取目标...</option></select></label>
+              </div>
+              <label class="expression-transfer-json">或粘贴分享包 JSON <textarea data-expression-import-json rows="10" placeholder="粘贴 private-companion-expression-pack 文件内容"></textarea></label>
+              <fieldset class="expression-transfer-options">
+                <legend>导入方式</legend>
+                <label><input type="radio" name="expression_import_destination" value="pending" checked /> 进入审核队列 <small>推荐，审核后使用</small></label>
+                <label><input type="radio" name="expression_import_destination" value="learned" /> 直接启用 <small>仅在你信任分享来源时使用</small></label>
+              </fieldset>
+              <div class="expression-import-preview" data-expression-import-preview role="status">选择目标并粘贴或选择文件后，点击“预览导入”。</div>
+              <footer>
+                <button type="button" class="secondary-button" data-expression-import-close>取消</button>
+                <button type="button" class="secondary-button" data-expression-import-preview-action disabled>预览导入</button>
+                <button type="submit" class="primary-button" data-expression-import-apply disabled>应用导入</button>
+              </footer>
+            </form>
+          </dialog>
         </section>
 
         <section id="learningPanelSocial" class="learning-section relationship-workspace" role="tabpanel" aria-labelledby="learningTabSocial" data-learning-section-panel="social" hidden data-retired-worldbook="true">
@@ -1814,7 +1870,7 @@ QQ空间 = 公开札记
   <script src="./js/features/daily-outfit.js?v=20260711-qzone-preview-context"></script>
   <script src="./js/ui/appearance.js?v=20260713-font-options"></script>
   <!-- Loaded on demand by app.js through AstrBot's relative dynamic-import rewriting:
-       ./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1
+       ./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1&amp;manual=provider-input-v2
        ./js/panels/qzone-panel.js?v=20260810-qzone-classic-loader-v1 -->
   <script src="./app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2&amp;page=lazy-classic-loader-v1&amp;scope=photo-scope-quota-v1&amp;touch=reality-official-reminder-v3"></script>
 </body>

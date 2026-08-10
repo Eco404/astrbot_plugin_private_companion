@@ -293,8 +293,15 @@ class WakeupAlarmTests(unittest.IsolatedAsyncioTestCase):
         user = harness.data["users"]["u"]
         response, test = harness._wakeup_alarm_command(user, "07:30")
         self.assertFalse(test)
-        self.assertIn("完整确认信息", response)
+        self.assertIn("只需在 10 分钟内单独发送", response)
         self.assertFalse(user["wakeup_alarm"].get("enabled"))
+
+        response = harness._reality_touch_apply_pending_confirmation(
+            user,
+            "我理解风险并确认授权",
+        )
+        self.assertIn("当前只授权本机音频能力", response)
+        self.assertTrue(harness._reality_touch_audio_consented(user))
 
         confirmation = f"确认 {harness._REALITY_TOUCH_CONFIRMATION_TEXT}"
         response, test = harness._wakeup_alarm_command(user, confirmation)

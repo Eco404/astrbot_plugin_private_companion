@@ -7279,6 +7279,15 @@ body.daily-outfit-preview-open {
     grid-template-columns: 1fr;
   }
 
+  .expression-library-transfer-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .expression-library-transfer-actions button {
+    flex: 1 1 0;
+  }
+
   .expression-library-filter-block,
   .expression-library-segments,
   .expression-library-search-wrap input {
@@ -21561,6 +21570,45 @@ textarea {
   gap: 12px;
 }
 
+.feature-param-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.feature-param-card-head h3 {
+  margin: 0;
+}
+
+.feature-model-config-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line-soft));
+  border-radius: var(--radius-sm);
+  padding: 0 12px;
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 7%);
+  color: var(--accent-strong);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.feature-model-config-jump:hover,
+.feature-model-config-jump:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.feature-model-config-jump span {
+  font-size: 15px;
+}
+
 .feature-param-section {
   display: grid;
   gap: 10px;
@@ -31824,6 +31872,253 @@ pre {
 .pc-dialog textarea:focus { border-color: var(--ortto-blue); outline: 3px solid rgba(36, 89, 222, .12); }
 .pc-dialog footer { justify-content: flex-end; border-top: 1px solid var(--ortto-line); padding-top: 14px; }
 
+.expression-library-transfer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.expression-library-transfer-actions button {
+  min-height: 34px;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.expression-transfer-dialog {
+  width: min(760px, calc(100vw - 28px));
+  max-width: none;
+  max-height: calc(100vh - 28px);
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+.expression-transfer-dialog > form {
+  max-height: calc(100vh - 30px);
+  overflow: auto;
+}
+
+.expression-transfer-dialog header {
+  display: flex;
+  gap: 18px;
+}
+
+.expression-transfer-dialog header > div {
+  min-width: 0;
+}
+
+.expression-transfer-dialog header p {
+  max-width: 620px;
+  line-height: 1.6;
+}
+
+.expression-transfer-dialog header .icon-button {
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+}
+
+.expression-transfer-dialog input,
+.expression-transfer-dialog select,
+.expression-transfer-dialog textarea {
+  box-sizing: border-box;
+  border-radius: 6px;
+}
+
+.expression-transfer-dialog select {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--ortto-line);
+  padding: 9px 10px;
+  background: #fff;
+  color: var(--ortto-ink);
+  font: inherit;
+}
+
+.expression-transfer-dialog select:focus {
+  border-color: var(--ortto-blue);
+  outline: 3px solid rgba(36, 89, 222, .12);
+}
+
+.expression-transfer-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.expression-transfer-options legend {
+  grid-column: 1 / -1;
+  margin-bottom: 2px;
+  color: var(--ortto-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.expression-transfer-options label {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  min-height: 46px;
+  border: 1px solid var(--ortto-line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #faf9f8;
+  color: var(--ortto-ink);
+  cursor: pointer;
+  transition: border-color 160ms var(--ease), background 160ms var(--ease);
+}
+
+.expression-transfer-options label:has(input:checked) {
+  border-color: rgba(36, 89, 222, .48);
+  background: rgba(36, 89, 222, .06);
+}
+
+.expression-transfer-options input {
+  grid-row: 1 / span 2;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--ortto-blue);
+}
+
+.expression-transfer-options small {
+  color: var(--ortto-muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.expression-transfer-input-grid {
+  display: grid;
+  grid-template-columns: minmax(0, .88fr) minmax(0, 1.12fr);
+  gap: 10px;
+  min-width: 0;
+}
+
+.expression-transfer-summary,
+.expression-import-preview {
+  min-width: 0;
+  border-left: 3px solid var(--ortto-blue);
+  border-radius: 6px;
+  padding: 11px 12px;
+  background: #f7f8fb;
+  color: var(--ortto-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.expression-transfer-json textarea {
+  min-height: 190px;
+  max-height: 340px;
+  background: #fbfbfb;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.expression-import-preview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.expression-import-preview-head > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.expression-import-preview-head span {
+  color: var(--ortto-muted);
+  font-size: 10px;
+}
+
+.expression-import-preview-head b {
+  overflow-wrap: anywhere;
+  color: var(--ortto-ink);
+  font-size: 14px;
+}
+
+.expression-import-preview-head em {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: rgba(32, 128, 88, .1);
+  color: #176b4a;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.expression-import-preview-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid var(--ortto-line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.expression-import-preview-stats span {
+  display: grid;
+  gap: 2px;
+  border-right: 1px solid var(--ortto-line);
+  padding: 9px 10px;
+  font-size: 10px;
+}
+
+.expression-import-preview-stats span:last-child {
+  border-right: 0;
+}
+
+.expression-import-preview-stats b {
+  color: var(--ortto-ink);
+  font-size: 16px;
+}
+
+.expression-import-preview details {
+  margin-top: 9px;
+}
+
+.expression-import-preview summary {
+  color: var(--ortto-blue);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.expression-import-preview ul {
+  margin: 7px 0 0;
+  padding-left: 18px;
+}
+
+.expression-transfer-error {
+  color: var(--danger, #a63730);
+  font-weight: 700;
+}
+
+.expression-transfer-dialog footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  position: sticky;
+  bottom: -20px;
+  z-index: 1;
+  margin-bottom: -20px;
+  padding: 14px 0 20px;
+  background: #fff;
+}
+
+.expression-transfer-dialog footer button {
+  border-radius: 6px;
+}
+
 @keyframes ortto-view-in { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes ortto-drop { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes ortto-dialog-in { from { opacity: 0; transform: translateY(12px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
@@ -31875,6 +32170,15 @@ pre {
   .user-detail-tabs { margin-inline: -4px; }
   .user-detail-tabs button { padding-inline: 10px; }
   .pc-dialog { width: calc(100vw - 16px); border-radius: 12px; }
+  .expression-transfer-dialog { width: calc(100vw - 12px); max-height: calc(100vh - 12px); border-radius: 8px; }
+  .expression-transfer-dialog > form { max-height: calc(100vh - 14px); padding: 14px; }
+  .expression-transfer-input-grid,
+  .expression-transfer-options { grid-template-columns: 1fr; }
+  .expression-import-preview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .expression-import-preview-stats span:nth-child(2) { border-right: 0; }
+  .expression-import-preview-stats span:nth-child(-n + 2) { border-bottom: 1px solid var(--ortto-line); }
+  .expression-transfer-dialog footer { bottom: -14px; margin-bottom: -14px; padding-bottom: 14px; }
+  .expression-transfer-dialog footer button { flex: 1 1 calc(50% - 7px); min-width: 0; }
   .memory-view-overview { padding: 15px; }
   .memory-view-stats { gap: 5px; }
   .memory-view-stats span { padding: 8px; }

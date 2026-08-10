@@ -1095,10 +1095,9 @@ class PrivateImageMixin:
         provider_settings = self._astrbot_provider_settings_for_umo(umo)
         prompt = str(provider_settings.get("image_caption_prompt") or "").strip()
         fallback_key = self._private_image_visual_provider_card_key()
-        plugin_provider_id = (
-            self._task_provider(getattr(self, "plugin_vision_provider_id", ""), self.narration_provider_id)
-            if fallback_key == "PLUGIN_VISION_PROVIDER_ID"
-            else _single_line(getattr(self, "narration_provider_id", ""), 160)
+        plugin_provider_id = _single_line(
+            getattr(self, "plugin_vision_provider_id", ""),
+            160,
         )
         fallback_getter = getattr(self, "_model_fallback_provider_id", None)
         plugin_fallback_id = (
@@ -1113,8 +1112,10 @@ class PrivateImageMixin:
         ]
 
     def _private_image_visual_provider_card_key(self) -> str:
-        mode = str(getattr(self, "provider_config_mode", "quick") or "quick").strip().lower()
-        return "PLUGIN_VISION_PROVIDER_ID" if mode == "quick" else "NARRATION_PROVIDER_ID"
+        # Image input is an independent capability in both provider modes.
+        # Never route it through a text/narration card merely because precision
+        # mode is active; providers such as DeepSeek may not support images.
+        return "PLUGIN_VISION_PROVIDER_ID"
 
     @staticmethod
     def _normalize_private_image_vision_provider_priority(value: Any) -> str:

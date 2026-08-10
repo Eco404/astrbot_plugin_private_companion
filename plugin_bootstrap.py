@@ -338,6 +338,17 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.enable_experimental_bluetooth_wakeup = self._cfg_bool(
         c, "enable_experimental_bluetooth_wakeup", False
     )
+    self.enable_reality_touch_camera = self._cfg_bool(c, "enable_reality_touch_camera", False)
+    self.reality_touch_camera_index = self._cfg_int(c, "reality_touch_camera_index", 0, 0, 32)
+    self.reality_touch_camera_min_interval_seconds = self._cfg_int(
+        c, "reality_touch_camera_min_interval_seconds", 60, 10, 3600
+    )
+    self.reality_touch_camera_capture_timeout_seconds = self._cfg_int(
+        c, "reality_touch_camera_capture_timeout_seconds", 5, 2, 20
+    )
+    self.reality_touch_camera_analysis_timeout_seconds = self._cfg_int(
+        c, "reality_touch_camera_analysis_timeout_seconds", 25, 5, 90
+    )
     self.target_platform = self._cfg_str(c, "target_platform", "aiocqhttp", "aiocqhttp")
     self.default_enable_configured_targets = self._cfg_bool(c, "default_enable_configured_targets", True)
     self.default_interaction_band = self._cfg_str(c, "default_interaction_band", "relaxed")
@@ -660,6 +671,7 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
     self.reaction_expression_embedding_enabled = self._cfg_bool(
         c, "reaction_expression_embedding_enabled", False
     )
+    self.embedding_provider_id = self._cfg_str(c, "EMBEDDING_PROVIDER_ID", "")
     self.reaction_expression_embedding_provider_id = self._cfg_str(
         c, "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID", ""
     )
@@ -741,6 +753,11 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
     self.segmented_proactive_split_mode = self._cfg_str(c, "segmented_proactive_split_mode", "regex", "regex")
     if self.segmented_proactive_split_mode not in {"regex", "words"}:
         self.segmented_proactive_split_mode = "regex"
+    self.segmented_proactive_match_width_variants = self._cfg_bool(
+        c,
+        "segmented_proactive_match_width_variants",
+        True,
+    )
     self.segmented_proactive_regex = str(self._cfg_raw(c, "segmented_proactive_regex", r".*?[。？！~…\n]+|.+$"))
     split_words = self._cfg_raw(c, "segmented_proactive_split_words", ["。", "？", "！", "~", "…", "“"])
     self.segmented_proactive_split_words = [str(item) for item in split_words] if isinstance(split_words, list) else ["。", "？", "！", "~", "…", "“"]

@@ -38,8 +38,8 @@ class RealityTouchUiTests(unittest.TestCase):
             f"{KEY}: {{",
             'label: "现实触及"',
             'mark: "触"',
-            "用户本人在私聊手动确认",
-            "当前不授予摄像头能力",
+            "用户本人在私聊分别确认",
+            "摄像头单帧环境观察",
             "data-reality-touch-form",
             "复制确认命令",
             "电脑音频输出设备",
@@ -58,6 +58,10 @@ class RealityTouchUiTests(unittest.TestCase):
             "data-reality-touch-device-save",
             "播放固定测试音频",
             'data-reality-touch-test-kind="device"',
+            "data-reality-touch-camera-config",
+            "data-reality-touch-camera-policy-form",
+            "data-reality-touch-camera-test",
+            "camera_single_frame",
             "叫醒偏好（可选）",
             "每次触发时按人格、关系与当天语境动态生成",
             "生成并试听",
@@ -81,11 +85,12 @@ class RealityTouchUiTests(unittest.TestCase):
         for marker in (
             '("/reality-touch", self.get_reality_touch',
             '("/reality-touch/update", self.update_reality_touch',
-            'action not in {"save", "save_policy", "disable", "stop_session", "cancel_reminder", "test", "select_output"}',
+            '"save_camera_config", "save_camera_policy", "test_camera"',
             '"该用户尚未在私聊中完成现实触及知情确认"',
             'action == "cancel_reminder"',
             "await test_audio_player(",
             "await wakeup_player(",
+            "await camera_snapshotter(",
         ):
             self.assertIn(marker, self.api)
 
@@ -99,6 +104,7 @@ class RealityTouchUiTests(unittest.TestCase):
             self.assertIn(marker, self.proactive)
         self.assertIn("sounddevice>=", self.requirements)
         self.assertIn("soundfile>=", self.requirements)
+        self.assertIn("opencv-python-headless>=", self.requirements)
 
 
 if __name__ == "__main__":

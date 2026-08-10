@@ -162,9 +162,12 @@ class ReactionExpressionUiTests(unittest.TestCase):
 
     def test_panel_exposes_optional_embedding_provider_with_local_fallback(self) -> None:
         items = self.schema["experimental_motivation_config"]["items"]
+        model_items = self.schema["model_assignment_config"]["items"]
 
         self.assertFalse(items["reaction_expression_embedding_enabled"]["default"])
         self.assertEqual("select_provider", items["REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"]["_special"])
+        self.assertEqual("select_provider", model_items["EMBEDDING_PROVIDER_ID"]["_special"])
+        self.assertIn("群内黑话", model_items["EMBEDDING_PROVIDER_ID"]["hint"])
         self.assertEqual(0.42, items["reaction_expression_embedding_score_threshold"]["default"])
         self.assertTrue(items["reaction_expression_embedding_backfill_enabled"]["default"])
         for key in (
@@ -176,7 +179,8 @@ class ReactionExpressionUiTests(unittest.TestCase):
         ):
             self.assertIn(key, self.script)
         self.assertIn("availableEmbeddingProviders", self.script)
-        self.assertIn("留空自动探测", self.script)
+        self.assertIn("通用语义嵌入模型", self.script)
+        self.assertIn('keys: ["EMBEDDING_PROVIDER_ID"]', self.script)
         self.assertIn("自动回退关键词检索", self.script)
 
     def test_runtime_panel_initializes_trigger_mode_summary_locally(self) -> None:

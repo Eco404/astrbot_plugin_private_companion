@@ -18,6 +18,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SegmentedConfigSaveTests(unittest.TestCase):
+    def test_width_variant_toggle_is_exposed_in_both_panels(self) -> None:
+        for relative_path in (
+            Path("pages") / "companion-panel" / "app.js",
+            Path("pages") / "陪伴面板" / "app.js",
+        ):
+            script = (ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn(
+                'segmented_proactive_match_width_variants: { type: "checkbox" }',
+                script,
+            )
+            self.assertIn(
+                "expandSegmentedWidthVariantWords(parseSegmentedWordList(values.segmented_proactive_split_words))",
+                script,
+            )
+
     def test_frontend_treats_persisted_feature_settings_as_authoritative(self) -> None:
         script = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
         block = re.search(
@@ -58,6 +73,7 @@ class SegmentedConfigSaveTests(unittest.TestCase):
                 "segmented_proactive_face_strategy": "previous",
                 "segmented_proactive_other_strategy": "separate",
                 "segmented_proactive_split_mode": "words",
+                "segmented_proactive_match_width_variants": False,
                 "segmented_proactive_regex": "test-regex",
                 "segmented_proactive_split_words": ["。", "！"],
                 "enable_segmented_proactive_content_cleanup": True,
@@ -104,6 +120,7 @@ class SegmentedConfigSaveTests(unittest.TestCase):
             "segmented_proactive_face_strategy": "previous",
             "segmented_proactive_other_strategy": "separate",
             "segmented_proactive_split_mode": "words",
+            "segmented_proactive_match_width_variants": False,
             "segmented_proactive_split_words": ["。", "！", "<newline>"],
             "enable_segmented_proactive_content_cleanup": True,
             "segmented_proactive_content_cleanup_scope": "trailing",

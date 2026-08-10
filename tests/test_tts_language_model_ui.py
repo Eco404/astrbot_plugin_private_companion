@@ -43,6 +43,14 @@ class TtsLanguageModelUiTests(unittest.TestCase):
         self.assertIn("if (ttsDirty) discardUnsavedTtsProviderChanges();", self.script)
         self.assertIn("TTS 还有未保存的 Provider、语种路由或语音策略", self.script)
 
+    def test_tts_feature_has_direct_model_config_shortcut(self) -> None:
+        self.assertIn(
+            'enable_tts_enhancement: ["tts", "前往语音模型"]',
+            self.script,
+        )
+        self.assertIn(".feature-param-card-head", self.css)
+        self.assertIn(".feature-model-config-jump", self.css)
+
     def test_astrbot_provider_management_is_complete(self) -> None:
         for route in ("/tts/providers", "/tts/provider/create", "/tts/provider/clone", "/tts/provider/update", "/tts/provider/test"):
             self.assertIn(route, self.script)

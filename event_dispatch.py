@@ -180,6 +180,55 @@ _SEGMENTED_PROTECTED_LITERAL_PATTERN = re.compile(
 )
 
 
+_SEGMENTED_WIDTH_VARIANT_GROUPS: tuple[tuple[str, ...], ...] = (
+    (",", "，"),
+    (".", "．", "。"),
+    ("?", "？"),
+    ("!", "！"),
+    (";", "；"),
+    (":", "："),
+    ("~", "～"),
+    ("(", "（"),
+    (")", "）"),
+    ("[", "［"),
+    ("]", "］"),
+    ("{", "｛"),
+    ("}", "｝"),
+    ("<", "＜"),
+    (">", "＞"),
+    ('"', "＂"),
+    ("'", "＇"),
+    ("/", "／"),
+    ("\\", "＼"),
+    ("|", "｜"),
+    ("+", "＋"),
+    ("-", "－"),
+    ("=", "＝"),
+    ("*", "＊"),
+    ("&", "＆"),
+    ("%", "％"),
+    ("#", "＃"),
+    ("@", "＠"),
+    ("$", "＄"),
+    ("^", "＾"),
+    ("_", "＿"),
+)
+
+
+def _expand_segmented_width_variant_words(words: list[str]) -> list[str]:
+    """Add common full-width/half-width punctuation equivalents in stable order."""
+    expanded = list(dict.fromkeys(str(word) for word in words if str(word) != ""))
+    present = set(expanded)
+    for variants in _SEGMENTED_WIDTH_VARIANT_GROUPS:
+        if not present.intersection(variants):
+            continue
+        for variant in variants:
+            if variant not in present:
+                expanded.append(variant)
+                present.add(variant)
+    return expanded
+
+
 
 _LUNAR_MONTH_NAMES = [
     "正月",
@@ -4698,6 +4747,9 @@ Bot 近期回复：
 
         cleanup_pattern: re.Pattern[str] | None = None
         cleanup_words: list[str] = []
+        match_width_variants = bool(
+            getattr(self, "segmented_proactive_match_width_variants", True)
+        )
         if self.enable_segmented_proactive_content_cleanup:
             if self.segmented_proactive_split_mode == "words":
                 configured_words = getattr(self, "segmented_proactive_content_cleanup_words", [])
@@ -4715,6 +4767,8 @@ Bot 近期回复：
                     if parsed_words is None:
                         parsed_words = re.split(r"[,，、\n]+", raw_cleanup_rule)
                     cleanup_words = [str(item) for item in parsed_words if str(item) != ""]
+                if match_width_variants:
+                    cleanup_words = _expand_segmented_width_variant_words(cleanup_words)
             elif self.segmented_proactive_content_cleanup_rule:
                 try:
                     cleanup_pattern = re.compile(self.segmented_proactive_content_cleanup_rule)
@@ -5092,6 +5146,8 @@ Bot 近期回复：
 
         if self.segmented_proactive_split_mode == "words":
             split_words = [word for word in self.segmented_proactive_split_words if word]
+            if match_width_variants:
+                split_words = _expand_segmented_width_variant_words(split_words)
             if "\n" not in split_words:
                 split_words.append("\n")
             if not split_words:
