@@ -150,6 +150,7 @@ from .unified_person_registry import UnifiedPersonRegistry
 from .migration_backfill import MigrationBackfill
 from .migration_dual_write import MigrationDualWriteProducer
 from .migration_replay import MigrationReplayWorker
+from .migration_read_router import MigrationRelationshipReadRouter
 from .unified_profile_contract import (
     build_person_ref as req036_build_person_ref,
     build_profile_dto as req036_build_profile_dto,
@@ -4278,6 +4279,48 @@ class PrivateCompanionPlugin(
                 if isinstance(status, dict):
                     status.update({"state": "paused", "code": "migration_replay_loop_unavailable"})
 
+    def _req041_relationship_read_view(
+        self,
+        event: Any,
+        user: dict[str, Any],
+        *,
+        kind: str = "private",
+        group_id: str = "",
+    ) -> dict[str, Any]:
+        existing = getattr(event, "req041_relationship_read_view", None)
+        if isinstance(existing, dict):
+            return existing
+        router = getattr(self, "req041_relationship_read_router", None)
+        if router is None or not isinstance(user, dict):
+            return user
+        event_ref = self._event_message_id(event)
+        if not event_ref:
+            event_ref = f"{getattr(event, 'unified_msg_origin', '')}:{uuid.uuid4().hex}"
+        result = router.begin(user, event_ref=event_ref, kind=kind, group_id=group_id)
+        view = result.get("user") if isinstance(result.get("user"), dict) else user
+        try:
+            setattr(event, "req041_relationship_read_view", view)
+            setattr(event, "req041_read_chain_id", str(result.get("chain_id") or ""))
+            setattr(event, "req041_read_generation", str(result.get("generation") or "legacy"))
+            setattr(event, "req041_read_identity_id", str(result.get("identity_id") or ""))
+        except Exception:
+            pass
+        return view
+
+    @filter.after_message_sent(priority=-110000)
+    async def finish_req041_read_chain(self, event: AstrMessageEvent, *args, **kwargs) -> None:
+        router = getattr(self, "req041_relationship_read_router", None)
+        chain_id = str(getattr(event, "req041_read_chain_id", "") or "")
+        if router is not None and chain_id:
+            try:
+                await asyncio.to_thread(router.finish, chain_id)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] REQ-041 读链清理失败: %s", _single_line(exc, 120))
+            try:
+                setattr(event, "req041_read_chain_id", "")
+            except Exception:
+                pass
+
     async def _req041_run_replay_batch(self) -> None:
         worker = getattr(self, "req041_migration_replay", None)
         if worker is None:
@@ -4446,12 +4489,28 @@ class PrivateCompanionPlugin(
                         outbox.set_epoch_state, epoch, "replaying", checkpoint="s5_replay_batch"
                     )
                     replay_result = await asyncio.to_thread(replay_worker.run_batch)
+                    if replay_result.get("status") == "ok" and status.get("phase") == "S5":
+                        status = await asyncio.to_thread(
+                            coordinator.transition, "S6", checkpoint="per_identity_relationship_cutover_enabled"
+                        )
+                        replay_result = await asyncio.to_thread(replay_worker.run_batch)
                     if replay_result.get("status") == "ok":
                         await asyncio.to_thread(
                             outbox.set_epoch_state, epoch, "active", checkpoint="s5_reconciled"
                         )
                     else:
                         status = coordinator.status()
+                    if replay_result.get("status") == "ok":
+                        self.req041_relationship_read_router = MigrationRelationshipReadRouter(
+                            coordinator=coordinator,
+                            relationship_store=relationship_store,
+                            registry_resolver=self._req041_registry_for_person,
+                            migration_epoch=epoch,
+                            policy_version=policy,
+                        )
+                        await asyncio.to_thread(
+                            coordinator.prune_read_chains, older_than=_now_ts() - 3600
+                        )
 
             remote = {"ok": False, "state": "degraded", "code": "memory_bridge_unavailable"}
             bridge_getter = getattr(self, "_memory_companion_bridge", None)

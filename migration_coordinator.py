@@ -485,17 +485,33 @@ class MigrationCoordinator:
             raise MigrationCoordinatorError("migration_reconcile_invalid")
         with self._transaction() as connection:
             row = connection.execute(
-                "SELECT assurance,stable_cycles FROM migration_identities WHERE identity_id=?", (identity,)
+                "SELECT assurance,state,read_generation,stable_cycles FROM migration_identities WHERE identity_id=?", (identity,)
             ).fetchone()
             if row is None:
                 raise MigrationStateConflict("migration_identity_missing")
             matched = source_revision == target_revision and hashes[0] == hashes[1] and backlog == 0
-            state = "reconciling" if row["assurance"] in FORMAL_ASSURANCE else "pending"
-            stable = int(row["stable_cycles"]) + 1 if matched and state == "reconciling" else 0
+            formal = row["assurance"] in FORMAL_ASSURANCE
+            if not formal:
+                state, read_generation = "pending", "legacy"
+            elif matched and row["read_generation"] == "new":
+                state, read_generation = "new_read", "new"
+            elif matched:
+                state, read_generation = "reconciling", "legacy"
+            elif row["read_generation"] == "new":
+                state, read_generation = "legacy_read", "legacy"
+                self._audit(connection, "identity_auto_rollback", identity, "migration_reconcile_mismatch")
+            else:
+                state, read_generation = "reconciling", "legacy"
+            stable = int(row["stable_cycles"]) + 1 if matched and formal else 0
             connection.execute(
-                """UPDATE migration_identities SET state=?,source_revision=?,target_revision=?,source_hash=?,
-                   target_hash=?,backlog=?,stable_cycles=?,error_code='',updated_at=? WHERE identity_id=?""",
-                (state, source_revision, target_revision, hashes[0], hashes[1], backlog, stable, float(self._clock()), identity),
+                """UPDATE migration_identities SET state=?,read_generation=?,source_revision=?,target_revision=?,
+                   source_hash=?,target_hash=?,backlog=?,stable_cycles=?,error_code=?,updated_at=?
+                   WHERE identity_id=?""",
+                (
+                    state, read_generation, source_revision, target_revision, hashes[0], hashes[1],
+                    backlog, stable, "" if matched else "migration_reconcile_mismatch",
+                    float(self._clock()), identity,
+                ),
             )
         return self.identity_status(identity)
 
@@ -552,15 +568,18 @@ class MigrationCoordinator:
             row = connection.execute("SELECT read_generation FROM migration_identities WHERE identity_id=?", (identity,)).fetchone()
             if row is None:
                 raise MigrationStateConflict("migration_identity_missing")
-            control = connection.execute("SELECT migration_epoch FROM migration_control WHERE singleton=1").fetchone()
+            control = connection.execute(
+                "SELECT migration_epoch,state FROM migration_control WHERE singleton=1"
+            ).fetchone()
             if control is None:
                 raise MigrationStateConflict("migration_control_missing")
             epoch = control["migration_epoch"]
+            generation = row["read_generation"] if control["state"] in {"active", "replaying"} else "legacy"
             connection.execute(
                 "INSERT INTO migration_read_leases VALUES(?,?,?,?,?)",
-                (chain, identity, row["read_generation"], epoch, float(self._clock())),
+                (chain, identity, generation, epoch, float(self._clock())),
             )
-            return row["read_generation"]
+            return generation
 
     def finish_read_chain(self, chain_id: str) -> bool:
         with self._transaction() as connection:
@@ -609,6 +628,26 @@ class MigrationCoordinator:
                 "SELECT identity_id FROM migration_identities ORDER BY identity_id"
             ).fetchall()
         return [str(row["identity_id"]) for row in rows]
+
+    def ready_identity_ids(self, *, required_stable_cycles: int = 2) -> list[str]:
+        required = max(1, int(required_stable_cycles))
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT identity_id FROM migration_identities
+                   WHERE assurance IN ('verified','explicit_linked')
+                     AND state='reconciling' AND source_revision=target_revision
+                     AND source_hash<>'' AND source_hash=target_hash AND backlog=0
+                     AND stable_cycles>=? ORDER BY identity_id""",
+                (required,),
+            ).fetchall()
+        return [str(row["identity_id"]) for row in rows]
+
+    def prune_read_chains(self, *, older_than: float) -> int:
+        cutoff = float(older_than)
+        with self._transaction() as connection:
+            return connection.execute(
+                "DELETE FROM migration_read_leases WHERE created_at<?", (cutoff,)
+            ).rowcount
 
 
 __all__ = [

@@ -311,6 +311,11 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             if not self._simulation_active(fast_user) and _safe_float(fast_user.get("next_proactive_at"), 0) <= 0:
                 self._schedule_next_proactive(fast_user, now=received_ts)
         try:
+            read_view_getter = getattr(self, "_req041_relationship_read_view", None)
+            fast_read_user = (
+                read_view_getter(event, fast_user, kind="private")
+                if callable(read_view_getter) else fast_user
+            )
             await self._memory_companion_apply_emotional_drift(
                 event=event,
                 user_id=user_id,
@@ -319,7 +324,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             self._memory_companion_attach_private_context(
                 event,
                 user_id=user_id,
-                user=fast_user,
+                user=fast_read_user,
                 text=safe_text or text,
             )
         except Exception as exc:
@@ -930,10 +935,15 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         response = ""
         if is_target_user:
             try:
+                read_view_getter = getattr(self, "_req041_relationship_read_view", None)
+                relationship_read_user = (
+                    read_view_getter(event, user, kind="private")
+                    if callable(read_view_getter) else user
+                )
                 self._memory_companion_attach_private_context(
                     event,
                     user_id=user_id,
-                    user=user,
+                    user=relationship_read_user,
                     text=(safe_text if text else "") or text,
                 )
             except Exception as exc:
@@ -1558,6 +1568,14 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
         setattr(event, "private_companion_group_sender_name", sender_name)
         setattr(event, "private_companion_group_text", text)
         setattr(event, "private_companion_group_contextual_followup", bool(continuation))
+        read_view_getter = getattr(self, "_req041_relationship_read_view", None)
+        private_users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+        canonical_sender = self._canonical_private_user_id(sender_id)
+        relationship_user = private_users.get(canonical_sender) if isinstance(private_users, dict) else None
+        if callable(read_view_getter) and isinstance(relationship_user, dict):
+            read_view_getter(
+                event, relationship_user, kind="group_member", group_id=group_id,
+            )
         self._memory_companion_attach_group_context(
             event,
             group_id=group_id,

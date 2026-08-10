@@ -17,6 +17,7 @@ from migration_backfill import MigrationBackfill
 from migration_dual_write import MigrationDualWriteProducer
 from migration_outbox import MigrationOutbox
 from migration_replay import MigrationReplayWorker
+from migration_read_router import MigrationRelationshipReadRouter
 from relationship_ledger import normalize_relationship_positive_stage_cap_key
 from unified_person_registry import UnifiedPersonRegistry
 
@@ -42,9 +43,11 @@ def _load_methods(*names: str) -> dict[str, Any]:
         "MigrationBackfill": MigrationBackfill,
         "MigrationDualWriteProducer": MigrationDualWriteProducer,
         "MigrationReplayWorker": MigrationReplayWorker,
+        "MigrationRelationshipReadRouter": MigrationRelationshipReadRouter,
         "UnifiedPersonRegistry": UnifiedPersonRegistry,
         "normalize_relationship_positive_stage_cap_key": normalize_relationship_positive_stage_cap_key,
         "_single_line": lambda value, limit=240: " ".join(str(value or "").split())[:limit],
+        "_now_ts": lambda: 1_786_291_200.0,
         "logger": types.SimpleNamespace(warning=lambda *_args, **_kwargs: None),
     }
     exec(compile(module, str(ROOT / "main.py"), "exec"), namespace)
@@ -134,7 +137,7 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         host = self._host()
         await host._req041_initialize_automatic_migration()
         status = host.req041_migration_coordinator.status()
-        self.assertEqual("S5", status["phase"])
+        self.assertEqual("S6", status["phase"])
         self.assertTrue(host.req041_migration_coordinator.verify_backup())
         self.assertEqual("active", host.req041_migration_status["state"])
         self.assertTrue(host.req041_migration_status["memory_bound"])
@@ -151,13 +154,13 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         host = self._host(bind=False)
         await host._req041_initialize_automatic_migration()
         first = host.req041_migration_coordinator.status()
-        self.assertEqual("S5", first["phase"])
+        self.assertEqual("S6", first["phase"])
         self.assertEqual("degraded", host.req041_migration_status["state"])
         self.assertEqual("memory_bridge_unavailable", host.req041_migration_status["code"])
         await host._req041_initialize_automatic_migration()
         second = host.req041_migration_coordinator.status()
         self.assertEqual(first["migration_epoch"], second["migration_epoch"])
-        self.assertEqual("S5", second["phase"])
+        self.assertEqual("S6", second["phase"])
 
     async def test_paused_restart_keeps_durable_dual_write_capture_available(self) -> None:
         first_host = self._host()
@@ -200,14 +203,18 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
                 migration_epoch=host.req041_migration_coordinator.status()["migration_epoch"],
             )
         )
-        self.assertEqual("S5", host.req041_migration_status["phase"])
+        self.assertEqual("S6", host.req041_migration_status["phase"])
         self.assertEqual(1, host.req041_migration_status["s4"]["migrated"])
         self.assertEqual("owner", account["relationship_role"])
         self.assertEqual("normal", account["relationship_mode"])
         self.assertEqual(88, account["relationship_score"])
         self.assertEqual(
-            1,
+            2,
             host.req041_migration_coordinator.identity_status(person["person_id"])["stable_cycles"],
+        )
+        self.assertEqual(
+            "new",
+            host.req041_migration_coordinator.identity_status(person["person_id"])["read_generation"],
         )
 
     async def test_live_dual_write_schedules_and_drains_s5_replay(self) -> None:

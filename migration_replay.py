@@ -302,6 +302,21 @@ class MigrationReplayWorker:
             recovered += self._recover_relationship_gap(person_id)
         return recovered
 
+    def switch_ready_identities(self, *, required_stable_cycles: int = 2) -> list[str]:
+        status = self.coordinator.status()
+        if status.get("phase") not in {"S6", "S7", "S8", "S9"}:
+            return []
+        switched: list[str] = []
+        for person_id in self.coordinator.ready_identity_ids(
+            required_stable_cycles=required_stable_cycles
+        ):
+            result = self.coordinator.switch_identity_to_new_read(
+                person_id, required_stable_cycles=required_stable_cycles
+            )
+            if result.get("read_generation") == "new":
+                switched.append(person_id)
+        return switched
+
     def apply_one(self, item: OutboxItem) -> dict[str, Any]:
         expected = self.outbox.applied_revision(item.stream_key, self.migration_epoch) + 1
         if item.source_revision != expected:
@@ -325,6 +340,12 @@ class MigrationReplayWorker:
         if len(code) > 80 or not code.replace("_", "").isalnum():
             code = "migration_replay_failed"
         self.outbox.mark_failed(item.event_id, self.migration_epoch, error_code=code)
+        identity_id = str(item.namespace.get("identity_id") or "") if isinstance(item.namespace, dict) else ""
+        if identity_id:
+            try:
+                self.coordinator.rollback_identity(identity_id, reason_code=code)
+            except Exception:
+                pass
         self.coordinator.pause(code)
         try:
             self.outbox.set_epoch_state(self.migration_epoch, "degraded", checkpoint=code)
@@ -477,9 +498,10 @@ class MigrationReplayWorker:
         except Exception as exc:
             code = self._pause_reconciliation(exc)
             return {"status": "paused", "applied": applied, "error_code": code}
+        switched = self.switch_ready_identities()
         return {
             "status": "ok", "applied": applied, "count": len(applied),
-            "recovered": recovered, "reconciled": reconciled,
+            "recovered": recovered, "reconciled": reconciled, "switched": switched,
         }
 
 

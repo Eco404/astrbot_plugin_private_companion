@@ -176,6 +176,18 @@ class MigrationCoordinatorTests(unittest.TestCase):
         self.assertEqual("new", switched["read_generation"])
         self.assertEqual("legacy", self.coordinator.begin_read_chain("person-a", "chain-before"))
         self.assertEqual("new", self.coordinator.begin_read_chain("person-a", "chain-after"))
+        self.coordinator.pause("test_global_pause")
+        self.assertEqual("new", self.coordinator.begin_read_chain("person-a", "chain-after"))
+        self.assertEqual("legacy", self.coordinator.begin_read_chain("person-a", "chain-paused"))
+        self.coordinator.resume()
+        auto_rollback = self.coordinator.reconcile_identity(
+            "person-a", source_revision=3, target_revision=2,
+            source_hash="d" * 64, target_hash="c" * 64, backlog=1,
+        )
+        self.assertEqual("legacy", auto_rollback["read_generation"])
+        self.assertEqual("legacy_read", auto_rollback["state"])
+        self.assertEqual("new", self.coordinator.begin_read_chain("person-a", "chain-after"))
+        self.assertEqual("legacy", self.coordinator.begin_read_chain("person-a", "chain-after-rollback"))
         downgraded = self.coordinator.register_identity("person-a", assurance="observed")
         self.assertEqual("legacy", downgraded["read_generation"])
         self.assertEqual("pending", downgraded["state"])

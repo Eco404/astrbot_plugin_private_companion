@@ -2032,6 +2032,21 @@ class MemoryCompanionAdapterMixin:
             text=text,
             event=event,
         )
+        relationship_view = getattr(event, "req041_relationship_read_view", None) if event is not None else None
+        if (
+            isinstance(relationship_view, dict)
+            and relationship_view.get("req041_read_generation") == "new"
+        ):
+            payload["relationship_projection"] = {
+                "phase_key": _single_line(
+                    relationship_view.get("req041_relationship_stage_key")
+                    or relationship_view.get("relationship_phase_key"), 40
+                ),
+                "relationship_role": _single_line(relationship_view.get("relationship_role"), 20),
+                "relationship_mode": _single_line(relationship_view.get("relationship_mode"), 32),
+                "score_redacted": True,
+                "scope": "group_member",
+            }
         self._memory_companion_attach_context(event, payload)
         self._memory_companion_attach_person_context(event)
 
