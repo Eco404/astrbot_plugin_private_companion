@@ -11,6 +11,9 @@ from astrbot_plugin_private_companion.command_handlers import CommandHandlersMix
 from astrbot_plugin_private_companion.llm_tool_actions import LlmToolActionsMixin
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
 from astrbot_plugin_private_companion.page_api_settings import PageSettingNormalizerMixin
+from astrbot_plugin_private_companion.photo_generation_scope import (
+    PHOTO_GENERATION_SCOPE_LIMIT_KEYS,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +121,26 @@ class CommandPhotoQuotaTests(unittest.IsolatedAsyncioTestCase):
 
         specs = harness._companion_manual_config_specs()
         self.assertEqual(specs["command_photo_generation_max_daily"]["min"], -1)
+        for key in PHOTO_GENERATION_SCOPE_LIMIT_KEYS.values():
+            with self.subTest(key=key):
+                self.assertEqual(-1, specs[key]["min"])
+                self.assertEqual(100, specs[key]["max"])
+                self.assertEqual(
+                    "-1（不限量）",
+                    harness._companion_manual_format_config_item_value(key, -1),
+                )
+                self.assertEqual(
+                    "0（不允许）",
+                    harness._companion_manual_format_config_item_value(key, 0),
+                )
+                self.assertEqual(
+                    "6 次",
+                    harness._companion_manual_format_config_item_value(key, 6),
+                )
+                self.assertIn(
+                    "用户请求生图",
+                    harness._companion_manual_config_location(key),
+                )
         self.assertEqual(
             harness._companion_manual_format_config_item_value(
                 "command_photo_generation_max_daily",
@@ -144,6 +167,24 @@ class CommandPhotoQuotaTests(unittest.IsolatedAsyncioTestCase):
                 3,
             ),
             "3 次",
+        )
+
+        aliases = harness._companion_manual_config_aliases()
+        self.assertEqual(
+            "photo_generation_private_owner_max_daily",
+            aliases["主要用户私聊生图上限"],
+        )
+        self.assertEqual(
+            "photo_generation_private_friend_max_daily",
+            aliases["其他陪伴用户私聊生图上限"],
+        )
+        self.assertEqual(
+            "photo_generation_group_max_daily",
+            aliases["群聊生图上限"],
+        )
+        self.assertEqual(
+            "photo_generation_proactive_max_daily",
+            aliases["Bot 主动生图上限"],
         )
 
     async def test_tool_stops_before_backend_when_user_quota_is_exhausted(self) -> None:
@@ -261,7 +302,9 @@ class CommandPhotoQuotaTests(unittest.IsolatedAsyncioTestCase):
         section_start = script.index('title: "用户请求生图"')
         section_end = script.index("\n    },", section_start)
         user_photo_section = script[section_start:section_end]
-        self.assertIn('"photo_generation_allowed_scopes"', user_photo_section)
+        self.assertNotIn('"photo_generation_allowed_scopes"', user_photo_section)
+        for key in PHOTO_GENERATION_SCOPE_LIMIT_KEYS.values():
+            self.assertIn(f'"{key}"', user_photo_section)
         self.assertIn('"command_photo_generation_max_daily"', user_photo_section)
         self.assertGreaterEqual(
             (page_api + page_api_settings).count('"command_photo_generation_max_daily"'),
@@ -274,6 +317,16 @@ class CommandPhotoQuotaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(api._normalize_setting_value("command_photo_generation_max_daily", 0), 0)
         self.assertEqual(api._normalize_setting_value("command_photo_generation_max_daily", 200), 100)
         self.assertEqual(api._normalize_setting_value("command_photo_generation_max_daily", None), -1)
+        for key in PHOTO_GENERATION_SCOPE_LIMIT_KEYS.values():
+            with self.subTest(key=key):
+                scope_setting = schema["photo_action_config"]["items"][key]
+                self.assertEqual(-1, scope_setting["default"])
+                self.assertEqual(-1, scope_setting["slider"]["min"])
+                self.assertEqual(100, scope_setting["slider"]["max"])
+                self.assertEqual(-1, api._normalize_setting_value(key, -5))
+                self.assertEqual(0, api._normalize_setting_value(key, 0))
+                self.assertEqual(100, api._normalize_setting_value(key, 200))
+                self.assertEqual(-1, api._normalize_setting_value(key, None))
 
 
 if __name__ == "__main__":

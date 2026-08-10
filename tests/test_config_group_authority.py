@@ -17,6 +17,13 @@ from astrbot_plugin_private_companion.plugin_bootstrap import _normalize_photo_g
 
 ROOT = Path(__file__).resolve().parents[1]
 
+PHOTO_SCOPE_LIMIT_KEYS = {
+    "private_owner": "photo_generation_private_owner_max_daily",
+    "private_friend": "photo_generation_private_friend_max_daily",
+    "group": "photo_generation_group_max_daily",
+    "proactive": "photo_generation_proactive_max_daily",
+}
+
 
 class ConfigGroupAuthorityTests(unittest.TestCase):
     def test_safe_float_supports_optional_maximum(self):
@@ -299,6 +306,191 @@ class ConfigGroupAuthorityTests(unittest.TestCase):
             config["photo_action_config"]["command_photo_generation_max_daily"],
         )
 
+    def test_legacy_photo_scope_values_migrate_to_independent_daily_limits(self):
+        cases = (
+            (
+                "grouped-all",
+                {
+                    "photo_action_config": {
+                        "photo_generation_allowed_scopes": [
+                            "private_owner",
+                            "private_friend",
+                            "group",
+                            "proactive",
+                        ],
+                    },
+                },
+                {scope: -1 for scope in PHOTO_SCOPE_LIMIT_KEYS},
+            ),
+            (
+                "flat-subset",
+                {"photo_generation_allowed_scopes": ["private_owner", "group"]},
+                {
+                    "private_owner": -1,
+                    "private_friend": 0,
+                    "group": -1,
+                    "proactive": 0,
+                },
+            ),
+            (
+                "grouped-empty-keeps-explicit-disable",
+                {"photo_action_config": {"photo_generation_allowed_scopes": []}},
+                {scope: 0 for scope in PHOTO_SCOPE_LIMIT_KEYS},
+            ),
+            (
+                "missing-keeps-default-open-behavior",
+                {},
+                {scope: -1 for scope in PHOTO_SCOPE_LIMIT_KEYS},
+            ),
+            (
+                "delimited-string",
+                {"photo_generation_allowed_scopes": "private_friend, proactive"},
+                {
+                    "private_owner": 0,
+                    "private_friend": -1,
+                    "group": 0,
+                    "proactive": -1,
+                },
+            ),
+            (
+                "json-string",
+                {
+                    "photo_action_config": {
+                        "photo_generation_allowed_scopes": '["private_owner", "proactive"]',
+                    },
+                },
+                {
+                    "private_owner": -1,
+                    "private_friend": 0,
+                    "group": 0,
+                    "proactive": -1,
+                },
+            ),
+        )
+
+        for name, config, expected in cases:
+            with self.subTest(name=name):
+                changed = migrate_flat_config_into_schema_groups(
+                    config,
+                    schema_path=ROOT / "_conf_schema.json",
+                    save=False,
+                )
+
+                self.assertGreater(changed, 0)
+                self.assertEqual(
+                    1,
+                    config["_photo_generation_scope_quota_semantics_version"],
+                )
+                group = config["photo_action_config"]
+                for scope, key in PHOTO_SCOPE_LIMIT_KEYS.items():
+                    self.assertEqual(expected[scope], config[key], key)
+                    self.assertEqual(expected[scope], group[key], f"grouped {key}")
+
+    def test_existing_photo_scope_daily_limits_are_not_overwritten_by_migration(self):
+        expected = {
+            "photo_generation_private_owner_max_daily": 3,
+            "photo_generation_private_friend_max_daily": 0,
+            "photo_generation_group_max_daily": 17,
+            "photo_generation_proactive_max_daily": -1,
+        }
+        config = {
+            **expected,
+            "photo_generation_allowed_scopes": [
+                "private_owner",
+                "private_friend",
+                "group",
+                "proactive",
+            ],
+            "photo_action_config": {
+                **expected,
+                "photo_generation_allowed_scopes": [
+                    "private_owner",
+                    "private_friend",
+                    "group",
+                    "proactive",
+                ],
+            },
+        }
+
+        migrate_flat_config_into_schema_groups(
+            config,
+            schema_path=ROOT / "_conf_schema.json",
+            save=False,
+        )
+
+        self.assertEqual(1, config["_photo_generation_scope_quota_semantics_version"])
+        for key, value in expected.items():
+            self.assertEqual(value, config[key], key)
+            self.assertEqual(value, config["photo_action_config"][key], f"grouped {key}")
+
+    def test_photo_scope_upgrade_migrates_after_astrbot_injects_new_defaults(self):
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        expected = {
+            "photo_generation_private_owner_max_daily": -1,
+            "photo_generation_private_friend_max_daily": 0,
+            "photo_generation_group_max_daily": -1,
+            "photo_generation_proactive_max_daily": 0,
+        }
+
+        with tempfile.TemporaryDirectory() as folder:
+            config_path = Path(folder) / "private_companion_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "photo_action_config": {
+                            "photo_generation_allowed_scopes": [
+                                "private_owner",
+                                "group",
+                            ],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config = AstrBotConfig(str(config_path), schema=schema)
+
+            for key in PHOTO_SCOPE_LIMIT_KEYS.values():
+                self.assertEqual(-1, config["photo_action_config"][key], key)
+
+            migrate_flat_config_into_schema_groups(
+                config,
+                schema_path=ROOT / "_conf_schema.json",
+                save=False,
+            )
+
+        self.assertEqual(1, config["_photo_generation_scope_quota_semantics_version"])
+        for key, value in expected.items():
+            self.assertEqual(value, config[key], key)
+            self.assertEqual(value, config["photo_action_config"][key], f"grouped {key}")
+
+    def test_photo_scope_quota_migration_marker_preserves_later_admin_values(self):
+        config = {"photo_generation_allowed_scopes": ["private_owner"]}
+        migrate_flat_config_into_schema_groups(
+            config,
+            schema_path=ROOT / "_conf_schema.json",
+            save=False,
+        )
+
+        expected = {
+            "photo_generation_private_owner_max_daily": 0,
+            "photo_generation_private_friend_max_daily": 4,
+            "photo_generation_group_max_daily": -1,
+            "photo_generation_proactive_max_daily": 9,
+        }
+        config.update(expected)
+        config["photo_action_config"].update(expected)
+        migrate_flat_config_into_schema_groups(
+            config,
+            schema_path=ROOT / "_conf_schema.json",
+            save=False,
+        )
+
+        self.assertEqual(1, config["_photo_generation_scope_quota_semantics_version"])
+        for key, value in expected.items():
+            self.assertEqual(value, config[key], key)
+            self.assertEqual(value, config["photo_action_config"][key], f"grouped {key}")
+
     def test_command_photo_quota_migrates_flat_or_grouped_legacy_zero(self):
         configs = (
             ("flat", {"command_photo_generation_max_daily": 0}),
@@ -353,19 +545,42 @@ class ConfigGroupAuthorityTests(unittest.TestCase):
         self.assertEqual(0, api._normalize_setting_value("command_photo_generation_max_daily", 0))
         self.assertEqual(100, api._normalize_setting_value("command_photo_generation_max_daily", 200))
 
+        scope_items = schema["photo_action_config"]["items"]
+        for key in PHOTO_SCOPE_LIMIT_KEYS.values():
+            scope_item = scope_items[key]
+            self.assertEqual(-1, scope_item["default"], key)
+            self.assertEqual(-1, scope_item["slider"]["min"], key)
+            self.assertEqual(100, scope_item["slider"]["max"], key)
+            self.assertEqual(-1, api._normalize_setting_value(key, -5), key)
+            self.assertEqual(0, api._normalize_setting_value(key, 0), key)
+            self.assertEqual(100, api._normalize_setting_value(key, 200), key)
+            self.assertEqual(-1, api._normalize_setting_value(key, None), key)
+
+        legacy_scope = scope_items["photo_generation_allowed_scopes"]
+        self.assertTrue(legacy_scope["invisible"])
+        marker = schema["_photo_generation_scope_quota_semantics_version"]
+        self.assertTrue(marker["invisible"])
+        self.assertEqual(0, marker["default"])
+
         scripts = [
             (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8"),
             (ROOT / "pages" / "companion-panel" / "app.js").read_text(encoding="utf-8"),
         ]
         for script in scripts:
             self.assertIn(
-                'keys: ["photo_generation_allowed_scopes", "command_photo_generation_max_daily"]',
+                'keys: ["photo_generation_private_owner_max_daily", "photo_generation_private_friend_max_daily", "photo_generation_group_max_daily", "photo_generation_proactive_max_daily", "command_photo_generation_max_daily"]',
                 script,
             )
+            self.assertNotIn('photo_generation_allowed_scopes: { type: "photo-scopes" }', script)
             self.assertIn(
                 'command_photo_generation_max_daily: { type: "number", min: -1, max: 100, step: 1 }',
                 script,
             )
+            for key in PHOTO_SCOPE_LIMIT_KEYS.values():
+                self.assertIn(
+                    f'{key}: {{ type: "number", min: -1, max: 100, step: 1 }}',
+                    script,
+                )
             self.assertIn('placeholder: "-1（不限量）"', script)
 
     def test_empty_photo_scope_selection_remains_explicitly_disabled(self):
@@ -738,6 +953,54 @@ class ConfigGroupAuthorityTests(unittest.TestCase):
                 schema,
                 default_values,
             )
+
+    def test_photo_scope_daily_limits_survive_real_config_save_and_reload(self):
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        expected = {
+            "photo_generation_private_owner_max_daily": 8,
+            "photo_generation_private_friend_max_daily": 0,
+            "photo_generation_group_max_daily": 25,
+            "photo_generation_proactive_max_daily": 100,
+        }
+
+        with tempfile.TemporaryDirectory() as folder:
+            config_path = Path(folder) / "private_companion_config.json"
+            config = AstrBotConfig(str(config_path), schema=schema)
+            plugin = SimpleNamespace(config=config)
+            api = PrivateCompanionPageApi(plugin)
+
+            for key, value in expected.items():
+                normalized = api._normalize_setting_value(key, value)
+                api._apply_config_value(key, normalized, expected)
+                self.assertEqual(normalized, getattr(plugin, key), key)
+            self.assertTrue(asyncio.run(api._save_config_if_possible()))
+
+            reloaded = AstrBotConfig(str(config_path), schema=schema)
+
+        for key, value in expected.items():
+            self.assertEqual(value, reloaded["photo_action_config"][key], key)
+            self.assertEqual(value, _flat_get(reloaded, key), f"effective {key}")
+
+    def test_migration_markers_survive_real_config_save_and_reload(self):
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        markers = (
+            "_command_photo_quota_semantics_version",
+            "_photo_generation_scope_quota_semantics_version",
+        )
+
+        with tempfile.TemporaryDirectory() as folder:
+            config_path = Path(folder) / "private_companion_config.json"
+            config = AstrBotConfig(str(config_path), schema=schema)
+            for marker in markers:
+                config[marker] = 1
+            plugin = SimpleNamespace(config=config)
+            api = PrivateCompanionPageApi(plugin)
+
+            self.assertTrue(asyncio.run(api._save_config_if_possible()))
+            reloaded = AstrBotConfig(str(config_path), schema=schema)
+
+        for marker in markers:
+            self.assertEqual(1, reloaded[marker], marker)
 
     def _apply_save_and_assert_roundtrip(
         self,

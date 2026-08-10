@@ -2608,6 +2608,56 @@ class LlmToolActionsMixin:
             logger.error("[PrivateCompanion] 聊天便签操作失败: %s", _single_line(exc, 160), exc_info=True)
             return json.dumps({"status": "error", "saved": False, "message": f"便签操作失败: {_single_line(exc, 120)}"}, ensure_ascii=False)
 
+    async def _note_photo_tool_quota_attempt(
+        self,
+        event: AstrMessageEvent,
+        *,
+        requester_id: str,
+        requester: dict[str, Any] | None,
+        photo_scope: str,
+        image_path: str = "",
+    ) -> None:
+        if not str(requester_id or "").strip():
+            return
+
+        def update_counters() -> bool:
+            changed = False
+            user = requester
+            user_getter = getattr(self, "_get_user", None)
+            if not isinstance(user, dict) and callable(user_getter):
+                user = user_getter(requester_id)
+            if photo_scope == "proactive":
+                proactive_notifier = getattr(self, "_note_photo_generation_attempt", None)
+                if callable(proactive_notifier):
+                    proactive_notifier(requester_id, image_path=image_path)
+                    changed = True
+            else:
+                command_notifier = getattr(self, "_note_command_photo_generation_attempt", None)
+                if callable(command_notifier) and isinstance(user, dict):
+                    command_notifier(user, image_path=image_path)
+                    changed = True
+            scope_notifier = getattr(self, "_note_photo_generation_scope_attempt", None)
+            if callable(scope_notifier):
+                scope_notifier(
+                    event,
+                    user=user if isinstance(user, dict) else None,
+                    user_id=requester_id,
+                    scope=photo_scope,
+                )
+                changed = True
+            if changed:
+                saver = getattr(self, "_save_data_sync", None)
+                if callable(saver):
+                    saver()
+            return changed
+
+        data_lock = getattr(self, "_data_lock", None)
+        if data_lock is not None:
+            async with data_lock:
+                update_counters()
+        else:
+            update_counters()
+
     async def _pc_generate_photo_impl(
         self,
         event: AstrMessageEvent,
@@ -2642,19 +2692,6 @@ class LlmToolActionsMixin:
         if not getattr(self, "enable_photo_text_action", False):
             return public_receipt({"status": "disabled", "message": "主动拍照/生图能力未启用"}, ensure_ascii=False)
         scope_checker = getattr(self, "_photo_generation_scope_allowed", None)
-        if callable(scope_checker) and not scope_checker(event):
-            return public_receipt(
-                {
-                    "status": "unauthorized",
-                    "success": False,
-                    "generated": False,
-                    "sent": False,
-                    "message": "当前会话不在生图使用范围内。请在生图设置中调整使用范围。",
-                    "must_not_claim_sent": True,
-                    "retryable": False,
-                },
-                ensure_ascii=False,
-            )
         structured_generator = getattr(self, "_generate_photo_image_result", None)
         legacy_generator = getattr(self, "_generate_photo_image", None)
         if not callable(structured_generator) and not callable(legacy_generator):
@@ -2765,7 +2802,6 @@ class LlmToolActionsMixin:
                 )
             except Exception:
                 request_scope = "private"
-
             def existing_private_user(raw_id: str) -> dict[str, Any] | None:
                 data = getattr(self, "data", None)
                 users = data.get("users") if isinstance(data, dict) else None
@@ -2838,23 +2874,99 @@ class LlmToolActionsMixin:
                     },
                     ensure_ascii=False,
                 )
-        quota_getter = getattr(self, "_command_photo_quota_left", None)
-        if requester_id and callable(quota_getter):
-            if requester is None and request_scope != "group":
-                data_lock = getattr(self, "_data_lock", None)
-                if data_lock is not None:
-                    async with data_lock:
-                        requester = self._get_user(requester_id)
-                else:
-                    requester = self._get_user(requester_id)
-            if isinstance(requester, dict):
-                quota_left = (
-                    quota_getter(requester)
-                    if bool(requester.get("enabled", True))
-                    else None
-                )
+        if requester_id and requester is None and callable(user_getter):
+            data_lock = getattr(self, "_data_lock", None)
+            if data_lock is not None:
+                async with data_lock:
+                    requester = user_getter(requester_id)
             else:
-                quota_left = None
+                requester = user_getter(requester_id)
+
+        photo_scope_getter = getattr(self, "_photo_generation_scope", None)
+        if callable(photo_scope_getter):
+            photo_scope = photo_scope_getter(
+                event,
+                user=requester if isinstance(requester, dict) else None,
+                user_id=requester_id,
+            )
+        elif bool(getattr(event, "private_companion_proactive_framework", False)):
+            photo_scope = "proactive"
+        elif request_scope == "group":
+            photo_scope = "group"
+        else:
+            photo_scope = ""
+
+        scope_quota_getter = getattr(self, "_photo_generation_scope_quota_left", None)
+        scope_left = (
+            scope_quota_getter(
+                event,
+                user=requester if isinstance(requester, dict) else None,
+                user_id=requester_id,
+                scope=photo_scope,
+            )
+            if callable(scope_quota_getter)
+            else None
+        )
+        scope_blocked = scope_left is not None and scope_left <= 0
+        if not callable(scope_quota_getter) and callable(scope_checker):
+            scope_blocked = not scope_checker(
+                event,
+                user=requester if isinstance(requester, dict) else None,
+                user_id=requester_id,
+            )
+        if scope_blocked:
+            scope_message_getter = getattr(self, "_photo_generation_scope_quota_block_message", None)
+            scope_message = (
+                scope_message_getter(
+                    event,
+                    user=requester if isinstance(requester, dict) else None,
+                    user_id=requester_id,
+                    scope=photo_scope,
+                )
+                if callable(scope_message_getter)
+                else "当前不允许在这个会话范围生图/改图，或今天该范围的额度已经用完。"
+            )
+            return public_receipt(
+                {
+                    "status": "quota_exhausted",
+                    "success": False,
+                    "generated": False,
+                    "sent": False,
+                    "message": scope_message,
+                    "must_not_claim_sent": True,
+                    "retryable": False,
+                },
+                ensure_ascii=False,
+            )
+
+        if photo_scope == "proactive" and isinstance(requester, dict):
+            proactive_available = True
+            photo_available = getattr(self, "_photo_text_available", None)
+            if callable(photo_available):
+                try:
+                    proactive_available = bool(photo_available(requester))
+                except TypeError:
+                    proactive_available = bool(photo_available())
+            if not proactive_available:
+                return public_receipt(
+                    {
+                        "status": "quota_exhausted",
+                        "success": False,
+                        "generated": False,
+                        "sent": False,
+                        "message": "今天主动生图额度已经用完，或该陪伴用户不允许主动生图。",
+                        "must_not_claim_sent": True,
+                        "retryable": False,
+                    },
+                    ensure_ascii=False,
+                )
+        else:
+            quota_getter = getattr(self, "_command_photo_quota_left", None)
+            quota_left = (
+                quota_getter(requester)
+                if callable(quota_getter) and isinstance(requester, dict)
+                else None
+            )
             if quota_left is not None and quota_left <= 0:
                 quota_message_getter = getattr(self, "_command_photo_quota_block_message", None)
                 quota_message = (
@@ -3205,6 +3317,13 @@ class LlmToolActionsMixin:
                 outer_timeout,
                 generation_timeout,
             )
+            await self._note_photo_tool_quota_attempt(
+                event,
+                requester_id=requester_id,
+                requester=requester if isinstance(requester, dict) else None,
+                photo_scope=photo_scope,
+                image_path="",
+            )
             return public_receipt(
                 {
                     "status": "timeout",
@@ -3294,17 +3413,18 @@ class LlmToolActionsMixin:
                 preset_hint=preset_text,
                 tool_name="pc_generate_photo",
             )
-        if ok:
-            try:
-                user_id = self._reaction_expression_event_storage_id(event, event.get_sender_id())
-            except Exception:
-                user_id = ""
-            if user_id and callable(getattr(self, "_command_photo_quota_left", None)):
-                async with self._data_lock:
-                    if request_scope != "group":
-                        user = self._get_user(user_id)
-                        self._note_command_photo_generation_attempt(user, image_path=image_path)
-                        self._save_data_sync()
+        billable_attempt = bool(ok or generation_completed)
+        failure_counter = getattr(self, "_photo_generation_failure_counts_as_attempt", None)
+        if not billable_attempt and callable(failure_counter):
+            billable_attempt = bool(failure_counter(note))
+        if billable_attempt:
+            await self._note_photo_tool_quota_attempt(
+                event,
+                requester_id=requester_id,
+                requester=requester if isinstance(requester, dict) else None,
+                photo_scope=photo_scope,
+                image_path=image_path if ok else "",
+            )
         sent = False
         delivery_deferred = False
         delivery: dict[str, Any] = {}

@@ -1,4 +1,16 @@
 {
+  "_command_photo_quota_semantics_version": {
+    "description": "内部迁移标记：用户请求生图额度语义版本",
+    "type": "int",
+    "default": 0,
+    "invisible": true
+  },
+  "_photo_generation_scope_quota_semantics_version": {
+    "description": "内部迁移标记：生图范围额度语义版本",
+    "type": "int",
+    "default": 0,
+    "invisible": true
+  },
   "basic_config": {
     "description": "基础配置",
     "type": "object",
@@ -9783,13 +9795,67 @@
         "default": true
       },
       "photo_generation_allowed_scopes": {
-        "description": "生图使用范围",
+        "description": "旧版生图使用范围",
         "type": "list",
-        "hint": "可选：主要用户私聊、其他陪伴用户私聊、群聊、Bot 主动生图。未选择任何范围时关闭全部生图请求。",
-        "render_type": "checkbox",
-        "options": ["private_owner", "private_friend", "group", "proactive"],
-        "labels": ["主要用户私聊", "其他陪伴用户私聊", "群聊", "Bot 主动生图"],
+        "hint": "仅用于把旧版勾选范围迁移到四项独立每日额度；旧版未勾选任何范围会迁移为四项 0（全部不允许）。",
         "default": ["private_owner", "private_friend", "group", "proactive"],
+        "invisible": true,
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_private_owner_max_daily": {
+        "description": "主要用户私聊生图每日上限",
+        "type": "int",
+        "hint": "限制主要用户在私聊中通过规则快判、显式指令或主链工具请求生图/改图的次数。-1 表示不限量，0 表示不允许，正数表示每位用户的每日限额。",
+        "slider": {
+          "min": -1,
+          "max": 100,
+          "step": 1
+        },
+        "default": -1,
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_private_friend_max_daily": {
+        "description": "其他陪伴用户私聊生图每日上限",
+        "type": "int",
+        "hint": "限制其他陪伴用户在私聊中通过规则快判、显式指令或主链工具请求生图/改图的次数。-1 表示不限量，0 表示不允许，正数表示每位用户的每日限额。",
+        "slider": {
+          "min": -1,
+          "max": 100,
+          "step": 1
+        },
+        "default": -1,
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_group_max_daily": {
+        "description": "群聊生图每日上限",
+        "type": "int",
+        "hint": "限制群聊成员通过规则快判、显式指令或主链工具请求生图/改图的次数，按请求者分别计数。-1 表示不限量，0 表示不允许，正数表示每位请求者的每日限额。",
+        "slider": {
+          "min": -1,
+          "max": 100,
+          "step": 1
+        },
+        "default": -1,
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_proactive_max_daily": {
+        "description": "Bot 主动生图每日上限",
+        "type": "int",
+        "hint": "限制 Bot 面向单个陪伴用户主动生图的次数，并与主动生图原有额度共同生效。-1 表示不限量，0 表示不允许，正数表示每位目标用户的每日限额；每日穿搭仍保持独立计数。",
+        "slider": {
+          "min": -1,
+          "max": 100,
+          "step": 1
+        },
+        "default": -1,
         "condition": {
           "enable_photo_text_action": true
         }

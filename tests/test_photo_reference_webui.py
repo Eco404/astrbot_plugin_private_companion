@@ -1,6 +1,4 @@
 from pathlib import Path
-import json
-import re
 import unittest
 
 
@@ -13,35 +11,46 @@ PHOTO_REFERENCE_METADATA = (PLUGIN_ROOT / "photo_reference_metadata.py").read_te
 
 
 class PhotoReferenceWebUiTests(unittest.TestCase):
-    def test_photo_scope_checkboxes_persist_through_hidden_textarea(self) -> None:
-        schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-        scope_spec = schema["photo_action_config"]["items"]["photo_generation_allowed_scopes"]
-        self.assertEqual("checkbox", scope_spec["render_type"])
-        self.assertEqual(
-            ["private_owner", "private_friend", "group", "proactive"],
-            scope_spec["options"],
+    def test_photo_scope_quotas_use_standard_number_inputs(self) -> None:
+        quota_keys = (
+            "photo_generation_private_owner_max_daily",
+            "photo_generation_private_friend_max_daily",
+            "photo_generation_group_max_daily",
+            "photo_generation_proactive_max_daily",
         )
-        self.assertIn("未选择任何范围时关闭全部生图请求", scope_spec["hint"])
+        scripts: list[bytes] = []
 
         for page_name in ("陪伴面板", "companion-panel"):
             with self.subTest(page=page_name):
-                script = (PLUGIN_ROOT / "pages" / page_name / "app.js").read_text(encoding="utf-8")
+                script_path = PLUGIN_ROOT / "pages" / page_name / "app.js"
+                script = script_path.read_text(encoding="utf-8")
                 html = (PLUGIN_ROOT / "pages" / page_name / "index.html").read_text(encoding="utf-8")
-                checkbox_template = re.search(
-                    r'<input type="checkbox" data-photo-scope-value="\$\{scope\}"([^>]*)>',
-                    script,
-                )
-                self.assertIsNotNone(checkbox_template)
-                self.assertNotIn("data-feature-param", checkbox_template.group(1))
-                self.assertIn(
-                    "host?.querySelector('textarea[data-feature-param=\"photo_generation_allowed_scopes\"]')",
-                    script,
-                )
-                self.assertIn("未选择任何范围时关闭全部生图请求", script)
-                self.assertIn('setting.type === "photo-scopes"', script)
-                self.assertIn("data-setup-guide-photo-scope", script)
-                self.assertIn("photoGenerationScopeValues", script)
-                self.assertIn("scope=photo-scope-save-v3", html)
+                scripts.append(script_path.read_bytes())
+
+                section_start = script.index('title: "用户请求生图"')
+                section_end = script.index("\n    },", section_start)
+                user_photo_section = script[section_start:section_end]
+                for key in quota_keys:
+                    self.assertIn(f'"{key}"', user_photo_section)
+                    self.assertIn(
+                        f'{key}: {{ type: "number", min: -1, max: 100, step: 1 }}',
+                        script,
+                    )
+                    guide_line = next(
+                        line for line in script.splitlines() if f'{{ key: "{key}"' in line
+                    )
+                    self.assertIn('type: "number"', guide_line)
+                    self.assertIn("min: -1", guide_line)
+                    self.assertIn("max: 100", guide_line)
+                    self.assertIn("step: 1", guide_line)
+
+                self.assertNotIn("photo_generation_allowed_scopes", script)
+                self.assertNotIn("photo-scopes", script)
+                self.assertNotIn("data-photo-scope-value", script)
+                self.assertNotIn("photo-scope-choice-list", script)
+                self.assertIn("scope=photo-scope-quota-v1", html)
+
+        self.assertEqual(scripts[0], scripts[1])
 
     def test_catalog_dirty_signature_normalizes_array_and_line_formats(self) -> None:
         self.assertIn('paramKey === "photo_reference_catalog"', APP_JS)

@@ -8421,8 +8421,9 @@ Output:
     async def _run_photo_text_action(self, user: dict[str, Any], name: str, reason: str) -> str:
         if not self.enable_photo_text_action:
             return "photo_text：未启用"
+        user_id = str(user.get("user_id") or "")
         scope_checker = getattr(self, "_photo_generation_scope_allowed", None)
-        if callable(scope_checker) and not scope_checker(proactive=True, user=user, user_id=str(user.get("user_id") or "")):
+        if callable(scope_checker) and not scope_checker(proactive=True, user=user, user_id=user_id):
             return "photo_text：主动生图不在当前配置的使用范围内,不能假装已经拍照"
         load_defer_note = self._photo_text_load_defer_note("photo_text", force_refresh=True)
         if load_defer_note:
@@ -8462,7 +8463,15 @@ Output:
             counted_attempt = self._photo_generation_failure_counts_as_attempt(workflow_note)
             if counted_attempt:
                 async with self._data_lock:
-                    self._note_photo_generation_attempt(str(user.get("user_id") or ""), image_path="")
+                    self._note_photo_generation_attempt(user_id, image_path="")
+                    scope_notifier = getattr(self, "_note_photo_generation_scope_attempt", None)
+                    if callable(scope_notifier):
+                        scope_notifier(
+                            proactive=True,
+                            user=user,
+                            user_id=user_id,
+                            scope="proactive",
+                        )
                     self._save_data_sync()
             return (
                 "photo_text：生图失败,不能假装已经拍照\n"
@@ -8471,7 +8480,15 @@ Output:
                 + ("\n本次已计入今日生图尝试额度,避免接口失败时反复请求。" if counted_attempt else "")
             )
         async with self._data_lock:
-            self._note_photo_generation_attempt(str(user.get("user_id") or ""), image_path=image_path)
+            self._note_photo_generation_attempt(user_id, image_path=image_path)
+            scope_notifier = getattr(self, "_note_photo_generation_scope_attempt", None)
+            if callable(scope_notifier):
+                scope_notifier(
+                    proactive=True,
+                    user=user,
+                    user_id=user_id,
+                    scope="proactive",
+                )
             self._save_data_sync()
         scene_context_line = _single_line(scene.get("scene_context"), 500)
         return (

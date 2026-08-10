@@ -127,6 +127,12 @@ from .relationship_ledger import (
 )
 from .storage.store_manager import StoreManager
 from .person_context_contract import empty_person_store, ensure_person_store
+from .photo_generation_scope import (
+    PHOTO_GENERATION_SCOPE_LABELS,
+    PHOTO_GENERATION_SCOPE_LIMIT_KEYS,
+    PHOTO_GENERATION_SCOPES,
+    normalize_photo_generation_scope_limit,
+)
 from .unified_profile_service import (
     DEFAULT_CLOSED_REPAIR_OPERATION_ID,
     ensure_legacy_profile_capabilities,
@@ -2893,13 +2899,163 @@ class CoreStoreMixin:
         role = role_getter(user, resolved_id) if callable(role_getter) else str((user or {}).get("relationship_role") or "friend")
         return "private_owner" if role == "owner" else "private_friend"
 
-    def _photo_generation_scope_allowed(self, event: Any = None, *, proactive: bool = False, user: dict[str, Any] | None = None, user_id: str = "") -> bool:
-        scopes = normalize_photo_generation_scopes(
-            getattr(self, "photo_generation_allowed_scopes", None),
+    def _photo_generation_scope_daily_limit(self, scope: str) -> int:
+        scope = str(scope or "").strip().lower()
+        key = PHOTO_GENERATION_SCOPE_LIMIT_KEYS.get(scope)
+        if key and hasattr(self, key):
+            return normalize_photo_generation_scope_limit(getattr(self, key, -1))
+
+        legacy = getattr(self, "photo_generation_allowed_scopes", None)
+        if isinstance(legacy, dict):
+            return normalize_photo_generation_scope_limit(legacy.get(scope, -1))
+        allowed = normalize_photo_generation_scopes(
+            legacy,
             default_if_missing=True,
         )
+        return -1 if scope in allowed else 0
+
+    def _photo_generation_scope_requester_id(
+        self,
+        event: Any = None,
+        *,
+        user: dict[str, Any] | None = None,
+        user_id: str = "",
+    ) -> str:
+        resolved_id = str(user_id or (user or {}).get("user_id") or "").strip()
+        if not resolved_id and event is not None:
+            try:
+                resolved_id = str(event.get_sender_id() or "").strip()
+            except Exception:
+                resolved_id = ""
+        resolver = getattr(self, "_private_user_id_for_event", None)
+        if event is not None and resolved_id and callable(resolver):
+            try:
+                resolved_id = str(resolver(event, resolved_id) or resolved_id).strip()
+            except Exception:
+                pass
+        canonicalizer = getattr(self, "_canonical_private_user_id", None)
+        if resolved_id and callable(canonicalizer):
+            try:
+                resolved_id = str(canonicalizer(resolved_id) or resolved_id).strip()
+            except Exception:
+                pass
+        return resolved_id
+
+    def _photo_generation_scope_today_key(self) -> str:
+        today_getter = getattr(self, "_environment_today_key", None)
+        if callable(today_getter):
+            try:
+                today = str(today_getter() or "").strip()
+                if today:
+                    return today
+            except Exception:
+                pass
+        return _today_key()
+
+    def _photo_generation_scope_quota_left(
+        self,
+        event: Any = None,
+        *,
+        proactive: bool = False,
+        user: dict[str, Any] | None = None,
+        user_id: str = "",
+        scope: str = "",
+    ) -> int | None:
+        resolved_scope = str(scope or "").strip().lower() or self._photo_generation_scope(
+            event,
+            proactive=proactive,
+            user=user,
+            user_id=user_id,
+        )
+        limit = self._photo_generation_scope_daily_limit(resolved_scope)
+        if limit < 0:
+            return None
+        if limit == 0:
+            return 0
+        requester_id = self._photo_generation_scope_requester_id(
+            event,
+            user=user,
+            user_id=user_id,
+        )
+        # Shared jobs such as the cached daily outfit have no requester and keep
+        # their existing independent quota; a zero scope limit still blocks them.
+        if not requester_id:
+            return limit
+        today = self._photo_generation_scope_today_key()
+        data = getattr(self, "data", None)
+        usage = data.get("photo_generation_scope_attempts") if isinstance(data, dict) else None
+        if not isinstance(usage, dict) or str(usage.get("day") or "") != today:
+            return limit
+        counts = usage.get("counts")
+        scope_counts = counts.get(resolved_scope) if isinstance(counts, dict) else None
+        used = _safe_int(scope_counts.get(requester_id), 0, 0) if isinstance(scope_counts, dict) else 0
+        return max(0, limit - used)
+
+    def _note_photo_generation_scope_attempt(
+        self,
+        event: Any = None,
+        *,
+        proactive: bool = False,
+        user: dict[str, Any] | None = None,
+        user_id: str = "",
+        scope: str = "",
+    ) -> None:
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return
+        resolved_scope = str(scope or "").strip().lower() or self._photo_generation_scope(
+            event,
+            proactive=proactive,
+            user=user,
+            user_id=user_id,
+        )
+        if resolved_scope not in PHOTO_GENERATION_SCOPES:
+            return
+        requester_id = self._photo_generation_scope_requester_id(
+            event,
+            user=user,
+            user_id=user_id,
+        )
+        if not requester_id:
+            return
+        today = self._photo_generation_scope_today_key()
+        usage = data.get("photo_generation_scope_attempts")
+        if not isinstance(usage, dict) or str(usage.get("day") or "") != today:
+            usage = {"day": today, "counts": {}}
+            data["photo_generation_scope_attempts"] = usage
+        counts = usage.setdefault("counts", {})
+        if not isinstance(counts, dict):
+            counts = {}
+            usage["counts"] = counts
+        scope_counts = counts.setdefault(resolved_scope, {})
+        if not isinstance(scope_counts, dict):
+            scope_counts = {}
+            counts[resolved_scope] = scope_counts
+        scope_counts[requester_id] = _safe_int(scope_counts.get(requester_id), 0, 0) + 1
+
+    def _photo_generation_scope_quota_block_message(
+        self,
+        event: Any = None,
+        *,
+        proactive: bool = False,
+        user: dict[str, Any] | None = None,
+        user_id: str = "",
+        scope: str = "",
+    ) -> str:
+        resolved_scope = str(scope or "").strip().lower() or self._photo_generation_scope(
+            event,
+            proactive=proactive,
+            user=user,
+            user_id=user_id,
+        )
+        label = PHOTO_GENERATION_SCOPE_LABELS.get(resolved_scope, "当前范围")
+        if self._photo_generation_scope_daily_limit(resolved_scope) == 0:
+            return f"管理员已关闭{label}生图/改图（对应每日上限为 0）。"
+        return f"今天{label}生图/改图额度用完了；管理员可调高对应每日上限，或设为 -1 取消限制。"
+
+    def _photo_generation_scope_allowed(self, event: Any = None, *, proactive: bool = False, user: dict[str, Any] | None = None, user_id: str = "") -> bool:
         scope = self._photo_generation_scope(event, proactive=proactive, user=user, user_id=user_id)
-        return scope in scopes
+        return self._photo_generation_scope_daily_limit(scope) != 0
 
     def _is_bot_self_user_id(self, user_id: str) -> bool:
         user_id = str(user_id or "").strip()

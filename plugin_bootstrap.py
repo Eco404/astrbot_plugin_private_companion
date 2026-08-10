@@ -32,6 +32,7 @@ from .helpers import (
 )
 from .p5_attestation import P5AttestationRegistry
 from .plugin_identity import PLUGIN_ID, PLUGIN_VERSION, plugin_identity_snapshot
+from .photo_generation_scope import PHOTO_GENERATION_SCOPE_LIMIT_KEYS
 from .photo_reference_catalog import load_catalog, validate_and_serialize
 from .proactive_chat_runtime_bridge import ProactiveChatRuntimeBridge
 from .relationship_ledger import normalize_relationship_positive_stage_cap_key
@@ -1061,9 +1062,11 @@ def _initialize_photo_and_expression_config(self: Any, c: Any) -> None:
     self.enable_photo_text_action = self._cfg_bool(
         c, "enable_photo_text_action", bool(self._cfg_raw(c, "allow_photo_text_action", legacy_photo_enabled))
     )
-    self.photo_generation_allowed_scopes = _normalize_photo_generation_scopes(
-        self._cfg_raw(c, "photo_generation_allowed_scopes", None)
-    )
+    self.photo_generation_allowed_scopes = {}
+    for scope, key in PHOTO_GENERATION_SCOPE_LIMIT_KEYS.items():
+        limit = self._cfg_int(c, key, -1, -1, 100)
+        setattr(self, key, limit)
+        self.photo_generation_allowed_scopes[scope] = limit
     self.enable_photo_reference_image = self._cfg_bool(c, "enable_photo_reference_image", False)
     self.enable_group_nsfw_private_fallback = self._cfg_bool(c, "enable_group_nsfw_private_fallback", False)
     self.group_nsfw_image_review_timeout_seconds = min(
