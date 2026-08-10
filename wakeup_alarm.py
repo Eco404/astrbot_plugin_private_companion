@@ -20,6 +20,7 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
     """Schedule local TTS contact without coupling to a Bluetooth vendor API."""
 
     _WAKEUP_DEFAULT_MESSAGE = "早上好，该起床啦。先坐起来喝口水，再慢慢开始今天吧。"
+    _WAKEUP_DYNAMIC_MESSAGE_HINT = "每次触发时按人格、关系与当天语境动态生成"
     _REALITY_TOUCH_CONSENT_VERSION = 1
     _REALITY_TOUCH_CONFIRMATION_TEXT = (
         "我已知晓现实触及会调用本机音频输出，并同意启用当前音频能力；"
@@ -130,7 +131,9 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         return (
             f"现实触及：起床语音已开启\n时间：{alarm.get('time', '未设置')}（{day_text}）\n"
             f"用户授权：{consent_text}（仅本机音频，不含摄像头）\n"
-            f"重复：{repeat} 次，间隔 {interval} 秒\n内容：{_single_line(alarm.get('message'), 120) or self._WAKEUP_DEFAULT_MESSAGE}\n"
+            f"重复：{repeat} 次，间隔 {interval} 秒\n"
+            f"叫醒偏好：{_single_line(alarm.get('message'), 120) or '未填写'}\n"
+            f"话术：{self._WAKEUP_DYNAMIC_MESSAGE_HINT}\n"
             "播放目标：系统默认音频输出（请确认它是已连接的蓝牙音响）。"
         )
 
@@ -186,7 +189,8 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
                 "enabled": bool(alarm.get("enabled")),
                 "time": self._wakeup_parse_time(alarm.get("time")),
                 "days": self._wakeup_days(alarm.get("days")) or list(range(7)),
-                "message": _single_line(alarm.get("message"), 240) or self._WAKEUP_DEFAULT_MESSAGE,
+                "message": _single_line(alarm.get("message"), 240),
+                "message_mode": "dynamic",
                 "repeat_count": _safe_int(alarm.get("repeat_count"), 1, 1, 6),
                 "repeat_interval_seconds": _safe_int(alarm.get("repeat_interval_seconds"), 20, 5, 300),
                 "last_trigger_key": _single_line(alarm.get("last_trigger_key"), 32),
@@ -225,6 +229,7 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
             "consent_version": self._REALITY_TOUCH_CONSENT_VERSION,
             "confirmation_command": f"陪伴 现实触及 确认 {self._REALITY_TOUCH_CONFIRMATION_TEXT}",
             "default_message": self._WAKEUP_DEFAULT_MESSAGE,
+            "dynamic_message_hint": self._WAKEUP_DYNAMIC_MESSAGE_HINT,
             "audio_output": self._reality_touch_audio_snapshot(),
             "counts": {
                 "users": len(rows),
@@ -252,7 +257,7 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
                 "enabled": enabled,
                 "time": alarm_time,
                 "days": days,
-                "message": _single_line(payload.get("message"), 240) or self._WAKEUP_DEFAULT_MESSAGE,
+                "message": _single_line(payload.get("message"), 240),
                 "repeat_count": _safe_int(payload.get("repeat_count"), 1, 1, 6),
                 "repeat_interval_seconds": _safe_int(payload.get("repeat_interval_seconds"), 20, 5, 300),
             }
@@ -312,7 +317,7 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         alarm["time"] = alarm_time
         alarm["enabled"] = True
         alarm.setdefault("days", list(range(7)))
-        alarm.setdefault("message", self._WAKEUP_DEFAULT_MESSAGE)
+        alarm.setdefault("message", "")
         alarm.setdefault("repeat_count", 1)
         alarm.setdefault("repeat_interval_seconds", 20)
         if len(parts) == 2:
@@ -337,8 +342,127 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         except Exception:
             return datetime.now().astimezone()
 
-    async def _play_wakeup_alarm(self, alarm: dict[str, Any], *, test: bool = False) -> bool:
-        message = _single_line(alarm.get("message"), 500) or self._WAKEUP_DEFAULT_MESSAGE
+    async def _generate_wakeup_alarm_message(
+        self,
+        user: dict[str, Any],
+        alarm: dict[str, Any],
+        *,
+        test: bool = False,
+    ) -> str:
+        """Create one in-character utterance for this firing; stored text is only a preference."""
+        llm_call = getattr(self, "_llm_call", None)
+        if not callable(llm_call):
+            return self._WAKEUP_DEFAULT_MESSAGE
+
+        umo = _single_line(user.get("umo"), 240)
+        name = _single_line(
+            user.get("nickname")
+            or user.get("last_display_name")
+            or user.get("display_name")
+            or user.get("name"),
+            48,
+        )
+        persona = ""
+        persona_resolver = getattr(self, "_resolve_proactive_persona_prompt", None)
+        if callable(persona_resolver):
+            try:
+                persona = str(await persona_resolver(user, umo=umo) or "").strip()
+            except TypeError:
+                try:
+                    persona = str(await persona_resolver(user) or "").strip()
+                except Exception:
+                    persona = ""
+            except Exception:
+                persona = ""
+
+        relationship = ""
+        relationship_formatter = getattr(self, "_format_proactive_relationship_fact", None)
+        if callable(relationship_formatter):
+            try:
+                relationship = str(relationship_formatter(user) or "").strip()
+            except Exception:
+                relationship = ""
+
+        history = ""
+        history_getter = getattr(self, "_recent_private_conversation_for_proactive_review", None)
+        if callable(history_getter):
+            try:
+                history = str(await history_getter(user, limit=8) or "").strip()
+            except Exception:
+                history = ""
+        if not history:
+            recent_lines = []
+            last_bot = _single_line(user.get("last_companion_message"), 180)
+            last_user = _single_line(user.get("last_user_message"), 180)
+            if last_bot:
+                recent_lines.append(f"Bot：{last_bot}")
+            if last_user:
+                recent_lines.append(f"用户：{last_user}")
+            history = "\n".join(recent_lines)
+
+        now = self._wakeup_now()
+        weekday = "一二三四五六日"[now.weekday()]
+        preference = _single_line(alarm.get("message"), 240)
+        prompt = (
+            "请为一次现实设备上的起床提醒写出此刻真正会对用户说的话。\n"
+            f"当前时间：{now.strftime('%Y-%m-%d %H:%M')}，周{weekday}\n"
+            f"用户称呼：{name or '没有可靠称呼，直接自然地说“你”'}\n"
+            f"关系状态：{relationship or '没有额外关系资料，保持自然、低压力'}\n"
+            f"用户设置的叫醒偏好或补充要求：{preference or '无，由你根据人格和语境自然发挥'}\n"
+            f"最近对话：\n{history[-2400:] or '没有可用的最近对话，不要自行编造昨晚或今天的经历'}\n\n"
+            "只输出最终说出口的一到两句短话，不要标题、引号、Markdown、括号动作、TTS 标签或解释。"
+            "目标是自然地把对方叫醒，措辞应每天有变化，并贴合人格和关系距离；设置内容只提供意图和事实，"
+            "需要融入当下重新表达，不要逐字复读。可以有温度、惦记或一点生活感，但不要像通知、客服或健康打卡。"
+            "不要声称看见、监听或确认了用户正在睡觉或已经醒来，不编造天气、日程和昨晚发生的事；"
+            "不要命令、训斥、内疚施压，也不要要求立即回应。"
+        )
+        system_prompt = (
+            "你正在延续下面的人格，以这个人本来的口吻说一句真实、克制的叫醒话。"
+            "人格是表达依据，不要复述或解释人格设定。\n\n"
+            + (persona[:6000] if persona else "保持自然、有生活感的陪伴者口吻。")
+        )
+        provider_id = None
+        provider_picker = getattr(self, "_task_provider", None)
+        if callable(provider_picker):
+            try:
+                provider_id = provider_picker(
+                    getattr(self, "voice_prompt_provider_id", ""),
+                    getattr(self, "mai_style_provider_id", ""),
+                    getattr(self, "fast_response_provider_id", ""),
+                    getattr(self, "llm_provider_id", ""),
+                ) or None
+            except Exception:
+                provider_id = None
+        try:
+            raw = await llm_call(
+                prompt,
+                max_tokens=160,
+                provider_id=provider_id,
+                task="wakeup_alarm_message",
+                system_prompt=system_prompt,
+                timeout_key="VOICE_PROMPT_PROVIDER_ID",
+            )
+        except Exception as exc:
+            logger.warning("[PrivateCompanion] 起床提醒动态话术生成失败，使用兜底文本: %s", _single_line(exc, 160))
+            return self._WAKEUP_DEFAULT_MESSAGE
+
+        message = str(raw or "").strip()
+        message = re.sub(r"^```(?:\w+)?\s*|\s*```$", "", message, flags=re.IGNORECASE)
+        message = re.sub(r"^(?:最终(?:话术|文本|回复)|话术|回复|输出)\s*[:：]\s*", "", message)
+        message = re.sub(r"<[^>]{1,80}>", "", message)
+        message = _single_line(message.strip().strip('"\'“”‘’'), 500)
+        if not message:
+            return self._WAKEUP_DEFAULT_MESSAGE
+        return message
+
+    async def _play_wakeup_alarm(
+        self,
+        user: dict[str, Any],
+        alarm: dict[str, Any],
+        *,
+        test: bool = False,
+    ) -> bool:
+        message = await self._generate_wakeup_alarm_message(user, alarm, test=test)
         repeat = 1 if test else _safe_int(alarm.get("repeat_count"), 1, 1, 6)
         interval = _safe_int(alarm.get("repeat_interval_seconds"), 20, 5, 300)
         played = await self._play_reality_touch_text(message, repeat=repeat, interval=interval)
@@ -375,7 +499,7 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
                 continue
             alarm["last_trigger_key"] = minute_key
             self._schedule_data_save(delay=0.2)
-            operation = self._play_wakeup_alarm(copy.deepcopy(alarm))
+            operation = self._play_wakeup_alarm(copy.deepcopy(user), copy.deepcopy(alarm))
             scheduler = getattr(self, "_create_lifecycle_background_task", None)
             if callable(scheduler):
                 scheduler(operation, label="wakeup_alarm_playback")
@@ -384,4 +508,4 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
 
     async def _test_wakeup_alarm(self, user: dict[str, Any]) -> None:
         alarm = self._wakeup_alarm_for_user(user)
-        await self._play_wakeup_alarm(alarm, test=True)
+        await self._play_wakeup_alarm(copy.deepcopy(user), copy.deepcopy(alarm), test=True)

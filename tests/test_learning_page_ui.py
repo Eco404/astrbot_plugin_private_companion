@@ -181,7 +181,7 @@ class LearningPageUiTests(unittest.TestCase):
             self.html,
         )
         self.assertNotIn('<script src="./js/panels/qzone-panel.js', self.html)
-        self.assertIn('import("./js/panels/qzone-panel.js?', self.script)
+        self.assertIn('loadOptionalClassicScript("./js/panels/qzone-panel.js?', self.script)
 
     def test_compact_folio_overrides_follow_legacy_cover_rules(self) -> None:
         marker = "/* Keep the compact utility header after all legacy folio rules"

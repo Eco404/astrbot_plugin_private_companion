@@ -2550,6 +2550,32 @@ class CoreStoreMixin:
             now=now,
             record_id=user.get("user_id"),
         )
+        # A secondary user's ordinary positive events are paused while a
+        # verified boundary violation is still unrecovered. Explicit apology
+        # recovery remains available through its dedicated reason code.
+        if delta > 0 and str(reason_code) not in {"relationship_violation_recovery"}:
+            violation = user.get("relationship_violation")
+            recovery_settler = getattr(self, "_settle_relationship_violation_recovery", None)
+            if isinstance(violation, dict) and callable(recovery_settler):
+                recovery_settler(user, now=_now_ts() if now is None else _safe_float(now, _now_ts(), 0))
+                violation = user.get("relationship_violation")
+            try:
+                role = self._private_user_role(user, str(user.get("user_id") or ""))
+            except Exception:
+                role = str(user.get("relationship_role") or "friend")
+            try:
+                pending_points = int(violation.get("unrecovered_points") or 0) if isinstance(violation, dict) else 0
+            except (TypeError, ValueError):
+                pending_points = 0
+            if str(role).strip().lower() != "owner" and pending_points > 0:
+                if score_migration.get("changed"):
+                    self._schedule_data_save()
+                return {
+                    "changed": False,
+                    "code": "relationship_violation_recovery_pending",
+                    "score": user.get("relationship_score"),
+                    "delta": 0,
+                }
         result = apply_relationship_event(
             user,
             delta,
@@ -2795,11 +2821,37 @@ class CoreStoreMixin:
         if isinstance(user, dict):
             if user.get("manual_enabled") or user.get("auto_enabled"):
                 return True
+            capabilities = user.get("unified_profile_capabilities")
+            if (
+                user.get("proactive_private_enabled") is True
+                or (
+                    isinstance(capabilities, dict)
+                    and capabilities.get("proactive_private_enabled") is True
+                )
+            ):
+                return True
         if not user_id:
             return False
         if user_id in set(self._configured_target_ids()):
             return True
         return False
+
+    def _private_passive_profile_available(
+        self,
+        user_id: str,
+        user: dict[str, Any] | None = None,
+    ) -> bool:
+        """Return whether a real private profile may use passive chat enhancements.
+
+        Passive private chat is intentionally independent from the historical
+        target/``enabled`` permission flags.  Those flags remain meaningful to
+        proactive delivery and relationship policy, but must not suppress normal
+        per-turn enhancements for an existing private profile.
+        """
+        canonical = self._canonical_private_user_id(str(user_id or "").strip())
+        if not canonical or self._is_bot_self_user_id(canonical):
+            return False
+        return isinstance(user, dict)
 
     def _photo_generation_scope(self, event: Any = None, *, proactive: bool = False, user: dict[str, Any] | None = None, user_id: str = "") -> str:
         """Return the configured permission bucket for a photo request."""

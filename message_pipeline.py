@@ -73,7 +73,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         preview_users = self.data.get("users", {})
         preview_user = preview_users.get(preview_user_id) if isinstance(preview_users, dict) else None
         if (
-            self._is_target_private_user(
+            self._private_passive_profile_available(
                 preview_user_id,
                 preview_user if isinstance(preview_user, dict) else None,
             )
@@ -95,17 +95,16 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
     canonical_user_id = self._canonical_private_user_id(user_id)
     raw_users = self.data.get("users", {})
     existing_user = raw_users.get(canonical_user_id) if isinstance(raw_users, dict) else None
-    is_configured_or_manual_target = self._is_target_private_user(
+    private_profile_available = self._private_passive_profile_available(
         canonical_user_id,
         existing_user if isinstance(existing_user, dict) else None,
     )
-    existing_user_disabled = isinstance(existing_user, dict) and not bool(existing_user.get("enabled", True))
-    if not is_configured_or_manual_target or existing_user_disabled:
+    if not private_profile_available:
         logger.info(
             "[PrivateCompanion] 非目标/未启用私聊放行默认主链: user=%s text=%s reason=%s",
             _single_line(canonical_user_id or user_id, 80),
             _single_line(text, 120),
-            "disabled" if existing_user_disabled else "not_target",
+            "not_profile",
         )
         return
     self._record_c3_inbound_activity(
@@ -236,7 +235,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
 
     raw_users = self.data.get("users", {})
     fast_user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
-    fast_target_user = isinstance(fast_user, dict) and self._is_target_private_user(user_id, fast_user) and bool(fast_user.get("enabled", True))
+    fast_target_user = self._private_passive_profile_available(user_id, fast_user)
     if (
         fast_target_user
         and text
@@ -295,6 +294,16 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         safe_text = self._sanitize_orphan_tts_placeholders(text)
         fast_user["last_user_message"] = safe_text or text
         fast_user["last_user_message_at"] = received_ts
+        fast_intent_profile = self._analyze_inbound_intent(text)
+        fast_user["intent_profile"] = fast_intent_profile
+        violation_settler = getattr(self, "_apply_relationship_violation_policy", None)
+        if callable(violation_settler):
+            violation_settler(
+                fast_user,
+                fast_intent_profile,
+                event_id=self._event_message_id(event),
+                now=received_ts,
+            )
         if self._clear_state_share_proactive_after_user_status_question(fast_user, user_id=user_id, text=safe_text or text, now=received_ts):
             if not self._simulation_active(fast_user) and _safe_float(fast_user.get("next_proactive_at"), 0) <= 0:
                 self._schedule_next_proactive(fast_user, now=received_ts)
@@ -382,8 +391,9 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
     async with self._data_lock:
         users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
         existing_user = users.get(user_id) if isinstance(users, dict) else None
-        is_target_user = self._is_target_private_user(user_id, existing_user if isinstance(existing_user, dict) else None) and (
-            not isinstance(existing_user, dict) or bool(existing_user.get("enabled", True))
+        is_target_user = self._private_passive_profile_available(
+            user_id,
+            existing_user if isinstance(existing_user, dict) else None,
         )
         if not is_target_user:
             logger.info(
@@ -782,6 +792,14 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 )
             ):
                 intent_profile = self._analyze_inbound_intent(text)
+                violation_settler = getattr(self, "_apply_relationship_violation_policy", None)
+                if callable(violation_settler):
+                    violation_settler(
+                        user,
+                        intent_profile,
+                        event_id=self._event_message_id(event),
+                        now=received_ts,
+                    )
                 if self.enable_intent_emotion_analysis:
                     user["intent_profile"] = intent_profile
                 if self._should_use_llm_emotion_judgement(text, intent_profile):
@@ -801,6 +819,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     emotion_review_id = uuid.uuid4().hex
                     user["pending_emotion_judgement"] = {
                         "review_id": emotion_review_id,
+                        "message_event_id": self._event_message_id(event),
                         "text": _single_line(text, 240),
                         "created_at": _now_ts(),
                         "local": deepcopy(intent_profile),

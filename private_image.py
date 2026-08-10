@@ -4702,8 +4702,7 @@ class PrivateImageMixin:
         user = raw_users.get(user_id) if user_id and isinstance(raw_users, dict) else None
         if not (
             isinstance(user, dict)
-            and self._is_target_private_user(user_id, user)
-            and bool(user.get("enabled", True))
+            and self._private_passive_profile_available(user_id, user)
         ):
             return ""
         feature_checker = getattr(self, "_feature_enabled_or_temp_unlocked", None)

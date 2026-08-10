@@ -1449,6 +1449,13 @@ class ProactiveMixin(UserRestGateMixin):
             return max(0, user_limit)
         role = self._private_user_role(user)
         mode = str(user.get("relationship_mode") or "normal")
+        violation = user.get("relationship_violation")
+        recovery_settler = getattr(self, "_settle_relationship_violation_recovery", None)
+        if isinstance(violation, dict) and callable(recovery_settler):
+            recovery_settler(user, now=_now_ts())
+            violation = user.get("relationship_violation")
+        if str(role).strip().lower() != "owner" and isinstance(violation, dict) and _safe_int(violation.get("unrecovered_points"), 0, 0, 12) > 0:
+            return 0
         relationship_is_distant = False
         if not (role == "owner" and mode == "owner_exclusive"):
             policy = (
@@ -1484,6 +1491,13 @@ class ProactiveMixin(UserRestGateMixin):
         mode = str(user.get("relationship_mode") or "normal")
         if role == "owner" and mode == "owner_exclusive":
             return max(1, _safe_int(getattr(self, "owner_exclusive_proactive_limit", 6), 6, 0, 30))
+        violation = user.get("relationship_violation")
+        recovery_settler = getattr(self, "_settle_relationship_violation_recovery", None)
+        if isinstance(violation, dict) and callable(recovery_settler):
+            recovery_settler(user, now=_now_ts())
+            violation = user.get("relationship_violation")
+        if isinstance(violation, dict) and _safe_int(violation.get("unrecovered_points"), 0, 0, 12) > 0:
+            return 0
         policy = (
             getattr(self, "relationship_stage_policy", None)
             if bool(getattr(self, "enable_custom_relationship_stage_policy", False))

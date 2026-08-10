@@ -831,13 +831,15 @@ def expression_decision_prompt(value: ExpressionDecision | Mapping[str, Any]) ->
             "；也可请用户帮一个容易拒绝的低负担小忙，如给意见、选一样东西或拍一张特定但不敏感的生活照片；"
             "请求要贴当前话题或自身愿望，不索取表态、承诺、秘密、排他性或即时回复"
         )
+    violation_hint = _bounded_text(decision.get("relationship_violation_hint"), 240)
     return (
         f"当前互动表达：{EXPRESSION_BAND_LABELS[band.value]}；"
         f"语气={str(decision.get('tone') or 'steady')[:24]}，"
         f"称呼距离={str(decision.get('address_style') or 'neutral')[:24]}，"
         f"回复长度={str(decision.get('response_length') or 'balanced')[:24]}；"
         f"{followup}；{initiative}；{proactive_rhythm}；{dimensions}{relationship_initiative}"
-        f"{f'；{content_instruction}' if content_instruction else ''}。"
+        f"{f'；{content_instruction}' if content_instruction else ''}"
+        f"{f'；{violation_hint}' if violation_hint else ''}。"
     )
 
 

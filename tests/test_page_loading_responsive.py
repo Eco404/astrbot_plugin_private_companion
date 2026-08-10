@@ -11,14 +11,15 @@ def _text(relative: str) -> str:
     return (PAGE_ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_heavy_panel_scripts_are_literal_dynamic_imports() -> None:
+def test_heavy_panel_scripts_are_lazy_classic_scripts() -> None:
     html = _text("index.html")
     script = _text("app.js")
 
     assert '<script src="./js/panels/provider-tree.js' not in html
     assert '<script src="./js/panels/qzone-panel.js' not in html
-    assert 'import("./js/panels/provider-tree.js?' in script
-    assert 'import("./js/panels/qzone-panel.js?' in script
+    assert 'loadOptionalClassicScript("./js/panels/provider-tree.js?' in script
+    assert 'loadOptionalClassicScript("./js/panels/qzone-panel.js?' in script
+    assert "import(\"./js/panels/qzone-panel.js?" not in script
     assert 'providerTree: "PrivateCompanionProviderTree"' in script
     assert 'qzonePanel: "PrivateCompanionQzonePanel"' in script
 

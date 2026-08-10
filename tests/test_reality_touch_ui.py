@@ -46,6 +46,9 @@ class RealityTouchUiTests(unittest.TestCase):
             "data-reality-touch-device-save",
             "播放固定测试音频",
             'data-reality-touch-test-kind="device"',
+            "叫醒偏好（可选）",
+            "每次触发时按人格、关系与当天语境动态生成",
+            "生成并试听",
             "主动语音同步到所选设备",
             "这是现实触及的一个使用示例",
             "未授权，且不会继承音频授权",
@@ -66,7 +69,7 @@ class RealityTouchUiTests(unittest.TestCase):
             'action not in {"save", "save_policy", "disable", "test", "select_output"}',
             '"该用户尚未在私聊中完成现实触及知情确认"',
             "await test_audio_player()",
-            'await text_player(alarm_for_test["message"], repeat=1, interval=20)',
+            "await wakeup_player(user_for_test, alarm_for_test, test=True)",
         ):
             self.assertIn(marker, self.api)
 

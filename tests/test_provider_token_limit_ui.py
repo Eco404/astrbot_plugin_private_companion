@@ -105,10 +105,10 @@ process.stdout.write(JSON.stringify(result));
                 relative,
             )
         # Provider editor code is now loaded on demand; verify its cache marker
-        # and the dynamic import instead of an eager script tag.
-        self.assertIn("page=lazy-bridge-v1", self.html)
+        # and classic-script loader instead of an eager script tag.
+        self.assertIn("page=lazy-classic-loader-v1", self.html)
         self.assertNotIn('<script src="./js/panels/provider-tree.js', self.html)
-        self.assertIn('import("./js/panels/provider-tree.js?', self.app)
+        self.assertIn('loadOptionalClassicScript("./js/panels/provider-tree.js?', self.app)
 
 
 if __name__ == "__main__":

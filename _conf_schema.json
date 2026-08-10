@@ -1814,6 +1814,18 @@
     "default": true,
     "invisible": true
   },
+  "enable_relationship_violation_penalties": {
+    "description": "Legacy flat config: 启用关系底线余波",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
+  "relationship_violation_recovery_minutes_per_point": {
+    "description": "Legacy flat config: 每个底线点恢复分钟",
+    "type": "int",
+    "default": 180,
+    "invisible": true
+  },
   "enable_llm_emotion_judgement": {
     "description": "Legacy flat config: 启用模型复核情绪变化",
     "type": "bool",
@@ -11773,6 +11785,29 @@
         "default": true,
         "condition": {
           "enable_mai_style_integration": true
+        }
+      },
+      "enable_relationship_violation_penalties": {
+        "description": "启用关系底线余波",
+        "type": "bool",
+        "hint": "仅对明确针对 Bot 的强迫、威胁或贬损保留短期余波；玩笑、引用和用户自己的相处边界不会触发。关闭后不再新增惩罚，但已记录状态仍可自然恢复。",
+        "default": true,
+        "condition": {
+          "enable_emotion_simulation": true
+        }
+      },
+      "relationship_violation_recovery_minutes_per_point": {
+        "description": "关系底线点恢复速度",
+        "type": "int",
+        "hint": "每个未恢复底线点需要的自然恢复分钟数；真诚道歉只能有限恢复，后续行为仍会影响恢复。",
+        "slider": {
+          "min": 15,
+          "max": 10080,
+          "step": 15
+        },
+        "default": 180,
+        "condition": {
+          "enable_relationship_violation_penalties": true
         }
       },
       "enable_llm_emotion_judgement": {

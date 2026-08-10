@@ -5138,6 +5138,7 @@ class UserMemoryMixin:
             "emotion_target": emotion_event.get("target", "none"),
             "emotion_rule": emotion_event.get("rule", ""),
             "emotion_confidence": round(_safe_float(emotion_event.get("confidence"), 0.0), 2),
+            "violation_severity": _safe_int(emotion_event.get("severity"), 0, 0, 3),
             "emotion_attribution": dict(emotion_event.get("attribution")) if isinstance(emotion_event.get("attribution"), dict) else {},
             "boundary_durable": durable_boundary,
             "playful_or_ambiguous": playful_or_ambiguous,
@@ -5167,7 +5168,13 @@ class UserMemoryMixin:
         intent_source = str((intent_context or {}).get("source") or "")
         boundary_durable = bool((intent_context or {}).get("boundary_durable"))
         playful_or_ambiguous = bool((intent_context or {}).get("playful_or_ambiguous"))
-        if playful_or_ambiguous or intent_source in {"soft_boundary_play_rule", "weak_boundary_ignored", "single_turn_boundary"}:
+        strong_single_turn_abuse = bool(
+            attribution.get("target") == "bot"
+            and re.search(r"(恶心|废物|垃圾|没用|工具人|假的|别装|别演).{0,10}(闭嘴|滚)|你.{0,8}(恶心|废物|垃圾|没用).{0,8}(闭嘴|滚)", cleaned)
+        )
+        if playful_or_ambiguous or intent_source in {"soft_boundary_play_rule", "weak_boundary_ignored"} or (
+            intent_source == "single_turn_boundary" and not strong_single_turn_abuse
+        ):
             return {"event": "neutral", "intensity": 0, "reason": "玩笑或单句边界不作为情绪余波依据", "target": "none", "rule": "playful_or_single_boundary", "confidence": 0.8}
         target_hint, third_party_hint = self._intent_target_hint(cleaned)
         self_low = bool(re.search(r"(我好|我真|我太|我是不是|我就是|我是).{0,12}(废物|垃圾|没用|傻|笨|恶心|讨厌)", cleaned))
@@ -5201,6 +5208,26 @@ class UserMemoryMixin:
         praise = bool(re.search(r"(喜欢你|爱你|可爱|厉害|真好|谢谢你|辛苦|最棒|夸夸)", cleaned))
         if self_low:
             return {"event": "comfort_need", "intensity": 62, "reason": "用户自我否定或低落", "target": "self", "rule": "self_low", "confidence": 0.88}
+        # Keep violations high-confidence: explicit coercion or targeted abuse
+        # only. Ordinary intimacy, teasing, quotes, and contact boundaries do
+        # not reduce the relationship score.
+        coercion = bool(
+            target_hint
+            and not third_party_hint
+            and re.search(r"(不许拒绝|不准拒绝|没有拒绝权|必须听我的|我说了算|不答应就|不给我就|敢拒绝试试|你只能听|强迫你)", cleaned)
+        )
+        if coercion:
+            severity = 3
+            return {
+                "event": "boundary_violation",
+                "intensity": min(100, 58 + severity * 14),
+                "reason": "明确越过角色底线",
+                "target": "bot",
+                "rule": "explicit_boundary_violation",
+                "confidence": 0.94,
+                "severity": severity,
+                "attribution": attribution,
+            }
         if intent_source == "durable_boundary_rule" and not direct_bot_negative and not identity_hurt:
             return {"event": "neutral", "intensity": 0, "reason": "用户在表达相处边界", "target": "bot", "rule": "boundary_goes_relationship", "confidence": 0.82}
         if third_party_hint and severe_hurt and not direct_bot_negative:
@@ -5280,7 +5307,7 @@ class UserMemoryMixin:
             "external": "external_negative",
         }
         event = aliases.get(event, event)
-        allowed_events = {"neutral", "hurt", "apology", "comfort", "praise", "comfort_need", "external_negative"}
+        allowed_events = {"neutral", "hurt", "boundary_violation", "apology", "comfort", "praise", "comfort_need", "external_negative"}
         if event not in allowed_events:
             return None
         target = str(payload.get("target") or "").strip().lower()
@@ -5318,12 +5345,16 @@ class UserMemoryMixin:
             target = "none"
         elif intensity <= 0:
             intensity = 60
+        severity = payload.get("severity")
+        if event == "boundary_violation":
+            severity = _safe_int(severity, max(1, min(3, (intensity - 40) // 20)), 1, 3)
         return {
             "event": event,
             "target": target,
             "intensity": intensity,
             "confidence": round(confidence, 2),
             "reason": _single_line(payload.get("reason"), 100) or "模型复核",
+            **({"severity": severity} if event == "boundary_violation" else {}),
         }
 
     def _merge_llm_emotion_judgement(self, base_intent: dict[str, Any], payload: Any) -> dict[str, Any] | None:
@@ -5338,9 +5369,14 @@ class UserMemoryMixin:
             return None
         local_source = str(base_intent.get("source") or "")
         local_text = _single_line(base_intent.get("text"), 240)
-        if event == "hurt" and (
+        strong_single_turn_abuse = bool(
+            local_source == "single_turn_boundary"
+            and re.search(r"(恶心|废物|垃圾|没用|工具人|假的|别装|别演).{0,10}(闭嘴|滚)|你.{0,8}(恶心|废物|垃圾|没用).{0,8}(闭嘴|滚)", local_text)
+        )
+        if event in {"hurt", "boundary_violation"} and (
             bool(base_intent.get("playful_or_ambiguous"))
-            or local_source in {"weak_boundary_ignored", "soft_boundary_play_rule", "single_turn_boundary"}
+            or local_source in {"weak_boundary_ignored", "soft_boundary_play_rule"}
+            or (local_source == "single_turn_boundary" and not strong_single_turn_abuse)
         ):
             return None
         if event == "hurt" and local_source == "durable_boundary_rule":
@@ -5349,7 +5385,7 @@ class UserMemoryMixin:
             )
             if not strong_negative:
                 return None
-        if event == "hurt" and target not in {"bot", "ambiguous"}:
+        if event in {"hurt", "boundary_violation"} and target not in {"bot", "ambiguous"}:
             event = "external_negative" if target == "other" else "neutral"
             intensity = 54 if event == "external_negative" else 0
         reason = normalized["reason"]
@@ -5366,6 +5402,8 @@ class UserMemoryMixin:
                 "llm_emotion_judgement_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
             }
         )
+        if event == "boundary_violation":
+            merged["violation_severity"] = _safe_int(normalized.get("severity"), 1, 1, 3)
         return merged
 
     async def _refine_inbound_emotion_with_model(
@@ -5383,14 +5421,15 @@ class UserMemoryMixin:
         prompt = f"""
 You classify whether one private inbound message changes the Bot's short-term emotional afterglow. Do not write a reply.
 
-Allowed event values: neutral, hurt, apology, comfort, praise, comfort_need, external_negative.
+Allowed event values: neutral, hurt, boundary_violation, apology, comfort, praise, comfort_need, external_negative.
 target must be bot, self, other, ambiguous, or none.
 Only classify hurt when the message clearly targets the Bot/current character. Be conservative with jokes, flirting, logs, code, and quoted text.
+Only classify boundary_violation for explicit coercion, threats, or repeated targeted degradation that overrides the character's right to refuse. Do not infer it from ordinary intimacy or ambiguous language.
 A boundary such as less intimacy, no flirting, no approaching, or no interruptions should normally be neutral; relationship-distance logic handles it separately.
 Calibrate confidence honestly. Values below 0.65 are valid results but will keep the local judgement instead of overriding it.
 Write reason as one short Chinese phrase suitable for a diagnostics panel.
 Return JSON only:
-{{"event":"neutral|hurt|apology|comfort|praise|comfort_need|external_negative","target":"bot|self|other|ambiguous|none","intensity":0-100,"confidence":0.0-1.0,"reason":"brief reason"}}
+{{"event":"neutral|hurt|boundary_violation|apology|comfort|praise|comfort_need|external_negative","target":"bot|self|other|ambiguous|none","intensity":0-100,"severity":1-3,"confidence":0.0-1.0,"reason":"brief reason"}}
 
 User message:
 {cleaned}
@@ -5439,6 +5478,14 @@ Local classifier result:
                 }
             if self.enable_intent_emotion_analysis:
                 user["intent_profile"] = intent_to_apply
+            violation_settler = getattr(self, "_apply_relationship_violation_policy", None)
+            if callable(violation_settler):
+                violation_settler(
+                    user,
+                    intent_to_apply,
+                    event_id=_single_line(pending.get("message_event_id") or observed.get("event_id"), 96),
+                    now=_now_ts(),
+                )
             self._update_relationship_state_from_intent(user, intent_to_apply)
             user["pending_emotion_judgement"] = {}
             reviewed_at = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -5594,6 +5641,173 @@ Local classifier result:
                     close()
         return event
 
+    def _relationship_violation_state(self, user: dict[str, Any]) -> dict[str, Any]:
+        state = user.get("relationship_violation")
+        if not isinstance(state, dict):
+            state = {}
+            user["relationship_violation"] = state
+        defaults = {
+            "unrecovered_points": 0,
+            "apology_recovered_points": 0,
+            "incident_count": 0,
+            "repeat_count": 0,
+            "last_violation_at": 0.0,
+            "last_recovery_at": 0.0,
+            "cooldown_until": 0.0,
+            "level": 0,
+            "last_severity": 0,
+            "last_reason": "",
+            "last_event_id": "",
+        }
+        for key, value in defaults.items():
+            if key not in state:
+                state[key] = value
+        return state
+
+    def _settle_relationship_violation_recovery(self, user: dict[str, Any], *, now: float) -> int:
+        state = self._relationship_violation_state(user)
+        outstanding = _safe_int(state.get("unrecovered_points"), 0, 0, 12)
+        if outstanding <= 0:
+            state["unrecovered_points"] = 0
+            return 0
+        last = _safe_float(state.get("last_recovery_at") or state.get("last_violation_at"), now, 0)
+        minutes_per_point = _safe_int(
+            getattr(self, "relationship_violation_recovery_minutes_per_point", 180),
+            180,
+            15,
+            10080,
+        )
+        recovered = min(outstanding, max(0, int(max(0.0, now - last) // (minutes_per_point * 60))))
+        if recovered:
+            state["unrecovered_points"] = outstanding - recovered
+            state["last_recovery_at"] = min(now, last + recovered * minutes_per_point * 60)
+            state["level"] = max(0, _safe_int(state.get("level"), 0, 0, 6) - (1 if state["unrecovered_points"] == 0 else 0))
+            if state["unrecovered_points"] == 0:
+                state["apology_recovered_points"] = 0
+        return recovered
+
+    def _apply_relationship_violation_policy(
+        self,
+        user: dict[str, Any],
+        intent: dict[str, Any] | None,
+        *,
+        event_id: str = "",
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Apply bounded penalties/recovery for secondary-user boundary events."""
+        if not isinstance(user, dict) or not isinstance(intent, dict):
+            return {"changed": False, "reason": "invalid_input"}
+        if not bool(getattr(self, "enable_relationship_violation_penalties", True)):
+            return {"changed": False, "reason": "disabled"}
+        if not bool(getattr(self, "enable_custom_relationship_stage_policy", True)):
+            return {"changed": False, "reason": "relationship_system_disabled"}
+        try:
+            role = self._private_user_role(user, str(user.get("user_id") or ""))
+        except Exception:
+            role = str(user.get("relationship_role") or "friend")
+        if str(role).strip().lower() == "owner":
+            return {"changed": False, "reason": "owner_exempt"}
+        ts = _now_ts() if now is None else _safe_float(now, _now_ts(), 0)
+        state = self._relationship_violation_state(user)
+        self._settle_relationship_violation_recovery(user, now=ts)
+        event = str(intent.get("emotion_event") or "neutral").strip().lower()
+        explicit_id = _single_line(event_id, 96)
+        if explicit_id and explicit_id == _single_line(state.get("last_event_id"), 96) and event in {"boundary_violation", "hurt", "apology"}:
+            return {"changed": False, "reason": "duplicate_event", "state": deepcopy(state)}
+        if event == "apology":
+            outstanding = _safe_int(state.get("unrecovered_points"), 0, 0, 12)
+            if outstanding <= 0:
+                return {"changed": False, "reason": "nothing_to_recover", "state": deepcopy(state)}
+            recover = min(3, max(1, int(math.ceil(outstanding * 0.35))))
+            result = self._apply_relationship_event(
+                user,
+                recover,
+                reason_code="relationship_violation_recovery",
+                event_id=explicit_id,
+                now=ts,
+            )
+            applied = _safe_int(result.get("delta"), 0, 0, recover)
+            if applied:
+                state["unrecovered_points"] = max(0, outstanding - applied)
+                state["apology_recovered_points"] = min(6, _safe_int(state.get("apology_recovered_points"), 0, 0, 6) + applied)
+                state["last_recovery_at"] = ts
+                state["last_event_id"] = explicit_id
+                self._schedule_data_save()
+            return {"changed": bool(applied), "reason": "apology_recovery", "recovered": applied, "state": deepcopy(state)}
+        emotion_confidence = _safe_float(intent.get("emotion_confidence"), 1.0, 0.0, 1.0)
+        is_severe_hurt_violation = (
+            event == "hurt"
+            and emotion_confidence >= 0.8
+            and str(intent.get("emotion_target") or "").lower() == "bot"
+            and _safe_int(intent.get("emotion_intensity"), 0, 0, 100) >= 76
+            and str(intent.get("emotion_rule") or "") in {"severe_hurt", "identity_hurt"}
+        )
+        if (
+            (event != "boundary_violation" and not is_severe_hurt_violation)
+            or (event == "boundary_violation" and emotion_confidence < 0.8)
+            or (
+                str(intent.get("emotion_target") or "").lower() != "bot"
+                if event == "boundary_violation"
+                else str(intent.get("emotion_target") or "").lower() not in {"bot", "ambiguous"}
+            )
+        ):
+            return {"changed": False, "reason": "no_violation", "state": deepcopy(state)}
+        severity = _safe_int(intent.get("violation_severity"), 2 if is_severe_hurt_violation else 1, 1, 3)
+        outstanding = _safe_int(state.get("unrecovered_points"), 0, 0, 12)
+        prior_apology = _safe_int(state.get("apology_recovered_points"), 0, 0, 6)
+        clawed_back = 0
+        if prior_apology:
+            clawback = self._apply_relationship_event(
+                user,
+                -prior_apology,
+                reason_code="relationship_violation_clawback",
+                event_id=explicit_id,
+                now=ts,
+            )
+            clawed_back = max(0, -_safe_int(clawback.get("delta"), 0, -6, 0))
+            state["apology_recovered_points"] = 0
+        penalty = {1: 4, 2: 7, 3: 12}[severity]
+        result = self._apply_relationship_event(
+            user,
+            -penalty,
+            reason_code="relationship_violation",
+            event_id=explicit_id,
+            now=ts,
+        )
+        applied_penalty = max(0, -_safe_int(result.get("delta"), 0, -12, 0))
+        state["unrecovered_points"] = min(12, outstanding + severity)
+        state["incident_count"] = _safe_int(state.get("incident_count"), 0, 0) + 1
+        state["repeat_count"] = _safe_int(state.get("repeat_count"), 0, 0) + (1 if outstanding > 0 else 0)
+        state["level"] = min(6, max(_safe_int(state.get("level"), 0, 0, 6), severity + state["repeat_count"] // 2))
+        state["last_violation_at"] = ts
+        state["last_recovery_at"] = ts
+        state["last_severity"] = severity
+        state["last_reason"] = _single_line(intent.get("emotion_reason") or intent.get("emotion_rule"), 120)
+        state["cooldown_until"] = ts + {1: 20, 2: 45, 3: 90}[severity] * 60
+        state["last_event_id"] = explicit_id
+        self._schedule_data_save()
+        return {
+            "changed": bool(applied_penalty or clawed_back),
+            "reason": "boundary_violation",
+            "severity": severity,
+            "penalty": applied_penalty,
+            "clawback": clawed_back,
+            "state": deepcopy(state),
+        }
+
+    def _relationship_violation_prompt_hint(self, user: dict[str, Any], *, now: float | None = None) -> str:
+        if not isinstance(user, dict):
+            return ""
+        state = self._relationship_violation_state(user)
+        self._settle_relationship_violation_recovery(user, now=_now_ts() if now is None else now)
+        points = _safe_int(state.get("unrecovered_points"), 0, 0, 12)
+        if points <= 0:
+            return ""
+        level = _safe_int(state.get("level"), 0, 0, 6)
+        if level >= 4:
+            return "关系底线余波仍在：保持克制、简短和礼貌，不主动升级亲密或索取；可以表达不舒服，但给对方改正空间。"
+        return "关系底线余波仍在：降低主动性和亲密度，先回应当前问题，不用说教；若对方真诚道歉，可温和承认并逐步恢复。"
+
     def _settle_current_interaction_from_intent(self, user: dict[str, Any], intent: dict[str, Any]) -> None:
         """Settle the short-term expression authority from one private-chat event.
 
@@ -5705,16 +5919,19 @@ Local classifier result:
             reason_code = "contact_boundary_active"
         elif (
             emotion_enabled
-            and emotion_event == "hurt"
+            and emotion_event in {"hurt", "boundary_violation"}
             and target in {"bot", "ambiguous"}
             and emotion_confidence >= 0.65
             and intensity >= hurt_threshold
         ):
-            band = "avoidant" if intensity >= avoidant_threshold else "hurt"
+            violation_severity = _safe_int(intent.get("violation_severity"), 1, 1, 3)
+            if emotion_event == "boundary_violation":
+                intensity = max(intensity, 58 + violation_severity * 14)
+            band = "avoidant" if intensity >= avoidant_threshold or violation_severity >= 3 else "hurt"
             recovery_load = recovery_per_hour + max(0, intensity - hurt_threshold)
             recovery_minutes = max(10, (recovery_load * 60 + recovery_per_hour - 1) // recovery_per_hour)
             expires_at = now + min(max_hurt_minutes, recovery_minutes) * 60
-            reason_code = "severe_hurt_event" if band == "avoidant" else "hurt_event"
+            reason_code = "boundary_violation" if emotion_event == "boundary_violation" else ("severe_hurt_event" if band == "avoidant" else "hurt_event")
         elif relation_enabled and inbound_intent == "play" and intent_confidence >= 0.68:
             band = "lively"
             expires_at = now + 6 * 3600

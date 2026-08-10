@@ -5567,9 +5567,25 @@ class CommandHandlersMixin:
             "恢复主链回复",
         }
         llm_block_status = action_compact in {"llm状态", "主链状态", "llm回复状态"}
-        if (llm_block_on or llm_block_off or llm_block_status) and not self._can_manage_group_companion(event):
-            yield event.plain_result(self._management_denied_text())
-            return
+        if llm_block_on or llm_block_off or llm_block_status:
+            authorized = self._can_manage_group_companion(event)
+            if not authorized:
+                # Some adapters omit sender.role. Refresh the group member snapshot
+                # before denying a real group owner/admin whose cache has expired.
+                refresher = getattr(self, "_refresh_group_role_snapshot", None)
+                if callable(refresher):
+                    try:
+                        await refresher(event, group_id, force=False)
+                    except Exception as exc:
+                        logger.debug(
+                            "[PrivateCompanion] 刷新群权限快照失败: group=%s error=%s",
+                            _single_line(group_id, 80),
+                            _single_line(exc, 160),
+                        )
+                    authorized = self._can_manage_group_companion(event)
+            if not authorized:
+                yield event.plain_result(self._management_denied_text())
+                return
         if llm_block_on or llm_block_off or llm_block_status:
             operator_id = ""
             try:

@@ -13,7 +13,7 @@ _SELECTOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
 _CODE_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,79}$")
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.+-]{1,40}$")
 _EVENT_TYPES = frozenset({
-    "neutral", "hurt", "apology", "comfort", "praise", "comfort_need",
+    "neutral", "hurt", "boundary_violation", "apology", "comfort", "praise", "comfort_need",
     "external_negative", "scar_touched", "warm_memory", "vulnerable_resonance",
     "play", "intimacy", "boundary",
 })
@@ -35,7 +35,7 @@ _SOURCE_RULES = frozenset({
     "direct_bot_target", "self_low", "diagnostic_skip", "structured_text", "quoted_negative",
     "third_party_target", "direct_positive_target", "negative_target_uncertain", "atrelay_skip",
     "playful_or_single_boundary", "boundary_goes_relationship", "third_party_negative", "severe_hurt",
-    "identity_hurt", "mild_hurt", "apology", "comfort", "praise", "llm_emotion_judgement",
+    "identity_hurt", "mild_hurt", "explicit_boundary_violation", "apology", "comfort", "praise", "llm_emotion_judgement",
     "short_chat_rule", "self_negative", "target_none",
 })
 

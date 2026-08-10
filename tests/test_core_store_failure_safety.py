@@ -103,6 +103,29 @@ class _IdentityCoreHarness(CoreStoreMixin):
 
 
 class CoreStoreFailureSafetyTests(unittest.IsolatedAsyncioTestCase):
+    def test_passive_private_profile_ignores_legacy_enabled_and_target_flags(self) -> None:
+        harness = _CoreHarness()
+
+        self.assertTrue(
+            harness._private_passive_profile_available(
+                "legacy",
+                {"enabled": False, "manual_disabled": True},
+            )
+        )
+        self.assertFalse(harness._private_passive_profile_available("", {}))
+
+    def test_proactive_capability_keeps_legacy_target_selection_eligible(self) -> None:
+        harness = _CoreHarness()
+        capabilities = default_capabilities()
+        capabilities["proactive_private_enabled"] = True
+
+        self.assertTrue(
+            harness._is_target_private_user(
+                "legacy",
+                {"unified_profile_capabilities": capabilities},
+            )
+        )
+
     def test_existing_legacy_private_profile_keeps_permission_before_defaults_fill(self) -> None:
         harness = _IdentityCoreHarness()
         harness.data["users"]["legacy"] = {

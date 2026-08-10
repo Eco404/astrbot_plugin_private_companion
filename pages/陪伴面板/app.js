@@ -565,6 +565,7 @@ function featureDraftFromOverview(overview = {}) {
     }
   });
   const settingBackedFeatureKeys = [
+    "enable_auto_user_profile_creation",
     "enable_multi_persona_mode",
     "enable_body_monitor_integration",
     "enable_rest_reply_simulation",
@@ -5395,18 +5396,57 @@ async function hydrateDailyOutfitLogo() {
   }
 }
 
-// AstrBot rewrites literal dynamic imports with the current Page asset token.
-// Keep these paths relative; manually constructed content URLs expire quickly.
+// These panels register window globals rather than ES module exports. Load
+// them as classic scripts so cross-origin plugin Page containers do not make
+// import() resolve relative paths against about:blank. Preserve AstrBot's
+// signed asset token from the app.js URL.
+const optionalScriptBaseUrl = (() => {
+  const current = String(document.currentScript?.src || "").trim();
+  if (current) return current;
+  const appScript = Array.from(document.scripts || [])
+    .reverse()
+    .find((script) => /\/app\.js(?:[?#]|$)/.test(String(script?.src || "")));
+  return String(appScript?.src || document.baseURI || window.location.href || "");
+})();
+
+function loadOptionalClassicScript(relativePath, retry = 0) {
+  return new Promise((resolve, reject) => {
+    let assetUrl;
+    try {
+      const base = new URL(optionalScriptBaseUrl, document.baseURI || window.location.href);
+      assetUrl = new URL(relativePath, base);
+      const assetToken = base.searchParams.get("asset_token");
+      if (assetToken && !assetUrl.searchParams.has("asset_token")) {
+        assetUrl.searchParams.set("asset_token", assetToken);
+      }
+      if (retry > 0) assetUrl.searchParams.set("retry", String(retry));
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = assetUrl.href;
+    script.async = true;
+    script.dataset.privateCompanionOptional = "1";
+    script.onload = () => resolve(true);
+    script.onerror = () => {
+      script.remove();
+      reject(new Error(`页面模块脚本加载失败：${assetUrl.pathname}`));
+    };
+    document.head.appendChild(script);
+  });
+}
+
 const optionalModuleLoaders = {
   providerTree: [
-    () => import("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1"),
-    () => import("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1&retry=1"),
-    () => import("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1&retry=2"),
+    () => loadOptionalClassicScript("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1", 0),
+    () => loadOptionalClassicScript("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1", 1),
+    () => loadOptionalClassicScript("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1", 2),
   ],
   qzonePanel: [
-    () => import("./js/panels/qzone-panel.js?v=20260731-qzone-platform-support-v1"),
-    () => import("./js/panels/qzone-panel.js?v=20260731-qzone-platform-support-v1&retry=1"),
-    () => import("./js/panels/qzone-panel.js?v=20260731-qzone-platform-support-v1&retry=2"),
+    () => loadOptionalClassicScript("./js/panels/qzone-panel.js?v=20260810-qzone-classic-loader-v1", 0),
+    () => loadOptionalClassicScript("./js/panels/qzone-panel.js?v=20260810-qzone-classic-loader-v1", 1),
+    () => loadOptionalClassicScript("./js/panels/qzone-panel.js?v=20260810-qzone-classic-loader-v1", 2),
   ],
 };
 
@@ -14126,11 +14166,17 @@ function renderLearningSummary() {
   const ruleCount = Number(library.rule_group_count ?? library.rule_count ?? library.pattern_count ?? (Array.isArray(library.rule_groups) ? library.rule_groups.length : 0));
   const pendingCount = Number(library.pending_rule_group_count ?? library.pending_rule_count ?? library.pending_count ?? (Array.isArray(library.pending_rule_groups) ? library.pending_rule_groups.length : 0));
   const skillCount = Number(growth.skill_count || skills.length || 0);
+  const worldbook = state.overview?.worldbook || {};
   root.innerHTML = `
     <button id="learningTabSkills" type="button" role="tab" aria-controls="learningPanelSkills" data-learning-section="skills" class="learning-summary-card" aria-label="技能，共 ${escapeHtml(skillCount)} 项">
       <b>${escapeHtml(skillCount)}</b>
       <span>技能</span>
       <small id="skillGrowthSummary">成长与熟练度</small>
+    </button>
+    <button id="learningTabSocial" type="button" role="tab" aria-controls="learningPanelSocial" data-learning-section="social" class="learning-summary-card" aria-label="关系网，共 ${escapeHtml(Number(worldbook.member_count || 0))} 个节点">
+      <b>${escapeHtml(Number(worldbook.member_count || 0))}</b>
+      <span>关系网</span>
+      <small id="worldbookNavSummary">${escapeHtml(worldbook.pending_observation_total ? `${worldbook.pending_observation_total} 条待确认` : "身份与边界")}</small>
     </button>
     <div class="learning-summary-card learning-summary-expression-card" data-learning-expression-card role="presentation">
       <button id="learningTabExpressions" type="button" role="tab" aria-controls="learningPanelExpressions" data-learning-section="expressions" data-expression-nav-view="library" class="learning-summary-expression-main" aria-label="表达，共 ${escapeHtml(ruleCount)} 个已启用规则组">
@@ -23558,6 +23604,16 @@ function renderFeatureSwitches() {
       renderFeatureSwitches();
     });
   });
+  document.querySelectorAll("[data-feature-card-open]").forEach((card) => {
+    const openDetail = () => {
+      state.selectedFeatureKey = card.dataset.featureCardOpen || "";
+      renderFeatureSwitches();
+    };
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("button, input, label, select, textarea, a")) return;
+      openDetail();
+    });
+  });
   bindProactiveOnlyTempUnlockActions($("#featureFlags"));
   bindProactiveIntensityCommonSetting();
 }
@@ -24018,7 +24074,7 @@ function featureSwitchItem(key) {
   const lockNote = tempUnlocked ? "已临时放行，关闭仅保留主动能力后清空" : "仅保留主动能力中，原配置保留";
   const relatedText = related.length ? `建议同步：${related.map((item) => item.label || item.key).join("、")}` : "";
   return `
-    <section class="feature-switch-item ${displayOn ? "on" : "off"} ${locked ? "locked" : ""}" title="${escapeHtml(locked ? "仅保留主动能力开启时，本功能在本插件普通被动链路中被跳过，原配置会保留。" : featureDescription(key))}">
+    <section class="feature-switch-item has-feature-detail ${displayOn ? "on" : "off"} ${locked ? "locked" : ""}" data-feature-card-open="${escapeHtml(key)}" title="${escapeHtml(locked ? "仅保留主动能力开启时，本功能在本插件普通被动链路中被跳过，原配置会保留。" : featureDescription(key))}">
       <label class="feature-toggle-hit" aria-label="${escapeHtml(featureLabel(key))}">
         <input type="checkbox" data-feature-key="${escapeHtml(key)}" ${displayOn ? "checked" : ""} ${locked ? "disabled" : ""}>
         <span class="feature-toggle-visual"></span>
@@ -24027,6 +24083,7 @@ function featureSwitchItem(key) {
         <button type="button" class="feature-switch-text" data-feature-open="${escapeHtml(key)}">
           <b>${escapeHtml(featureLabel(key))}</b>
           <small>${escapeHtml(featurePublicKey(key))}</small>
+          <span class="feature-open-hint">查看配置 <span aria-hidden="true">›</span></span>
         </button>
         <div class="feature-switch-meta">
           <span class="feature-state-text">${escapeHtml(stateText)}</span>
@@ -32804,13 +32861,13 @@ function renderRealityTouchSettings() {
           <div>${dayChecks}</div>
         </fieldset>
         <label class="reality-message-field">
-          <span>播报内容</span>
-          <textarea name="reality_message" rows="3" maxlength="240" ${formDisabled}>${escapeHtml(alarm.message || data.default_message || "")}</textarea>
-          <small>到点后先由当前 TTS 配置合成，再交给系统默认音频输出。</small>
+          <span>叫醒偏好（可选）</span>
+          <textarea name="reality_message" rows="3" maxlength="240" placeholder="例如：温柔一点，提醒我上午有课" ${formDisabled}>${escapeHtml(alarm.message || "")}</textarea>
+          <small>${escapeHtml(data.dynamic_message_hint || "每次触发时按人格、关系与当天语境动态生成")}；这里的内容只作为补充要求，不会固定复读。</small>
         </label>
         <div class="reality-form-actions">
           <button type="submit" class="primary" ${formDisabled}>保存起床设置</button>
-          <button type="button" data-reality-touch-test data-reality-touch-test-kind="scenario" data-reality-touch-test-message="${escapeHtml(alarm.message || data.default_message || "")}" ${testDisabled}>试听此场景</button>
+          <button type="button" data-reality-touch-test data-reality-touch-test-kind="scenario" ${testDisabled}>生成并试听</button>
           <button type="button" class="danger soft" data-reality-touch-disable ${alarm.enabled ? "" : "disabled"}>关闭该用户闹钟</button>
         </div>
       </form>
@@ -33530,7 +33587,7 @@ function bindRealityTouchActions(root) {
           action: "test",
           user_id: user.user_id,
           test_kind: control.dataset.realityTouchTestKind || "scenario",
-          message: control.dataset.realityTouchTestMessage || "",
+          message: root.querySelector('[name="reality_message"]')?.value || "",
         }),
         control.dataset.realityTouchTestKind === "device"
           ? "固定测试音频已发送到所选电脑音频输出设备"

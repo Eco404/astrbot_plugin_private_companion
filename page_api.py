@@ -4311,11 +4311,12 @@ class PrivateCompanionPageApi(
         updater = getattr(self.plugin, "_reality_touch_update_alarm", None)
         policy_updater = getattr(self.plugin, "_reality_touch_update_policy", None)
         device_selector = getattr(self.plugin, "_reality_touch_select_audio_device", None)
-        text_player = getattr(self.plugin, "_play_reality_touch_text", None)
+        wakeup_player = getattr(self.plugin, "_play_wakeup_alarm", None)
         test_audio_player = getattr(self.plugin, "_play_reality_touch_test_audio", None)
         if not callable(snapshotter) or not callable(updater):
             return self._error("当前插件实例不支持现实触及控制台", status_code=503)
 
+        user_for_test: dict[str, Any] | None = None
         alarm_for_test: dict[str, Any] | None = None
         test_kind = ""
         message = ""
@@ -4362,11 +4363,10 @@ class PrivateCompanionPageApi(
                     if not consented:
                         return self._error("该用户尚未在私聊中完成现实触及知情确认")
                     alarm = user.get("wakeup_alarm") if isinstance(user.get("wakeup_alarm"), dict) else {}
-                    alarm_for_test = {
-                        "message": self._single_line(payload.get("message"), 240)
-                        or self._single_line(alarm.get("message"), 240)
-                        or "现实触及音频输出测试。你现在听到的声音来自 Bot 的主动语音能力。",
-                    }
+                    user_for_test = deepcopy(user)
+                    alarm_for_test = deepcopy(alarm)
+                    if "message" in payload:
+                        alarm_for_test["message"] = self._single_line(payload.get("message"), 240)
 
             if action == "test":
                 if test_kind == "device":
@@ -4376,9 +4376,9 @@ class PrivateCompanionPageApi(
                         return self._error("固定测试音频播放失败，请检查所选音频输出设备")
                     message = "固定测试音频已发送到所选音频输出设备"
                 else:
-                    if not callable(text_player) or alarm_for_test is None:
+                    if not callable(wakeup_player) or user_for_test is None or alarm_for_test is None:
                         return self._error("当前插件实例没有可用的本机语音播放能力", status_code=503)
-                    if not await text_player(alarm_for_test["message"], repeat=1, interval=20):
+                    if not await wakeup_player(user_for_test, alarm_for_test, test=True):
                         return self._error("场景试听失败，请检查 TTS 配置和所选音频输出设备")
                     message = "场景试听已发送到所选音频输出设备"
 

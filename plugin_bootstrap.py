@@ -1214,6 +1214,14 @@ def _initialize_review_and_group_config(self: Any, c: Any) -> None:
     self.enable_relationship_analysis = self._cfg_bool(c, "enable_relationship_analysis", True)
     self.enable_relationship_state_machine = self._cfg_bool(c, "enable_relationship_state_machine", True)
     self.enable_emotion_simulation = self._cfg_bool(c, "enable_emotion_simulation", True)
+    self.enable_relationship_violation_penalties = self._cfg_bool(c, "enable_relationship_violation_penalties", True)
+    self.relationship_violation_recovery_minutes_per_point = self._cfg_int(
+        c,
+        "relationship_violation_recovery_minutes_per_point",
+        180,
+        15,
+        10080,
+    )
     self.enable_llm_emotion_judgement = self._cfg_bool(c, "enable_llm_emotion_judgement", False)
     self.emotion_judgement_mode = self._cfg_str(c, "emotion_judgement_mode", "suspicious", "suspicious").lower()
     if self.emotion_judgement_mode not in {"suspicious", "always", "off"}:

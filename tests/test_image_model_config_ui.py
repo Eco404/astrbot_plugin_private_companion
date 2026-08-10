@@ -35,8 +35,8 @@ class ImageModelConfigUiTests(unittest.TestCase):
         self.assertNotIn("renderProviders(context);", toolbar_binding)
         self.assertIn('button.setAttribute("aria-pressed"', self.script)
         self.assertIn(
-            './js/panels/provider-tree.js?v=20260804-private-reading-capability-v1',
-            self.html,
+            'loadOptionalClassicScript("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1',
+            self.script,
         )
 
     def test_private_reading_provider_ui_follows_runtime_capability(self) -> None:

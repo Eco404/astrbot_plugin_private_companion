@@ -6349,7 +6349,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             and not external_proactive
             and not plugin_owned_reaction_text
             and not plugin_tts_plain_fallback
-            and not self._friend_private_plain_result_allows_segmenting(event, chain)
+            and not self._private_plain_result_allows_segmenting(event, chain)
         ):
             return
         if getattr(result, "use_t2i_", None) or getattr(result, "use_markdown_", None):
@@ -6489,7 +6489,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 trimmer(group)
             self._save_data_sync()
 
-    def _friend_private_plain_result_allows_segmenting(self, event: AstrMessageEvent, chain: list[Any]) -> bool:
+    def _private_plain_result_allows_segmenting(self, event: AstrMessageEvent, chain: list[Any]) -> bool:
+        """Allow plugin-produced private text to use the configured reply splitter."""
         try:
             if not bool(getattr(event, "is_private_chat", lambda: False)()):
                 return False
@@ -6500,23 +6501,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         text = "".join(str(getattr(comp, "text", "") or "") for comp in chain).strip()
         if not text:
             return False
-        try:
-            user_id = str(event.get_sender_id())
-        except Exception:
-            user_id = ""
-        user_id = _single_line(user_id, 80)
-        resolver = getattr(self, "_private_user_id_for_event", None)
-        user_id = (
-            resolver(event, user_id)
-            if callable(resolver) and user_id
-            else self._canonical_private_user_id(user_id)
-        )
-        if not user_id:
-            return False
-        raw_users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
-        user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
-        role = self._private_user_role(user if isinstance(user, dict) else {}, user_id)
-        return role == "friend"
+        return True
 
     @filter.on_decorating_result(priority=-9000)
     @_multi_persona_event_context
@@ -10376,8 +10361,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         current_user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
         if (
             isinstance(current_user, dict)
-            and self._is_target_private_user(user_id, current_user)
-            and bool(current_user.get("enabled", True))
+            and self._private_passive_profile_available(user_id, current_user)
         ):
             return
         display_name = ""
@@ -11185,7 +11169,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         user = users.get(user_id) if isinstance(users, dict) else None
         if not isinstance(user, dict):
             return user_id, None
-        if not self._is_target_private_user(user_id, user) or not bool(user.get("enabled", True)):
+        if not self._private_passive_profile_available(user_id, user):
             return user_id, None
         return user_id, user
 
@@ -11794,7 +11778,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if not isinstance(user, dict):
                 return
             user_id = canonical_user_id
-            if not self._is_target_private_user(user_id, user) or not bool(user.get("enabled", True)):
+            if not self._private_passive_profile_available(user_id, user):
                 return
             if self._is_recent_poke_echo(user, text):
                 logger.info("[PrivateCompanion] 主动专用模式忽略 poke 回流事件: user=%s", user_id)
@@ -12198,6 +12182,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 channel_scope="private" if is_private else "group",
             )
             projection = expression.to_dict() if hasattr(expression, "to_dict") else dict(expression or {})
+            if is_private:
+                violation_hint_getter = getattr(self, "_relationship_violation_prompt_hint", None)
+                if callable(violation_hint_getter):
+                    hint = violation_hint_getter(current_user, now=_now_ts())
+                    if hint:
+                        projection["relationship_violation_hint"] = hint
         except Exception as exc:
             logger.debug("[PrivateCompanion] 统一表达决策生成失败，使用日常保守默认值: %s", _single_line(exc, 120))
             projection = build_expression_decision({}).to_dict()

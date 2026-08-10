@@ -239,6 +239,11 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
             api._allowed_feature_keys(),
         )
 
+    def test_user_profile_switch_is_hydrated_from_settings(self) -> None:
+        start = self.script.index("const settingBackedFeatureKeys = [")
+        block = self.script[start : self.script.index("];", start) + 2]
+        self.assertIn('"enable_auto_user_profile_creation"', block)
+
     def test_reaction_expression_settings_are_visible_and_apply_to_runtime(self) -> None:
         plugin = SimpleNamespace(
             config={},

@@ -80,8 +80,7 @@ async def inject_humanized_state(
         private_user = raw_users.get(private_user_id) if private_user_id and isinstance(raw_users, dict) else None
         private_user_active = (
             isinstance(private_user, dict)
-            and self._is_target_private_user(private_user_id, private_user)
-            and bool(private_user.get("enabled", True))
+            and self._private_passive_profile_available(private_user_id, private_user)
         )
         if private_user_active:
             preferred_address = _single_line(
@@ -438,7 +437,7 @@ async def inject_humanized_state(
     if not isinstance(current_user, dict):
         log_bookshelf_secret_skip("private_user_missing")
         return
-    if not self._is_target_private_user(user_id, current_user) or not current_user.get("enabled", True):
+    if not self._private_passive_profile_available(user_id, current_user):
         log_bookshelf_secret_skip("private_user_disabled", current_user)
         return
     if not bool(getattr(event, "private_companion_skip_passive_input_status", False)):

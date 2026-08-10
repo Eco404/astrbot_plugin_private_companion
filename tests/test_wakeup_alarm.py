@@ -43,8 +43,40 @@ class AlarmHarness(WakeupAlarmMixin):
     def _schedule_data_save(self, **kwargs) -> None:
         return None
 
-    async def _play_wakeup_alarm(self, alarm, *, test=False):
+    async def _play_wakeup_alarm(self, user, alarm, *, test=False):
         self.played += 1
+        return True
+
+
+class DynamicAlarmHarness(WakeupAlarmMixin):
+    def __init__(self, llm_result: str | None = "早呀，今天也想用我的方式把你轻轻叫起来。") -> None:
+        self.environment_perception_timezone = "Asia/Shanghai"
+        self.llm_result = llm_result
+        self.llm_calls: list[dict] = []
+        self.audio_calls: list[dict] = []
+
+    def _wakeup_now(self) -> datetime:
+        return datetime(2026, 8, 10, 7, 30)
+
+    async def _resolve_proactive_persona_prompt(self, _user, *, umo="") -> str:
+        return "人格：说话温柔、有一点熟稔的玩笑。"
+
+    def _format_proactive_relationship_fact(self, _user) -> str:
+        return "长期阶段=亲密，语气=warm"
+
+    async def _recent_private_conversation_for_proactive_review(self, _user, *, limit=8) -> str:
+        return "用户：明早九点有课。\nBot：那我到时候叫你。"
+
+    @staticmethod
+    def _task_provider(*provider_ids: str) -> str:
+        return next((item for item in provider_ids if item), "")
+
+    async def _llm_call(self, prompt: str, **kwargs):
+        self.llm_calls.append({"prompt": prompt, **kwargs})
+        return self.llm_result
+
+    async def _play_reality_touch_text(self, text: str, *, repeat: int, interval: int) -> bool:
+        self.audio_calls.append({"text": text, "repeat": repeat, "interval": interval})
         return True
 
 
@@ -69,6 +101,7 @@ class WakeupAlarmTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(test)
         self.assertIn("07:30", response)
         self.assertEqual([0], user["wakeup_alarm"]["days"])
+        self.assertEqual("", user["wakeup_alarm"]["message"])
         self.assertEqual("07:30", harness._wakeup_parse_time("7：30"))
         self.assertEqual(list(range(7)), harness._wakeup_days([0, 1, 2, 3, 4, 5, 6]))
 
@@ -106,6 +139,44 @@ class WakeupAlarmTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(row["consent"]["local_audio"])
         self.assertFalse(row["consent"]["camera"])
         self.assertEqual("08-10 08:00", row["alarm"]["next_trigger_text"])
+        self.assertEqual("dynamic", row["alarm"]["message_mode"])
+
+    async def test_each_playback_generates_one_contextual_message_then_repeats_it(self) -> None:
+        harness = DynamicAlarmHarness()
+        user = {
+            "umo": "bot:FriendMessage:u",
+            "nickname": "小林",
+        }
+        alarm = {
+            "message": "温柔一点，并提醒我上午有课",
+            "repeat_count": 3,
+            "repeat_interval_seconds": 15,
+        }
+
+        played = await harness._play_wakeup_alarm(user, alarm)
+
+        self.assertTrue(played)
+        self.assertEqual(1, len(harness.llm_calls))
+        self.assertEqual(
+            [{"text": harness.llm_result, "repeat": 3, "interval": 15}],
+            harness.audio_calls,
+        )
+        call = harness.llm_calls[0]
+        self.assertIn("2026-08-10 07:30，周一", call["prompt"])
+        self.assertIn("小林", call["prompt"])
+        self.assertIn("长期阶段=亲密", call["prompt"])
+        self.assertIn("明早九点有课", call["prompt"])
+        self.assertIn("温柔一点，并提醒我上午有课", call["prompt"])
+        self.assertIn("说话温柔", call["system_prompt"])
+
+    async def test_model_empty_result_uses_fixed_text_only_as_final_fallback(self) -> None:
+        harness = DynamicAlarmHarness(llm_result=None)
+
+        await harness._play_wakeup_alarm({"umo": "bot:FriendMessage:u"}, {}, test=True)
+
+        self.assertEqual(1, len(harness.llm_calls))
+        self.assertEqual(harness._WAKEUP_DEFAULT_MESSAGE, harness.audio_calls[0]["text"])
+        self.assertEqual(1, harness.audio_calls[0]["repeat"])
 
     async def test_tick_is_idempotent_for_one_minute(self) -> None:
         harness = AlarmHarness()
