@@ -24819,7 +24819,7 @@ function featureSettingInput(key, value, accessibility = {}) {
   if (spec.type === "photo-scopes") {
     const allowed = new Set(Array.isArray(value) ? value : String(value || "").split(/[\r\n,，、;；]+/));
     const options = [["private_owner", "主要用户私聊"], ["private_friend", "其他陪伴用户私聊"], ["group", "群聊"], ["proactive", "Bot 主动生图"]];
-    return `<div class="multi-persona-choice-list photo-scope-choice-list" data-feature-param-group="${safeKey}">${options.map(([scope, label]) => `<label><input type="checkbox" data-photo-scope-value="${scope}" data-feature-param="${safeKey}" value="${scope}"${allowed.has(scope) ? " checked" : ""}${accessibilityAttrs}${disabledAttr}><span>${label}</span></label>`).join("")}<textarea data-feature-param="${safeKey}" hidden>${escapeHtml(options.map(([scope]) => scope).filter((scope) => allowed.has(scope)).join("\n"))}</textarea></div>`;
+    return `<div class="multi-persona-choice-list photo-scope-choice-list" data-feature-param-group="${safeKey}">${options.map(([scope, label]) => `<label><input type="checkbox" data-photo-scope-value="${scope}" value="${scope}"${allowed.has(scope) ? " checked" : ""}${accessibilityAttrs}${disabledAttr}><span>${label}</span></label>`).join("")}<textarea data-feature-param="${safeKey}" hidden>${escapeHtml(options.map(([scope]) => scope).filter((scope) => allowed.has(scope)).join("\n"))}</textarea></div>`;
   }
   if (key === "multi_persona_primary_id") {
     const current = String(value || "").trim();
@@ -27369,7 +27369,7 @@ function bindFeatureDetailActions() {
   detailPage?.querySelectorAll("[data-photo-scope-value]").forEach((input) => {
     input.addEventListener("change", () => {
       const host = input.closest(".photo-scope-choice-list");
-      const hidden = host?.querySelector('[data-feature-param="photo_generation_allowed_scopes"]');
+      const hidden = host?.querySelector('textarea[data-feature-param="photo_generation_allowed_scopes"]');
       if (hidden) {
         hidden.value = Array.from(host.querySelectorAll("[data-photo-scope-value]:checked")).map((item) => String(item.value || "").trim()).filter(Boolean).join("\n");
         rememberFeatureParamDraft(hidden);
