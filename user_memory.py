@@ -8463,6 +8463,9 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             # Keep the caller contract stable without reading or projecting
             # archived affinity data when the master switch is off.
             return build_expression_decision({})
+        view_getter = getattr(self, "_req041_relationship_snapshot_view", None)
+        if callable(view_getter) and channel_scope != "group":
+            user = view_getter(user, source="expression_decision")
         decision_now = _now_ts() if now is None else _safe_float(now, _now_ts(), 0)
         role_getter = getattr(self, "_private_user_role", None)
         try:

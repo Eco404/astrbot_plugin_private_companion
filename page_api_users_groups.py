@@ -83,6 +83,11 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 state_conditions = deepcopy(self.plugin.data.get("state_conditions"))
             if not isinstance(user, dict):
                 return self._error("用户不存在")
+            relationship_view_getter = getattr(
+                self.plugin, "_req041_relationship_snapshot_view", None
+            )
+            if callable(relationship_view_getter):
+                user = relationship_view_getter(user, source="admin_user_detail")
             detail = self._user_summary(user_id, user)
             relationship_panel = self._relationship_panel(
                 user_id,

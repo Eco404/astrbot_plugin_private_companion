@@ -4307,6 +4307,33 @@ class PrivateCompanionPlugin(
             pass
         return view
 
+    def _req041_relationship_snapshot_view(
+        self,
+        user: dict[str, Any],
+        *,
+        source: str,
+    ) -> dict[str, Any]:
+        """Take one short-lived private relationship view for background decisions."""
+        if not isinstance(user, dict) or user.get("req041_read_generation") == "new":
+            return user
+        router = getattr(self, "req041_relationship_read_router", None)
+        if router is None:
+            return user
+        result = router.begin(
+            user,
+            event_ref=f"snapshot:{_single_line(source, 60) or 'relationship'}:{uuid.uuid4().hex}",
+            kind="private",
+        )
+        chain_id = str(result.get("chain_id") or "")
+        try:
+            return result.get("user") if isinstance(result.get("user"), dict) else user
+        finally:
+            if chain_id:
+                try:
+                    router.finish(chain_id)
+                except Exception:
+                    pass
+
     @filter.after_message_sent(priority=-110000)
     async def finish_req041_read_chain(self, event: AstrMessageEvent, *args, **kwargs) -> None:
         router = getattr(self, "req041_relationship_read_router", None)
