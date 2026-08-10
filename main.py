@@ -11970,6 +11970,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "【工具调用协议】当前模型兼容接口会严格核对每个 tool_call_id 与工具结果。"
             "需要使用多个工具时，请按顺序逐个调用：每条 assistant 消息只发起一个工具调用，"
             "拿到该工具结果后再决定是否调用下一个；不要并行或批量发起 tool_calls。"
+            "回复当前会话的普通文字时，直接输出最终回复，不要调用 send_message_to_user；"
+            "确需使用该工具发送媒体或主动消息时，plain 文本不得为空，调用同一轮不要额外输出可见正文。"
         )
         req.system_prompt = f"{current_prompt}\n\n{marker}\n{instruction}".strip()
         return True

@@ -88,6 +88,8 @@ class ToolCallContextIntegrityTests(unittest.TestCase):
         self.assertIs(req.func_tool, tool_set)
         self.assertIn("按顺序逐个调用", req.system_prompt)
         self.assertIn("每条 assistant 消息只发起一个工具调用", req.system_prompt)
+        self.assertIn("普通文字时，直接输出最终回复", req.system_prompt)
+        self.assertIn("plain 文本不得为空", req.system_prompt)
 
     def test_tool_guard_does_not_change_non_deepseek_provider(self) -> None:
         self.plugin._llm_request_provider_identity_parts = lambda _event, _req: [

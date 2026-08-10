@@ -245,6 +245,56 @@ class TtsToolFullScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_resp.completion_text, "真正只发这一句。")
         self.assertTrue(event._private_companion_same_session_tool_finalized)
 
+    async def test_empty_same_session_tool_hides_intermediate_text(self):
+        harness = _ResponseHarness()
+        event = SimpleNamespace(unified_msg_origin="default:GroupMessage:10001")
+        tool_resp = LLMResponse(
+            role="assistant",
+            completion_text="这句工具调用附带的中间正文不能提前发送。",
+            tools_call_name=["send_message_to_user"],
+            tools_call_args=[{"messages": [{"type": "plain", "text": ""}]}],
+        )
+
+        await harness.normalize_tts_enhancement_response(event, tool_resp)
+
+        self.assertEqual(tool_resp.completion_text, "")
+        self.assertIsNone(tool_resp.result_chain)
+        self.assertFalse(hasattr(event, "_private_companion_same_session_tool_text"))
+
+    async def test_empty_same_session_tool_is_safe_noop(self):
+        harness = _ToolHarness()
+        event = SimpleNamespace(unified_msg_origin="default:GroupMessage:10001")
+        platform_send = AsyncMock()
+        context = SimpleNamespace(
+            context=SimpleNamespace(
+                event=event,
+                context=SimpleNamespace(send_message=platform_send),
+            )
+        )
+        kwargs = {"messages": [{"type": "plain", "text": ""}]}
+
+        result = await harness._send_message_to_user_tool_with_tts_processing(
+            SimpleNamespace(), context, kwargs
+        )
+
+        self.assertIn("No visible message was sent", result)
+        platform_send.assert_not_awaited()
+
+    async def test_empty_cross_session_tool_keeps_framework_validation(self):
+        harness = _ToolHarness()
+        event = SimpleNamespace(unified_msg_origin="default:GroupMessage:10001")
+        context = SimpleNamespace(context=SimpleNamespace(event=event))
+        kwargs = {
+            "session": "default:FriendMessage:20002",
+            "messages": [{"type": "plain", "text": ""}],
+        }
+
+        result = await harness._send_message_to_user_tool_with_tts_processing(
+            SimpleNamespace(), context, kwargs
+        )
+
+        self.assertIsNone(result)
+
     async def test_reaction_tool_intermediate_text_is_hidden_until_tool_result(self):
         harness = _ResponseHarness()
         event = SimpleNamespace(unified_msg_origin="default:GroupMessage:10001")

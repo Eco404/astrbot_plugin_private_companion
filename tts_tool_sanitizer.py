@@ -75,12 +75,7 @@ class TtsToolSanitizerMixin:
         messages = kwargs.get("messages")
         if not isinstance(messages, list) or not messages:
             return ""
-        try:
-            current_session = str(getattr(event, "unified_msg_origin", "") or "")
-        except Exception:
-            current_session = ""
-        target_session = str(kwargs.get("session") or current_session or "")
-        if not current_session or target_session != current_session:
+        if not self._send_tool_targets_current_session(event, kwargs):
             return ""
         visible_parts: list[str] = []
         for item in messages:
@@ -100,6 +95,31 @@ class TtsToolSanitizerMixin:
                 visible_parts.append(text)
         return "\n".join(visible_parts).strip()
 
+    @staticmethod
+    def _send_tool_targets_current_session(event: Any, kwargs: dict[str, Any]) -> bool:
+        try:
+            current_session = str(getattr(event, "unified_msg_origin", "") or "")
+        except Exception:
+            current_session = ""
+        target_session = str(kwargs.get("session") or current_session or "")
+        return bool(current_session and target_session == current_session)
+
+    def _same_session_tool_has_only_empty_plain(self, event: Any, kwargs: dict[str, Any]) -> bool:
+        if not self._send_tool_targets_current_session(event, kwargs):
+            return False
+        messages = kwargs.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return False
+        for item in messages:
+            if not isinstance(item, dict):
+                return False
+            if str(item.get("type") or "").strip().lower() != "plain":
+                return False
+            text = self._clean_tool_plain_text_tts_markup(item.get("text"))
+            if _redact_outbound_secrets(text, self).strip():
+                return False
+        return True
+
     def _prepare_same_session_send_tool_response(self, event: Any, resp: Any) -> tuple[bool, str]:
         if self._event_requires_direct_same_session_tool_delivery(event):
             return False, ""
@@ -108,14 +128,15 @@ class TtsToolSanitizerMixin:
             if name != "send_message_to_user":
                 continue
             payload = args[index] if index < len(args) and isinstance(args[index], dict) else {}
-            text = self._same_session_tool_text(event, payload)
-            if not text:
+            if not self._send_tool_targets_current_session(event, payload):
                 continue
-            try:
-                setattr(event, "_private_companion_same_session_tool_pending", True)
-                setattr(event, "_private_companion_same_session_tool_text", text)
-            except Exception:
-                pass
+            text = self._same_session_tool_text(event, payload)
+            if text:
+                try:
+                    setattr(event, "_private_companion_same_session_tool_pending", True)
+                    setattr(event, "_private_companion_same_session_tool_text", text)
+                except Exception:
+                    pass
             return True, text
         return False, ""
 
@@ -235,6 +256,18 @@ class TtsToolSanitizerMixin:
             deferred_text = self._defer_same_session_send_tool(event, kwargs)
             if deferred_text:
                 return "Current-session text delivery is deferred to the final assistant response; do not send it again."
+            if (
+                not self._event_requires_direct_same_session_tool_delivery(event)
+                and self._same_session_tool_has_only_empty_plain(event, kwargs)
+            ):
+                logger.info(
+                    "[PrivateCompanion] 已忽略同会话 send_message_to_user 空文本，等待 Agent 输出最终回复: session=%s",
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                )
+                return (
+                    "No visible message was sent because the current-session plain text was empty. "
+                    "Reply once in the final assistant response and do not call this tool again."
+                )
         if not any(
             isinstance(item, dict)
             and (
