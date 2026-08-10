@@ -8157,6 +8157,16 @@ class ProactiveEngineMixin:
             return False
         if isinstance(user, dict) and self._private_user_role(user) == "friend":
             return False
+        if isinstance(user, dict):
+            scope_quota_getter = getattr(self, "_photo_generation_scope_quota_left", None)
+            if callable(scope_quota_getter):
+                scope_left = scope_quota_getter(
+                    proactive=True,
+                    user=user,
+                    user_id=str(user.get("user_id") or ""),
+                )
+                if scope_left is not None and scope_left <= 0:
+                    return False
         if self._daily_token_soft_limit_should_defer("photo_prompt"):
             return False
         if self.photo_generation_backend == "comfyui":

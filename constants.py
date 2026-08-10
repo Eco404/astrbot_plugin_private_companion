@@ -233,6 +233,7 @@ _DATA_STORE_KEYS = (
     "diary_generated_day",
     "recent_photo_generations",
     "recent_photo_continuity",
+    "photo_generation_scope_attempts",
     "photo_reference_feedback",
     "daily_story_plan",
     "detail_enhanced_day",

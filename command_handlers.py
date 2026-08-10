@@ -17,6 +17,7 @@ from astrbot.api.event import AstrMessageEvent
 
 from .constants import DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT
 from .helpers import _flat_get, _missing_optional_model_dependency, _now_ts, _path_text, _photo_group_request_matches, _safe_float, _safe_int, _set_into_config, _single_line, _today_key
+from .photo_generation_scope import PHOTO_GENERATION_SCOPE_LIMIT_KEYS
 from .photo_reference_catalog import (
     CATALOG_VERSION,
     CatalogValidationError,
@@ -713,6 +714,10 @@ class CommandHandlersMixin:
                 "label": "非指令生图处理方式",
             },
             "enable_natural_language_photo_generation": {"type": "bool", "label": "允许规则快判生图/改图"},
+            "photo_generation_private_owner_max_daily": {"type": "int", "min": -1, "max": 100, "label": "主要用户私聊生图每日上限"},
+            "photo_generation_private_friend_max_daily": {"type": "int", "min": -1, "max": 100, "label": "其他陪伴用户私聊生图每日上限"},
+            "photo_generation_group_max_daily": {"type": "int", "min": -1, "max": 100, "label": "群聊生图每日上限"},
+            "photo_generation_proactive_max_daily": {"type": "int", "min": -1, "max": 100, "label": "Bot 主动生图每日上限"},
             "command_photo_generation_max_daily": {"type": "int", "min": -1, "max": 100, "label": "用户请求生图每日上限"},
             "photo_generation_trace_max_size_kb": {"type": "int", "min": 0, "max": 102400, "label": "生图日志单文件大小（KB）"},
             "photo_generation_trace_backup_count": {"type": "int", "min": 0, "max": 20, "label": "生图日志轮转备份数"},
@@ -946,6 +951,10 @@ class CommandHandlersMixin:
             "humanized_state_intensity": "拓展页 -> 功能开关 -> 拟人状态 -> 状态强度",
             "natural_language_photo_generation_mode": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图",
             "enable_natural_language_photo_generation": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 非指令生图/改图",
+            "photo_generation_private_owner_max_daily": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 用户请求生图",
+            "photo_generation_private_friend_max_daily": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 用户请求生图",
+            "photo_generation_group_max_daily": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 用户请求生图",
+            "photo_generation_proactive_max_daily": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 用户请求生图",
             "command_photo_generation_max_daily": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 用户请求生图",
             "photo_generation_trace_max_size_kb": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 生图可观测日志",
             "photo_generation_trace_backup_count": "拓展页 -> 功能开关 -> 长线主动 -> 生图/拍照能力详情 -> 生图可观测日志",
@@ -1076,6 +1085,14 @@ class CommandHandlersMixin:
             "自然语言改图": "natural_language_photo_generation_mode",
             "规则快判生图": "enable_natural_language_photo_generation",
             "规则快判改图": "enable_natural_language_photo_generation",
+            "主要用户私聊生图上限": "photo_generation_private_owner_max_daily",
+            "主用户私聊生图上限": "photo_generation_private_owner_max_daily",
+            "其他陪伴用户私聊生图上限": "photo_generation_private_friend_max_daily",
+            "其他用户私聊生图上限": "photo_generation_private_friend_max_daily",
+            "群聊生图上限": "photo_generation_group_max_daily",
+            "群聊生图每日上限": "photo_generation_group_max_daily",
+            "Bot主动生图上限": "photo_generation_proactive_max_daily",
+            "Bot 主动生图上限": "photo_generation_proactive_max_daily",
             "用户生图上限": "command_photo_generation_max_daily",
             "用户请求生图上限": "command_photo_generation_max_daily",
             "指令生图上限": "command_photo_generation_max_daily",
@@ -1326,7 +1343,10 @@ class CommandHandlersMixin:
         return str(value)
 
     def _companion_manual_format_config_item_value(self, key: str, value: Any) -> str:
-        if str(key or "") == "command_photo_generation_max_daily":
+        if str(key or "") in {
+            "command_photo_generation_max_daily",
+            *PHOTO_GENERATION_SCOPE_LIMIT_KEYS.values(),
+        }:
             limit = _safe_int(value, -1, -1, 100)
             if limit < 0:
                 return "-1（不限量）"
@@ -2937,6 +2957,7 @@ class CommandHandlersMixin:
                     "自拍/头像/角色表情包需要自动套人设或穿搭参考图时，先开启 enable_photo_reference_image；关闭时只按提示词生成。",
                     "非指令生图模式：natural_language_photo_generation_mode，可选 tool_first / rule_fast / off。",
                     "规则快判前置接管需要 enable_natural_language_photo_generation=true；显式指令和 pc_generate_photo 工具不依赖这个开关。",
+                    "会话范围额度：photo_generation_private_owner_max_daily、photo_generation_private_friend_max_daily、photo_generation_group_max_daily、photo_generation_proactive_max_daily；每项均为 -1 不限量、0 不允许、正数为每日限额。",
                     "用户请求上限：command_photo_generation_max_daily，同时作用于显式陪伴生图指令和 pc_generate_photo 工具；-1 表示不限量，0 表示不允许，正数表示每日限额。",
                     "参考图命令：陪伴 参考图 <本地图片路径|图片URL|清空|查看>，也可带图或回复图片；查看会把当前实际参考图发出来检查。",
                     "多参考图库：发送一张或多张图片并使用“陪伴 参考图库 添加 <用途注释>”；支持列表、预览、删除和清空。用途注释写清服装、地点和适用场景，生图时会结合最终画面自动选一张，今日穿搭图不会无条件优先。",
@@ -2952,6 +2973,10 @@ class CommandHandlersMixin:
                 "settings": [
                     "enable_photo_text_action",
                     "natural_language_photo_generation_mode",
+                    "photo_generation_private_owner_max_daily",
+                    "photo_generation_private_friend_max_daily",
+                    "photo_generation_group_max_daily",
+                    "photo_generation_proactive_max_daily",
                     "command_photo_generation_max_daily",
                     "enable_natural_language_photo_generation",
                     "natural_language_photo_generation_max_daily",
@@ -2968,6 +2993,7 @@ class CommandHandlersMixin:
                 ],
                 "suggestions": [
                     "如果误触多，先把 natural_language_photo_generation_mode 调回 tool_first，必要时改 off。",
+                    "如果只有某类会话被禁止或额度用完，先检查对应的四项会话范围额度；不要用总额度代替范围控制。",
                     "如果只有用户明确请求提示额度用完或被禁止，检查 command_photo_generation_max_daily；设为 -1 即不限量，0 表示不允许，不要修改主动带图或规则快判上限。",
                     "如果没反应，先确认 enable_photo_text_action、生图后端、主链工具是否注册；只有 rule_fast 才看规则快判开关和每日上限。",
                     "如果出图后只回“好了”，重点看图片任务回调和结果说明模板，而不是聊天主模型。",
@@ -5024,12 +5050,41 @@ class CommandHandlersMixin:
             event.stop_event()
             return True
         scope_checker = getattr(self, "_photo_generation_scope_allowed", None)
-        if callable(scope_checker) and not scope_checker(event, user_id=user_id):
-            await self._reply(event, "当前会话不在生图使用范围内，请在生图设置中调整使用范围。")
-            event.stop_event()
-            return True
+        photo_scope = ""
         async with self._data_lock:
             user = self._get_user(user_id)
+            scope_getter = getattr(self, "_photo_generation_scope", None)
+            if callable(scope_getter):
+                photo_scope = scope_getter(event, user=user, user_id=user_id)
+            scope_quota_getter = getattr(self, "_photo_generation_scope_quota_left", None)
+            scope_left = (
+                scope_quota_getter(
+                    event,
+                    user=user,
+                    user_id=user_id,
+                    scope=photo_scope,
+                )
+                if callable(scope_quota_getter)
+                else None
+            )
+            scope_blocked = scope_left is not None and scope_left <= 0
+            if not callable(scope_quota_getter) and callable(scope_checker):
+                scope_blocked = not scope_checker(event, user=user, user_id=user_id)
+            if scope_blocked:
+                message_getter = getattr(self, "_photo_generation_scope_quota_block_message", None)
+                message = (
+                    message_getter(
+                        event,
+                        user=user,
+                        user_id=user_id,
+                        scope=photo_scope,
+                    )
+                    if callable(message_getter)
+                    else "当前会话不允许生图/改图，或今天该范围的生图额度已经用完。"
+                )
+                await self._reply(event, message)
+                event.stop_event()
+                return True
             if self._natural_language_photo_quota_left(user) <= 0:
                 await self._reply(event, "今天规则快判生图/改图额度用完了。")
                 event.stop_event()
@@ -5170,6 +5225,14 @@ class CommandHandlersMixin:
             async with self._data_lock:
                 user = self._get_user(user_id)
                 self._note_natural_language_photo_generation_attempt(user, image_path=image_path)
+                scope_notifier = getattr(self, "_note_photo_generation_scope_attempt", None)
+                if callable(scope_notifier):
+                    scope_notifier(
+                        event,
+                        user=user,
+                        user_id=user_id,
+                        scope=photo_scope,
+                    )
                 self._save_data_sync()
         if not image_path:
             await self._reply(
@@ -5251,10 +5314,6 @@ class CommandHandlersMixin:
             event.stop_event()
             return True
         scope_checker = getattr(self, "_photo_generation_scope_allowed", None)
-        if callable(scope_checker) and not scope_checker(event, user_id=user_id):
-            await self._reply(event, "当前会话不在生图使用范围内，请在生图设置中调整使用范围。")
-            event.stop_event()
-            return True
         try:
             safe_has_image = getattr(self, "_private_event_has_image_safe", None)
             if callable(safe_has_image):
@@ -5297,8 +5356,41 @@ class CommandHandlersMixin:
             event.stop_event()
             return True
 
+        photo_scope = ""
         async with self._data_lock:
             user = self._get_user(user_id)
+            scope_getter = getattr(self, "_photo_generation_scope", None)
+            if callable(scope_getter):
+                photo_scope = scope_getter(event, user=user, user_id=user_id)
+            scope_quota_getter = getattr(self, "_photo_generation_scope_quota_left", None)
+            scope_left = (
+                scope_quota_getter(
+                    event,
+                    user=user,
+                    user_id=user_id,
+                    scope=photo_scope,
+                )
+                if callable(scope_quota_getter)
+                else None
+            )
+            scope_blocked = scope_left is not None and scope_left <= 0
+            if not callable(scope_quota_getter) and callable(scope_checker):
+                scope_blocked = not scope_checker(event, user=user, user_id=user_id)
+            if scope_blocked:
+                message_getter = getattr(self, "_photo_generation_scope_quota_block_message", None)
+                message = (
+                    message_getter(
+                        event,
+                        user=user,
+                        user_id=user_id,
+                        scope=photo_scope,
+                    )
+                    if callable(message_getter)
+                    else "当前会话不允许生图/改图，或今天该范围的生图额度已经用完。"
+                )
+                await self._reply(event, message)
+                event.stop_event()
+                return True
             quota_left = self._command_photo_quota_left(user)
             if quota_left is not None and quota_left <= 0:
                 await self._reply(event, self._command_photo_quota_block_message())
@@ -5446,6 +5538,14 @@ class CommandHandlersMixin:
             async with self._data_lock:
                 user = self._get_user(user_id)
                 self._note_command_photo_generation_attempt(user, image_path=image_path)
+                scope_notifier = getattr(self, "_note_photo_generation_scope_attempt", None)
+                if callable(scope_notifier):
+                    scope_notifier(
+                        event,
+                        user=user,
+                        user_id=user_id,
+                        scope=photo_scope,
+                    )
                 self._save_data_sync()
         if not image_path:
             await self._reply(

@@ -11,6 +11,12 @@ from typing import Any
 
 from astrbot.api import logger
 
+from .photo_generation_scope import (
+    PHOTO_GENERATION_SCOPE_LIMIT_KEYS,
+    legacy_photo_generation_scope_limits,
+    normalize_photo_generation_scope_limit,
+)
+
 LEGACY_PROACTIVE_ACTIONS_KEY = "enabled_proactive_actions"
 
 # These fields were removed from the active configuration surface.  Keep the
@@ -155,6 +161,10 @@ _RELATIONSHIP_SWITCH_MIGRATION_VERSION = 1
 _COMMAND_PHOTO_QUOTA_MIGRATION_MARKER = "_command_photo_quota_semantics_version"
 _COMMAND_PHOTO_QUOTA_MIGRATION_VERSION = 1
 
+# v6.1.2 replaces the scope allow-list with four independent daily quotas.
+_PHOTO_SCOPE_QUOTA_MIGRATION_MARKER = "_photo_generation_scope_quota_semantics_version"
+_PHOTO_SCOPE_QUOTA_MIGRATION_VERSION = 1
+
 
 def migrate_flat_config_into_schema_groups(
     config: Any,
@@ -194,6 +204,9 @@ def _migrate_flat_config_into_schema_groups(
 
     relationship_switch_changes = _migrate_relationship_switch_semantics(root, schema_map)
     changed.extend(relationship_switch_changes)
+
+    photo_scope_quota_changes = _migrate_photo_scope_quota_semantics(root, schema_map)
+    changed.extend(photo_scope_quota_changes)
 
     command_photo_quota_changes = _migrate_command_photo_quota_semantics(root, schema_map)
     changed.extend(command_photo_quota_changes)
@@ -411,6 +424,85 @@ def _migrate_command_photo_quota_semantics(
 
     root[_COMMAND_PHOTO_QUOTA_MIGRATION_MARKER] = _COMMAND_PHOTO_QUOTA_MIGRATION_VERSION
     changed.append(f"{_COMMAND_PHOTO_QUOTA_MIGRATION_MARKER}~set")
+    return changed
+
+
+def _migrate_photo_scope_quota_semantics(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Convert the legacy scope allow-list into independent daily quotas once."""
+    if root.get(_PHOTO_SCOPE_QUOTA_MIGRATION_MARKER) == _PHOTO_SCOPE_QUOTA_MIGRATION_VERSION:
+        return []
+
+    legacy_key = "photo_generation_allowed_scopes"
+    legacy_item = schema_map.get(legacy_key) or {}
+    legacy_group_key = str(legacy_item.get("group") or "photo_action_config")
+    group = root.get(legacy_group_key)
+    if not isinstance(group, dict):
+        group = {}
+        root[legacy_group_key] = group
+
+    if legacy_key in group:
+        raw_legacy = group.get(legacy_key)
+    elif legacy_key in root:
+        raw_legacy = root.get(legacy_key)
+    else:
+        raw_legacy = None
+    legacy_limits = legacy_photo_generation_scope_limits(raw_legacy)
+
+    # AstrBot adds newly introduced grouped fields with their schema defaults
+    # before plugin startup.  Four default ``-1`` values therefore still mean
+    # "migrate the legacy list".  A non-default new value, however, proves the
+    # quota form has already been persisted and must remain authoritative even
+    # if an older AstrBot build discarded the private migration marker.
+    existing_limits: dict[str, int] = {}
+    has_nondefault_new_value = False
+    for scope, key in PHOTO_GENERATION_SCOPE_LIMIT_KEYS.items():
+        item = schema_map.get(key) or {}
+        group_key = str(item.get("group") or "photo_action_config")
+        target_group = root.get(group_key)
+        if isinstance(target_group, dict) and key in target_group:
+            raw_value = target_group.get(key)
+        elif key in root:
+            raw_value = root.get(key)
+        else:
+            continue
+        value = normalize_photo_generation_scope_limit(raw_value)
+        existing_limits[scope] = value
+        default_value = normalize_photo_generation_scope_limit(item.get("default", -1))
+        if value != default_value:
+            has_nondefault_new_value = True
+
+    limits = (
+        {
+            scope: existing_limits.get(scope, legacy_limits.get(scope, -1))
+            for scope in PHOTO_GENERATION_SCOPE_LIMIT_KEYS
+        }
+        if has_nondefault_new_value
+        else legacy_limits
+    )
+
+    changed: list[str] = []
+    for scope, key in PHOTO_GENERATION_SCOPE_LIMIT_KEYS.items():
+        item = schema_map.get(key)
+        if not isinstance(item, dict):
+            continue
+        value = normalize_photo_generation_scope_limit(limits.get(scope, -1))
+        group_key = str(item.get("group") or "photo_action_config")
+        target_group = root.get(group_key)
+        if not isinstance(target_group, dict):
+            target_group = {}
+            root[group_key] = target_group
+        if root.get(key) != value:
+            root[key] = value
+            changed.append(f"{key}~scope-quota-v1")
+        if target_group.get(key) != value:
+            target_group[key] = value
+            changed.append(f"{group_key}.{key}~scope-quota-v1")
+
+    root[_PHOTO_SCOPE_QUOTA_MIGRATION_MARKER] = _PHOTO_SCOPE_QUOTA_MIGRATION_VERSION
+    changed.append(f"{_PHOTO_SCOPE_QUOTA_MIGRATION_MARKER}~set")
     return changed
 
 
