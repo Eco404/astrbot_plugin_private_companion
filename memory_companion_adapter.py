@@ -869,6 +869,13 @@ class MemoryCompanionAdapterMixin:
             bridge, "tombstone_scoped_record", namespace, **kwargs
         )
 
+    def _memory_companion_tombstone_scoped_namespace(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "tombstone_scoped_namespace", namespace, **kwargs
+        )
+
     async def _memory_companion_read_profile(
         self,
         profile: str,

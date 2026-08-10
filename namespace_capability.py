@@ -26,7 +26,10 @@ except ImportError:  # pragma: no cover - direct-module test compatibility
 CAPABILITY_NAME = "chat.namespace_memory.v1"
 CAPABILITY_VERSION = "1.0"
 RECORD_KINDS = ("evidence", "memory", "profile_fact", "rule", "summary")
-API_METHODS = ("list_scoped_records", "read_scoped_record", "tombstone_scoped_record", "upsert_scoped_record")
+API_METHODS = (
+    "list_scoped_records", "read_scoped_record", "tombstone_scoped_namespace",
+    "tombstone_scoped_record", "upsert_scoped_record",
+)
 CAPABILITY_FIELDS = (
     "capability_name", "capability_version", "namespace_contract_name", "namespace_contract_version",
     "namespace_contract_fingerprint", "context_fields", "supported_kinds", "supported_purposes",

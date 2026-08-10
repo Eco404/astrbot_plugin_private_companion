@@ -109,6 +109,26 @@ class IdentityAssuranceNamespaceTests(unittest.TestCase):
         self.assertTrue(self.registry.matches_person_subject(created["person_id"], "onebot:10001:0123456789abcdef"))
         self.assertFalse(self.registry.matches_person_subject(created["person_id"], "other-user"))
 
+    def test_explicit_relink_retires_detached_state_and_operation_ids_are_request_bound(self) -> None:
+        created = self.registry.create_or_link(_identity("10001"), operation_id="create-1")
+        secondary = _identity("10002")
+        linked = self.registry.link_identity(created["person_id"], secondary, operation_id="link-1")
+        detached = self.registry.unlink_identity(
+            created["person_id"], secondary, operation_id="unlink-1", dry_run=False,
+        )
+        self.assertTrue(linked["ok"])
+        self.assertTrue(detached["ok"])
+        relinked = self.registry.link_identity(created["person_id"], secondary, operation_id="relink-1")
+        self.assertEqual("identity_relinked", relinked["code"])
+        self.assertNotIn(linked["identity_key"], self.store["unified_person"]["detached_identity_links"])
+        self.assertEqual(relinked, self.registry.link_identity(
+            created["person_id"], secondary, operation_id="relink-1"
+        ))
+        conflict = self.registry.link_identity(
+            created["person_id"], _identity("10003"), operation_id="relink-1"
+        )
+        self.assertEqual("operation_id_conflict", conflict["code"])
+
 
 if __name__ == "__main__":
     unittest.main()

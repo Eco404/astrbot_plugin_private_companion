@@ -625,17 +625,41 @@ class UnifiedPersonRegistry:
             person_id = _text(person_id, "person_id")
             normalized = _identity(identity)
             op = _operation_id(operation_id)
-            _text(actor_id, "actor_id", 120)
+            actor = _text(actor_id, "actor_id", 120)
         except ValueError:
             return {"ok": False, "state": "invalid", "code": "invalid_request", "person_id": ""}
         if not op:
             return {"ok": False, "state": "pending", "code": "explicit_operation_required", "person_id": person_id}
         key = build_identity_key(normalized)
+        operation_key = f"req036.link:{op}"
+        request_fingerprint = _fingerprint({"person_id": person_id, "identity_key": key, "actor_id": actor})
         with _LOCK:
             root = _root(self._store)
+            prior_operation = root["operations"].get(operation_key)
+            if isinstance(prior_operation, dict):
+                if prior_operation.get("request_fingerprint") != request_fingerprint:
+                    return {
+                        "ok": False, "state": "invalid", "code": "operation_id_conflict",
+                        "operation_id": op, "person_id": person_id, "identity_key": key, "changed": False,
+                    }
+                cached = prior_operation.get("result")
+                return deepcopy(cached) if isinstance(cached, dict) else {
+                    "ok": False, "state": "invalid", "code": "operation_record_corrupt",
+                    "operation_id": op, "person_id": person_id, "identity_key": key, "changed": False,
+                }
+            if operation_key in root["operations"]:
+                return {
+                    "ok": False, "state": "invalid", "code": "operation_record_corrupt",
+                    "operation_id": op, "person_id": person_id, "identity_key": key, "changed": False,
+                }
             profile = root["profiles"].get(person_id)
             if not isinstance(profile, dict):
                 return {"ok": False, "state": "pending", "code": "person_not_found", "person_id": person_id}
+            if profile.get("profile_status", "active") != "active":
+                return {
+                    "ok": False, "state": "pending", "code": "person_not_active",
+                    "person_id": person_id, "identity_key": key, "changed": False,
+                }
             try:
                 current_projection = build_person_projection(self._store, person_id)
             except (TypeError, ValueError, OverflowError):
@@ -660,7 +684,7 @@ class UnifiedPersonRegistry:
                 return {"ok": False, "state": "invalid", "code": "identity_conflict", "person_id": person_id}
             if isinstance(prior, dict) and prior.get("person_id") == person_id and prior.get("status") == "active":
                 projection = build_person_projection(self._store, person_id)
-                return {
+                result = {
                     "ok": bool(projection and not validate_projection(projection)),
                     "state": "resolved" if projection and not validate_projection(projection) else "invalid",
                     "code": "already_linked",
@@ -669,8 +693,37 @@ class UnifiedPersonRegistry:
                     "projection": projection,
                     "changed": False,
                 }
+                root["operations"][operation_key] = {
+                    "request_fingerprint": request_fingerprint, "result": deepcopy(result),
+                }
+                return result
+            detached = root["detached_identity_links"].get(key)
+            relinking = isinstance(detached, dict)
+            if relinking:
+                try:
+                    detached_identity = _identity(detached.get("identity"))
+                    detached_valid = (
+                        detached.get("person_id") == person_id
+                        and detached.get("identity_key") == key
+                        and detached.get("status") == "detached"
+                        and build_identity_key(detached_identity) == key
+                    )
+                except (TypeError, ValueError):
+                    detached_valid = False
+                if not detached_valid:
+                    return {
+                        "ok": False, "state": "invalid", "code": "detached_identity_conflict",
+                        "person_id": person_id, "identity_key": key, "changed": False,
+                    }
             now = _now()
-            root["identity_links"][key] = {"identity_key": key, "identity": normalized, "person_id": person_id, "identity_assurance": "explicit_linked", "status": "active", "updated_at": now, "last_operation_id": op}
+            root["identity_links"][key] = {
+                "identity_key": key, "identity": normalized, "person_id": person_id,
+                "identity_assurance": "explicit_linked", "status": "active",
+                "created_at": str(detached.get("created_at") or now) if relinking else now,
+                "updated_at": now, "last_operation_id": op,
+            }
+            if relinking:
+                root["detached_identity_links"].pop(key, None)
             if key not in identity_keys:
                 identity_keys.append(key)
             profile["identity_assurance"] = "explicit_linked"
@@ -685,9 +738,19 @@ class UnifiedPersonRegistry:
                 "operation_id": op,
                 "source_event_count": 0,
             }
-            root["audit_events"].append({"event_id": op, "action": "link_identity", "actor_id": str(actor_id), "person_id": person_id, "at": now})
+            action = "relink_identity" if relinking else "link_identity"
+            root["audit_events"].append({"event_id": op, "action": action, "actor_id": actor, "person_id": person_id, "at": now})
             projection = build_person_projection(self._store, person_id)
-            return {"ok": bool(projection and not validate_projection(projection)), "state": "resolved" if projection and not validate_projection(projection) else "invalid", "code": "identity_linked", "person_id": person_id, "identity_key": key, "projection": projection, "changed": True}
+            result = {
+                "ok": bool(projection and not validate_projection(projection)),
+                "state": "resolved" if projection and not validate_projection(projection) else "invalid",
+                "code": "identity_relinked" if relinking else "identity_linked",
+                "person_id": person_id, "identity_key": key, "projection": projection, "changed": True,
+            }
+            root["operations"][operation_key] = {
+                "request_fingerprint": request_fingerprint, "result": deepcopy(result),
+            }
+            return result
 
     def unlink_identity(
         self,
