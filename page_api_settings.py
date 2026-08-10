@@ -12,6 +12,7 @@ from .helpers import (
     _normalize_timezone_setting,
     _path_text,
     normalize_bot_relationship_cards,
+    normalize_photo_generation_scopes,
 )
 from .photo_reference_catalog import CatalogValidationError, validate_and_serialize
 from .relationship_ledger import normalize_relationship_positive_stage_cap_key
@@ -479,20 +480,7 @@ class PageSettingNormalizerMixin:
             mode = str(value or "auto").strip().lower()
             return mode if mode in {"auto", "comfyui", "sdgen", "external", "tool_call"} else "auto"
         if key == "photo_generation_allowed_scopes":
-            raw_items = value
-            if isinstance(raw_items, str):
-                try:
-                    parsed = json.loads(raw_items)
-                    raw_items = parsed if isinstance(parsed, list) else re.split(r"[\n,，、;；]+", raw_items)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    raw_items = re.split(r"[\n,，、;；]+", raw_items)
-            allowed = {"private_owner", "private_friend", "group", "proactive"}
-            result = []
-            for item in raw_items if isinstance(raw_items, (list, tuple, set)) else []:
-                scope = str(item or "").strip().lower()
-                if scope in allowed and scope not in result:
-                    result.append(scope)
-            return result or ["private_owner", "private_friend", "group", "proactive"]
+            return normalize_photo_generation_scopes(value)
         if key == "photo_reference_catalog":
             raw_items = value
             if isinstance(value, str):

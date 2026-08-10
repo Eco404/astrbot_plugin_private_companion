@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from astrbot_plugin_private_companion.group_observation import GroupObservationMixin
 from astrbot_plugin_private_companion.group_wakeup import GroupWakeupMixin
@@ -14,8 +15,68 @@ class _InterjectionHarness(GroupObservationMixin):
     enable_group_interjection = True
 
 
+class _RepeatHarness(_InterjectionHarness):
+    enable_group_repeat_follow = True
+    group_repeat_count_distinct_users_only = False
+    group_repeat_trigger_threshold = 3
+    group_repeat_follow_probability = 1.0
+    group_repeat_interrupt_probability = 0.0
+    group_repeat_interrupt_probability_step = 0.0
+    group_repeat_interrupt_image_path = ""
+    group_repeat_interrupt_text = "禁止复读"
+    group_interject_max_daily = 12
+
+    def __init__(self) -> None:
+        self.replies: list[tuple[str, str]] = []
+
+    @staticmethod
+    def _compact_repeat_text(text: str) -> str:
+        return str(text or "").strip()
+
+    @staticmethod
+    def _group_topic_signature(text: str) -> str:
+        return str(text or "").strip()
+
+    async def _reply_with_optional_media(
+        self,
+        _event,
+        text: str,
+        *,
+        image_path: str = "",
+        quote_message_id: str = "",
+    ) -> None:
+        self.replies.append((text, image_path))
+
+    def _group_interjection_allowed(self, group, text):
+        raise AssertionError("general interjection must stay disabled in high-intensity mode")
+
+
 class _WakeupHarness(GroupWakeupMixin):
     enable_group_wakeup_enhancement = True
+
+    def __init__(self) -> None:
+        self.data = {}
+        self.web_exploration_interests = ""
+        self.group_wakeup_interest_keywords = []
+        self.group_wakeup_context_words = []
+        self.group_wakeup_generated_keyword_limit = 24
+        self.group_wakeup_interest_probability = 0.2
+        self.group_wakeup_cooldown_seconds = 0
+        self.group_wakeup_fatigue_limit = 100
+        self.group_wakeup_fatigue_decay_minutes = 10
+        self.group_wakeup_log_limit = 80
+        self.enable_group_wakeup_question = False
+        self.enable_group_wakeup_cold_group = False
+
+    @staticmethod
+    def _parse_text_list_config(value, *, limit=40):
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()][:limit]
+        return [item.strip() for item in str(value or "").split(",") if item.strip()][:limit]
+
+    @staticmethod
+    def _group_wakeup_topic_interest_weight(group, word, *, sender_id, text, group_id):
+        return {"multiplier": 1.0, "score": 0.0, "reason": ""}
 
 
 class _QuotedLinkHarness(ForwardMessageMixin):
@@ -35,6 +96,15 @@ class _WakeEvent:
 
     def get_sender_id(self) -> str:
         raise AssertionError("wakeup messages must not enter the proactive interjection path")
+
+
+class _RepeatEvent:
+    is_wake = False
+    is_at_or_wake_command = False
+    private_companion_group_quoted_link_payload = False
+
+    def get_sender_id(self) -> str:
+        return "10001"
 
 
 class GroupLinkReplyGuardTests(unittest.IsolatedAsyncioTestCase):
@@ -106,6 +176,26 @@ class GroupLinkReplyGuardTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(wakeup, {})
+
+    def test_interest_probability_miss_blocks_general_interjection_fallthrough(self) -> None:
+        self.wakeup.group_wakeup_interest_keywords = ["摄影"]
+        scene = {"talking_to": "group", "trigger": "normal"}
+
+        with patch("astrbot_plugin_private_companion.group_wakeup.random.random", return_value=0.9):
+            wakeup = self.wakeup._evaluate_group_wakeup(
+                {},
+                scene=scene,
+                sender_id="10001",
+                sender_name="群友",
+                text="今天出去拍摄影素材",
+                group_id="20001",
+            )
+
+        self.assertEqual(wakeup, {})
+        miss = scene.get("interest_keyword_probability_miss")
+        self.assertIsInstance(miss, dict)
+        self.assertEqual(miss.get("words"), ["摄影"])
+        self.assertFalse(self.wakeup._group_wakeup_allows_general_interjection(scene))
 
     def test_question_beside_qq_boilerplate_keeps_only_user_text(self) -> None:
         text = "这个视频讲什么？ 当前QQ版本不支持此应用，请升级"
@@ -182,6 +272,24 @@ class GroupLinkReplyGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_wakeup_message_does_not_compete_with_interjection(self) -> None:
         await self.interjection._maybe_group_interject(_WakeEvent(), {}, "有没有人知道这个怎么弄？")
+
+    async def test_repeat_still_works_when_general_interjection_is_disabled(self) -> None:
+        harness = _RepeatHarness()
+        group = {}
+        event = _RepeatEvent()
+
+        with patch("astrbot_plugin_private_companion.group_observation.random.random", return_value=0.5):
+            for _ in range(3):
+                await harness._maybe_group_interject(
+                    event,
+                    group,
+                    "复读测试",
+                    allow_interjection=False,
+                )
+
+        self.assertEqual(harness.replies, [("复读测试", "")])
+        self.assertEqual(group["repeat_follow_state"]["count"], 3)
+        self.assertTrue(group["repeat_follow_state"]["acted"])
 
 
 if __name__ == "__main__":

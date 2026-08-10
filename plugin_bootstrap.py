@@ -28,6 +28,7 @@ from .helpers import (
     _set_into_config,
     _set_today_key_timezone,
     _single_line,
+    normalize_photo_generation_scopes,
 )
 from .p5_attestation import P5AttestationRegistry
 from .plugin_identity import PLUGIN_ID, PLUGIN_VERSION, plugin_identity_snapshot
@@ -58,6 +59,10 @@ DEFAULT_NEWS_SOURCES = "\n".join(
         "Ars Technica|https://feeds.arstechnica.com/arstechnica/index",
     ]
 )
+
+def _normalize_photo_generation_scopes(value: Any) -> list[str]:
+    """Keep explicit empty selections while defaulting missing legacy config."""
+    return normalize_photo_generation_scopes(value, default_if_missing=True)
 
 LEGACY_DEFAULT_NEWS_SOURCES = "\n".join(
     [
@@ -1056,22 +1061,9 @@ def _initialize_photo_and_expression_config(self: Any, c: Any) -> None:
     self.enable_photo_text_action = self._cfg_bool(
         c, "enable_photo_text_action", bool(self._cfg_raw(c, "allow_photo_text_action", legacy_photo_enabled))
     )
-    raw_photo_scopes = self._cfg_raw(c, "photo_generation_allowed_scopes", None)
-    if isinstance(raw_photo_scopes, str):
-        raw_photo_scopes = re.split(r"[\\n,，、;；]+", raw_photo_scopes)
-    if not isinstance(raw_photo_scopes, (list, tuple, set)):
-        raw_photo_scopes = []
-    allowed_photo_scopes = {
-        str(item or "").strip().lower()
-        for item in raw_photo_scopes
-        if str(item or "").strip().lower() in {"private_owner", "private_friend", "group", "proactive"}
-    }
-    self.photo_generation_allowed_scopes = sorted(allowed_photo_scopes) or [
-        "private_owner",
-        "private_friend",
-        "group",
-        "proactive",
-    ]
+    self.photo_generation_allowed_scopes = _normalize_photo_generation_scopes(
+        self._cfg_raw(c, "photo_generation_allowed_scopes", None)
+    )
     self.enable_photo_reference_image = self._cfg_bool(c, "enable_photo_reference_image", False)
     self.enable_group_nsfw_private_fallback = self._cfg_bool(c, "enable_group_nsfw_private_fallback", False)
     self.group_nsfw_image_review_timeout_seconds = min(
@@ -1215,6 +1207,83 @@ def _initialize_review_and_group_config(self: Any, c: Any) -> None:
     self.enable_relationship_state_machine = self._cfg_bool(c, "enable_relationship_state_machine", True)
     self.enable_emotion_simulation = self._cfg_bool(c, "enable_emotion_simulation", True)
     self.enable_relationship_violation_penalties = self._cfg_bool(c, "enable_relationship_violation_penalties", True)
+    self.enable_relationship_boundary_feedback = self._cfg_bool(c, "enable_relationship_boundary_feedback", True)
+    self.enable_relationship_boundary_stage = self._cfg_bool(c, "enable_relationship_boundary_stage", True)
+    self.enable_relationship_boundary_apology = self._cfg_bool(c, "enable_relationship_boundary_apology", True)
+    self.enable_relationship_boundary_bottom_line = self._cfg_bool(c, "enable_relationship_boundary_bottom_line", True)
+    self.relationship_boundary_tier_adaptive = self._cfg_bool(c, "relationship_boundary_tier_adaptive", True)
+    self.relationship_boundary_penalty_light = self._cfg_int(c, "relationship_boundary_penalty_light", 4, 1, 60)
+    self.relationship_boundary_penalty_mid = self._cfg_int(c, "relationship_boundary_penalty_mid", 7, 1, 60)
+    self.relationship_boundary_penalty_severe = self._cfg_int(c, "relationship_boundary_penalty_severe", 12, 1, 60)
+    self.relationship_boundary_penalty_bottom_line = self._cfg_int(c, "relationship_boundary_penalty_bottom_line", 14, 1, 60)
+    self.relationship_boundary_stage_avoid_points = self._cfg_int(c, "relationship_boundary_stage_avoid_points", 6, 1, 120)
+    self.relationship_boundary_stage_forbid_points = self._cfg_int(c, "relationship_boundary_stage_forbid_points", 12, 1, 120)
+    self.relationship_boundary_stage_reflect_points = self._cfg_int(c, "relationship_boundary_stage_reflect_points", 20, 1, 120)
+    if self.relationship_boundary_stage_forbid_points < self.relationship_boundary_stage_avoid_points:
+        self.relationship_boundary_stage_forbid_points = self.relationship_boundary_stage_avoid_points
+    if self.relationship_boundary_stage_reflect_points < self.relationship_boundary_stage_forbid_points:
+        self.relationship_boundary_stage_reflect_points = self.relationship_boundary_stage_forbid_points
+    self.relationship_boundary_cold_minutes = self._cfg_int(c, "relationship_boundary_cold_minutes", 180, 10, 1440)
+    self.relationship_boundary_apology_restore_ratio = self._cfg_unit_interval(c, "relationship_boundary_apology_restore_ratio", 0.6, 0.0)
+    self.relationship_boundary_apology_duplicate_limit = self._cfg_int(c, "relationship_boundary_apology_duplicate_limit", 3, 1, 20)
+    self.relationship_boundary_apology_speedup_multiplier = self._cfg_float(c, "relationship_boundary_apology_speedup_multiplier", 3.0, 1.0, 10.0)
+    self.relationship_boundary_recover_ratio_light = self._cfg_unit_interval(c, "relationship_boundary_recover_ratio_light", 0.5, 0.0)
+    self.relationship_boundary_recover_ratio_mid = self._cfg_unit_interval(c, "relationship_boundary_recover_ratio_mid", 0.33, 0.0)
+    self.relationship_boundary_recover_ratio_severe = self._cfg_unit_interval(c, "relationship_boundary_recover_ratio_severe", 0.25, 0.0)
+    self.enable_relationship_boundary_vent = self._cfg_bool(c, "enable_relationship_boundary_vent", True)
+    self.enable_relationship_boundary_owner_report = self._cfg_bool(c, "enable_relationship_boundary_owner_report", True)
+    self.relationship_boundary_vent_targets = self._cfg_raw(c, "relationship_boundary_vent_targets", [])
+    self.relationship_boundary_vent_scene_template = self._cfg_str(c, "relationship_boundary_vent_scene_template", "")
+    self.relationship_boundary_bottom_line_baseline = self._cfg_str(c, "relationship_boundary_bottom_line_baseline", "")
+    self.relationship_boundary_tone_confession = self._cfg_str(
+        c,
+        "relationship_boundary_tone_confession",
+        "把这次表达当作心意，不当作冒犯；结合当前关系自然害羞、迟疑或温和说明节奏，不必机械拒绝。",
+    )
+    self.relationship_boundary_tone_light = self._cfg_str(
+        c,
+        "relationship_boundary_tone_light",
+        "轻微降低亲密度，带一点迟疑或回避并自然说明节奏；不要把普通互动渲染成严重冒犯。",
+    )
+    self.relationship_boundary_tone_mid = self._cfg_str(
+        c,
+        "relationship_boundary_tone_mid",
+        "平静而明确地划清界限，减少主动贴近和暧昧回应；可以说明原因，但不要反复说教。",
+    )
+    self.relationship_boundary_tone_severe = self._cfg_str(
+        c,
+        "relationship_boundary_tone_severe",
+        "明显收住亲密表达，直接说明不舒服并拒绝继续；保持角色口吻，不使用系统式警告。",
+    )
+    self.relationship_boundary_tone_bottom_line = self._cfg_str(
+        c,
+        "relationship_boundary_tone_bottom_line",
+        "明确表达这触碰了重要底线，受伤和距离感可以真实存在；不要功能化播报惩罚，也不要立即恢复亲密。",
+    )
+    self.relationship_boundary_tone_silent = self._cfg_str(
+        c,
+        "relationship_boundary_tone_silent",
+        "关系尚浅时不必长篇袒露脆弱，可以安静收住互动并记住这次不舒服。",
+    )
+    self.relationship_boundary_tone_communicate = self._cfg_str(
+        c,
+        "relationship_boundary_tone_communicate",
+        "关系很深时可以因为信任而说清为什么难过或生气，但亲密关系不等于放弃边界。",
+    )
+    for _boundary_level, _boundary_default in {
+        "light": 0.15,
+        "mid": 0.35,
+        "severe": 0.6,
+        "bottom_line": 0.9,
+    }.items():
+        setattr(self, f"relationship_boundary_vent_probability_{_boundary_level}", self._cfg_unit_interval(c, f"relationship_boundary_vent_probability_{_boundary_level}", _boundary_default, 0.0))
+    for _boundary_level, _boundary_default in {
+        "light": 0.12,
+        "mid": 0.3,
+        "severe": 0.55,
+        "bottom_line": 0.85,
+    }.items():
+        setattr(self, f"relationship_boundary_owner_report_probability_{_boundary_level}", self._cfg_unit_interval(c, f"relationship_boundary_owner_report_probability_{_boundary_level}", _boundary_default, 0.0))
     self.relationship_violation_recovery_minutes_per_point = self._cfg_int(
         c,
         "relationship_violation_recovery_minutes_per_point",

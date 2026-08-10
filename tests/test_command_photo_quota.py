@@ -208,7 +208,7 @@ class CommandPhotoQuotaTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("管理员已关闭", harness.replies[0])
         self.assertFalse(harness.generated)
 
-    async def test_tool_rejects_non_target_user_before_backend(self) -> None:
+    async def test_tool_uses_scope_and_quota_instead_of_legacy_target_permission(self) -> None:
         harness = _ToolQuotaHarness(0, used=0)
         harness._is_target_private_user = lambda _user_id, _user: False
 
@@ -219,7 +219,7 @@ class CommandPhotoQuotaTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(payload["status"], "unauthorized")
+        self.assertEqual(payload["status"], "quota_exhausted")
         self.assertFalse(payload["generated"])
         self.assertFalse(payload["sent"])
         self.assertTrue(payload["must_not_claim_sent"])

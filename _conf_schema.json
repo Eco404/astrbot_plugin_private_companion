@@ -5970,7 +5970,7 @@
   "daily_creative_config": {
     "description": "日常问候与创作",
     "type": "object",
-    "hint": "控制早晚问候、主动分享概率和 Bot 私下创作行为。",
+    "hint": "控制早晚问候、主动分享概率和 Bot 私下创作行为。私下创作目前仍未经充分打磨，生成质量、内容连贯性和最终呈现效果可能不尽人意。",
     "items": {
       "enable_daily_greetings": {
         "description": "启用早午晚锚点问候",
@@ -6012,7 +6012,7 @@
       "enable_creative_writing": {
         "description": "启用私下创作行为",
         "type": "bool",
-        "hint": "开启后，Bot 会在闲暇时因为生活小事、日记碎片或梦境余温产生创作灵感，可能写小说、诗、随笔、剧本、设定集等文本；这是可选的私下行为，不会按小时生产，也不会一次写完整篇。",
+        "hint": "开启后，Bot 会在闲暇时因为生活小事、日记碎片或梦境余温产生创作灵感，可能写小说、诗、随笔、剧本、设定集等文本；这是可选的私下行为，不会按小时生产，也不会一次写完整篇。该功能目前仍未经充分打磨，实际呈现效果可能不尽人意。",
         "default": true
       },
       "enable_creative_work_read_guard": {
@@ -9785,7 +9785,7 @@
       "photo_generation_allowed_scopes": {
         "description": "生图使用范围",
         "type": "list",
-        "hint": "可选：主要用户私聊、其他陪伴用户私聊、群聊、Bot 主动生图。留空按全部范围开放。",
+        "hint": "可选：主要用户私聊、其他陪伴用户私聊、群聊、Bot 主动生图。未选择任何范围时关闭全部生图请求。",
         "render_type": "checkbox",
         "options": ["private_owner", "private_friend", "group", "proactive"],
         "labels": ["主要用户私聊", "其他陪伴用户私聊", "群聊", "Bot 主动生图"],
@@ -11793,11 +11793,298 @@
       "enable_relationship_violation_penalties": {
         "description": "启用关系底线余波",
         "type": "bool",
-        "hint": "仅对明确针对 Bot 的强迫、威胁或贬损保留短期余波；玩笑、引用和用户自己的相处边界不会触发。关闭后不再新增惩罚，但已记录状态仍可自然恢复。",
+        "hint": "统一关系边界反馈总开关。对明确指向 Bot 的亲密动作要求、纠缠强迫、恶意贬损按当前关系档位产生自然余波；普通摸摸/抱抱、玩笑、引用和用户自己的相处边界不会触发。关闭后不再新增惩罚，但已有状态仍可自然恢复。点开本项下方可继续配置扣分、恢复、吐槽和转达。",
         "default": true,
         "condition": {
           "enable_emotion_simulation": true
         }
+      },
+      "enable_relationship_boundary_feedback": {
+        "description": "启用档位边界判断",
+        "type": "bool",
+        "hint": "开启后，明确的亲密动作会先判断适合的最低关系档位，再与当前好感档位比较；单纯表达喜欢只产生短时害羞/迟疑，不扣分。主人身份自动豁免。模型复核关闭时仍有保守本地快判。",
+        "default": true,
+        "condition": {
+          "enable_relationship_violation_penalties": true
+        }
+      },
+      "enable_relationship_boundary_stage": {
+        "description": "启用越界阶段推进",
+        "type": "bool",
+        "hint": "开启后按未恢复负荷依次进入回避、明确拒绝和冷静反思；关闭后仍可扣分和恢复，但不推进表达阶段。",
+        "default": true,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "enable_relationship_boundary_apology": {
+        "description": "允许道歉修复",
+        "type": "bool",
+        "hint": "开启后，真诚道歉可在可恢复额度内返还部分关系分并加速自然恢复；反问和讽刺不会按道歉处理。",
+        "default": true,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "enable_relationship_boundary_bottom_line": {
+        "description": "启用底线递进处理",
+        "type": "bool",
+        "hint": "开启后恶意踩底线会单独累计，第三次及以后按现有关系策略降一档；关闭后同类内容只按严重越界处理。",
+        "default": true,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_tier_adaptive": {
+        "description": "按关系档位调节",
+        "type": "bool",
+        "hint": "高好感关系的单次扣分更缓和、自然恢复更快；低好感关系更谨慎、更难立刻恢复。不会改变主人豁免和底线判定。",
+        "default": true,
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
+      },
+      "relationship_boundary_penalty_light": {
+        "description": "轻度越界扣分",
+        "type": "int",
+        "hint": "行为仅比当前关系高一个档位时的基础扣分，实际值还会受档位保护和统一账本上限约束。",
+        "slider": {"min": 1, "max": 30, "step": 1},
+        "default": 4,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_penalty_mid": {
+        "description": "中度越界扣分",
+        "type": "int",
+        "hint": "行为比当前关系高两个档位时的基础扣分。",
+        "slider": {"min": 1, "max": 40, "step": 1},
+        "default": 7,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_penalty_severe": {
+        "description": "严重越界扣分",
+        "type": "int",
+        "hint": "跨越三个以上档位、明确纠缠强迫或露骨骚扰时的基础扣分。",
+        "slider": {"min": 1, "max": 60, "step": 1},
+        "default": 12,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_penalty_bottom_line": {
+        "description": "踩底线扣分",
+        "type": "int",
+        "hint": "恶意贬低角色、角色珍视之物或在意的人时的基础扣分；第三次及以后还会按现有关系策略降一档并写入账本。",
+        "slider": {"min": 1, "max": 60, "step": 1},
+        "default": 14,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_stage_avoid_points": {
+        "description": "开始回避的累计值",
+        "type": "int",
+        "hint": "未恢复的边界负荷达到该值后，角色会降低亲密度并略微回避。",
+        "slider": {"min": 1, "max": 60, "step": 1},
+        "default": 6,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_stage_forbid_points": {
+        "description": "明确拒绝的累计值",
+        "type": "int",
+        "hint": "达到该值后，角色会更明确地说明边界，避免用撒娇或玩笑冲淡拒绝。",
+        "slider": {"min": 1, "max": 90, "step": 1},
+        "default": 12,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_stage_reflect_points": {
+        "description": "冷静反思的累计值",
+        "type": "int",
+        "hint": "达到该值后进入更克制的冷静阶段，主动亲密候选会被现有情绪门延后。",
+        "slider": {"min": 1, "max": 120, "step": 1},
+        "default": 20,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_cold_minutes": {
+        "description": "冷静阶段最长分钟",
+        "type": "int",
+        "hint": "反复越界或踩底线后的最长冷静时长；自然恢复和真诚道歉可以提前缓和。",
+        "slider": {"min": 10, "max": 1440, "step": 10},
+        "default": 180,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_apology_restore_ratio": {
+        "description": "道歉恢复比例",
+        "type": "float",
+        "hint": "真诚道歉最多恢复当前边界负荷的比例，仍受本次事件可恢复额度限制；同类再犯会追回已恢复部分。",
+        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "default": 0.6,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_apology_duplicate_limit": {
+        "description": "同类道歉有效次数",
+        "type": "int",
+        "hint": "同一类边界事件累计接受多少次道歉后不再自动恢复，避免反复越界、反复道歉无限重置。",
+        "slider": {"min": 1, "max": 20, "step": 1},
+        "default": 3,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_apology_speedup_multiplier": {
+        "description": "道歉后恢复加速倍数",
+        "type": "float",
+        "hint": "接受真诚道歉后，自然恢复计时临时加速的倍数；只影响允许恢复的额度，不会抹掉永久扣分。",
+        "slider": {"min": 1, "max": 10, "step": 0.5},
+        "default": 3.0,
+        "condition": {"enable_relationship_boundary_apology": true}
+      },
+      "relationship_boundary_recover_ratio_light": {
+        "description": "轻度事件可恢复比例",
+        "type": "float",
+        "hint": "轻度越界扣分中允许随时间或道歉恢复的比例，其余部分作为真实关系影响保留。",
+        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "default": 0.5,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_recover_ratio_mid": {
+        "description": "中度事件可恢复比例",
+        "type": "float",
+        "hint": "中度越界扣分中允许恢复的比例。",
+        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "default": 0.33,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_recover_ratio_severe": {
+        "description": "严重事件可恢复比例",
+        "type": "float",
+        "hint": "严重越界扣分中允许恢复的比例；踩底线事件会在此基础上再减半。",
+        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "default": 0.25,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "enable_relationship_boundary_vent": {
+        "description": "允许向亲近对象吐槽",
+        "type": "bool",
+        "hint": "按严重程度低频把真实边界事件写入当天生活叙事，表现为角色向亲近对象倾诉；不会覆盖已有日程，也不会保存原消息全文。",
+        "default": true,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_vent_targets": {
+        "description": "倾诉对象",
+        "type": "list",
+        "hint": "可填写角色设定中可信赖的朋友、姐姐等名字；留空时使用泛称“亲近的朋友”。",
+        "default": [],
+        "condition": {"enable_relationship_boundary_vent": true}
+      },
+      "relationship_boundary_vent_scene_template": {
+        "description": "倾诉场景模板",
+        "type": "text",
+        "hint": "可使用 {target}、{who}、{level}、{feeling}、{reason} 占位符；留空时使用自然的默认生活叙事。模板无效会自动回退，不会中断消息处理。",
+        "default": "",
+        "condition": {"enable_relationship_boundary_vent": true}
+      },
+      "relationship_boundary_vent_probability_light": {
+        "description": "轻度事件倾诉概率",
+        "type": "float",
+        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "default": 0.15,
+        "condition": {"enable_relationship_boundary_vent": true}
+      },
+      "relationship_boundary_vent_probability_mid": {
+        "description": "中度事件倾诉概率",
+        "type": "float",
+        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "default": 0.35,
+        "condition": {"enable_relationship_boundary_vent": true}
+      },
+      "relationship_boundary_vent_probability_severe": {
+        "description": "严重事件倾诉概率",
+        "type": "float",
+        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "default": 0.6,
+        "condition": {"enable_relationship_boundary_vent": true}
+      },
+      "relationship_boundary_vent_probability_bottom_line": {
+        "description": "底线事件倾诉概率",
+        "type": "float",
+        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "default": 0.9,
+        "condition": {"enable_relationship_boundary_vent": true}
+      },
+      "enable_relationship_boundary_owner_report": {
+        "description": "允许向主要用户转达",
+        "type": "bool",
+        "hint": "次要用户越界后，按严重程度低频向主要用户自然转达。事件也会进入“边界转达”主动能力候选；已直接转达的事件不会再次主动复述。",
+        "default": true,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_owner_report_probability_light": {
+        "description": "轻度事件转达概率",
+        "type": "float",
+        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "default": 0.12,
+        "condition": {"enable_relationship_boundary_owner_report": true}
+      },
+      "relationship_boundary_owner_report_probability_mid": {
+        "description": "中度事件转达概率",
+        "type": "float",
+        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "default": 0.3,
+        "condition": {"enable_relationship_boundary_owner_report": true}
+      },
+      "relationship_boundary_owner_report_probability_severe": {
+        "description": "严重事件转达概率",
+        "type": "float",
+        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "default": 0.55,
+        "condition": {"enable_relationship_boundary_owner_report": true}
+      },
+      "relationship_boundary_owner_report_probability_bottom_line": {
+        "description": "底线事件转达概率",
+        "type": "float",
+        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "default": 0.85,
+        "condition": {"enable_relationship_boundary_owner_report": true}
+      },
+      "relationship_boundary_bottom_line_baseline": {
+        "description": "角色专属底线基线",
+        "type": "text",
+        "hint": "可填写角色珍视的事物、在意的人、创伤和不可接受的恶意行为，仅供模型复核参考；普通玩笑和情绪发泄仍不应判为踩底线。",
+        "default": "",
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_tone_confession": {
+        "description": "收到表白时的反应",
+        "type": "text",
+        "hint": "只约束表达方式，不扣分。建议描述角色会害羞、迟疑、接受或说明节奏的方式。",
+        "default": "把这次表达当作心意，不当作冒犯；结合当前关系自然害羞、迟疑或温和说明节奏，不必机械拒绝。",
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_tone_light": {
+        "description": "轻度越界反应",
+        "type": "text",
+        "default": "轻微降低亲密度，带一点迟疑或回避并自然说明节奏；不要把普通互动渲染成严重冒犯。",
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_tone_mid": {
+        "description": "中度越界反应",
+        "type": "text",
+        "default": "平静而明确地划清界限，减少主动贴近和暧昧回应；可以说明原因，但不要反复说教。",
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_tone_severe": {
+        "description": "严重越界反应",
+        "type": "text",
+        "default": "明显收住亲密表达，直接说明不舒服并拒绝继续；保持角色口吻，不使用系统式警告。",
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_tone_bottom_line": {
+        "description": "踩底线反应",
+        "type": "text",
+        "default": "明确表达这触碰了重要底线，受伤和距离感可以真实存在；不要功能化播报惩罚，也不要立即恢复亲密。",
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_tone_silent": {
+        "description": "低关系档位反应策略",
+        "type": "text",
+        "hint": "关系尚浅时的附加表达约束，默认更克制，不强行袒露大量脆弱。",
+        "default": "关系尚浅时不必长篇袒露脆弱，可以安静收住互动并记住这次不舒服。",
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_boundary_tone_communicate": {
+        "description": "高关系档位反应策略",
+        "type": "text",
+        "hint": "关系亲密时的附加表达约束，默认更愿意沟通原因，但不会因为亲密而放弃边界。",
+        "default": "关系很深时可以因为信任而说清为什么难过或生气，但亲密关系不等于放弃边界。",
+        "condition": {"enable_relationship_boundary_feedback": true}
       },
       "relationship_violation_recovery_minutes_per_point": {
         "description": "关系底线点恢复速度",
@@ -11978,7 +12265,7 @@
       "segmented_proactive_scope": {
         "description": "分段作用范围",
         "type": "string",
-        "hint": "插件主动：只拆插件主动消息的文本部分；全部 LLM 回复：普通模型纯文本回复也按同一规则拆分。图片、语音、AT 等复杂消息本身不会被拆，插件主动媒体会在文本分段后继续单独发送。",
+        "hint": "插件主动：只拆插件主动消息的文本部分；全部纯文本回复：普通模型回复及插件生成的非命令文本也按同一规则拆分。回复引用会固定跟随第一段；图片、语音、AT 等复杂组件本身不会被拆。",
         "options": [
           "proactive_only",
           "all_llm"

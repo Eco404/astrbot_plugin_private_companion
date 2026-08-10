@@ -21,6 +21,7 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
             ["private_owner", "private_friend", "group", "proactive"],
             scope_spec["options"],
         )
+        self.assertIn("未选择任何范围时关闭全部生图请求", scope_spec["hint"])
 
         for page_name in ("陪伴面板", "companion-panel"):
             with self.subTest(page=page_name):
@@ -36,7 +37,11 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
                     "host?.querySelector('textarea[data-feature-param=\"photo_generation_allowed_scopes\"]')",
                     script,
                 )
-                self.assertIn("scope=photo-scope-save-v1", html)
+                self.assertIn("未选择任何范围时关闭全部生图请求", script)
+                self.assertIn('setting.type === "photo-scopes"', script)
+                self.assertIn("data-setup-guide-photo-scope", script)
+                self.assertIn("photoGenerationScopeValues", script)
+                self.assertIn("scope=photo-scope-save-v3", html)
 
     def test_catalog_dirty_signature_normalizes_array_and_line_formats(self) -> None:
         self.assertIn('paramKey === "photo_reference_catalog"', APP_JS)

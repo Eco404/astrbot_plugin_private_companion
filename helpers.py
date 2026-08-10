@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import ipaddress
 import socket
@@ -210,6 +211,48 @@ def normalize_bot_relationship_cards(value: Any, *, limit: int = 16) -> list[str
         if len(cards) >= max_cards:
             break
     return cards
+
+
+PHOTO_GENERATION_SCOPE_VALUES = (
+    "private_owner",
+    "private_friend",
+    "group",
+    "proactive",
+)
+
+
+def normalize_photo_generation_scopes(
+    value: Any,
+    *,
+    default_if_missing: bool = False,
+) -> list[str]:
+    """Normalize every persisted/UI representation of the photo scope list."""
+    if value is None:
+        raw_items: Any = PHOTO_GENERATION_SCOPE_VALUES if default_if_missing else ()
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raw_items = ()
+        else:
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed = text
+            if isinstance(parsed, (list, tuple, set)):
+                raw_items = parsed
+            else:
+                raw_items = re.split(r"(?:\r?\n|\\n|[,，、;；])+", str(parsed or ""))
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = ()
+
+    selected = {
+        str(item or "").strip().lower()
+        for item in raw_items
+        if str(item or "").strip().lower() in PHOTO_GENERATION_SCOPE_VALUES
+    }
+    return [scope for scope in PHOTO_GENERATION_SCOPE_VALUES if scope in selected]
 
 
 def _photo_group_request_matches(text: Any) -> bool:

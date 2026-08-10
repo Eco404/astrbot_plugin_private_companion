@@ -247,6 +247,8 @@ _DATA_STORE_KEYS = (
     "creative_memory_pool",
     "proactive_candidate_pool",
     "external_proactive_abilities",
+    "boundary_feedback_reports",
+    "boundary_feedback_vent_history",
     "worldbook_entries",
     "worldbook_member_profiles",
     "worldbook_group_profiles",

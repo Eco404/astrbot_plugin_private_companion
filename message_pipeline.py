@@ -295,6 +295,9 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         fast_user["last_user_message"] = safe_text or text
         fast_user["last_user_message_at"] = received_ts
         fast_intent_profile = self._analyze_inbound_intent(text)
+        boundary_enricher = getattr(self, "_enrich_boundary_feedback_intent", None)
+        if callable(boundary_enricher):
+            fast_intent_profile = boundary_enricher(fast_user, fast_intent_profile)
         fast_user["intent_profile"] = fast_intent_profile
         violation_settler = getattr(self, "_apply_relationship_violation_policy", None)
         if callable(violation_settler):
@@ -792,6 +795,9 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 )
             ):
                 intent_profile = self._analyze_inbound_intent(text)
+                boundary_enricher = getattr(self, "_enrich_boundary_feedback_intent", None)
+                if callable(boundary_enricher):
+                    intent_profile = boundary_enricher(user, intent_profile)
                 violation_settler = getattr(self, "_apply_relationship_violation_policy", None)
                 if callable(violation_settler):
                     violation_settler(
@@ -1164,6 +1170,51 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                 else self._canonical_private_user_id(sender_id)
             )
             current_sender = users.get(scoped_sender_id) if isinstance(users, dict) else None
+            boundary_profile_known = bool(
+                isinstance(current_sender, dict)
+                and any(
+                    key in current_sender
+                    for key in ("relationship_role", "manual_enabled", "enabled", "umo", "relationship_score")
+                )
+            )
+            if (at_bot or reply_to_bot) and boundary_profile_known and bool(
+                getattr(self, "enable_relationship_boundary_feedback", True)
+            ):
+                current_sender.setdefault("user_id", scoped_sender_id)
+                group_boundary_intent = self._analyze_inbound_intent(text)
+                group_boundary_intent["boundary_scope"] = "group"
+                group_boundary_intent["boundary_group_id"] = group_id
+                boundary_enricher = getattr(self, "_enrich_boundary_feedback_intent", None)
+                if callable(boundary_enricher):
+                    group_boundary_intent = boundary_enricher(current_sender, group_boundary_intent)
+                violation_settler = getattr(self, "_apply_relationship_violation_policy", None)
+                if callable(violation_settler):
+                    violation_settler(
+                        current_sender,
+                        group_boundary_intent,
+                        event_id=self._event_message_id(event),
+                        now=received_ts,
+                    )
+                if self._should_use_llm_emotion_judgement(text, group_boundary_intent):
+                    review_id = uuid.uuid4().hex
+                    current_sender["pending_emotion_judgement"] = {
+                        "review_id": review_id,
+                        "message_event_id": self._event_message_id(event),
+                        "text": _single_line(text, 240),
+                        "created_at": _now_ts(),
+                        "local": deepcopy(group_boundary_intent),
+                        "scope": "group",
+                        "group_id": group_id,
+                    }
+                    self._create_lifecycle_background_task(
+                        self._refine_inbound_emotion_with_model(
+                            scoped_sender_id,
+                            text,
+                            deepcopy(group_boundary_intent),
+                            review_id=review_id,
+                        ),
+                        label="group_boundary_emotion_refine",
+                    )
             if scoped_sender_id in set(self._configured_target_ids()) or (
                 isinstance(current_sender, dict) and bool(current_sender.get("manual_enabled"))
             ):
@@ -1698,10 +1749,9 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             self._maybe_refresh_group_slang_meanings(group_id, group_snapshot),
             label="refresh_group_slang",
         )
-        await self._maybe_group_interject(event, group_snapshot, text)
     else:
         logger.info(
-            "[PrivateCompanion] 群聊高强度收口生效: group=%s recent_wakeups=%s threshold=%s merge_active=%s floor=%s reason=%s merge_scope=%s merge_wait=%ss skip=followup-refresh/interject",
+            "[PrivateCompanion] 群聊高强度收口生效: group=%s recent_wakeups=%s threshold=%s merge_active=%s floor=%s reason=%s merge_scope=%s merge_wait=%ss skip=followup-refresh/general-interject repeat=enabled",
             group_id,
             group_snapshot_high_intensity.get("recent_wakeups"),
             group_snapshot_high_intensity.get("threshold"),
@@ -1711,6 +1761,15 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             getattr(self, "group_high_intensity_merge_scope", "group"),
             self._group_high_intensity_merge_wait_seconds(),
         )
+    await self._maybe_group_interject(
+        event,
+        group_snapshot,
+        text,
+        allow_interjection=(
+            not bool(group_snapshot_high_intensity.get("active"))
+            and self._group_wakeup_allows_general_interjection(scene)
+        ),
+    )
     original_interject_at = _safe_float(group.get("last_interject_at"), 0) if isinstance(group, dict) else 0
     repeat_state_changed = group_snapshot.get("repeat_follow_state") != (
         group.get("repeat_follow_state") if isinstance(group, dict) else {}

@@ -238,6 +238,13 @@ _PLATFORM_DISPLAY_NAMES = {
 class GroupWakeupMixin:
     """群聊唤醒"""
 
+    @staticmethod
+    def _group_wakeup_allows_general_interjection(scene: dict[str, Any] | None) -> bool:
+        return not bool(
+            isinstance(scene, dict)
+            and scene.get("interest_keyword_probability_miss")
+        )
+
     def _group_message_addresses_bot(self, event: AstrMessageEvent, text: str) -> bool:
         if getattr(event, "is_at_or_wake_command", False) or getattr(event, "is_wake", False):
             return True
@@ -1291,6 +1298,7 @@ class GroupWakeupMixin:
         )
         if base_interest_probability <= 0:
             return {}
+        probability_misses: list[dict[str, Any]] = []
         for word in self._group_wakeup_interest_words(group):
             if not self._text_contains_wakeup_word(cleaned, word):
                 continue
@@ -1327,6 +1335,20 @@ class GroupWakeupMixin:
                 fatigue=fatigue,
                 note="命中了兴趣词,但本次概率未触发,所以没有接话。" + (f" 话题权重：{topic_weight.get('reason')}" if topic_weight.get("reason") else ""),
             )
+            probability_misses.append(
+                {
+                    "word": word,
+                    "probability": round(probability, 3),
+                    "topic_weight": topic_weight,
+                }
+            )
+        if probability_misses:
+            # Keep this result on the transient scene so the same message cannot
+            # immediately fall through to the independent general-interjection draw.
+            scene["interest_keyword_probability_miss"] = {
+                "words": [item["word"] for item in probability_misses],
+                "attempts": probability_misses,
+            }
         return {}
 
     def _infer_group_scene(

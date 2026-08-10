@@ -1289,7 +1289,7 @@ const featureMeta = {
   enable_tts_enhancement: ["TTS强化", "支持中文聊天文本搭配外语语音块，统一处理生成路径、<tts> 标签规范化、语种控制与朗读文本清洗；生效范围可配置为普通回复，或普通回复加全部主动消息。"],
   enable_proactive_quote_trigger_message: ["引用触发消息", "群聊回复、群主动插话和可追溯的私聊主动消息会引用触发消息；普通群回复可只在首次或对象变化时引用。"],
   enable_reply_interception_forward: ["回复拦截转发", "把插件阻断、回复改写和主动消息拦截情况发送到指定私聊或群聊。"],
-  enable_creative_writing: ["私下创作", "闲暇时可选地因生活小事、日记碎片或梦境灵感写一点文本作品。"],
+  enable_creative_writing: ["私下创作", "闲暇时可选地因生活小事、日记碎片或梦境灵感写一点文本作品。该功能仍未经充分打磨，实际呈现效果可能不尽人意。"],
   enable_creative_work_read_guard: ["创作原文读取保护", "询问书柜已有作品时先读取真实原文；关闭后不再强制调用工具或替换模型回复。"],
   creative_hidden_mode: ["低调创作模式", "默认不汇报创作，只在节点或用户询问时自然提起。"],
   enable_reaction_expression_experiment: ["表情表达实验", "主模型一次生成完整文字和隐藏表情意图，插件再按配置的位置发送合适图片；没有足够合适的候选时保持纯文字。"],
@@ -2577,7 +2577,7 @@ const configDescriptions = {
   enable_private_image_vision_cache: "开启后，同一张图片或表情包会按内容哈希复用上次视觉摘要，避免重复调用识图模型；会保留压缩预览图用于管理，不保留原始大图，也不会缓存最终聊天回复。",
   private_image_vision_cache_max_items: "最多保留多少条图片视觉摘要缓存。达到上限后会清理最久未命中的旧缓存，0 表示不限制。",
   segmented_proactive_threshold: "纯文本短于或等于该字数时才考虑分段；太长的内容保持一整条，避免读起来散。",
-  segmented_proactive_scope: "插件主动只影响插件主动消息；全部 LLM 回复还会处理普通模型回复。文字按规则切分，语音、图片、@、平台表情与附件按各自位置策略编排。",
+  segmented_proactive_scope: "插件主动只影响插件主动消息；全部纯文本回复还会处理普通模型回复和插件生成的非命令文本。回复引用固定跟随第一段，语音、图片、@、平台表情与附件按各自位置策略编排。",
   segmented_proactive_chat_scope: "控制分段在哪类会话生效：全部、仅私聊或仅群聊。不匹配的会话会保持整条发送。",
   segmented_proactive_min_segment_chars: "分段后短于或等于该字数的片段会并入相邻消息，避免“哈哈”“我也觉得”这类附和语单独发出。",
   segmented_proactive_max_segments: "一次主动文本最多拆成几条。默认 3，过高会显得刷屏；图片、语音和附加组件不占用这个文本段数。",
@@ -3675,7 +3675,7 @@ const featureSettingSections = {
     },
     {
       title: "创作方式",
-      note: "控制私下创作触发、是否低调提起和单次推进规模。",
+      note: "控制私下创作触发、是否低调提起和单次推进规模。该功能仍未经充分打磨，实际呈现效果可能不尽人意。",
       keys: ["creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects", "creative_direction_prompt"],
     },
   ],
@@ -4070,7 +4070,7 @@ const featureSettingTypes = {
   balance_api_custom_headers: { type: "textarea" },
   photo_generation_prompt_format: { type: "select", options: [["traditional", "传统文生图提示词（标签/短语）"], ["natural_language", "自然语言描述"], ["nai", "NAI 联动模式（NovelAI 标签语法）"]] },
   photo_generation_style: { type: "select", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
-  segmented_proactive_scope: { type: "select", options: [["proactive_only", "仅插件主动"], ["all_llm", "全部 LLM 纯文本回复"]] },
+  segmented_proactive_scope: { type: "select", options: [["proactive_only", "仅插件主动"], ["all_llm", "全部纯文本回复"]] },
   segmented_proactive_send_as_forward: { type: "checkbox" },
   segmented_proactive_voice_strategy: { type: "select", options: [["inline", "嵌入正文"], ["separate", "单独发送"], ["previous", "跟随上段"], ["next", "跟随下段"]] },
   segmented_proactive_image_strategy: { type: "select", options: [["inline", "嵌入正文"], ["separate", "单独发送"], ["previous", "跟随上段"], ["next", "跟随下段"]] },
@@ -4208,6 +4208,29 @@ function proactiveGaugeMax(used, limit, explicit = false, fallback = 8) {
   const usedCount = Number(used || 0);
   if (proactiveLimitUnlimited(limit, explicit)) return Math.max(8, usedCount + 1);
   return Math.max(1, Number(limit || fallback || 8));
+}
+
+const PHOTO_GENERATION_SCOPE_OPTIONS = Object.freeze([
+  ["private_owner", "主要用户私聊"],
+  ["private_friend", "其他陪伴用户私聊"],
+  ["group", "群聊"],
+  ["proactive", "Bot 主动生图"],
+]);
+
+function photoGenerationScopeValues(value) {
+  let rawItems = value;
+  if (!Array.isArray(rawItems)) {
+    const text = String(value || "").trim();
+    if (!text) return [];
+    try {
+      const parsed = JSON.parse(text);
+      rawItems = Array.isArray(parsed) ? parsed : text.split(/(?:\r?\n|\\n|[,，、;；])+/);
+    } catch (_) {
+      rawItems = text.split(/(?:\r?\n|\\n|[,，、;；])+/);
+    }
+  }
+  const selected = new Set(rawItems.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean));
+  return PHOTO_GENERATION_SCOPE_OPTIONS.map(([scope]) => scope).filter((scope) => selected.has(scope));
 }
 
 function collectSettingValue(key, input) {
@@ -7487,7 +7510,7 @@ const setupGuideAdvancedItems = {
       ],
       kind: "feature",
       settings: [
-        { key: "photo_generation_allowed_scopes", type: "photo-scopes", label: "生图使用范围", description: "分别控制主要用户私聊、其他陪伴用户私聊、群聊和 Bot 主动生图；未选择时按全部范围开放。" },
+        { key: "photo_generation_allowed_scopes", type: "photo-scopes", label: "生图使用范围", description: "分别控制主要用户私聊、其他陪伴用户私聊、群聊和 Bot 主动生图；未选择任何范围时关闭全部生图请求。" },
         { key: "photo_generation_backend", type: "select", label: "生图后端", options: [["auto", "自动：在线 API → ComfyUI → SDGen"], ["external", "只用在线图片 API"], ["comfyui", "只用 ComfyUI"], ["sdgen", "只用 SDGen"], ["tool_call", "函数工具（调用其他插件的生图工具）"]], description: "这里仅选择后端；在线 API 凭据和队列统一在“模型配置 → 生图模型”维护。" },
         { key: "natural_language_photo_generation_mode", type: "select", label: "非指令生图处理方式", options: [["tool_first", "工具优先：主链调用 pc_generate_photo"], ["rule_fast", "规则快判：插件前置接管"], ["off", "关闭：不做前置接管"]], description: "注册生图工具后建议用工具优先；只有工具调用不稳定时再用规则快判。" },
         { key: "command_photo_generation_max_daily", type: "number", label: "用户请求每日上限", placeholder: "-1（不限量）", min: -1, max: 100, description: "显式陪伴生图指令与主链 pc_generate_photo 工具共用；-1 表示不限量，0 表示不允许用户请求生图/改图。" },
@@ -8230,6 +8253,18 @@ function setupGuideModeHomeHtml() {
 
 function setupGuideAdvancedSettingHtml(setting) {
   if (!setting || !setting.key) return "";
+  if (setting.type === "photo-scopes") {
+    const selected = new Set(photoGenerationScopeValues(setupGuideFieldValue(setting.key)));
+    return `
+      <div class="setup-guide-input" data-setup-guide-photo-scope-group="${escapeHtml(setting.key)}">
+        <span>${escapeHtml(setting.label || configLabel(setting.key))}</span>
+        ${setting.description ? `<small>${escapeHtml(setting.description)}</small>` : ""}
+        <div class="multi-persona-choice-list photo-scope-choice-list">
+          ${PHOTO_GENERATION_SCOPE_OPTIONS.map(([scope, label]) => `<label><input type="checkbox" data-setup-guide-photo-scope="${escapeHtml(setting.key)}" value="${scope}" ${selected.has(scope) ? "checked" : ""}><span>${label}</span></label>`).join("")}
+        </div>
+      </div>
+    `;
+  }
   if (setting.type === "bool") {
     return setupGuideCheck(setting.key, setting.label || configLabel(setting.key), setting.description || "开启后跟随该功能一起生效。");
   }
@@ -24817,9 +24852,8 @@ function featureSettingInput(key, value, accessibility = {}) {
   const disabledAttr = disabled ? " disabled" : "";
   const accessibilityAttrs = featureSettingAccessibilityAttrs(accessibility);
   if (spec.type === "photo-scopes") {
-    const allowed = new Set(Array.isArray(value) ? value : String(value || "").split(/[\r\n,，、;；]+/));
-    const options = [["private_owner", "主要用户私聊"], ["private_friend", "其他陪伴用户私聊"], ["group", "群聊"], ["proactive", "Bot 主动生图"]];
-    return `<div class="multi-persona-choice-list photo-scope-choice-list" data-feature-param-group="${safeKey}">${options.map(([scope, label]) => `<label><input type="checkbox" data-photo-scope-value="${scope}" value="${scope}"${allowed.has(scope) ? " checked" : ""}${accessibilityAttrs}${disabledAttr}><span>${label}</span></label>`).join("")}<textarea data-feature-param="${safeKey}" hidden>${escapeHtml(options.map(([scope]) => scope).filter((scope) => allowed.has(scope)).join("\n"))}</textarea></div>`;
+    const allowed = new Set(photoGenerationScopeValues(value));
+    return `<div class="multi-persona-choice-list photo-scope-choice-list" data-feature-param-group="${safeKey}">${PHOTO_GENERATION_SCOPE_OPTIONS.map(([scope, label], index) => `<label><input type="checkbox" data-photo-scope-value="${scope}" value="${scope}"${allowed.has(scope) ? " checked" : ""}${featureSettingAccessibilityAttrs(accessibility, index ? `-${scope}` : "")}${disabledAttr}><span>${label}</span></label>`).join("")}<textarea data-feature-param="${safeKey}" hidden>${escapeHtml(PHOTO_GENERATION_SCOPE_OPTIONS.map(([scope]) => scope).filter((scope) => allowed.has(scope)).join("\n"))}</textarea></div>`;
   }
   if (key === "multi_persona_primary_id") {
     const current = String(value || "").trim();
@@ -25301,7 +25335,7 @@ const featureDetailGuides = {
   },
   enable_segmented_proactive_reply: {
     summary: "把文字按自然聊天节奏拆成短句，并统一编排语音、图片、@、平台表情、表情包和其他附件。",
-    trigger: "插件主动消息发送时；若作用范围设为全部 LLM，也会处理普通模型纯文本回复。",
+    trigger: "插件主动消息发送时；若作用范围设为全部纯文本回复，也会处理普通模型回复及插件生成的非命令文本。",
     enabled: "符合条件的文字会分段；各类组件按独立位置策略进入相邻正文或单独发送，引用只跟随第一段正文。",
     disabled: "符合场景的文本一次性发送完整内容。",
   },
@@ -34422,6 +34456,18 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  const photoScopeInput = event.target instanceof Element ? event.target.closest("[data-setup-guide-photo-scope]") : null;
+  if (photoScopeInput) {
+    const key = photoScopeInput.dataset.setupGuidePhotoScope || "";
+    const host = photoScopeInput.closest("[data-setup-guide-photo-scope-group]");
+    if (!key || !host) return;
+    setupGuideDraft()[key] = Array.from(host.querySelectorAll("[data-setup-guide-photo-scope]:checked"))
+      .map((item) => String(item.value || "").trim())
+      .filter(Boolean);
+    updateSetupGuideSelectedStates(host);
+    updateSetupGuideStatusViews();
+    return;
+  }
   const advancedToggle = event.target instanceof Element ? event.target.closest("[data-setup-guide-advanced-toggle]") : null;
   if (advancedToggle) {
     const key = advancedToggle.dataset.setupGuideAdvancedToggle || "";

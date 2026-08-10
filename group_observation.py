@@ -3520,7 +3520,14 @@ class GroupObservationMixin:
             return {"action": "interrupt", "text": "" if image_path else text_reply, "image_path": image_path}
         return {"action": "follow", "text": cleaned, "image_path": ""}
 
-    async def _maybe_group_interject(self, event: AstrMessageEvent, group: dict[str, Any], text: str) -> None:
+    async def _maybe_group_interject(
+        self,
+        event: AstrMessageEvent,
+        group: dict[str, Any],
+        text: str,
+        *,
+        allow_interjection: bool = True,
+    ) -> None:
         if bool(getattr(event, "is_wake", False)) or bool(getattr(event, "is_at_or_wake_command", False)):
             return
         if bool(getattr(event, "private_companion_group_quoted_link_payload", False)):
@@ -3547,6 +3554,8 @@ class GroupObservationMixin:
                 "has_image": bool(image_path),
                 "topic_signature": self._group_topic_signature(text),
             }
+            return
+        if not allow_interjection:
             return
         allowed, reason = self._group_interjection_allowed(group, text)
         if not allowed:

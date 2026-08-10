@@ -2731,9 +2731,9 @@ class LlmToolActionsMixin:
         if callable(resolver) and requester_id:
             requester_id = resolver(event, requester_id)
         requester = None
+        request_scope = "private"
         user_getter = getattr(self, "_get_user", None)
-        target_checker = getattr(self, "_is_target_private_user", None)
-        if callable(user_getter) and callable(target_checker):
+        if callable(user_getter):
             if not requester_id:
                 return public_receipt(
                     {
@@ -2752,10 +2752,16 @@ class LlmToolActionsMixin:
             # configured fallback nickname) before authorization can reject it.
             scope_getter = getattr(self, "_reaction_expression_scope", None)
             try:
+                private_marker = getattr(event, "is_private_chat", None)
+                event_is_private = (
+                    bool(private_marker())
+                    if callable(private_marker)
+                    else (True if private_marker is None else bool(private_marker))
+                )
                 request_scope = (
                     _single_line(scope_getter(event), 16).casefold()
                     if callable(scope_getter)
-                    else "private"
+                    else ("private" if event_is_private else "group")
                 )
             except Exception:
                 request_scope = "private"
@@ -2799,49 +2805,26 @@ class LlmToolActionsMixin:
                         if request_scope == "group"
                         else user_getter(requester_id)
                     )
-                    # A configured target may legitimately be encountered in a
-                    # group before its first private message; retain that
-                    # existing behavior for the explicit target only.
-                    if (
-                        request_scope == "group"
-                        and requester is None
-                        and target_checker(requester_id, None)
-                    ):
-                        requester = user_getter(requester_id)
                     group_enabled = False
                     if request_scope == "group":
                         group_id_getter = getattr(self, "_extract_group_id_from_event", None)
                         group_id = group_id_getter(event) if callable(group_id_getter) else ""
                         checker = getattr(self, "_group_enabled_for_event", None)
                         group_enabled = bool(group_id and callable(checker) and checker(group_id))
-                    requester_authorized = group_enabled or bool(
-                        isinstance(requester, dict)
-                        and target_checker(requester_id, requester)
-                        and requester.get("enabled", True)
-                    )
+                    requester_authorized = (group_enabled if request_scope == "group" else isinstance(requester, dict))
             else:
                 requester = (
                     existing_private_user(requester_id)
                     if request_scope == "group"
                     else user_getter(requester_id)
                 )
-                if (
-                    request_scope == "group"
-                    and requester is None
-                    and target_checker(requester_id, None)
-                ):
-                    requester = user_getter(requester_id)
                 group_enabled = False
                 if request_scope == "group":
                     group_id_getter = getattr(self, "_extract_group_id_from_event", None)
                     group_id = group_id_getter(event) if callable(group_id_getter) else ""
                     checker = getattr(self, "_group_enabled_for_event", None)
                     group_enabled = bool(group_id and callable(checker) and checker(group_id))
-                requester_authorized = group_enabled or bool(
-                    isinstance(requester, dict)
-                    and target_checker(requester_id, requester)
-                    and requester.get("enabled", True)
-                )
+                requester_authorized = (group_enabled if request_scope == "group" else isinstance(requester, dict))
             if not requester_authorized:
                 return public_receipt(
                     {
@@ -2849,7 +2832,7 @@ class LlmToolActionsMixin:
                         "success": False,
                         "generated": False,
                         "sent": False,
-                        "message": "这个生图工具只对已启用的陪伴对象开放。",
+                        "message": "当前群聊未启用陪伴功能，或请求者身份不可用。",
                         "must_not_claim_sent": True,
                         "retryable": False,
                     },
@@ -2857,7 +2840,7 @@ class LlmToolActionsMixin:
                 )
         quota_getter = getattr(self, "_command_photo_quota_left", None)
         if requester_id and callable(quota_getter):
-            if requester is None:
+            if requester is None and request_scope != "group":
                 data_lock = getattr(self, "_data_lock", None)
                 if data_lock is not None:
                     async with data_lock:
@@ -3318,12 +3301,7 @@ class LlmToolActionsMixin:
                 user_id = ""
             if user_id and callable(getattr(self, "_command_photo_quota_left", None)):
                 async with self._data_lock:
-                    users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
-                    existing_user = users.get(user_id) if isinstance(users, dict) else None
-                    if self._is_target_private_user(
-                        user_id,
-                        existing_user if isinstance(existing_user, dict) else None,
-                    ):
+                    if request_scope != "group":
                         user = self._get_user(user_id)
                         self._note_command_photo_generation_attempt(user, image_path=image_path)
                         self._save_data_sync()

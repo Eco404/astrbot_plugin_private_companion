@@ -257,6 +257,25 @@ class PhotoBackendReferenceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path, "")
         self.assertIn("停止纯文生图回退", note)
 
+    def test_bailian_wan_image_models_use_required_multimodal_protocol(self) -> None:
+        harness = _ReferenceFailureHarness()
+        for model in ("wan2.7-image", "wan2.6-image-edit"):
+            harness.external_image_api_model = model
+            self.assertTrue(harness._bailian_prefers_multimodal(), model)
+            self.assertTrue(harness._bailian_requires_multimodal(), model)
+
+        harness.external_image_api_model = "qwen-image-plus"
+        self.assertTrue(harness._bailian_prefers_multimodal())
+        self.assertFalse(harness._bailian_requires_multimodal())
+
+        harness.external_image_api_model = "qwen-image-edit"
+        self.assertTrue(harness._bailian_prefers_multimodal())
+        self.assertFalse(harness._bailian_requires_multimodal())
+
+        harness.external_image_api_model = "wan-video"
+        self.assertFalse(harness._bailian_prefers_multimodal())
+        self.assertFalse(harness._bailian_requires_multimodal())
+
     async def test_gemini_reference_conversion_failure_does_not_submit_text_only(self) -> None:
         harness = _ReferenceFailureHarness()
 

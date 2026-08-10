@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from astrbot.api.message_components import Plain, Record
+from astrbot.api.message_components import Plain, Record, Reply
 from astrbot.core.message.message_event_result import (
     MessageEventResult,
     ResultContentType,
@@ -153,6 +153,152 @@ class OfficialTtsSegmentingCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["嗯..."], [item.text for item in event.result.chain])
         plugin._create_lifecycle_background_task.assert_called_once()
+
+    async def test_plugin_group_quoted_plain_reply_segments_without_llm_marker(self) -> None:
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        plugin = object.__new__(PrivateCompanionPlugin)
+        plugin.enabled = True
+        plugin.segmented_proactive_scope = "all_llm"
+        plugin.enable_framework_error_leak_guard = False
+        plugin.enable_daily_case_review_experiment = False
+        plugin._proactive_only_blocks_passive_event = lambda *_args: False
+        plugin._feature_enabled_or_temp_unlocked = (
+            lambda key: key == "enable_segmented_proactive_reply"
+        )
+        plugin._segmented_scope_allows_event = lambda _event: True
+        plugin._restore_response_review_meta_leak_before_send = lambda *_args: False
+        plugin._platform_supports = lambda *_args, **_kwargs: True
+        quote = Reply(id="quoted-message")
+        source = (
+            "刚才被戳了宇宙。"
+            "正看着群里庄见秋发的那个哔哩哔哩高标的链接呢，顺便刷刷消息摸鱼。"
+        )
+        chunks = [
+            [quote, Plain("刚才被戳了宇宙。")],
+            [Plain("正看着群里庄见秋发的那个哔哩哔哩高标的链接呢，顺便刷刷消息摸鱼。")],
+        ]
+        plugin._segment_llm_reply_chain = Mock(return_value=(chunks, True, source))
+        plugin._limit_private_routine_check_segments = lambda _text, value: value
+        plugin._plain_text_segments_from_chunks = lambda _chunks: []
+        plugin._build_result_from_chain = lambda chain: MessageEventResult(
+            chain=list(chain)
+        )
+        plugin._segmented_chunk_log_text = lambda chunk: "".join(
+            item.text for item in chunk if isinstance(item, Plain)
+        )
+        plugin._create_lifecycle_background_task = Mock(
+            side_effect=lambda coroutine, **_kwargs: coroutine.close()
+        )
+        result = MessageEventResult(chain=[quote, Plain(source)])
+
+        class Event:
+            unified_msg_origin = "default:GroupMessage:10001"
+            message_str = "芙蕾雅 你在干嘛"
+
+            def __init__(self) -> None:
+                self.result = result
+
+            @staticmethod
+            def is_private_chat() -> bool:
+                return False
+
+            def get_result(self) -> MessageEventResult:
+                return self.result
+
+            def set_result(self, value: MessageEventResult) -> None:
+                self.result = value
+
+        event = Event()
+        self.assertTrue(
+            PrivateCompanionPlugin._private_plain_result_allows_segmenting(
+                plugin,
+                event,
+                list(result.chain),
+            )
+        )
+
+        await PrivateCompanionPlugin.apply_segmented_llm_reply_scope(plugin, event)
+
+        self.assertIs(quote, event.result.chain[0])
+        self.assertEqual("刚才被戳了宇宙。", event.result.chain[1].text)
+        plugin._create_lifecycle_background_task.assert_called_once()
+
+    async def test_plugin_tts_group_quote_is_still_a_plain_fallback(self) -> None:
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        plugin = object.__new__(PrivateCompanionPlugin)
+        plugin.enabled = True
+        plugin.segmented_proactive_scope = "all_llm"
+        plugin.enable_framework_error_leak_guard = False
+        plugin.enable_daily_case_review_experiment = False
+        plugin._proactive_only_blocks_passive_event = lambda *_args: False
+        plugin._feature_enabled_or_temp_unlocked = (
+            lambda key: key == "enable_segmented_proactive_reply"
+        )
+        plugin._segmented_scope_allows_event = lambda _event: True
+        plugin._restore_response_review_meta_leak_before_send = lambda *_args: False
+        plugin._platform_supports = lambda *_args, **_kwargs: True
+        plugin._private_plain_result_allows_segmenting = lambda *_args: False
+        quote = Reply(id="quoted-message")
+        chunks = [
+            [quote, Plain("第一段。")],
+            [Plain("第二段。")],
+        ]
+        plugin._segment_llm_reply_chain = Mock(
+            return_value=(chunks, True, "第一段。第二段。")
+        )
+        plugin._limit_private_routine_check_segments = lambda _text, value: value
+        plugin._plain_text_segments_from_chunks = lambda _chunks: []
+        plugin._build_result_from_chain = lambda chain: MessageEventResult(
+            chain=list(chain)
+        )
+        plugin._segmented_chunk_log_text = lambda chunk: "".join(
+            item.text for item in chunk if isinstance(item, Plain)
+        )
+        plugin._create_lifecycle_background_task = Mock(
+            side_effect=lambda coroutine, **_kwargs: coroutine.close()
+        )
+        result = MessageEventResult(chain=[quote, Plain("第一段。第二段。")])
+
+        class Event:
+            unified_msg_origin = "default:GroupMessage:10001"
+            message_str = "普通聊天"
+            _private_companion_tts_request_applied = True
+
+            def __init__(self) -> None:
+                self.result = result
+
+            def get_result(self) -> MessageEventResult:
+                return self.result
+
+            def set_result(self, value: MessageEventResult) -> None:
+                self.result = value
+
+        event = Event()
+        await PrivateCompanionPlugin.apply_segmented_llm_reply_scope(plugin, event)
+
+        self.assertIs(quote, event.result.chain[0])
+        self.assertEqual("第一段。", event.result.chain[1].text)
+        plugin._create_lifecycle_background_task.assert_called_once()
+
+    def test_plugin_command_plain_reply_stays_whole(self) -> None:
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        plugin = object.__new__(PrivateCompanionPlugin)
+        event = SimpleNamespace(
+            is_command=True,
+            message_str="/陪伴 状态",
+            unified_msg_origin="default:GroupMessage:10001",
+        )
+
+        self.assertFalse(
+            PrivateCompanionPlugin._private_plain_result_allows_segmenting(
+                plugin,
+                event,
+                [Reply(id="quoted-command"), Plain("配置已保存。当前状态正常。")],
+            )
+        )
 
     async def test_reaction_reply_defers_remaining_bubbles_until_first_send(self) -> None:
         from astrbot_plugin_private_companion.main import PrivateCompanionPlugin

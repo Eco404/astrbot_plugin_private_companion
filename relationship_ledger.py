@@ -260,6 +260,7 @@ def apply_relationship_event(
     dedupe_key = _event_key(reason, ts, event_id, window_seconds)
     explicit_event_id = str(event_id or "").strip()
     canonical_reason = _EVENT_REASON_ALIASES.get(reason, reason)
+    violation_recovery = canonical_reason == "relationship_violation_recovery"
     duplicate = any(
         isinstance(item, dict) and item.get("event_key") == dedupe_key
         for item in ledger[-200:]
@@ -276,13 +277,13 @@ def apply_relationship_event(
     if duplicate:
         return _result(False, "duplicate_event", score=_score(user.get("relationship_score")))
 
-    positive_cap = max(1, min(30, int(positive_event_cap or 4)))
+    positive_cap = 60 if violation_recovery else max(1, min(30, int(positive_event_cap or 4)))
     negative_cap = max(1, min(60, int(negative_event_cap or 12)))
     requested = max(-negative_cap, min(positive_cap, numeric_delta))
     before = _score(user.get("relationship_score"))
-    if requested > 0 and before >= 900:
+    if requested > 0 and before >= 900 and not violation_recovery:
         requested = max(1, (requested + 1) // 2)
-    elif requested > 0 and before >= 600:
+    elif requested > 0 and before >= 600 and not violation_recovery:
         requested = max(1, (requested * 3 + 3) // 4)
     applied = requested
     day_key = _calendar_date(ts, timezone_name).isoformat()
@@ -290,7 +291,7 @@ def apply_relationship_event(
     if not isinstance(totals, dict) or totals.get("day") != day_key:
         totals = {"day": day_key, "positive": 0, "negative": 0}
         user["relationship_daily_totals"] = totals
-    if applied > 0:
+    if applied > 0 and not violation_recovery:
         raw_daily_cap = DEFAULT_POSITIVE_DAILY_CAP if positive_daily_cap is None else positive_daily_cap
         cap = max(0, min(120, int(raw_daily_cap)))
         remaining = max(0, cap - _bounded_int(totals.get("positive"), 0, 0, cap))
@@ -312,7 +313,8 @@ def apply_relationship_event(
         return _result(False, code, score=before)
     user["relationship_score"] = after
     if applied > 0:
-        totals["positive"] = _bounded_int(totals.get("positive"), 0, 0, 120) + applied
+        if not violation_recovery:
+            totals["positive"] = _bounded_int(totals.get("positive"), 0, 0, 120) + applied
         user["relationship_last_effective_at"] = ts
     else:
         totals["negative"] = _bounded_int(totals.get("negative"), 0, -120, 0) + applied

@@ -3762,6 +3762,9 @@ class PrivateCompanionPlugin(
             )
         self._log_registered_command_handlers()
         self._install_send_message_to_user_tool_sanitizer()
+        boundary_ability_registrar = getattr(self, "_register_relationship_boundary_proactive_ability", None)
+        if callable(boundary_ability_registrar) and bool(getattr(self, "enable_relationship_boundary_feedback", True)):
+            boundary_ability_registrar()
         self._schedule_default_persona_prompt_refresh()
         await self._body_monitor_integration.set_enabled(self.enable_body_monitor_integration)
         needs_startup_save = False
@@ -6335,8 +6338,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
         plugin_tts_plain_fallback = (
             bool(getattr(event, "_private_companion_tts_request_applied", False))
-            and bool(chain)
-            and all(isinstance(comp, Plain) for comp in chain)
+            and bool(self._plain_result_body_text(chain))
         )
         if is_llm_result and await self._should_defer_segmenting_to_astrbot_tts(event, result, chain):
             logger.debug(
@@ -6489,18 +6491,28 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 trimmer(group)
             self._save_data_sync()
 
-    def _private_plain_result_allows_segmenting(self, event: AstrMessageEvent, chain: list[Any]) -> bool:
-        """Allow plugin-produced private text to use the configured reply splitter."""
-        try:
-            if not bool(getattr(event, "is_private_chat", lambda: False)()):
-                return False
-        except Exception:
+    def _plain_result_body_text(self, chain: list[Any]) -> str:
+        """Return text when a result contains only an optional quote and plain body."""
+        body = [comp for comp in list(chain or []) if not self._is_reply_component(comp)]
+        if not body or any(not isinstance(comp, Plain) for comp in body):
+            return ""
+        return "".join(str(getattr(comp, "text", "") or "") for comp in body).strip()
+
+    def _private_plain_result_allows_segmenting(
+        self,
+        event: AstrMessageEvent,
+        chain: list[Any],
+    ) -> bool:
+        """Allow plugin text replies while leaving functional command output intact."""
+        if not self._plain_result_body_text(chain):
             return False
-        if not chain or any(not isinstance(comp, Plain) for comp in chain):
-            return False
-        text = "".join(str(getattr(comp, "text", "") or "") for comp in chain).strip()
-        if not text:
-            return False
+        command_reason = getattr(self, "_tts_functional_command_reason", None)
+        if callable(command_reason):
+            try:
+                if command_reason(event):
+                    return False
+            except Exception:
+                pass
         return True
 
     @filter.on_decorating_result(priority=-9000)
@@ -6767,6 +6779,35 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return [chain], False, full_text
         return self._clean_segmented_reply_chunks(event, chunks), True, full_text
 
+    async def _send_segmented_remainder_chain(
+        self,
+        event: AstrMessageEvent,
+        chain: list[Any],
+    ) -> str:
+        """Send delayed chunks through a live platform route when the source event is proactive."""
+        external_proactive = (
+            str(getattr(event, "_private_companion_external_proactive_source", "") or "")
+            == "proactive_chat"
+        )
+        if external_proactive:
+            umo = _single_line(getattr(event, "unified_msg_origin", ""), 240)
+            sender = getattr(self, "_send_chain_components", None)
+            if not umo or not callable(sender):
+                raise RuntimeError("主动分段补发缺少可用的平台发送入口")
+            accepted = await sender(
+                umo,
+                list(chain),
+                apply_decorating_hooks=False,
+            )
+            if not accepted:
+                raise RuntimeError("主动分段补发未被平台接受")
+            return "platform"
+        try:
+            await event.send(event.chain_result(chain))
+        except Exception:
+            await event.send(self._build_result_from_chain(chain))
+        return "event"
+
     async def _send_segmented_llm_chain_remainder(
         self,
         event: AstrMessageEvent,
@@ -6943,7 +6984,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                             )
                         logger.warning("[PrivateCompanion] 分段剩余组件命中违禁词，停止发送: word=%s", _single_line(hit, 40))
                         return
-                    await event.send(event.chain_result(outbound_chunk))
+                    delivery_path = await self._send_segmented_remainder_chain(
+                        event,
+                        outbound_chunk,
+                    )
                     if case_id:
                         self._update_daily_review_case(
                             case_id,
@@ -6952,8 +6996,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                             signals={"segments_expected": total + 1, "segments_sent": sent_index + 1},
                         )
                     logger.info(
-                        "[PrivateCompanion] 分段 LLM 剩余组件已发送: source=%s index=%s/%s preview=%s",
+                        "[PrivateCompanion] 分段 LLM 剩余组件已发送: source=%s delivery=%s index=%s/%s preview=%s",
                         source or "unknown",
+                        delivery_path,
                         sent_index,
                         total,
                         _single_line(preview, 120),
@@ -6968,6 +7013,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         )
                     raise
                 except Exception as exc:
+                    if (
+                        str(getattr(event, "_private_companion_external_proactive_source", "") or "")
+                        == "proactive_chat"
+                    ):
+                        if case_id:
+                            self._update_daily_review_case(
+                                case_id,
+                                outcome="delivery_failed",
+                                signals={"segments_expected": total + 1, "segments_sent": sent_index},
+                            )
+                        logger.warning(
+                            "[PrivateCompanion] 主动分段 LLM 剩余组件发送失败: source=%s error=%s",
+                            source or "unknown",
+                            _single_line(exc, 160),
+                            exc_info=True,
+                        )
+                        return
                     try:
                         await event.send(self._build_result_from_chain(outbound_chunk))
                         if case_id:

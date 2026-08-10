@@ -12,6 +12,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot_plugin_private_companion.config_migration import migrate_flat_config_into_schema_groups
 from astrbot_plugin_private_companion.helpers import _flat_get, _safe_float
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
+from astrbot_plugin_private_companion.plugin_bootstrap import _normalize_photo_generation_scopes
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -366,6 +367,50 @@ class ConfigGroupAuthorityTests(unittest.TestCase):
                 script,
             )
             self.assertIn('placeholder: "-1（不限量）"', script)
+
+    def test_empty_photo_scope_selection_remains_explicitly_disabled(self):
+        api = PrivateCompanionPageApi(None)
+        self.assertEqual([], api._normalize_setting_value("photo_generation_allowed_scopes", []))
+        self.assertEqual([], api._normalize_setting_value("photo_generation_allowed_scopes", ""))
+        self.assertEqual(
+            ["private_owner", "group"],
+            api._normalize_setting_value(
+                "photo_generation_allowed_scopes",
+                ["private_owner", "invalid", "group", "private_owner"],
+            ),
+        )
+
+        all_scopes = ["private_owner", "private_friend", "group", "proactive"]
+        self.assertEqual(all_scopes, _normalize_photo_generation_scopes(None))
+        self.assertEqual([], _normalize_photo_generation_scopes([]))
+        self.assertEqual(
+            ["private_owner", "private_friend"],
+            _normalize_photo_generation_scopes("private_owner\nprivate_friend"),
+        )
+        self.assertEqual(
+            ["private_owner", "private_friend"],
+            _normalize_photo_generation_scopes(r"private_owner\nprivate_friend"),
+        )
+        self.assertEqual(
+            ["private_owner", "group"],
+            _normalize_photo_generation_scopes('["private_owner", "group"]'),
+        )
+        self.assertEqual(
+            ["private_owner", "group"],
+            _normalize_photo_generation_scopes("private_owner,group"),
+        )
+
+        config = {
+            "photo_generation_allowed_scopes": all_scopes,
+            "photo_action_config": {"photo_generation_allowed_scopes": []},
+        }
+        migrate_flat_config_into_schema_groups(
+            config,
+            schema_path=ROOT / "_conf_schema.json",
+            save=False,
+        )
+        self.assertEqual([], config["photo_action_config"]["photo_generation_allowed_scopes"])
+        self.assertEqual([], config["photo_generation_allowed_scopes"])
 
     def test_removed_owner_companion_switch_stays_absent(self):
         source = (ROOT / "plugin_bootstrap.py").read_text(encoding="utf-8")

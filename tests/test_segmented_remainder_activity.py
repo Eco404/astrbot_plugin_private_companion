@@ -127,6 +127,28 @@ class SegmentedRemainderActivityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([], event.sent)
 
+    async def test_proactive_remainder_uses_live_platform_sender_after_event_finishes(self) -> None:
+        plugin = self._build_remainder_harness(activity=False)
+        plugin._send_chain_components = AsyncMock(return_value=True)
+        event = _RemainderEvent()
+        event._private_companion_external_proactive_source = "proactive_chat"
+
+        await PrivateCompanionPlugin._send_segmented_llm_chain_remainder(
+            plugin,
+            event,
+            [[Plain("第二段。")], [Plain("第三段。")]],
+            previous_segment="第一段。",
+            source="decorating_result",
+            started_at=1.0,
+        )
+
+        self.assertEqual([], event.sent)
+        self.assertEqual(2, plugin._send_chain_components.await_count)
+        first_call = plugin._send_chain_components.await_args_list[0]
+        self.assertEqual("default:GroupMessage:10001", first_call.args[0])
+        self.assertEqual("第二段。", first_call.args[1][0].text)
+        self.assertFalse(first_call.kwargs["apply_decorating_hooks"])
+
 
 if __name__ == "__main__":
     unittest.main()

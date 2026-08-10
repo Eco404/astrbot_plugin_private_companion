@@ -103,6 +103,22 @@ class _IdentityCoreHarness(CoreStoreMixin):
 
 
 class CoreStoreFailureSafetyTests(unittest.IsolatedAsyncioTestCase):
+    def test_photo_scope_empty_list_denies_every_scope_but_missing_config_keeps_legacy_default(self) -> None:
+        harness = _CoreHarness()
+        harness.photo_generation_allowed_scopes = []
+        for scope in ("private_owner", "private_friend", "group", "proactive"):
+            with self.subTest(scope=scope):
+                harness._photo_generation_scope = lambda *args, _scope=scope, **kwargs: _scope
+                self.assertFalse(harness._photo_generation_scope_allowed())
+
+        legacy_harness = _CoreHarness()
+        self.assertTrue(legacy_harness._photo_generation_scope_allowed(proactive=True))
+
+        serialized_harness = _CoreHarness()
+        serialized_harness.photo_generation_allowed_scopes = "private_owner\nprivate_friend"
+        serialized_harness._photo_generation_scope = lambda *args, **kwargs: "private_friend"
+        self.assertTrue(serialized_harness._photo_generation_scope_allowed())
+
     def test_passive_private_profile_ignores_legacy_enabled_and_target_flags(self) -> None:
         harness = _CoreHarness()
 

@@ -15837,7 +15837,20 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
 
     def _bailian_prefers_multimodal(self) -> bool:
         model = str(getattr(self, "external_image_api_model", "") or "").strip().lower()
-        return "qwen-image" in model or "image-edit" in model
+        # New Wan image models use the Model Studio multimodal contract
+        # (``input.messages``), even for text-only prompts.  Sending these
+        # models through the legacy async ``input.prompt`` endpoint produces
+        # the misleading ``Field required: input.messages`` response.
+        return bool(
+            "qwen-image" in model
+            or "image-edit" in model
+            or re.search(r"(?:^|[-_])wan[\w.-]*[-_]image(?:$|[-_])", model)
+        )
+
+    def _bailian_requires_multimodal(self) -> bool:
+        """Whether a Bailian model has no compatible legacy async fallback."""
+        model = str(getattr(self, "external_image_api_model", "") or "").strip().lower()
+        return bool(re.search(r"(?:^|[-_])wan[\w.-]*[-_]image(?:$|[-_])", model))
 
     def _modelscope_api_root(self) -> str:
         base = self._normalized_external_image_api_base_url(platform="modelscope").rstrip("/")
@@ -18086,6 +18099,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         reference_image_path = normalized_reference_paths[0] if normalized_reference_paths else ""
         if platform == "bailian":
             multimodal_first = bool(reference_image_path) or self._bailian_prefers_multimodal()
+            multimodal_required = self._bailian_requires_multimodal()
             bailian_note = ""
             if multimodal_first:
                 multimodal_outcome = self._coerce_external_photo_generation_outcome(
@@ -18108,6 +18122,13 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                         _single_line(note, 180),
                     )
                     return "", f"百炼参考图多模态接口失败：{_single_line(note, 180)}"
+                if multimodal_required:
+                    logger.info(
+                        "[PrivateCompanion] 百炼模型要求多模态协议,停止不兼容异步回退: model=%s note=%s",
+                        _single_line(self.external_image_api_model, 80),
+                        _single_line(note, 180),
+                    )
+                    return "", f"百炼多模态生图失败：{_single_line(note, 180)}"
                 logger.info(
                     "[PrivateCompanion] 百炼多模态生图失败,回退异步文生图: %s",
                     _single_line(note, 180),

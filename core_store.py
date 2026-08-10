@@ -113,6 +113,7 @@ from .helpers import (
     _strip_internal_message_blocks,
     _strip_persisted_chat_control_tags,
     _today_key,
+    normalize_photo_generation_scopes,
 )
 from .companion_interaction_expression import current_interaction_projection, normalize_normal_interaction_band_cap
 from .config_migration import _ensure_config_parent_dir
@@ -430,6 +431,8 @@ class CoreStoreMixin:
             "creative_memory_pool": [],
             "proactive_candidate_pool": [],
             "external_proactive_abilities": {},
+            "boundary_feedback_reports": [],
+            "boundary_feedback_vent_history": [],
             "worldbook_entries": [],
             "worldbook_member_profiles": {},
             "worldbook_group_profiles": {},
@@ -519,6 +522,8 @@ class CoreStoreMixin:
         data.setdefault("creative_memory_pool", [])
         data.setdefault("proactive_candidate_pool", [])
         data.setdefault("external_proactive_abilities", {})
+        data.setdefault("boundary_feedback_reports", [])
+        data.setdefault("boundary_feedback_vent_history", [])
         data.setdefault("worldbook_entries", [])
         data.setdefault("worldbook_member_profiles", {})
         data.setdefault("worldbook_group_profiles", {})
@@ -2889,11 +2894,12 @@ class CoreStoreMixin:
         return "private_owner" if role == "owner" else "private_friend"
 
     def _photo_generation_scope_allowed(self, event: Any = None, *, proactive: bool = False, user: dict[str, Any] | None = None, user_id: str = "") -> bool:
-        scopes = getattr(self, "photo_generation_allowed_scopes", None)
-        if not isinstance(scopes, (list, tuple, set)) or not scopes:
-            scopes = ["private_owner", "private_friend", "group", "proactive"]
+        scopes = normalize_photo_generation_scopes(
+            getattr(self, "photo_generation_allowed_scopes", None),
+            default_if_missing=True,
+        )
         scope = self._photo_generation_scope(event, proactive=proactive, user=user, user_id=user_id)
-        return scope in {str(item or "").strip().lower() for item in scopes}
+        return scope in scopes
 
     def _is_bot_self_user_id(self, user_id: str) -> bool:
         user_id = str(user_id or "").strip()

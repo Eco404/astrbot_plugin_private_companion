@@ -5028,26 +5028,8 @@ class CommandHandlersMixin:
             await self._reply(event, "当前会话不在生图使用范围内，请在生图设置中调整使用范围。")
             event.stop_event()
             return True
-        group_id_getter = getattr(self, "_extract_group_id_from_event", None)
-        group_id = group_id_getter(event) if callable(group_id_getter) else ""
-        group_allowed = bool(group_id and callable(getattr(self, "_group_enabled_for_event", None)) and self._group_enabled_for_event(group_id))
         async with self._data_lock:
             user = self._get_user(user_id)
-            if (not group_allowed and (not self._is_target_private_user(user_id, user) or not bool(user.get("enabled", True)))):
-                if directed:
-                    logger.info(
-                        "[PrivateCompanion] 定向自然语言生图已命中但用户无权限: user=%s enabled=%s text=%s",
-                        _single_line(user_id, 40),
-                        bool(user.get("enabled", True)) if isinstance(user, dict) else False,
-                        _single_line(text, 160),
-                    )
-                return False
-            if self._private_user_role(user, user_id) == "friend" and not (
-                callable(scope_checker) and scope_checker(event, user=user, user_id=user_id)
-            ):
-                await self._reply(event, "这个规则快判生图/改图入口只对主要用户开放。")
-                event.stop_event()
-                return True
             if self._natural_language_photo_quota_left(user) <= 0:
                 await self._reply(event, "今天规则快判生图/改图额度用完了。")
                 event.stop_event()
@@ -5273,10 +5255,6 @@ class CommandHandlersMixin:
             await self._reply(event, "当前会话不在生图使用范围内，请在生图设置中调整使用范围。")
             event.stop_event()
             return True
-        group_id_getter = getattr(self, "_extract_group_id_from_event", None)
-        group_id = group_id_getter(event) if callable(group_id_getter) else ""
-        group_allowed = bool(group_id and callable(getattr(self, "_group_enabled_for_event", None)) and self._group_enabled_for_event(group_id))
-
         try:
             safe_has_image = getattr(self, "_private_event_has_image_safe", None)
             if callable(safe_has_image):
@@ -5321,10 +5299,6 @@ class CommandHandlersMixin:
 
         async with self._data_lock:
             user = self._get_user(user_id)
-            if (not group_allowed and (not self._is_target_private_user(user_id, user) or not bool(user.get("enabled", True)))):
-                await self._reply(event, "这个生图入口只对已启用的陪伴对象开放。")
-                event.stop_event()
-                return True
             quota_left = self._command_photo_quota_left(user)
             if quota_left is not None and quota_left <= 0:
                 await self._reply(event, self._command_photo_quota_block_message())
