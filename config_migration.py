@@ -149,6 +149,12 @@ LEGACY_DEFAULT_VALUE_MIGRATIONS: dict[str, tuple[Any, Any]] = {
 _RELATIONSHIP_SWITCH_MIGRATION_MARKER = "_relationship_switch_semantics_version"
 _RELATIONSHIP_SWITCH_MIGRATION_VERSION = 1
 
+# v6.0.9 changes the user-request photo quota from ``0 = unlimited`` to
+# ``-1 = unlimited`` and ``0 = disabled``. Keep this one-shot so a later
+# explicit administrator choice of zero remains authoritative.
+_COMMAND_PHOTO_QUOTA_MIGRATION_MARKER = "_command_photo_quota_semantics_version"
+_COMMAND_PHOTO_QUOTA_MIGRATION_VERSION = 1
+
 
 def migrate_flat_config_into_schema_groups(
     config: Any,
@@ -188,6 +194,9 @@ def _migrate_flat_config_into_schema_groups(
 
     relationship_switch_changes = _migrate_relationship_switch_semantics(root, schema_map)
     changed.extend(relationship_switch_changes)
+
+    command_photo_quota_changes = _migrate_command_photo_quota_semantics(root, schema_map)
+    changed.extend(command_photo_quota_changes)
 
     # 参考图目录升级需要先于通用的“分组值优先”处理。AstrBot 会为新版
     # 分组补上空默认值；这不代表用户主动清空，不能覆盖仍然非空的旧字段。
@@ -370,6 +379,38 @@ def _migrate_relationship_switch_semantics(
     if root.get(_RELATIONSHIP_SWITCH_MIGRATION_MARKER) != _RELATIONSHIP_SWITCH_MIGRATION_VERSION:
         root[_RELATIONSHIP_SWITCH_MIGRATION_MARKER] = _RELATIONSHIP_SWITCH_MIGRATION_VERSION
         changed.append(f"{_RELATIONSHIP_SWITCH_MIGRATION_MARKER}~set")
+    return changed
+
+
+def _migrate_command_photo_quota_semantics(
+    root: dict[str, Any],
+    schema_map: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Upgrade the old unlimited zero once without rewriting future disables."""
+    if root.get(_COMMAND_PHOTO_QUOTA_MIGRATION_MARKER) == _COMMAND_PHOTO_QUOTA_MIGRATION_VERSION:
+        return []
+
+    key = "command_photo_generation_max_daily"
+    item = schema_map.get(key)
+    if not isinstance(item, dict):
+        return []
+    group_key = str(item.get("group") or "")
+    group = root.get(group_key) if group_key else None
+    has_grouped_value = isinstance(group, dict) and key in group
+    has_flat_value = key in root
+    changed: list[str] = []
+    raw_value = group.get(key) if has_grouped_value else root.get(key) if has_flat_value else None
+    if (has_grouped_value or has_flat_value) and _coerce_schema_value(raw_value, item) == 0:
+        migrated_value = _coerce_schema_value(-1, item)
+        if root.get(key) != migrated_value:
+            root[key] = migrated_value
+            changed.append(f"{key}~quota-semantics-v1")
+        if isinstance(group, dict) and group.get(key) != migrated_value:
+            group[key] = migrated_value
+            changed.append(f"{group_key}.{key}~quota-semantics-v1")
+
+    root[_COMMAND_PHOTO_QUOTA_MIGRATION_MARKER] = _COMMAND_PHOTO_QUOTA_MIGRATION_VERSION
+    changed.append(f"{_COMMAND_PHOTO_QUOTA_MIGRATION_MARKER}~set")
     return changed
 
 

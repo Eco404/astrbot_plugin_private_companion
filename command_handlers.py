@@ -422,6 +422,13 @@ class CommandHandlersMixin:
         else:
             silence_confidence_text = f"{silence_confidence:.0f}%"
         reply_style = str(getattr(self, "reply_style_prompt", "") or "").strip()
+        command_photo_limit = self._command_photo_generation_daily_limit()
+        if command_photo_limit < 0:
+            command_photo_limit_text = "不限量（-1）"
+        elif command_photo_limit == 0:
+            command_photo_limit_text = "不允许（0）"
+        else:
+            command_photo_limit_text = f"{command_photo_limit} 次"
         return [
             f"群聊连续对话：{self._feature_on_text(getattr(self, 'enable_group_conversation_followup', False))}，窗口 {getattr(self, 'group_conversation_followup_seconds', 0)} 秒，最多 {getattr(self, 'group_conversation_followup_max_turns', 0)} 轮",
             f"高强度收口：{self._feature_on_text(getattr(self, 'enable_group_high_intensity_mode', False))}，{getattr(self, 'group_high_intensity_wakeup_window_seconds', 0)} 秒内 {getattr(self, 'group_high_intensity_wakeup_threshold', 0)} 次唤醒后持续 {getattr(self, 'group_high_intensity_cooldown_seconds', 0)} 秒",
@@ -433,7 +440,7 @@ class CommandHandlersMixin:
             f"智能沉默：{self._feature_on_text(getattr(self, 'enable_smart_silence', True))}，模式 {getattr(self, 'smart_silence_judge_mode', 'boundary_only')}，置信度 {silence_confidence_text}，超时 {getattr(self, 'smart_silence_model_timeout_seconds', 0)} 秒",
             f"被动回复复核：{self._feature_on_text(getattr(self, 'enable_passive_response_review', getattr(self, 'enable_response_self_review', True)))}，模式 {getattr(self, 'passive_review_mode', getattr(self, 'response_review_mode', 'severe_only'))}，强度 {getattr(self, 'passive_review_strength', 'lenient')}，长度阈值 {getattr(self, 'response_review_max_chars', 260)} 字；框架异常文本外发拦截：{self._feature_on_text(getattr(self, 'enable_framework_error_leak_guard', True))}",
             f"主动消息终审：{self._feature_on_text(getattr(self, 'enable_proactive_message_review', True))}，模式 {getattr(self, 'proactive_review_mode', 'full')}，强度 {getattr(self, 'proactive_review_strength', 'lenient')}",
-            f"用户请求生图每日上限：{getattr(self, 'command_photo_generation_max_daily', 0) or '不限'}；非指令生图：{_single_line(getattr(self, 'natural_language_photo_generation_mode', 'tool_first'), 24) or 'tool_first'}，规则快判{self._feature_on_text(getattr(self, 'enable_natural_language_photo_generation', False))}，每日上限 {getattr(self, 'natural_language_photo_generation_max_daily', 0)}",
+            f"用户请求生图每日上限：{command_photo_limit_text}；非指令生图：{_single_line(getattr(self, 'natural_language_photo_generation_mode', 'tool_first'), 24) or 'tool_first'}，规则快判{self._feature_on_text(getattr(self, 'enable_natural_language_photo_generation', False))}，每日上限 {getattr(self, 'natural_language_photo_generation_max_daily', 0)}",
             f"拟人状态：健康 {self._feature_on_text(getattr(self, 'enable_health_state', True))}，饥饿 {self._feature_on_text(getattr(self, 'enable_hunger_state', True))}，生理期 {self._feature_on_text(getattr(self, 'enable_cycle_state', True))}，强度 {getattr(self, 'humanized_state_intensity', 0)}",
             f"回复风格：{'已配置' if reply_style else '未配置'}，长度 {len(reply_style)} 字",
         ]
@@ -706,7 +713,7 @@ class CommandHandlersMixin:
                 "label": "非指令生图处理方式",
             },
             "enable_natural_language_photo_generation": {"type": "bool", "label": "允许规则快判生图/改图"},
-            "command_photo_generation_max_daily": {"type": "int", "min": 0, "max": 100, "label": "用户请求生图每日上限"},
+            "command_photo_generation_max_daily": {"type": "int", "min": -1, "max": 100, "label": "用户请求生图每日上限"},
             "photo_generation_trace_max_size_kb": {"type": "int", "min": 0, "max": 102400, "label": "生图日志单文件大小（KB）"},
             "photo_generation_trace_backup_count": {"type": "int", "min": 0, "max": 20, "label": "生图日志轮转备份数"},
             "natural_language_photo_generation_max_daily": {"type": "int", "min": 0, "max": 100, "label": "规则快判生图每日上限"},
@@ -1319,6 +1326,13 @@ class CommandHandlersMixin:
         return str(value)
 
     def _companion_manual_format_config_item_value(self, key: str, value: Any) -> str:
+        if str(key or "") == "command_photo_generation_max_daily":
+            limit = _safe_int(value, -1, -1, 100)
+            if limit < 0:
+                return "-1（不限量）"
+            if limit == 0:
+                return "0（不允许）"
+            return f"{limit} 次"
         if str(key or "") in {"rest_reply_probability", "smart_silence_min_confidence"}:
             try:
                 number = float(value)
@@ -1777,14 +1791,20 @@ class CommandHandlersMixin:
                 )
 
         if photo_behavior:
-            command_quota_question = "上限" in compact and any(
+            command_quota_question = any(word in compact for word in ("上限", "额度")) and any(
                 marker in compact for marker in ("用户请求", "指令生图", "陪伴生图", "陪伴自拍", "陪伴改图", "额度用完")
             )
-            if command_quota_question and current_int("command_photo_generation_max_daily", 0) > 0:
+            command_photo_limit = _safe_int(
+                self._companion_manual_current_config_value("command_photo_generation_max_daily"),
+                -1,
+                -1,
+                100,
+            )
+            if command_quota_question and command_photo_limit >= 0:
                 propose(
                     "command_photo_generation_max_daily",
-                    0,
-                    "把用户请求生图每日上限设为 0，显式陪伴生图指令与 pc_generate_photo 工具调用都不再受每日次数限制。",
+                    -1,
+                    "把用户请求生图每日上限设为 -1，显式陪伴生图指令与 pc_generate_photo 工具调用都不再受每日次数限制；0 表示完全不允许用户请求生图。",
                     "用户请求生图上限",
                     condition="用户明确询问指令/工具生图额度，并希望取消每日限制。",
                     strength="可尝试",
@@ -2917,7 +2937,7 @@ class CommandHandlersMixin:
                     "自拍/头像/角色表情包需要自动套人设或穿搭参考图时，先开启 enable_photo_reference_image；关闭时只按提示词生成。",
                     "非指令生图模式：natural_language_photo_generation_mode，可选 tool_first / rule_fast / off。",
                     "规则快判前置接管需要 enable_natural_language_photo_generation=true；显式指令和 pc_generate_photo 工具不依赖这个开关。",
-                    "用户请求上限：command_photo_generation_max_daily，同时作用于显式陪伴生图指令和 pc_generate_photo 工具；0 表示不限量。",
+                    "用户请求上限：command_photo_generation_max_daily，同时作用于显式陪伴生图指令和 pc_generate_photo 工具；-1 表示不限量，0 表示不允许，正数表示每日限额。",
                     "参考图命令：陪伴 参考图 <本地图片路径|图片URL|清空|查看>，也可带图或回复图片；查看会把当前实际参考图发出来检查。",
                     "多参考图库：发送一张或多张图片并使用“陪伴 参考图库 添加 <用途注释>”；支持列表、预览、删除和清空。用途注释写清服装、地点和适用场景，生图时会结合最终画面自动选一张，今日穿搭图不会无条件优先。",
                     "规则快判上限：natural_language_photo_generation_max_daily，只作用于 rule_fast。",
@@ -2948,7 +2968,7 @@ class CommandHandlersMixin:
                 ],
                 "suggestions": [
                     "如果误触多，先把 natural_language_photo_generation_mode 调回 tool_first，必要时改 off。",
-                    "如果只有用户明确请求提示额度用完，检查 command_photo_generation_max_daily；设为 0 即不限量，不要修改主动带图或规则快判上限。",
+                    "如果只有用户明确请求提示额度用完或被禁止，检查 command_photo_generation_max_daily；设为 -1 即不限量，0 表示不允许，不要修改主动带图或规则快判上限。",
                     "如果没反应，先确认 enable_photo_text_action、生图后端、主链工具是否注册；只有 rule_fast 才看规则快判开关和每日上限。",
                     "如果出图后只回“好了”，重点看图片任务回调和结果说明模板，而不是聊天主模型。",
                     "在线 API 报模型错误时，确认图片模型不是普通聊天模型。",
@@ -4472,10 +4492,25 @@ class CommandHandlersMixin:
         user["last_natural_photo_path"] = _path_text(image_path, 1000)
         user["last_natural_photo_at"] = _now_ts()
 
+    def _command_photo_generation_daily_limit(self) -> int:
+        return _safe_int(
+            getattr(self, "command_photo_generation_max_daily", -1),
+            -1,
+            -1,
+            100,
+        )
+
+    def _command_photo_quota_block_message(self) -> str:
+        if self._command_photo_generation_daily_limit() == 0:
+            return "管理员已关闭用户请求生图/改图（“用户请求生图每日上限”为 0）。"
+        return "今天用户请求生图/改图额度用完了。管理员可调高“用户请求生图每日上限”，或设为 -1 取消每日限制。"
+
     def _command_photo_quota_left(self, user: dict[str, Any]) -> int | None:
-        limit = max(0, _safe_int(getattr(self, "command_photo_generation_max_daily", 0), 0))
-        if limit <= 0:
+        limit = self._command_photo_generation_daily_limit()
+        if limit < 0:
             return None
+        if limit == 0:
+            return 0
         today = self._environment_now().strftime("%Y-%m-%d") if callable(getattr(self, "_environment_now", None)) else ""
         if not today:
             today = str(getattr(self, "_today_key", lambda: "")() or "")
@@ -5292,7 +5327,7 @@ class CommandHandlersMixin:
                 return True
             quota_left = self._command_photo_quota_left(user)
             if quota_left is not None and quota_left <= 0:
-                await self._reply(event, "今天用户请求生图/改图额度用完了。管理员可调整“用户请求生图每日上限”，0 表示不限量。")
+                await self._reply(event, self._command_photo_quota_block_message())
                 event.stop_event()
                 return True
 
