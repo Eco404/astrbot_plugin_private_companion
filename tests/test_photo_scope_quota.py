@@ -142,11 +142,17 @@ class PhotoScopeQuotaTests(unittest.TestCase):
         self.assertIsNone(
             self.harness._photo_generation_scope_quota_left(user=self.harness.users["owner"])
         )
+        self.assertTrue(
+            self.harness._photo_generation_scope_allowed(user=self.harness.users["owner"])
+        )
 
         self.harness.photo_generation_private_owner_max_daily = 0
         self.assertEqual(
             0,
             self.harness._photo_generation_scope_quota_left(user=self.harness.users["owner"]),
+        )
+        self.assertFalse(
+            self.harness._photo_generation_scope_allowed(user=self.harness.users["owner"])
         )
         self.assertIn(
             "管理员已关闭",
@@ -158,6 +164,17 @@ class PhotoScopeQuotaTests(unittest.TestCase):
             2,
             self.harness._photo_generation_scope_quota_left(user=self.harness.users["owner"]),
         )
+
+    def test_allowed_compatibility_gate_rejects_exhausted_positive_quota(self) -> None:
+        owner = self.harness.users["owner"]
+        owner_event = _Event("owner")
+
+        self.harness._note_photo_generation_scope_attempt(owner_event, user=owner)
+        self.assertTrue(self.harness._photo_generation_scope_allowed(owner_event, user=owner))
+
+        self.harness._note_photo_generation_scope_attempt(owner_event, user=owner)
+        self.assertEqual(0, self.harness._photo_generation_scope_quota_left(owner_event, user=owner))
+        self.assertFalse(self.harness._photo_generation_scope_allowed(owner_event, user=owner))
 
     def test_usage_is_isolated_by_requester_and_scope(self) -> None:
         owner = self.harness.users["owner"]

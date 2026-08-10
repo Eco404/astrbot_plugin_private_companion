@@ -3054,8 +3054,13 @@ class CoreStoreMixin:
         return f"今天{label}生图/改图额度用完了；管理员可调高对应每日上限，或设为 -1 取消限制。"
 
     def _photo_generation_scope_allowed(self, event: Any = None, *, proactive: bool = False, user: dict[str, Any] | None = None, user_id: str = "") -> bool:
-        scope = self._photo_generation_scope(event, proactive=proactive, user=user, user_id=user_id)
-        return self._photo_generation_scope_daily_limit(scope) != 0
+        quota_left = self._photo_generation_scope_quota_left(
+            event,
+            proactive=proactive,
+            user=user,
+            user_id=user_id,
+        )
+        return quota_left is None or quota_left > 0
 
     def _is_bot_self_user_id(self, user_id: str) -> bool:
         user_id = str(user_id or "").strip()
