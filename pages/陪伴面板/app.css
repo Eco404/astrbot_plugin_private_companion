@@ -31172,6 +31172,22 @@ pre {
 .photo-reference-add-form>header [data-photo-reference-add-close]{width:34px;min-height:34px;padding:0;font-size:20px}
 .photo-reference-add-form>.photo-reference-add-body{display:block;min-height:0;overflow:auto;padding:16px 18px 20px}
 .photo-reference-add-basics{display:grid;grid-template-columns:minmax(240px,1.15fr) minmax(220px,.85fr);gap:12px;margin-bottom:16px}
+.photo-reference-source-field{display:grid;gap:7px;min-width:0;color:var(--muted);font-size:12px}
+.photo-reference-source-modes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:3px;border:1px solid var(--line);border-radius:8px;padding:3px;background:var(--surface-soft)}
+.photo-reference-add-form .photo-reference-source-modes button{width:100%;min-height:32px;border:1px solid transparent;border-radius:6px;padding:6px 9px;background:transparent;color:var(--muted);box-shadow:none}
+.photo-reference-add-form .photo-reference-source-modes button.is-active{border-color:var(--line-soft);background:var(--surface);color:var(--accent)}
+.photo-reference-upload-panel{display:grid;grid-template-columns:minmax(160px,.9fr) minmax(0,1.1fr);gap:8px;align-items:stretch}
+.photo-reference-upload-panel[hidden],.photo-reference-source-field>[data-photo-reference-source-panel="url"][hidden]{display:none!important}
+.photo-reference-file-picker{align-content:center;border:1px dashed color-mix(in srgb,var(--accent) 55%,var(--line));border-radius:8px;padding:9px 10px;background:color-mix(in srgb,var(--accent) 5%,var(--surface));cursor:pointer}
+.photo-reference-file-picker>span{color:var(--ink);font-weight:700}
+.photo-reference-file-picker input[type="file"]{padding:4px 0;border:0;border-radius:0;background:transparent;font-size:11px}
+.photo-reference-file-preview{display:grid;grid-template-columns:48px minmax(0,1fr);align-items:center;gap:9px;min-height:60px;border:1px solid var(--line-soft);border-radius:8px;padding:5px 8px;background:var(--surface)}
+.photo-reference-file-preview>img{width:48px;height:48px;border-radius:4px;object-fit:cover;background:var(--surface-soft)}
+.photo-reference-file-preview>img[hidden]{display:none}
+.photo-reference-file-preview>div{display:grid;gap:3px;min-width:0}
+.photo-reference-file-preview>img[hidden]+div{grid-column:1/-1}
+.photo-reference-file-preview b{overflow:hidden;color:var(--ink);font-size:12px;text-overflow:ellipsis;white-space:nowrap}
+.photo-reference-file-preview small{color:var(--muted);font-size:10px}
 .photo-reference-guided-editor{padding:16px;border:1px solid var(--line);background:color-mix(in srgb,var(--surface) 95%,var(--surface-soft) 5%);border-radius:8px}
 .photo-reference-guided-tabs{display:flex;gap:8px;overflow-x:auto;border-bottom:1px solid var(--line);margin-bottom:16px}
 .photo-reference-guided-tabs button{flex:0 0 auto;width:auto;border:0;background:transparent;padding:8px 12px;cursor:pointer;color:inherit}
@@ -31205,7 +31221,7 @@ pre {
 .photo-reference-guided-model-note code{overflow-wrap:anywhere;color:var(--accent);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}
 .photo-reference-guided-expert{margin-top:16px;border-top:1px solid var(--line-soft);padding-top:12px}.photo-reference-guided-expert summary{cursor:pointer;font-size:12px;font-weight:800}.photo-reference-guided-expert .photo-reference-guided-choice{margin-top:10px!important}.photo-reference-guided-expert textarea{margin-top:8px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}
 @media(min-width:900px){.photo-reference-guided-editor{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(300px,.85fr);align-items:start;gap:0 18px}.photo-reference-guided-tabs{grid-column:1/-1}.photo-reference-guided-editor:not([data-photo-guided-active-tab="trial"])>[data-photo-guided-panel="answers"],.photo-reference-guided-editor:not([data-photo-guided-active-tab="trial"])>[data-photo-guided-panel="result"]{display:block!important;min-width:0}.photo-reference-guided-editor>[data-photo-guided-panel="result"]{position:sticky;top:0}.photo-reference-guided-editor>[data-photo-guided-panel="trial"]{grid-column:1/-1}}
-@media(max-width:700px){.photo-reference-add-dialog{width:calc(100vw - 16px);max-height:calc(100vh - 16px)}.photo-reference-add-form{max-height:calc(100vh - 18px)}.photo-reference-add-form>.photo-reference-add-body{padding:13px}.photo-reference-add-basics,.photo-reference-guided-choices{grid-template-columns:1fr}.photo-reference-guided-choice-section{grid-template-columns:1fr;gap:3px}.photo-reference-guided-choice-section>b{padding-top:4px}}
+@media(max-width:700px){.photo-reference-add-dialog{width:calc(100vw - 16px);max-height:calc(100vh - 16px)}.photo-reference-add-form{max-height:calc(100vh - 18px)}.photo-reference-add-form>.photo-reference-add-body{padding:13px}.photo-reference-add-basics,.photo-reference-upload-panel,.photo-reference-guided-choices{grid-template-columns:1fr}.photo-reference-guided-choice-section{grid-template-columns:1fr;gap:3px}.photo-reference-guided-choice-section>b{padding-top:4px}}
 
 /* Ortto-inspired people and world workspaces */
 #panel-roleplay,

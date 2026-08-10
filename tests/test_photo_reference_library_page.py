@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import tempfile
 import unittest
@@ -17,6 +19,12 @@ from astrbot_plugin_private_companion.photo_reference_selection import Selection
 
 
 ROOT = Path(__file__).resolve().parents[1]
+VALID_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+SECOND_VALID_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+)
 
 
 class _PhotoReferencePagePlugin:
@@ -423,6 +431,126 @@ class PhotoReferenceLibraryPageApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["items"][1]["direct_url"], "https://example.com/formal.webp")
             self.assertFalse(payload["items"][2]["available"])
 
+    async def test_catalog_upload_saves_valid_png_to_owned_reference_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin = _PhotoReferencePagePlugin(root)
+            api = PrivateCompanionPageApi(plugin)
+            raw = VALID_PNG
+            data_url = f"data:image/png;base64,{base64.b64encode(raw).decode('ascii')}"
+
+            async with self.app.test_request_context(
+                "/",
+                method="POST",
+                json={"data_url": data_url, "filename": "persona portrait.png"},
+            ):
+                result = await api.upload_photo_reference()
+
+            self.assertTrue(result["success"])
+            uploaded = result["data"]
+            path = Path(uploaded["source"])
+            self.assertEqual(path.parent, (root / "photo_reference_images").resolve())
+            self.assertEqual(path.name, uploaded["filename"])
+            self.assertEqual(path.name, f"webui_{hashlib.sha256(raw).hexdigest()}.png")
+            self.assertEqual(uploaded["mime"], "image/png")
+            self.assertEqual(uploaded["size"], len(raw))
+            self.assertEqual(path.read_bytes(), raw)
+
+    async def test_catalog_upload_rejects_unsupported_and_spoofed_images(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin = _PhotoReferencePagePlugin(root)
+            api = PrivateCompanionPageApi(plugin)
+            data_urls = [
+                "data:image/gif;base64," + base64.b64encode(b"GIF89aimage").decode("ascii"),
+                "data:image/png;base64," + base64.b64encode(b"not-a-png").decode("ascii"),
+            ]
+
+            for data_url in data_urls:
+                async with self.app.test_request_context("/", method="POST", json={"data_url": data_url}):
+                    result = await api.upload_photo_reference()
+                self.assertFalse(result["success"])
+
+            self.assertFalse((root / "photo_reference_images").exists())
+
+    async def test_catalog_upload_rejects_truncated_image_with_valid_magic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin = _PhotoReferencePagePlugin(root)
+            api = PrivateCompanionPageApi(plugin)
+            raw = VALID_PNG[:20]
+            data_url = f"data:image/png;base64,{base64.b64encode(raw).decode('ascii')}"
+
+            async with self.app.test_request_context("/", method="POST", json={"data_url": data_url}):
+                result = await api.upload_photo_reference()
+
+            self.assertFalse(result["success"])
+            self.assertIn("损坏", result["error"])
+            self.assertFalse((root / "photo_reference_images").exists())
+
+    async def test_catalog_upload_rejects_images_above_the_12mb_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin = _PhotoReferencePagePlugin(root)
+            api = PrivateCompanionPageApi(plugin)
+            raw = VALID_PNG
+            data_url = f"data:image/png;base64,{base64.b64encode(raw).decode('ascii')}"
+
+            with patch("astrbot_plugin_private_companion.page_api.PHOTO_REFERENCE_ASSET_MAX_BYTES", len(raw) - 1):
+                async with self.app.test_request_context("/", method="POST", json={"data_url": data_url}):
+                    result = await api.upload_photo_reference()
+
+            self.assertFalse(result["success"])
+            self.assertFalse((root / "photo_reference_images").exists())
+
+    async def test_catalog_upload_deduplicates_content_and_enforces_file_quota(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin = _PhotoReferencePagePlugin(root)
+            api = PrivateCompanionPageApi(plugin)
+
+            async def upload(raw: bytes, filename: str) -> dict[str, object]:
+                data_url = f"data:image/png;base64,{base64.b64encode(raw).decode('ascii')}"
+                async with self.app.test_request_context(
+                    "/",
+                    method="POST",
+                    json={"data_url": data_url, "filename": filename},
+                ):
+                    return await api.upload_photo_reference()
+
+            first = await upload(VALID_PNG, "first.png")
+            duplicate = await upload(VALID_PNG, "renamed.png")
+            self.assertTrue(first["success"])
+            self.assertTrue(duplicate["success"])
+            self.assertEqual(first["data"]["source"], duplicate["data"]["source"])
+            self.assertEqual(len(list((root / "photo_reference_images").glob("webui_*"))), 1)
+
+            with patch("astrbot_plugin_private_companion.page_api.PHOTO_REFERENCE_UPLOAD_MAX_COUNT", 1):
+                rejected = await upload(SECOND_VALID_PNG, "second.png")
+            self.assertFalse(rejected["success"])
+            self.assertIn("文件上限", rejected["error"])
+
+    async def test_catalog_upload_enforces_total_storage_quota(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            plugin = _PhotoReferencePagePlugin(root)
+            api = PrivateCompanionPageApi(plugin)
+
+            async def upload(raw: bytes) -> dict[str, object]:
+                data_url = f"data:image/png;base64,{base64.b64encode(raw).decode('ascii')}"
+                async with self.app.test_request_context("/", method="POST", json={"data_url": data_url}):
+                    return await api.upload_photo_reference()
+
+            with patch(
+                "astrbot_plugin_private_companion.page_api.PHOTO_REFERENCE_UPLOAD_MAX_TOTAL_BYTES",
+                len(VALID_PNG) + len(SECOND_VALID_PNG) - 1,
+            ):
+                first = await upload(VALID_PNG)
+                second = await upload(SECOND_VALID_PNG)
+            self.assertTrue(first["success"])
+            self.assertFalse(second["success"])
+            self.assertIn("容量", second["error"])
+
     async def test_list_recovers_saved_catalog_when_runtime_catalog_is_stale_empty(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -712,8 +840,35 @@ class PhotoReferenceLibraryPageUiTests(unittest.TestCase):
         self.assertIn('data-preview-endpoint', self.script)
         self.assertIn('saveCurrentFeatureDetail(event.currentTarget, "已保存参考图库")', self.script)
         self.assertIn('("/photo_reference/list", self.list_photo_references', self.api)
+        self.assertIn('("/photo_reference/upload", self.upload_photo_reference', self.api)
         self.assertIn('("/photo_reference/image_data", self.get_photo_reference_image_data', self.api)
         self.assertIn('参考图不存在或已不在当前配置中', self.api)
+
+    def test_manager_supports_file_upload_and_preserves_url_mode(self) -> None:
+        for marker in (
+            'data-photo-reference-source-mode="file"',
+            'data-photo-reference-source-mode="url"',
+            'data-photo-reference-file',
+            'accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"',
+            'async function uploadPhotoReferenceFile(file)',
+            'postJson("/photo_reference/upload"',
+            'setPhotoReferenceFormBusy(form, true)',
+            'data-photo-reference-file-preview',
+        ):
+            self.assertIn(marker, self.script)
+        self.assertIn('.photo-reference-file-preview>img[hidden]+div{grid-column:1/-1}', self.styles)
+
+    def test_manager_keeps_async_upload_bound_to_the_current_draft(self) -> None:
+        for marker in (
+            "photoReferenceLibraryRequestSeq: 0",
+            "photoReferenceSubmissionToken: null",
+            "const requestSeq = ++state.photoReferenceLibraryRequestSeq",
+            "requestSeq !== state.photoReferenceLibraryRequestSeq || photoReferenceManagerBusy()",
+            "state.photoReferenceSubmissionToken !== submissionToken",
+            "state.featureDetailSubpage === \"photo_reference_library\"\n    && (state.photoReferenceSubmitting || state.photoReferenceAddDialogOpen)",
+            "if (photoReferenceManagerBusy()) {\n      showToast(\"参考图正在处理，请稍候\", \"error\");",
+        ):
+            self.assertIn(marker, self.script)
 
     def test_manager_distinguishes_load_failure_and_hydrates_saved_status(self) -> None:
         self.assertIn('function hydratePhotoReferenceDraftFromStatus(status)', self.script)
@@ -729,7 +884,7 @@ class PhotoReferenceLibraryPageUiTests(unittest.TestCase):
         self.assertIn('grid-template-columns: repeat(2, minmax(0, 1fr));', self.styles)
         self.assertIn('@media (max-width: 520px)', self.styles)
         self.assertIn('.photo-reference-manager[hidden]', self.styles)
-        self.assertIn('./app.css?v=20260809-external-ability-controls-v3', self.html)
+        self.assertIn('./app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1', self.html)
         self.assertRegex(self.html, r'<script src="\./app\.js\?v=[^" ]+"')
 
     def test_structured_metadata_round_trip_keeps_explicit_false_lock(self) -> None:
