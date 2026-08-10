@@ -43,6 +43,9 @@ class RealityTouchUiTests(unittest.TestCase):
             "data-reality-touch-form",
             "复制确认命令",
             "电脑音频输出设备",
+            "现实触及播放音量",
+            "data-reality-touch-volume",
+            "电脑音频输出设备与音量已保存",
             "data-reality-touch-device-save",
             "播放固定测试音频",
             'data-reality-touch-test-kind="device"',
@@ -68,8 +71,8 @@ class RealityTouchUiTests(unittest.TestCase):
             '("/reality-touch/update", self.update_reality_touch',
             'action not in {"save", "save_policy", "disable", "test", "select_output"}',
             '"该用户尚未在私聊中完成现实触及知情确认"',
-            "await test_audio_player()",
-            "await wakeup_player(user_for_test, alarm_for_test, test=True)",
+            "await test_audio_player(",
+            "await wakeup_player(",
         ):
             self.assertIn(marker, self.api)
 

@@ -461,11 +461,15 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         alarm: dict[str, Any],
         *,
         test: bool = False,
+        volume: Any = None,
     ) -> bool:
         message = await self._generate_wakeup_alarm_message(user, alarm, test=test)
         repeat = 1 if test else _safe_int(alarm.get("repeat_count"), 1, 1, 6)
         interval = _safe_int(alarm.get("repeat_interval_seconds"), 20, 5, 300)
-        played = await self._play_reality_touch_text(message, repeat=repeat, interval=interval)
+        playback_kwargs = {"repeat": repeat, "interval": interval}
+        if volume is not None:
+            playback_kwargs["volume"] = volume
+        played = await self._play_reality_touch_text(message, **playback_kwargs)
         if played:
             logger.info("[PrivateCompanion] 起床提醒场景已播放: test=%s repeat=%s", test, repeat)
         return played

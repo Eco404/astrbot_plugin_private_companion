@@ -32758,10 +32758,15 @@ function renderRealityTouchDevicePanel() {
           <span>输出设备</span>
           <select data-reality-touch-device>${options || '<option value="system_default">跟随系统默认输出</option>'}</select>
         </label>
-        <button type="button" class="primary" data-reality-touch-device-save>保存设备</button>
+        <button type="button" class="primary" data-reality-touch-device-save>保存设备与音量</button>
         <button type="button" data-reality-touch-refresh>刷新列表</button>
         <button type="button" data-reality-touch-test data-reality-touch-test-kind="device" ${canTest ? "" : "disabled"}>播放固定测试音频</button>
       </div>
+      <label class="reality-device-volume">
+        <span>现实触及播放音量 <output data-reality-touch-volume-output>${Number(audio.playback_volume ?? 35)}%</output></span>
+        <input type="range" data-reality-touch-volume min="0" max="100" step="1" value="${Number(audio.playback_volume ?? 35)}">
+        <small>仅影响现实触及的本机播放，不修改普通聊天 TTS 音量。</small>
+      </label>
       <div class="reality-device-status ${audio.selected_device_missing ? "error" : ""}">
         <b>${audio.selected_device_missing ? "所选设备当前离线" : `当前路由：${escapeHtml(audio.label || "跟随系统默认输出")}`}</b>
         <span>${escapeHtml(audio.error || (audio.backend_available ? "设备离线时播放会失败，不会自动改投其他设备。" : "安装音频路由依赖并重载插件后，可选择具体耳机、扬声器或蓝牙音响。"))}</span>
@@ -33518,8 +33523,12 @@ function bindRealityTouchActions(root) {
   root.querySelector("[data-reality-touch-device-save]")?.addEventListener("click", async (event) => {
     const select = root.querySelector("[data-reality-touch-device]");
     const result = await runAction(
-      () => postJson("/reality-touch/update", { action: "select_output", device_id: select?.value || "system_default" }),
-      "电脑音频输出设备已保存",
+      () => postJson("/reality-touch/update", {
+        action: "select_output",
+        device_id: select?.value || "system_default",
+        playback_volume: Number(root.querySelector("[data-reality-touch-volume]")?.value ?? 35),
+      }),
+      "电脑音频输出设备与音量已保存",
       event.currentTarget,
       { reload: false },
     );
@@ -33527,6 +33536,11 @@ function bindRealityTouchActions(root) {
       state.realityTouch = result;
       renderExperimentalPage();
     }
+  });
+  const volumeInput = root.querySelector("[data-reality-touch-volume]");
+  volumeInput?.addEventListener("input", (event) => {
+    const output = root.querySelector("[data-reality-touch-volume-output]");
+    if (output) output.textContent = `${Number(event.currentTarget.value || 0)}%`;
   });
   const policyForm = root.querySelector("[data-reality-touch-policy-form]");
   policyForm?.addEventListener("submit", async (event) => {
@@ -33588,6 +33602,7 @@ function bindRealityTouchActions(root) {
           user_id: user.user_id,
           test_kind: control.dataset.realityTouchTestKind || "scenario",
           message: root.querySelector('[name="reality_message"]')?.value || "",
+          playback_volume: Number(root.querySelector("[data-reality-touch-volume]")?.value ?? 35),
         }),
         control.dataset.realityTouchTestKind === "device"
           ? "固定测试音频已发送到所选电脑音频输出设备"

@@ -28486,6 +28486,33 @@ pre {
   font: inherit;
 }
 
+.reality-device-volume {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.reality-device-volume > span {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reality-device-volume output {
+  color: var(--accent-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.reality-device-volume input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.reality-device-volume small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .reality-device-status {
   display: grid;
   gap: 3px;

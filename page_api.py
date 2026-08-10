@@ -4325,7 +4325,10 @@ class PrivateCompanionPageApi(
                 if not callable(device_selector):
                     return self._error("当前插件实例不支持选择音频输出设备", status_code=503)
                 async with self.plugin._data_lock:
-                    selected = device_selector(payload.get("device_id"))
+                    selected = device_selector(
+                        payload.get("device_id"),
+                        payload.get("playback_volume") if "playback_volume" in payload else None,
+                    )
                     self.plugin._save_data_sync()
                     snapshot = deepcopy(snapshotter())
                 snapshot["message"] = f"音频输出已切换为：{self._single_line(selected.get('name'), 120)}"
@@ -4372,13 +4375,20 @@ class PrivateCompanionPageApi(
                 if test_kind == "device":
                     if not callable(test_audio_player):
                         return self._error("当前插件实例没有固定测试音频播放能力", status_code=503)
-                    if not await test_audio_player():
+                    if not await test_audio_player(
+                        payload.get("playback_volume") if "playback_volume" in payload else None
+                    ):
                         return self._error("固定测试音频播放失败，请检查所选音频输出设备")
                     message = "固定测试音频已发送到所选音频输出设备"
                 else:
                     if not callable(wakeup_player) or user_for_test is None or alarm_for_test is None:
                         return self._error("当前插件实例没有可用的本机语音播放能力", status_code=503)
-                    if not await wakeup_player(user_for_test, alarm_for_test, test=True):
+                    if not await wakeup_player(
+                        user_for_test,
+                        alarm_for_test,
+                        test=True,
+                        volume=payload.get("playback_volume") if "playback_volume" in payload else None,
+                    ):
                         return self._error("场景试听失败，请检查 TTS 配置和所选音频输出设备")
                     message = "场景试听已发送到所选音频输出设备"
 

@@ -105,9 +105,11 @@ class AudioHarness(RealityTouchAudioMixin):
         self.enable_experimental_bluetooth_wakeup = True
         self.tts_local_playback_volume = 50
         self.default_plays = 0
+        self.default_volume = None
 
-    def _open_tts_audio_file_local(self, path: str) -> None:
+    def _open_tts_audio_file_local(self, path: str, *, volume=None) -> None:
         self.default_plays += 1
+        self.default_volume = volume
 
     @staticmethod
     def _reality_touch_audio_consented(user) -> bool:
@@ -147,6 +149,20 @@ class RealityTouchAudioTests(unittest.TestCase):
         self.assertEqual(1, self.sd.last_stream.kwargs["device"])
         self.assertEqual(1, self.sd.writes)
         self.assertEqual(0, harness.default_plays)
+
+    def test_reality_touch_volume_is_persisted_and_applied_to_default_output(self) -> None:
+        harness = AudioHarness()
+        self.assertEqual(0, harness._reality_touch_playback_volume(-10))
+        self.assertEqual(100, harness._reality_touch_playback_volume(120))
+        harness._reality_touch_select_audio_device("system_default", playback_volume=12)
+        snapshot = harness._reality_touch_audio_snapshot()
+        self.assertEqual(12, snapshot["playback_volume"])
+
+        with tempfile.NamedTemporaryFile(suffix=".wav") as audio:
+            harness._open_reality_touch_audio_file(audio.name)
+
+        self.assertEqual(1, harness.default_plays)
+        self.assertEqual(12, harness.default_volume)
 
     def test_audio_is_resampled_to_selected_device_default_rate(self) -> None:
         harness = AudioHarness()

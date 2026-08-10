@@ -4495,16 +4495,25 @@ Provider 规则：{emotion_rule}
                     )
             raise
 
-    def _open_tts_audio_file_local(self, audio_path: str) -> None:
+    def _open_tts_audio_file_local(self, audio_path: str, *, volume: int | None = None) -> None:
         path = str(audio_path or "").strip()
         if not path:
             return
-        volume = max(0, min(100, _safe_int(getattr(self, "tts_local_playback_volume", 35), 35)))
+        volume = max(
+            0,
+            min(
+                100,
+                _safe_int(
+                    getattr(self, "tts_local_playback_volume", 35) if volume is None else volume,
+                    35,
+                ),
+            ),
+        )
         if sys.platform.startswith("win"):
             self._play_tts_audio_file_windows_silent(path, volume=volume)
             return
         if sys.platform == "darwin":
-            subprocess.run(["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            subprocess.run(["afplay", "-v", str(volume / 100.0), path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
             return
         subprocess.run(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-volume", str(volume), path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
