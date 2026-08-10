@@ -27,6 +27,7 @@ from .helpers import _missing_optional_model_dependency, _now_ts, _path_text, _s
 from .companion_interaction_expression import current_interaction_projection
 from .relationship_ledger import normalize_relationship_mode
 from .relationship_policy import relationship_projection_for_bridge
+from .namespace_capability import negotiate_namespace_capability
 
 
 def _memory_companion_safe_float(value: Any, default: float, minimum: float = 0.0) -> float:
@@ -725,6 +726,30 @@ class MemoryCompanionAdapterMixin:
         status.setdefault("available", True)
         self._bridge_last_status = status
         return status
+
+    def _memory_companion_probe_namespace_capabilities(self, bridge: Any) -> dict[str, Any]:
+        """Negotiate only the REQ-041 scoped API; legacy bridge state is untouched."""
+        try:
+            getter = getattr(bridge, "probe_namespace_context_capabilities", None)
+        except Exception:
+            getter = None
+        if not callable(getter):
+            return {
+                "available": False,
+                "state": "degraded",
+                "code": "namespace_capability_probe_missing",
+                "mismatches": ["namespace_capability_probe_missing"],
+            }
+        try:
+            result = getter()
+        except Exception:
+            return {
+                "available": False,
+                "state": "degraded",
+                "code": "namespace_capability_probe_exception",
+                "mismatches": ["namespace_capability_probe_exception"],
+            }
+        return negotiate_namespace_capability(result)
 
     async def _memory_companion_read_profile(
         self,
