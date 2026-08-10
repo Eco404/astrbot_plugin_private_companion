@@ -26,6 +26,7 @@ try:
         validate_projection,
     )
     from .p4_affinity_confinement import validate_runtime_state
+    from .identity_namespace import AssurancePolicy, NamespaceContext
 except ImportError:
     from person_context_contract import (
         build_identity_key,
@@ -36,6 +37,7 @@ except ImportError:
         validate_projection,
     )
     from p4_affinity_confinement import validate_runtime_state
+    from identity_namespace import AssurancePolicy, NamespaceContext
 
 
 _LOCK = threading.RLock()
@@ -366,6 +368,58 @@ class UnifiedPersonRegistry:
             if result.get("state") not in {"pending", "invalid", "resolved", "degraded"}:
                 result["state"] = "invalid"
             return deepcopy(result)
+
+    def namespace_context(
+        self,
+        identity: dict[str, Any],
+        *,
+        kind: str,
+        group_id: str = "",
+        policy_version: str,
+        migration_epoch: str,
+        purpose: str = "memory_read",
+    ) -> dict[str, Any]:
+        """Resolve a strict Shadow namespace without changing legacy state.
+
+        A complete five-field identity that exactly matches an active link is
+        treated as ``verified`` for the new read matrix.  The legacy v1 profile
+        keeps its historical ``observed`` value, avoiding a silent contract
+        change for old consumers.  Missing links are routed to ``pending`` and
+        therefore fail closed for every formal purpose.
+        """
+        try:
+            normalized = _identity(identity)
+            identity_key = build_identity_key(normalized)
+        except (TypeError, ValueError):
+            return {"ok": False, "code": "identity_invalid", "context": None, "decision": "namespace_context_missing"}
+        with _LOCK:
+            root = _root(self._store)
+            link = root["identity_links"].get(identity_key)
+            linked = isinstance(link, dict) and link.get("status") == "active" and bool(link.get("person_id"))
+            person_id = str(link.get("person_id") or "") if linked else person_id_for_identity(normalized)
+            profile = root["profiles"].get(person_id) if linked else None
+            status = str(profile.get("profile_status") or "active") if isinstance(profile, dict) else "active"
+            stored_assurance = str(link.get("identity_assurance") or "observed") if linked else "unverified"
+        assurance = "explicit_linked" if stored_assurance == "explicit_linked" else "verified" if linked else "unverified"
+        effective_kind = kind if linked else "pending"
+        context = NamespaceContext(
+            kind=effective_kind,
+            identity_id=person_id,
+            group_id=group_id if effective_kind in {"group_member", "group_shared"} else "",
+            assurance=assurance,
+            profile_status=status,
+            policy_version=policy_version,
+            migration_epoch=migration_epoch,
+        )
+        decision = AssurancePolicy.authorize(context, purpose)
+        return {
+            "ok": decision.allowed,
+            "code": "namespace_resolved" if decision.allowed else decision.code,
+            "identity_key": identity_key,
+            "person_id": person_id,
+            "context": context.to_dict(),
+            "decision": decision.code,
+        }
 
     def create_or_link(
         self, identity: dict[str, Any], profile: dict[str, Any] | None = None,
