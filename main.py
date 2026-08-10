@@ -7560,6 +7560,25 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             caption=caption,
         )
 
+    @filter.llm_tool(name="pc_reality_touch_reminder")
+    @_multi_persona_event_context
+    async def pc_reality_touch_reminder(
+        self,
+        event: AstrMessageEvent,
+        text: str,
+    ) -> str:
+        """执行当前 AstrBot 官方任务绑定的现实触及提醒。
+
+        Args:
+            text(string): 根据官方任务备注生成的一到两句最终提醒文本。
+        """
+        executor = getattr(self, "_execute_official_reality_touch_reminder", None)
+        if not callable(executor):
+            return "Reality touch reminder failed: capability unavailable"
+        delivered, detail = await executor(event, text)
+        prefix = "Reality touch reminder delivered: " if delivered else "Reality touch reminder failed: "
+        return prefix + (_single_line(detail, 180) or "unknown result")
+
     @filter.llm_tool(name="pc_manage_memo")
     @_multi_persona_event_context
     async def pc_manage_memo(
@@ -9735,6 +9754,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if self is None or event is None:
             return
         await self._acknowledge_official_llm_timer_trigger(event)
+        await self._acknowledge_official_reality_touch_trigger(event)
         if self._finalize_memo_request_tool_boundary(event):
             logger.info(
                 "[PrivateCompanion] 明确便签请求已从最终工具集移除 future_task,避免重复提醒: session=%s",
@@ -9756,6 +9776,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if self is None or event is None:
             return
         await self._record_official_llm_timer_tool_result(event, tool, tool_result)
+        await self._record_official_reality_touch_tool_result(event, tool, tool_result)
         if self._record_future_task_result(event, tool, tool_args, tool_result):
             logger.info(
                 "[PrivateCompanion] 已记录本轮 future_task 成功: action=%s session=%s",
@@ -9785,6 +9806,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if self is None or event is None:
             return
         await self._complete_official_llm_timer_event(event)
+        await self._complete_official_reality_touch_reminder(event)
 
     def _is_lightweight_private_passive_inbound(self, text: str) -> bool:
         cleaned = _single_line(text, 80)

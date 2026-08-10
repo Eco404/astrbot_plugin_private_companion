@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 import types
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 
@@ -130,7 +132,162 @@ class _FeedbackEvent:
         self.stopped = True
 
 
+class _ReminderCron:
+    def __init__(self) -> None:
+        self.jobs: dict[str, SimpleNamespace] = {}
+        self.created = 0
+        self.pause_next_add = False
+        self.add_started = asyncio.Event()
+        self.add_release = asyncio.Event()
+
+    async def add_active_job(self, **kwargs):
+        if self.pause_next_add:
+            self.pause_next_add = False
+            self.add_started.set()
+            await self.add_release.wait()
+        self.created += 1
+        job_id = f"reality-job-{self.created}"
+        job = SimpleNamespace(job_id=job_id, payload=dict(kwargs.get("payload") or {}))
+        self.jobs[job_id] = job
+        return job
+
+    async def delete_job(self, job_id: str) -> None:
+        self.jobs.pop(job_id, None)
+
+
+class _ReminderEvent:
+    def __init__(self, reminder: dict) -> None:
+        self.extras = {
+            "cron_payload": {
+                "origin": "private_companion_reality_touch",
+                "sender_id": "u",
+                "private_companion": {"reminder_id": reminder["id"]},
+            },
+            "cron_job": {"id": reminder["job_id"]},
+        }
+
+    def get_extra(self, key=None, default=None):
+        if key is None:
+            return self.extras
+        return self.extras.get(key, default)
+
+
+class ReminderHarness(WakeupAlarmMixin):
+    def __init__(self) -> None:
+        self.enable_experimental_bluetooth_wakeup = True
+        self.environment_perception_timezone = "Asia/Shanghai"
+        self._data_lock = asyncio.Lock()
+        self.cron = _ReminderCron()
+        self.data = {
+            "users": {
+                "u": {
+                    "umo": "bot:FriendMessage:u",
+                    "reality_touch_consent": {
+                        "confirmed": True,
+                        "version": 1,
+                        "granted_capabilities": ["local_audio"],
+                    },
+                    "wakeup_alarm": {
+                        "delivery_mode": "audio_only",
+                        "playback_volume": 36,
+                        "fade_in_ms": 500,
+                    },
+                }
+            }
+        }
+        self.audio_calls: list[dict] = []
+
+    def _save_data_sync(self) -> None:
+        return None
+
+    def _official_cron_manager(self):
+        return self.cron
+
+    def _llm_timer_timezone_name(self) -> str:
+        return "Asia/Shanghai"
+
+    @staticmethod
+    def _llm_timer_run_at(scheduled_ts: float) -> datetime:
+        return datetime.fromtimestamp(scheduled_ts)
+
+    @staticmethod
+    def _environment_fromtimestamp(scheduled_ts: float) -> datetime:
+        return datetime.fromtimestamp(scheduled_ts)
+
+    async def _delete_official_llm_timer_job(self, job_id: str):
+        await self.cron.delete_job(job_id)
+        return True, ""
+
+    async def _play_reality_touch_text(self, text: str, **kwargs) -> bool:
+        self.audio_calls.append({"text": text, **kwargs})
+        return True
+
+    async def _send_wakeup_chat_copy(self, _user, _message) -> bool:
+        return False
+
+    async def schedule(self, topic: str) -> bool:
+        return await self._schedule_reality_touch_official_reminder(
+            "u",
+            {"scheduled_ts": int(time.time()) + 3600, "topic": topic},
+            source_text=f"提醒我{topic}",
+            trigger_umo="bot:FriendMessage:u",
+        )
+
+
 class WakeupAlarmTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelling_during_official_registration_reclaims_created_job(self) -> None:
+        harness = ReminderHarness()
+        harness.cron.pause_next_add = True
+        schedule_task = asyncio.create_task(harness.schedule("关窗"))
+        await harness.cron.add_started.wait()
+        reminder = next(iter(harness.data["users"]["u"]["reality_touch_reminders"].values()))
+
+        self.assertTrue(
+            await asyncio.wait_for(
+                harness._cancel_reality_touch_official_reminder("u", reminder_id=reminder["id"]),
+                timeout=1,
+            )
+        )
+        harness.cron.add_release.set()
+
+        self.assertFalse(await schedule_task)
+        self.assertEqual("cancelled", reminder["status"])
+        self.assertEqual({}, harness.cron.jobs)
+
+    async def test_official_reality_touch_reminders_are_independent_and_idempotent(self) -> None:
+        harness = ReminderHarness()
+        self.assertTrue(await harness.schedule("喝水"))
+        self.assertTrue(await harness.schedule("拿快递"))
+
+        reminders = harness.data["users"]["u"]["reality_touch_reminders"]
+        self.assertEqual(2, len(reminders))
+        self.assertEqual(2, len(harness.cron.jobs))
+        first = next(item for item in reminders.values() if item["topic"] == "喝水")
+        second = next(item for item in reminders.values() if item["topic"] == "拿快递")
+        event = _ReminderEvent(first)
+
+        self.assertTrue(await harness._acknowledge_official_reality_touch_trigger(event))
+        self.assertEqual("triggered", first["status"])
+        delivered, _ = await harness._execute_official_reality_touch_reminder(event, "该喝水了。")
+        self.assertTrue(delivered)
+        delivered_again, detail = await harness._execute_official_reality_touch_reminder(event, "重复提醒")
+        self.assertTrue(delivered_again)
+        self.assertIn("跳过重复调用", detail)
+        self.assertEqual(1, len(harness.audio_calls))
+        self.assertTrue(await harness._complete_official_reality_touch_reminder(event))
+        self.assertEqual("completed", first["status"])
+        self.assertEqual("scheduled", second["status"])
+
+        self.assertTrue(
+            await harness._cancel_reality_touch_official_reminder(
+                "u",
+                reminder_id=second["id"],
+            )
+        )
+        self.assertEqual("cancelled", second["status"])
+        self.assertNotIn(second["job_id"], harness.cron.jobs)
+        self.assertIn(first["job_id"], harness.cron.jobs)
+
     def test_command_and_day_normalization(self) -> None:
         harness = AlarmHarness()
         user = harness.data["users"]["u"]

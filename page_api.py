@@ -4303,7 +4303,7 @@ class PrivateCompanionPageApi(
         payload = await request.get_json(silent=True) or {}
         action = self._single_line(payload.get("action"), 24).lower()
         user_id = self._single_line(payload.get("user_id"), 120)
-        if action not in {"save", "save_policy", "disable", "stop_session", "test", "select_output"}:
+        if action not in {"save", "save_policy", "disable", "stop_session", "cancel_reminder", "test", "select_output"}:
             return self._error("不支持的现实触及操作")
         if action != "select_output" and not user_id:
             return self._error("请选择私聊用户")
@@ -4313,12 +4313,14 @@ class PrivateCompanionPageApi(
         device_selector = getattr(self.plugin, "_reality_touch_select_audio_device", None)
         wakeup_player = getattr(self.plugin, "_play_wakeup_alarm", None)
         test_audio_player = getattr(self.plugin, "_play_reality_touch_test_audio", None)
+        reminder_canceller = getattr(self.plugin, "_cancel_reality_touch_official_reminder", None)
         if not callable(snapshotter) or not callable(updater):
             return self._error("当前插件实例不支持现实触及控制台", status_code=503)
 
         user_for_test: dict[str, Any] | None = None
         alarm_for_test: dict[str, Any] | None = None
         test_kind = ""
+        cancel_reminder_id = ""
         message = ""
         try:
             if action == "select_output":
@@ -4368,6 +4370,10 @@ class PrivateCompanionPageApi(
                     stopper(user)
                     self.plugin._save_data_sync()
                     message = "已停止该用户当前这轮触达，不影响之后的闹钟"
+                elif action == "cancel_reminder":
+                    cancel_reminder_id = self._single_line(payload.get("reminder_id"), 40)
+                    if not cancel_reminder_id:
+                        return self._error("缺少现实触及提醒 ID")
                 else:
                     test_kind = "device" if self._single_line(payload.get("test_kind"), 24).lower() == "device" else "scenario"
                     consented = getattr(self.plugin, "_reality_touch_audio_consented", lambda _: False)(user)
@@ -4383,7 +4389,13 @@ class PrivateCompanionPageApi(
                     if "fade_in_ms" in payload:
                         alarm_for_test["fade_in_ms"] = _safe_int(payload.get("fade_in_ms"), 800, 0, 5000)
 
-            if action == "test":
+            if action == "cancel_reminder":
+                if not callable(reminder_canceller):
+                    return self._error("当前插件实例不支持取消现实触及官方提醒", status_code=503)
+                if not await reminder_canceller(user_id, reminder_id=cancel_reminder_id):
+                    return self._error("取消失败，任务可能已经开始执行或已结束")
+                message = "现实触及官方提醒已取消"
+            elif action == "test":
                 if test_kind == "device":
                     if not callable(test_audio_player):
                         return self._error("当前插件实例没有固定测试音频播放能力", status_code=503)

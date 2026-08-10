@@ -12,7 +12,13 @@ from astrbot_plugin_private_companion.daily_state import DailyStateMixin
 class ReminderRoutingHarness(DailyStateMixin):
     def __init__(self) -> None:
         self.enable_llm_timer_scheduling = True
+        self.enable_experimental_bluetooth_wakeup = True
         self._schedule_llm_timer = AsyncMock()
+        self._schedule_reality_touch_official_reminder = AsyncMock(return_value=True)
+
+    @staticmethod
+    def _reality_touch_audio_consented(_user) -> bool:
+        return True
 
     @staticmethod
     def _private_user_role(_user) -> str:
@@ -38,6 +44,41 @@ class ReminderRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("只能选择 `future_task` 或 `<timer>` 其中一种", instruction)
         self.assertIn("应使用 `pc_manage_memo`", instruction)
         self.assertIn("动作回访", instruction)
+        self.assertIn('"delivery":"reality_touch"', instruction)
+        self.assertIn("取消现实触及提醒时必须保留交付类型", instruction)
+
+    def test_reality_touch_directive_keeps_delivery_metadata(self):
+        payload = self.plugin._parse_timer_directive(
+            '{"time":"2027-01-15 08:30:00","delivery":"reality_touch",'
+            '"delivery_mode":"audio_only","playback_volume":42,"fade_in_ms":600,"topic":"喝水"}'
+        )
+
+        self.assertIsNotNone(payload)
+        self.assertEqual("reality_touch", payload["delivery"])
+        self.assertEqual("audio_only", payload["delivery_mode"])
+        self.assertEqual(42, payload["playback_volume"])
+        self.assertEqual(600, payload["fade_in_ms"])
+
+    async def test_reality_touch_reminder_routes_to_official_reality_touch_scheduler(self):
+        payload = {
+            "scheduled_ts": 1_800_000_000,
+            "delivery": "reality_touch",
+            "topic": "喝水",
+        }
+
+        result = await self.plugin._schedule_llm_timer_after_response_dedup(
+            SimpleNamespace(),
+            SimpleNamespace(tools_call_name=[]),
+            "owner",
+            payload,
+            source_text="用现实触及提醒我喝水",
+            visible_text="好。",
+            trigger_umo="aiocqhttp:FriendMessage:owner",
+        )
+
+        self.assertEqual("reality_touch_official", result)
+        self.plugin._schedule_reality_touch_official_reminder.assert_awaited_once()
+        self.plugin._schedule_llm_timer.assert_not_awaited()
 
     def test_activity_followup_policy_adapts_to_all_quota_tiers(self):
         expected = {

@@ -64,6 +64,9 @@ class RealityTouchUiTests(unittest.TestCase):
             "主动语音同步到所选设备",
             "这是现实触及的一个使用示例",
             "未授权，且不会继承音频授权",
+            "自定义现实触及提醒",
+            "官方 Cron",
+            "data-reality-touch-reminder-cancel",
         ):
             self.assertIn(marker, self.primary)
         self.assertIn(".reality-touch-grid", self.primary_css)
@@ -78,8 +81,9 @@ class RealityTouchUiTests(unittest.TestCase):
         for marker in (
             '("/reality-touch", self.get_reality_touch',
             '("/reality-touch/update", self.update_reality_touch',
-            'action not in {"save", "save_policy", "disable", "stop_session", "test", "select_output"}',
+            'action not in {"save", "save_policy", "disable", "stop_session", "cancel_reminder", "test", "select_output"}',
             '"该用户尚未在私聊中完成现实触及知情确认"',
+            'action == "cancel_reminder"',
             "await test_audio_player(",
             "await wakeup_player(",
         ):

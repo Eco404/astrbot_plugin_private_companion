@@ -12923,12 +12923,27 @@ class DailyStateMixin(DailyStateTickMixin):
             else "预约时间可落在预计完成附近，但不能早于预计完成时间。"
         )
         current_time = self._environment_fromtimestamp(_now_ts()).strftime("%Y-%m-%d %H:%M:%S")
+        reality_consented = getattr(self, "_reality_touch_audio_consented", lambda _: False)(current_user)
+        reality_ready = bool(
+            getattr(self, "enable_experimental_bluetooth_wakeup", False)
+            and reality_consented
+        )
+        reality_touch_rule = (
+            "用户已经具备现实触及音频授权。只有用户明确要求‘用现实触及/本机音响/电脑扬声器提醒’时，"
+            "不要调用 `future_task`，必须只输出：\n"
+            '<timer>{"time":"YYYY-MM-DD HH:MM:SS","delivery":"reality_touch","reason":"custom_reminder","topic":"要提醒的具体事项"}</timer>\n'
+            "这种标签仍会注册为 AstrBot 官方一次性 Cron，由官方任务到点调用现实触及；普通提醒不得擅自改成现实触及。"
+            if reality_ready
+            else "当前用户没有可用的现实触及音频授权。即使用户提到音响，也不得承诺本机播放；普通提醒仍使用官方 `future_task`。"
+        )
         return f"""【临时预约与动作回访】
 当前本地时间：{current_time}。所有 time 都必须据此换算为未来的绝对时间。
 一、明确约定：用户明确要求稍后提醒/叫醒/回头说，或双方形成明确临时约定时，若本轮提供 AstrBot 官方 `future_task` 工具，优先调用该工具；只有没有官方工具可用时，才在回复末尾写：
 <timer>{{"time":"YYYY-MM-DD HH:MM:SS","topic":"约定内容"}}</timer>
 
 同一约定只能选择 `future_task` 或 `<timer>` 其中一种，绝对不能同时创建。用户明确说“便签/便笺/备忘/待办/帮我记一下/记下来”时，应使用 `pc_manage_memo`；带提醒时间的便签由便签自身提醒，不得再调用 `future_task` 或输出 `<timer>`。
+
+现实触及交付：{reality_touch_rule}
 
 二、动作回访：用户明确说自己暂时离开去做一个有自然结束点的具体动作（如洗澡、吃饭、拿快递、短时出门办事），即使没有主动要求提醒，也可以形成一个“忙完后想问一句”的主动念头。生成念头的同一轮必须估计合理耗时并直接预约下一次主动消息：
 <timer>{{"time":"YYYY-MM-DD HH:MM:SS","reason":"activity_followup","activity":"洗澡","estimated_minutes":30,"topic":"洗完澡后问问回来了没有","motive":"记得用户刚去洗澡，估计差不多结束后想自然问一句","followup_intensity":1,"style":"轻松自然"}}</timer>
@@ -12937,7 +12952,7 @@ class DailyStateMixin(DailyStateTickMixin):
 当前主动配额为 L{tier}（{tier_label}）：{followup_policy.get("generation_rule")} 最大回访强度为 {max_intensity}/3；{timing_note}
 强度 1 是轻轻问一句；2 可以更直接、更有存在感；3 仅限主要用户且当前人格和关系明确支持的轻度监督感。无论强度都只发一次，不得命令、指责、施压、连续追发或假装看见用户现实状态。{role_note}
 
-改时间直接写新时间；取消同一约定时写：<timer>{{"action":"cancel"}}</timer>
+改时间直接写新时间；取消普通约定时写：<timer>{{"action":"cancel"}}</timer>；取消现实触及提醒时必须保留交付类型，写：<timer>{{"action":"cancel","delivery":"reality_touch","topic":"要取消的提醒事项"}}</timer>。
         除上述动作回访外，时间和约定不明确就不要写。标签不应出现在可见回复中，只会被转写为 AstrBot 官方一次性定时计划。"""
 
     def _extract_timer_directives(self, text: str) -> tuple[str, list[dict[str, Any]]]:
@@ -13071,6 +13086,18 @@ class DailyStateMixin(DailyStateTickMixin):
                 _single_line(trigger_umo, 120) or "unknown",
             )
             return "official_task"
+        if _single_line(payload.get("delivery"), 32).lower() == "reality_touch":
+            scheduler = getattr(self, "_schedule_reality_touch_official_reminder", None)
+            if not callable(scheduler):
+                logger.warning("[PrivateCompanion] 当前实例不支持现实触及官方提醒")
+                return "reality_touch_unavailable"
+            scheduled = await scheduler(
+                user_id,
+                payload,
+                source_text=source_text,
+                trigger_umo=trigger_umo,
+            )
+            return "reality_touch_official" if scheduled else "reality_touch_unavailable"
         await self._schedule_llm_timer(
             user_id,
             payload,
@@ -13104,6 +13131,8 @@ class DailyStateMixin(DailyStateTickMixin):
                 "cancel": True,
                 "action": "cancel",
                 "topic": _single_line(payload.get("topic") or payload.get("reason"), 60),
+                "delivery": _single_line(payload.get("delivery"), 32).lower(),
+                "reminder_id": _single_line(payload.get("reminder_id") or payload.get("id"), 40),
             }
 
         time_text = ""
@@ -13122,6 +13151,12 @@ class DailyStateMixin(DailyStateTickMixin):
             value = payload.get(key)
             if value is not None:
                 parsed[key] = _single_line(value, 140 if key == "motive" else 60)
+        delivery = _single_line(payload.get("delivery"), 32).lower()
+        if delivery == "reality_touch":
+            parsed["delivery"] = delivery
+            parsed["delivery_mode"] = _single_line(payload.get("delivery_mode"), 32).lower()
+            parsed["playback_volume"] = _safe_int(payload.get("playback_volume"), -1, -1, 100)
+            parsed["fade_in_ms"] = _safe_int(payload.get("fade_in_ms"), -1, -1, 5000)
         if _single_line(parsed.get("reason"), 40) == "activity_followup":
             parsed["estimated_minutes"] = _safe_int(payload.get("estimated_minutes"), 0, 0, 720)
             parsed["followup_intensity"] = self._normalize_activity_followup_intensity(

@@ -28704,6 +28704,40 @@ pre {
   font-size: 15px;
 }
 
+.reality-custom-reminders {
+  margin-top: 18px;
+}
+
+.reality-reminder-list {
+  display: grid;
+  gap: 8px;
+}
+
+.reality-reminder-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.reality-reminder-row > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.reality-reminder-row b,
+.reality-reminder-row span {
+  overflow-wrap: anywhere;
+}
+
+.reality-reminder-row span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .reality-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

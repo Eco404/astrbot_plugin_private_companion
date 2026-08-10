@@ -32793,6 +32793,7 @@ function renderRealityTouchSettings() {
   }
   const consent = user.consent || {};
   const alarm = user.alarm || {};
+  const customReminders = Array.isArray(user.custom_reminders) ? user.custom_reminders : [];
   const confirmed = toBool(consent.confirmed);
   const command = String(data.confirmation_command || "");
   const options = users.map((item) => {
@@ -32918,6 +32919,20 @@ function renderRealityTouchSettings() {
           <button type="button" class="danger soft" data-reality-touch-disable ${alarm.enabled ? "" : "disabled"}>关闭该用户闹钟</button>
         </div>
       </form>
+      <section class="reality-custom-reminders">
+        <div class="reality-scenario-head">
+          <div><span>官方 Cron</span><h4>自定义现实触及提醒</h4></div>
+          <small>在私聊中明确说“用现实触及提醒我……”即可创建；时间由 AstrBot 官方任务管理。</small>
+        </div>
+        ${customReminders.length ? `<div class="reality-reminder-list">${customReminders.map((item) => {
+          const active = ["registering", "scheduled", "triggered"].includes(String(item.status || ""));
+          const statusText = ({ registering: "登记中", scheduled: "等待触发", triggered: "准备执行", delivering: "正在交付", completed: "已完成", delivery_failed: "交付失败", completed_without_delivery: "未执行", cancelled: "已取消", failed: "登记失败" })[String(item.status || "")] || String(item.status || "未知");
+          return `<div class="reality-reminder-row">
+            <div><b>${escapeHtml(item.topic || "未命名提醒")}</b><span>${escapeHtml(item.scheduled_text || "-")} · ${escapeHtml(statusText)} · ${escapeHtml(String(item.playback_volume ?? "-"))}%</span></div>
+            ${active ? `<button type="button" class="danger soft" data-reality-touch-reminder-cancel="${escapeHtml(item.id || "")}">取消</button>` : ""}
+          </div>`;
+        }).join("")}</div>` : `<div class="exp-settings-empty">暂无自定义现实触及提醒。</div>`}
+      </section>
     </article>
   `;
 }
@@ -32948,6 +32963,7 @@ function renderRealityTouchRuntime() {
         <div><span>主动语音扩展</span><b>${escapeHtml(String(counts.proactive_voice || 0))}</b></div>
         <div><span>计划场景</span><b>${escapeHtml(String(counts.enabled || 0))}</b></div>
         <div><span>已排期</span><b>${escapeHtml(String(counts.scheduled || 0))}</b></div>
+        <div><span>官方现实提醒</span><b>${escapeHtml(String(counts.custom_scheduled || 0))}</b></div>
       </div>
       ${user ? `
         <dl class="reality-runtime-detail">
@@ -33709,6 +33725,24 @@ function bindRealityTouchActions(root) {
       state.realityTouch = result;
       renderExperimentalPage();
     }
+  });
+  root.querySelectorAll("[data-reality-touch-reminder-cancel]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const user = selectedRealityTouchUser();
+      const reminderId = event.currentTarget.dataset.realityTouchReminderCancel || "";
+      if (!user || !reminderId) return;
+      if (!requireSecondClick(event.currentTarget, `reality-reminder-cancel-${reminderId}`, "再次点击将取消这条官方提醒")) return;
+      const result = await runAction(
+        () => postJson("/reality-touch/update", { action: "cancel_reminder", user_id: user.user_id, reminder_id: reminderId }),
+        "现实触及官方提醒已取消",
+        event.currentTarget,
+        { reload: false },
+      );
+      if (result) {
+        state.realityTouch = result;
+        renderExperimentalPage();
+      }
+    });
   });
 }
 

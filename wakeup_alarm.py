@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import re
+import uuid
 import zoneinfo
 from datetime import datetime, timedelta
 from typing import Any
@@ -139,6 +140,387 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
             self._wakeup_contact_tasks = registry
         return registry
 
+    @staticmethod
+    def _reality_touch_reminder_registry(user: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        reminders = user.get("reality_touch_reminders")
+        if not isinstance(reminders, dict):
+            reminders = {}
+            user["reality_touch_reminders"] = reminders
+        return reminders
+
+    @staticmethod
+    def _official_reality_touch_metadata(event: Any) -> dict[str, str]:
+        getter = getattr(event, "get_extra", None)
+        if not callable(getter):
+            return {}
+        try:
+            payload = getter("cron_payload", {})
+            cron_job = getter("cron_job", {})
+        except Exception:
+            return {}
+        if not isinstance(payload, dict) or payload.get("origin") != "private_companion_reality_touch":
+            return {}
+        private_payload = payload.get("private_companion")
+        if not isinstance(private_payload, dict):
+            return {}
+        reminder_id = _single_line(private_payload.get("reminder_id"), 40)
+        user_id = _single_line(payload.get("sender_id"), 120)
+        job_id = _single_line(cron_job.get("id"), 80) if isinstance(cron_job, dict) else ""
+        if not reminder_id or not user_id:
+            return {}
+        return {"reminder_id": reminder_id, "user_id": user_id, "job_id": job_id}
+
+    @staticmethod
+    def _official_reality_touch_matches(reminder: Any, metadata: dict[str, str]) -> bool:
+        if not isinstance(reminder, dict) or not metadata:
+            return False
+        if _single_line(reminder.get("id"), 40) != metadata.get("reminder_id"):
+            return False
+        current_job_id = _single_line(reminder.get("job_id"), 80)
+        event_job_id = metadata.get("job_id", "")
+        return not (current_job_id and event_job_id and current_job_id != event_job_id)
+
+    @staticmethod
+    def _prune_reality_touch_reminders(reminders: dict[str, dict[str, Any]]) -> None:
+        if len(reminders) <= 48:
+            return
+        inactive = sorted(
+            (
+                item
+                for item in reminders.items()
+                if _single_line(item[1].get("status"), 32)
+                not in {"registering", "scheduled", "triggered", "delivering"}
+            ),
+            key=lambda item: _safe_int(item[1].get("created_at"), 0, 0),
+        )
+        for reminder_id, _ in inactive[: max(0, len(reminders) - 40)]:
+            reminders.pop(reminder_id, None)
+
+    async def _schedule_reality_touch_official_reminder(
+        self,
+        user_id: str,
+        payload: dict[str, Any],
+        *,
+        source_text: str,
+        trigger_umo: str = "",
+    ) -> bool:
+        if bool(payload.get("cancel")):
+            return await self._cancel_reality_touch_official_reminder(
+                user_id,
+                reminder_id=_single_line(payload.get("reminder_id"), 40),
+                topic=_single_line(payload.get("topic"), 80),
+            )
+        if not bool(getattr(self, "enable_experimental_bluetooth_wakeup", False)):
+            logger.warning("[PrivateCompanion] 现实触及总开关关闭，未创建官方提醒: user=%s", user_id)
+            return False
+        scheduled_ts = _safe_int(payload.get("scheduled_ts"), 0, 0)
+        if scheduled_ts <= _now_ts():
+            return False
+        cron_mgr = getattr(self, "_official_cron_manager", lambda: None)()
+        if cron_mgr is None:
+            logger.warning("[PrivateCompanion] AstrBot 官方 Cron 不可用，未创建现实触及提醒")
+            return False
+
+        reminder_id = uuid.uuid4().hex
+        async with self._data_lock:
+            users = self.data.get("users", {}) if isinstance(self.data, dict) else {}
+            user = users.get(str(user_id)) if isinstance(users, dict) else None
+            if not isinstance(user, dict) or not self._reality_touch_audio_consented(user):
+                return False
+            topic = _single_line(payload.get("topic") or source_text, 240) or "到点提醒"
+            alarm = user.get("wakeup_alarm") if isinstance(user.get("wakeup_alarm"), dict) else {}
+            requested_mode = _single_line(payload.get("delivery_mode"), 32).lower()
+            delivery_mode = requested_mode if requested_mode in self._WAKEUP_DELIVERY_MODES else self._wakeup_delivery_mode(alarm)
+            requested_volume = _safe_int(payload.get("playback_volume"), -1, -1, 100)
+            requested_fade = _safe_int(payload.get("fade_in_ms"), -1, -1, 5000)
+            reminder = {
+                "id": reminder_id,
+                "backend": "astrbot_cron",
+                "status": "registering",
+                "scheduled_ts": scheduled_ts,
+                "topic": topic,
+                "source_text": _single_line(source_text, 240),
+                "delivery_mode": delivery_mode,
+                "playback_volume": (
+                    requested_volume
+                    if requested_volume >= 0
+                    else _safe_int(alarm.get("playback_volume"), self._reality_touch_playback_volume(), 0, 100)
+                ),
+                "fade_in_ms": (
+                    requested_fade
+                    if requested_fade >= 0
+                    else _safe_int(alarm.get("fade_in_ms"), 800, 0, 5000)
+                ),
+                "created_at": _now_ts(),
+                "umo": _single_line(trigger_umo, 180) or _single_line(user.get("umo"), 180),
+            }
+            if not reminder["umo"]:
+                return False
+            reminders = self._reality_touch_reminder_registry(user)
+            reminders[reminder_id] = reminder
+            self._prune_reality_touch_reminders(reminders)
+            self._save_data_sync()
+
+        when = self._environment_fromtimestamp(scheduled_ts).strftime("%Y-%m-%d %H:%M")
+        note = (
+            "这是用户明确要求通过 PrivateCompanion 现实触及交付的提醒。"
+            "到点后根据人格和关系，把提醒事项改写成一到两句自然、准确的话，然后只调用一次 "
+            "pc_reality_touch_reminder(text=最终提醒文本)。"
+            "不要调用 send_message_to_user、future_task 或其他 TTS 工具，不要自行追加第二次提醒；"
+            "专用工具会按用户设置处理本机音频、设备回退和聊天副本。\n"
+            f"提醒时间：{when}\n提醒事项：{reminder['topic']}\n"
+            "不要声称看见或监听用户，不编造任务之外的事实。"
+        )
+        try:
+            job = await cron_mgr.add_active_job(
+                name="PrivateCompanion 现实触及提醒",
+                cron_expression=None,
+                payload={
+                    "session": reminder["umo"],
+                    "sender_id": str(user_id),
+                    "note": note,
+                    "origin": "private_companion_reality_touch",
+                    "private_companion": {
+                        "reminder_id": reminder_id,
+                        "topic": reminder["topic"],
+                        "delivery_mode": reminder["delivery_mode"],
+                    },
+                },
+                description=_single_line(reminder["topic"], 180),
+                timezone=self._llm_timer_timezone_name(),
+                enabled=True,
+                persistent=True,
+                run_once=True,
+                run_at=self._llm_timer_run_at(scheduled_ts),
+            )
+            job_id = _single_line(getattr(job, "job_id", ""), 80)
+            if not job_id:
+                raise RuntimeError("官方 Cron 未返回任务 ID")
+        except Exception as exc:
+            async with self._data_lock:
+                user = self.data.get("users", {}).get(str(user_id))
+                current = self._reality_touch_reminder_registry(user).get(reminder_id) if isinstance(user, dict) else None
+                if isinstance(current, dict) and _single_line(current.get("status"), 32) == "registering":
+                    current.update({"status": "failed", "error": _single_line(exc, 180)})
+                    self._save_data_sync()
+            logger.warning("[PrivateCompanion] 现实触及官方提醒创建失败: %s", _single_line(exc, 180))
+            return False
+
+        should_reclaim_job = False
+        async with self._data_lock:
+            user = self.data.get("users", {}).get(str(user_id))
+            current = self._reality_touch_reminder_registry(user).get(reminder_id) if isinstance(user, dict) else None
+            should_reclaim_job = (
+                not isinstance(current, dict)
+                or _single_line(current.get("status"), 32) != "registering"
+            )
+            if not should_reclaim_job:
+                current.update({"status": "scheduled", "job_id": job_id, "registered_at": _now_ts()})
+                self._save_data_sync()
+        if should_reclaim_job:
+            await self._delete_official_llm_timer_job(job_id)
+            return False
+        logger.info(
+            "[PrivateCompanion] 现实触及提醒已注册到官方 Cron: user=%s reminder=%s job=%s time=%s",
+            user_id,
+            reminder_id,
+            job_id,
+            when,
+        )
+        return True
+
+    async def _cancel_reality_touch_official_reminder(
+        self,
+        user_id: str,
+        *,
+        reminder_id: str = "",
+        topic: str = "",
+    ) -> bool:
+        async with self._data_lock:
+            user = self.data.get("users", {}).get(str(user_id)) if isinstance(self.data, dict) else None
+            if not isinstance(user, dict):
+                return False
+            reminders = self._reality_touch_reminder_registry(user)
+            candidates = [
+                item
+                for item in reminders.values()
+                if _single_line(item.get("status"), 32) in {"registering", "scheduled"}
+                and (not reminder_id or _single_line(item.get("id"), 40) == reminder_id)
+                and (not topic or topic in _single_line(item.get("topic"), 240))
+            ]
+            if not candidates:
+                return False
+            target = max(candidates, key=lambda item: _safe_int(item.get("scheduled_ts"), 0, 0))
+            target_id = _single_line(target.get("id"), 40)
+            job_id = _single_line(target.get("job_id"), 80)
+            target["status"] = "cancel_pending"
+            self._save_data_sync()
+        if not job_id:
+            ok, error = True, ""
+        else:
+            ok, error = await self._delete_official_llm_timer_job(job_id)
+        async with self._data_lock:
+            user = self.data.get("users", {}).get(str(user_id))
+            current = self._reality_touch_reminder_registry(user).get(target_id) if isinstance(user, dict) else None
+            if isinstance(current, dict):
+                current.update(
+                    {
+                        "status": "cancelled" if ok else "scheduled",
+                        "cancelled_at": _now_ts() if ok else 0,
+                        "cancel_error": "" if ok else _single_line(error, 180),
+                    }
+                )
+                self._save_data_sync()
+        return bool(ok)
+
+    async def _acknowledge_official_reality_touch_trigger(self, event: Any) -> bool:
+        metadata = self._official_reality_touch_metadata(event)
+        if not metadata:
+            return False
+        async with self._data_lock:
+            user = self.data.get("users", {}).get(metadata["user_id"]) if isinstance(self.data, dict) else None
+            reminder = self._reality_touch_reminder_registry(user).get(metadata["reminder_id"]) if isinstance(user, dict) else None
+            if not self._official_reality_touch_matches(reminder, metadata):
+                return False
+            if _single_line(reminder.get("status"), 32) not in {"scheduled", "triggered"}:
+                return False
+            reminder.update({"status": "triggered", "triggered_at": _now_ts()})
+            if metadata.get("job_id"):
+                reminder["job_id"] = metadata["job_id"]
+            self._save_data_sync()
+        try:
+            setattr(event, "private_companion_reality_touch_reminder_id", metadata["reminder_id"])
+        except Exception:
+            pass
+        return True
+
+    async def _execute_official_reality_touch_reminder(self, event: Any, text: str) -> tuple[bool, str]:
+        metadata = self._official_reality_touch_metadata(event)
+        if not metadata:
+            return False, "当前事件不是 PrivateCompanion 现实触及官方任务"
+        async with self._data_lock:
+            user = self.data.get("users", {}).get(metadata["user_id"]) if isinstance(self.data, dict) else None
+            reminder = self._reality_touch_reminder_registry(user).get(metadata["reminder_id"]) if isinstance(user, dict) else None
+            if not self._official_reality_touch_matches(reminder, metadata):
+                return False, "现实触及提醒记录与官方任务不匹配"
+            if _safe_int(reminder.get("delivery_at"), 0, 0) > 0:
+                delivered = bool(reminder.get("audio_success") or reminder.get("chat_success"))
+                return delivered, "该现实触及提醒已经执行，已跳过重复调用"
+            if _safe_int(reminder.get("tool_called_at"), 0, 0) > 0:
+                return False, "该现实触及提醒正在执行，已跳过重复调用"
+            reminder_snapshot = copy.deepcopy(reminder)
+            user_snapshot = copy.deepcopy(user)
+            reminder.update({"status": "delivering", "tool_called_at": _now_ts()})
+            self._save_data_sync()
+
+        reminder_text = _single_line(text, 500) or _single_line(reminder_snapshot.get("topic"), 240)
+        if not reminder_text:
+            return False, "提醒文本为空"
+        consented = bool(
+            getattr(self, "enable_experimental_bluetooth_wakeup", False)
+            and self._reality_touch_audio_consented(user_snapshot)
+        )
+        volume = _safe_int(
+            reminder_snapshot.get("playback_volume"),
+            self._reality_touch_playback_volume(),
+            0,
+            100,
+        )
+        fade_in_ms = _safe_int(reminder_snapshot.get("fade_in_ms"), 800, 0, 5000)
+        audio_success = False
+        if consented:
+            audio_success = await self._play_reality_touch_text(
+                reminder_text,
+                repeat=1,
+                interval=20,
+                volume=volume,
+                fade_in_ms=fade_in_ms,
+                source="official_reminder",
+            )
+        delivery_mode = self._wakeup_delivery_mode(reminder_snapshot)
+        chat_success = False
+        if delivery_mode == "audio_and_chat" or (delivery_mode == "chat_on_failure" and not audio_success):
+            chat_success = await self._send_wakeup_chat_copy(user_snapshot, reminder_text)
+        delivered = bool(audio_success or chat_success)
+
+        async with self._data_lock:
+            user = self.data.get("users", {}).get(metadata["user_id"])
+            reminder = self._reality_touch_reminder_registry(user).get(metadata["reminder_id"]) if isinstance(user, dict) else None
+            if self._official_reality_touch_matches(reminder, metadata):
+                reminder.update(
+                    {
+                        "status": "delivered" if delivered else "delivery_failed",
+                        "delivery_at": _now_ts(),
+                        "delivered_text": reminder_text,
+                        "audio_success": audio_success,
+                        "chat_success": chat_success,
+                        "delivery_error": "" if delivered else (
+                            "现实触及授权不可用且聊天兜底失败"
+                            if not consented
+                            else "本机音频与聊天兜底均未确认成功"
+                        ),
+                    }
+                )
+                self._save_data_sync()
+        detail = "本机音频播放成功" if audio_success else (
+            "本机音频失败，聊天兜底成功" if chat_success else "现实触及交付失败"
+        )
+        return delivered, detail
+
+    async def _record_official_reality_touch_tool_result(
+        self,
+        event: Any,
+        tool: Any,
+        tool_result: Any,
+    ) -> bool:
+        if _single_line(getattr(tool, "name", ""), 80) != "pc_reality_touch_reminder":
+            return False
+        metadata = self._official_reality_touch_metadata(event)
+        if not metadata:
+            return False
+        failed = bool(tool_result is None or getattr(tool_result, "isError", False))
+        if not failed:
+            return True
+        async with self._data_lock:
+            user = self.data.get("users", {}).get(metadata["user_id"])
+            reminder = self._reality_touch_reminder_registry(user).get(metadata["reminder_id"]) if isinstance(user, dict) else None
+            if self._official_reality_touch_matches(reminder, metadata) and not reminder.get("delivery_at"):
+                reminder.update(
+                    {
+                        "status": "delivery_failed",
+                        "delivery_at": _now_ts(),
+                        "delivery_error": "现实触及工具调用失败",
+                    }
+                )
+                self._save_data_sync()
+        return True
+
+    async def _complete_official_reality_touch_reminder(self, event: Any) -> bool:
+        metadata = self._official_reality_touch_metadata(event)
+        if not metadata:
+            return False
+        async with self._data_lock:
+            user = self.data.get("users", {}).get(metadata["user_id"]) if isinstance(self.data, dict) else None
+            reminder = self._reality_touch_reminder_registry(user).get(metadata["reminder_id"]) if isinstance(user, dict) else None
+            if not self._official_reality_touch_matches(reminder, metadata):
+                return False
+            status = _single_line(reminder.get("status"), 32)
+            if status == "delivered":
+                reminder["status"] = "completed"
+                reminder["completed_at"] = _now_ts()
+            elif status == "triggered":
+                reminder.update(
+                    {
+                        "status": "completed_without_delivery",
+                        "completed_at": _now_ts(),
+                        "delivery_error": "官方任务未调用现实触及工具",
+                    }
+                )
+            elif status != "delivery_failed":
+                return False
+            self._save_data_sync()
+        return True
+
     def _cancel_wakeup_contact_task(self, user_id: str) -> None:
         task = self._wakeup_contact_task_registry().pop(str(user_id), None)
         if isinstance(task, asyncio.Task) and not task.done():
@@ -241,6 +623,37 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         policy = self._reality_touch_policy(user)
         next_trigger = self._wakeup_next_trigger(alarm, now=now)
         session = self._wakeup_contact_session(alarm)
+        reminder_rows = [
+            {
+                "id": _single_line(item.get("id"), 40),
+                "job_id": _single_line(item.get("job_id"), 80),
+                "status": _single_line(item.get("status"), 32),
+                "scheduled_ts": _safe_int(item.get("scheduled_ts"), 0, 0),
+                "scheduled_text": (
+                    datetime.fromtimestamp(
+                        _safe_int(item.get("scheduled_ts"), 0, 0),
+                        tz=(now or self._wakeup_now()).tzinfo,
+                    ).strftime("%m-%d %H:%M")
+                    if _safe_int(item.get("scheduled_ts"), 0, 0) > 0
+                    else ""
+                ),
+                "topic": _single_line(item.get("topic"), 240),
+                "delivery_mode": self._wakeup_delivery_mode(item),
+                "playback_volume": _safe_int(item.get("playback_volume"), self._reality_touch_playback_volume(), 0, 100),
+                "audio_success": bool(item.get("audio_success")),
+                "chat_success": bool(item.get("chat_success")),
+                "delivery_error": _single_line(item.get("delivery_error") or item.get("error"), 180),
+            }
+            for item in self._reality_touch_reminder_registry(user).values()
+            if isinstance(item, dict)
+        ]
+        reminder_rows.sort(
+            key=lambda item: (
+                item.get("status") not in {"registering", "scheduled", "triggered", "delivering"},
+                -_safe_int(item.get("scheduled_ts"), 0, 0),
+            )
+        )
+        reminder_rows = reminder_rows[:20]
         label = _single_line(
             user.get("display_name") or user.get("nickname") or user.get("name") or user_id,
             80,
@@ -303,6 +716,7 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
                     "feedback": _single_line(session.get("feedback"), 120),
                 },
             },
+            "custom_reminders": reminder_rows,
         }
 
     def _reality_touch_page_snapshot(self) -> dict[str, Any]:
@@ -330,6 +744,12 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
         proactive_voice = sum(1 for row in rows if row.get("policy", {}).get("proactive_voice_enabled"))
         enabled = sum(1 for row in rows if row.get("alarm", {}).get("enabled"))
         scheduled = sum(1 for row in rows if row.get("alarm", {}).get("next_trigger_at"))
+        custom_scheduled = sum(
+            1
+            for row in rows
+            for item in (row.get("custom_reminders") or [])
+            if item.get("status") in {"registering", "scheduled", "triggered", "delivering"}
+        )
         return {
             "global_enabled": bool(getattr(self, "enable_experimental_bluetooth_wakeup", False)),
             "consent_version": self._REALITY_TOUCH_CONSENT_VERSION,
@@ -343,6 +763,7 @@ class WakeupAlarmMixin(RealityTouchAudioMixin):
                 "proactive_voice": proactive_voice,
                 "enabled": enabled,
                 "scheduled": scheduled,
+                "custom_scheduled": custom_scheduled,
             },
             "users": rows,
         }
