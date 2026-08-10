@@ -4031,6 +4031,30 @@
     "default": 25,
     "invisible": true
   },
+  "enable_reality_touch_camera_proactive_curiosity": {
+    "description": "现实触及：启用主动视觉好奇链路",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "reality_touch_camera_proactive_min_tier": {
+    "description": "现实触及：主动单帧最低强度档位",
+    "type": "int",
+    "default": 4,
+    "invisible": true
+  },
+  "reality_touch_camera_proactive_max_daily": {
+    "description": "现实触及：主动单帧每日上限",
+    "type": "int",
+    "default": 1,
+    "invisible": true
+  },
+  "reality_touch_camera_proactive_cooldown_minutes": {
+    "description": "现实触及：主动单帧行为冷却分钟数",
+    "type": "int",
+    "default": 240,
+    "invisible": true
+  },
   "enable_tts_local_playback_live_only": {
     "description": "Legacy flat config: 直播时仅播放直播回应消息",
     "type": "bool",
@@ -11659,6 +11683,64 @@
         "condition": {
           "enable_experimental_bluetooth_wakeup": true,
           "enable_reality_touch_camera": true
+        }
+      },
+      "enable_reality_touch_camera_proactive_curiosity": {
+        "description": "启用主动视觉好奇",
+        "type": "bool",
+        "hint": "默认关闭。开启后，主动消息主链可把具体、现实中可观察且确实能增加交流价值的语境作为一条独立候选；不会根据吃饭、穿搭等单个关键词硬触发。用户仍需单独选择只询问或授权后可主动读取。",
+        "default": false,
+        "condition": {
+          "enable_experimental_bluetooth_wakeup": true,
+          "enable_reality_touch_camera": true
+        }
+      },
+      "reality_touch_camera_proactive_min_tier": {
+        "description": "允许直接主动单帧的最低强度档位",
+        "type": "int",
+        "hint": "低于该档位时，即使用户选择“授权后可主动单帧”，也只允许 Bot 表达一次自然好奇。推荐 4（亲密陪伴）；1-5 分别对应克制、轻陪伴、稳定陪伴、亲密陪伴、持续在线。",
+        "slider": {
+          "min": 1,
+          "max": 5,
+          "step": 1
+        },
+        "default": 4,
+        "condition": {
+          "enable_experimental_bluetooth_wakeup": true,
+          "enable_reality_touch_camera": true,
+          "enable_reality_touch_camera_proactive_curiosity": true
+        }
+      },
+      "reality_touch_camera_proactive_max_daily": {
+        "description": "主动单帧每日上限",
+        "type": "int",
+        "hint": "按用户分别计数，只限制 Bot 主动发起的摄像头单帧；用户明确要求的手动读取不占用。0 表示禁止直接主动读取。",
+        "slider": {
+          "min": 0,
+          "max": 10,
+          "step": 1
+        },
+        "default": 1,
+        "condition": {
+          "enable_experimental_bluetooth_wakeup": true,
+          "enable_reality_touch_camera": true,
+          "enable_reality_touch_camera_proactive_curiosity": true
+        }
+      },
+      "reality_touch_camera_proactive_cooldown_minutes": {
+        "description": "主动单帧行为冷却（分钟）",
+        "type": "int",
+        "hint": "两次 Bot 主动摄像头观察之间的行为冷却，独立于设备读取的技术间隔。推荐至少 240 分钟，避免连续产生视觉好奇。",
+        "slider": {
+          "min": 10,
+          "max": 1440,
+          "step": 10
+        },
+        "default": 240,
+        "condition": {
+          "enable_experimental_bluetooth_wakeup": true,
+          "enable_reality_touch_camera": true,
+          "enable_reality_touch_camera_proactive_curiosity": true
         }
       },
       "enable_reaction_expression_experiment": {

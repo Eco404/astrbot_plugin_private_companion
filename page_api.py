@@ -4403,16 +4403,28 @@ class PrivateCompanionPageApi(
                 min_interval = _safe_int(payload.get("min_interval_seconds"), 60, 10, 3600)
                 capture_timeout = _safe_int(payload.get("capture_timeout_seconds"), 5, 2, 20)
                 analysis_timeout = _safe_int(payload.get("analysis_timeout_seconds"), 25, 5, 90)
+                proactive_curiosity_enabled = self._normalize_bool_value(payload.get("proactive_curiosity_enabled"))
+                proactive_min_tier = _safe_int(payload.get("proactive_min_tier"), 4, 1, 5)
+                proactive_max_daily = _safe_int(payload.get("proactive_max_daily"), 1, 0, 10)
+                proactive_cooldown_minutes = _safe_int(payload.get("proactive_cooldown_minutes"), 240, 10, 1440)
                 self._set_config_value("enable_reality_touch_camera", camera_enabled)
                 self._set_config_value("reality_touch_camera_index", camera_index)
                 self._set_config_value("reality_touch_camera_min_interval_seconds", min_interval)
                 self._set_config_value("reality_touch_camera_capture_timeout_seconds", capture_timeout)
                 self._set_config_value("reality_touch_camera_analysis_timeout_seconds", analysis_timeout)
+                self._set_config_value("enable_reality_touch_camera_proactive_curiosity", proactive_curiosity_enabled)
+                self._set_config_value("reality_touch_camera_proactive_min_tier", proactive_min_tier)
+                self._set_config_value("reality_touch_camera_proactive_max_daily", proactive_max_daily)
+                self._set_config_value("reality_touch_camera_proactive_cooldown_minutes", proactive_cooldown_minutes)
                 self.plugin.enable_reality_touch_camera = camera_enabled
                 self.plugin.reality_touch_camera_index = camera_index
                 self.plugin.reality_touch_camera_min_interval_seconds = min_interval
                 self.plugin.reality_touch_camera_capture_timeout_seconds = capture_timeout
                 self.plugin.reality_touch_camera_analysis_timeout_seconds = analysis_timeout
+                self.plugin.enable_reality_touch_camera_proactive_curiosity = proactive_curiosity_enabled
+                self.plugin.reality_touch_camera_proactive_min_tier = proactive_min_tier
+                self.plugin.reality_touch_camera_proactive_max_daily = proactive_max_daily
+                self.plugin.reality_touch_camera_proactive_cooldown_minutes = proactive_cooldown_minutes
                 if not await self._save_config_if_possible():
                     return self._error("摄像头配置已更新到运行态，但写入插件配置失败")
                 async with self.plugin._data_lock:

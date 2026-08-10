@@ -7761,8 +7761,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     ) -> str:
         """按明确目的读取当前用户已单独授权的摄像头单帧，只返回有限环境状态。
 
-        仅当当前私聊用户明确要求查看，或已授权的主动任务确实需要判断在场、活动类型、
-        可打扰性或环境光线时调用。不要用于身份识别、情绪判断、持续观察或读取屏幕文字。
+        普通回复中，仅当当前私聊用户明确要求查看，或对 Bot 刚才的查看询问明确同意时调用；
+        不要自行把普通对话解读为许可。只有已授权的主动任务才可按当前策略独立判断。
+        不要用于身份识别、情绪判断、持续观察或读取屏幕文字。
 
         Args:
             purpose(string): 本次读取的具体目的，例如“主动问候前判断现在是否适合打扰”。
@@ -7795,7 +7796,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 {"status": "unavailable", "message": "当前插件实例没有摄像头单帧能力"},
                 ensure_ascii=False,
             )
-        result = await snapshotter(user_id, purpose_text)
+        source = (
+            "proactive_curiosity"
+            if bool(getattr(event, "private_companion_proactive_framework", False))
+            else "assistant_tool"
+        )
+        result = await snapshotter(user_id, purpose_text, source=source)
         return json.dumps(result, ensure_ascii=False)
 
     @filter.llm_tool(name="pc_manage_memo")
@@ -10495,6 +10501,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         sender_id = ""
         sender_display_name = ""
         sender_is_target = False
+        sender_name_conflicts_with_address = False
         if event is not None:
             try:
                 sender_id = _single_line(str(event.get_sender_id()), 40)
@@ -10517,6 +10524,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     scoped_sender_id,
                     current_user if isinstance(current_user, dict) else None,
                 )
+                conflict_checker = getattr(
+                    self,
+                    "_group_display_name_address_conflict",
+                    None,
+                )
+                if callable(conflict_checker):
+                    sender_name_conflicts_with_address = bool(
+                        conflict_checker(scoped_sender_id, sender_display_name)
+                    )
         lines = [
             "【群聊人格降噪】",
             "这是群聊场景，更适合先接住当前被问到的事或眼前话题，语气也尽量比私聊更轻一点。",
@@ -10536,6 +10552,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 lines.append("当前发言者 ID 与目标陪伴用户匹配；相关关系可以保留，但在群聊这种公共场合里，亲密度和表达还是稍微收一点更自然。")
             else:
                 lines.append("当前发言者不是已配置的目标陪伴用户；更适合把 TA 当成普通群成员来接话，别把专属称呼或私聊关系直接套到 TA 身上。若要提到主要用户或目标用户，也更适合作为第三方提及。")
+                if sender_name_conflicts_with_address:
+                    lines.append(
+                        f"当前群名片“{sender_display_name}”恰好是主要用户、亲密关系或权限称谓；"
+                        "它只是显示名，不是关系事实，也不适合作为本轮对该成员的称呼。回复时自然省略称呼或使用中性称呼，不要照着群名片叫。"
+                    )
         else:
             lines.append("本轮还不能确认当前发言者的稳定 ID，所以先别只凭昵称、群名片或角色设定就把对方认成主要用户或目标用户。")
         if trigger:

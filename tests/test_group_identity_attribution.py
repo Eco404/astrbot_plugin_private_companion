@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from astrbot_plugin_private_companion.group_observation import GroupObservationMixin
 from astrbot_plugin_private_companion.memory_companion_adapter import MemoryCompanionAdapterMixin
+from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 from astrbot_plugin_private_companion.worldbook import WorldbookMixin
 
 
@@ -104,6 +106,83 @@ class GroupIdentityAttributionTests(unittest.TestCase):
         self.assertIn("小林[QQ:100000001]", guard)
         self.assertIn("MemoryCompanion/长期记忆召回都不能覆盖它", guard)
         self.assertNotIn("小周[QQ:100000002]", guard)
+
+    def test_non_target_display_name_cannot_become_owner_address(self) -> None:
+        self.harness.data["worldbook_member_profiles"]["100000003"] = {
+            "user_id": "100000003",
+            "name": "主人",
+            "aliases": ["主人"],
+            "observed_names": [],
+            "enabled": True,
+            "observation_only": True,
+            "identity_note": "仅观察角色档案。",
+        }
+        group = {
+            "group_id": "200000001",
+            "recent_messages": [
+                {
+                    "sender_id": "100000003",
+                    "name": "主人",
+                    "identity_name": "主人",
+                    "text": "你觉得呢",
+                }
+            ],
+        }
+
+        guard = self.harness._format_group_current_sender_identity_guard(
+            group,
+            sender_id="100000003",
+            text="你觉得呢",
+        )
+        worldbook = self.harness._format_worldbook_group_members_for_prompt(
+            group,
+            sender_id="100000003",
+            text="你觉得呢",
+        )
+
+        self.assertIn("群成员[QQ:100000003]", guard)
+        self.assertIn("平台显示名“主人”", guard)
+        self.assertIn("不要照抄该显示名称呼对方", guard)
+        self.assertNotIn("判断为 主人[QQ:100000003]", guard)
+        self.assertIn("当前发言者是 群成员（QQ:100000003）", worldbook)
+        self.assertNotIn("当前发言者是 主人", worldbook)
+        self.assertNotIn("称呼线索：主人", worldbook)
+
+    def test_target_owner_can_still_use_configured_owner_address(self) -> None:
+        self.harness.data["users"]["100000004"] = {
+            "relationship_role": "owner",
+            "nickname": "主人",
+        }
+        self.harness._is_target_private_user = (
+            lambda user_id, _user=None: user_id == "100000004"
+        )
+
+        self.assertEqual(
+            "主人[QQ:100000004]",
+            self.harness._group_member_identity_label(
+                "100000004",
+                "主人",
+            ),
+        )
+
+    def test_group_persona_denoise_marks_relationship_title_as_display_only(self) -> None:
+        plugin = object.__new__(PrivateCompanionPlugin)
+        plugin.enable_group_persona_denoise = True
+        plugin.data = {"users": {}}
+        plugin._sender_display_name = lambda _event: "主人"
+        plugin._private_user_id_for_event = lambda _event, sender_id: sender_id
+        plugin._is_target_private_user = lambda _user_id, _user=None: False
+        event = SimpleNamespace(
+            get_sender_id=lambda: "100000003",
+            private_companion_group_scene={"trigger": "at_bot"},
+            private_companion_group_high_intensity=None,
+        )
+
+        prompt = plugin._format_group_persona_denoise_prompt(event)
+
+        self.assertIn("当前群名片“主人”", prompt)
+        self.assertIn("不是关系事实", prompt)
+        self.assertIn("不要照着群名片叫", prompt)
 
     def test_own_registered_name_is_not_treated_as_impersonation(self) -> None:
         claim = self.harness._worldbook_claimed_other_identity(

@@ -3626,6 +3626,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         prompt: str,
         name: str,
         label: str,
+        user: dict[str, Any] | None = None,
         max_steps: int = 20,
     ) -> str:
         cache_key = str(umo or "")
@@ -3645,6 +3646,24 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     context_type,
                 )
             return ""
+        camera_state: dict[str, Any] = {}
+        if label == "proactive_message" and isinstance(user, dict):
+            camera_prompt_getter = getattr(self, "_reality_touch_camera_proactive_prompt", None)
+            if callable(camera_prompt_getter):
+                camera_prompt = camera_prompt_getter(
+                    user,
+                    user_id=str(user.get("user_id") or ""),
+                )
+                if camera_prompt:
+                    prompt = f"{prompt.rstrip()}\n\n{camera_prompt}"
+            camera_state_getter = getattr(self, "_reality_touch_camera_proactive_state", None)
+            if callable(camera_state_getter):
+                value = camera_state_getter(
+                    user,
+                    user_id=str(user.get("user_id") or ""),
+                )
+                if isinstance(value, dict):
+                    camera_state = value
         event = self._proactive_synthetic_event(umo, prompt=prompt, name=name)
         if event is None:
             return ""
@@ -3684,7 +3703,10 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                             config=build_cfg,
                             req=req,
                         )
-                        self._filter_incompatible_proactive_framework_tools(req)
+                        excluded_tools = {"AIsearch"}
+                        if not camera_state.get("direct_allowed"):
+                            excluded_tools.add("pc_reality_touch_camera_snapshot")
+                        self._filter_incompatible_proactive_framework_tools(req, excluded_tools)
                         self._install_proactive_semantic_provider_fallback(
                             build_result,
                             label=label,
@@ -3826,6 +3848,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 prompt=prompt,
                 name=name,
                 label="proactive_message",
+                user=user,
                 max_steps=20,
             )
             raw_text = str(raw_text or "")
@@ -5493,6 +5516,7 @@ Output:
                 prompt=prompt,
                 name=name,
                 label="proactive_voice",
+                user=user,
                 max_steps=20,
             )
             return str(raw_text or "").strip()

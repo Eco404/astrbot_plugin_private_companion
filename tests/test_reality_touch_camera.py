@@ -21,6 +21,11 @@ class CameraHarness(WakeupAlarmMixin):
         self.reality_touch_camera_index = 0
         self.reality_touch_camera_min_interval_seconds = 60
         self.reality_touch_camera_capture_timeout_seconds = 5
+        self.enable_reality_touch_camera_proactive_curiosity = False
+        self.reality_touch_camera_proactive_min_tier = 4
+        self.reality_touch_camera_proactive_max_daily = 1
+        self.reality_touch_camera_proactive_cooldown_minutes = 240
+        self.proactive_tier = 4
         self.plugin_vision_provider_id = ""
         self.context = types.SimpleNamespace(get_provider_by_id=lambda _provider_id: None)
         self.save_count = 0
@@ -37,6 +42,13 @@ class CameraHarness(WakeupAlarmMixin):
 
     def _relationship_owner_user_ids(self) -> set[str]:
         return set(self.owner_user_ids)
+
+    def _proactive_quota_policy(self, _user) -> dict:
+        return {"tier": self.proactive_tier, "label": f"L{self.proactive_tier}"}
+
+    @staticmethod
+    def _environment_today_key() -> str:
+        return "2026-08-11"
 
 
 class RealityTouchCameraConsentTests(unittest.TestCase):
@@ -306,6 +318,111 @@ class RealityTouchCameraSnapshotTests(unittest.IsolatedAsyncioTestCase):
         persisted = json.dumps(self.user, ensure_ascii=False)
         self.assertNotIn("preview_data_url", persisted)
         self.assertNotIn("one-frame-preview", persisted)
+
+
+class RealityTouchCameraProactiveTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.harness = CameraHarness()
+        self.user = self.harness.data["users"]["u"]
+        self.user["user_id"] = "u"
+        self.harness._reality_touch_camera_command(
+            self.user,
+            "摄像头确认 " + self.harness._REALITY_TOUCH_CAMERA_CONFIRMATION_TEXT,
+        )
+        self.harness.enable_reality_touch_camera_proactive_curiosity = True
+
+    def test_auto_mode_downgrades_to_ask_below_minimum_tier(self) -> None:
+        self.user["reality_touch_camera_policy"]["proactive_mode"] = "auto"
+        self.harness.proactive_tier = 3
+
+        state = self.harness._reality_touch_camera_proactive_state(self.user, user_id="u")
+        prompt = self.harness._reality_touch_camera_proactive_prompt(self.user, user_id="u")
+
+        self.assertEqual("ask", state["effective_mode"])
+        self.assertFalse(state["direct_allowed"])
+        self.assertTrue(state["ask_allowed"])
+        self.assertIn("不能调用摄像头工具", prompt)
+
+    def test_auto_mode_allows_optional_direct_glance_at_matching_tier(self) -> None:
+        self.user["reality_touch_camera_policy"]["proactive_mode"] = "auto"
+
+        state = self.harness._reality_touch_camera_proactive_state(self.user, user_id="u")
+        prompt = self.harness._reality_touch_camera_proactive_prompt(self.user, user_id="u")
+
+        self.assertTrue(state["direct_allowed"])
+        self.assertEqual(1, state["remaining_today"])
+        self.assertIn("独立、低频的可选能力", prompt)
+        self.assertIn("pc_reality_touch_camera_snapshot", prompt)
+        self.assertIn("普通问候", prompt)
+
+    def test_silence_disables_chain_but_zero_override_keeps_ask_mode(self) -> None:
+        policy = self.user["reality_touch_camera_policy"]
+        policy["proactive_mode"] = "auto"
+        self.user["ignored_streak"] = 1
+        state = self.harness._reality_touch_camera_proactive_state(self.user, user_id="u")
+        self.assertFalse(state["ask_allowed"])
+        self.assertIn("沉默", state["reason"])
+
+        self.user["ignored_streak"] = 0
+        policy["proactive_max_daily"] = 0
+        state = self.harness._reality_touch_camera_proactive_state(self.user, user_id="u")
+        self.assertFalse(state["direct_allowed"])
+        self.assertTrue(state["ask_allowed"])
+        self.assertIn("日额度", state["direct_reason"])
+        self.assertIn("不能调用摄像头工具", self.harness._reality_touch_camera_proactive_prompt(self.user, user_id="u"))
+
+    async def test_proactive_snapshot_uses_independent_daily_counter(self) -> None:
+        policy = self.user["reality_touch_camera_policy"]
+        policy["proactive_mode"] = "auto"
+        self.harness._capture_reality_touch_camera_frame = lambda: {
+            "jpeg_bytes": b"one-frame",
+            "width": 320,
+            "height": 240,
+            "brightness": "normal",
+        }
+        self.harness._analyze_reality_touch_camera_frame = AsyncMock(return_value={
+            "presence": "present",
+            "activity": "eating",
+            "interruptibility": "medium",
+            "brightness": "normal",
+            "confidence": 0.8,
+            "analyzed": True,
+            "width": 320,
+            "height": 240,
+            "summary": "在场，正在进行日常活动",
+        })
+
+        result = await self.harness._reality_touch_camera_snapshot_for_user(
+            "u",
+            "看看用户刚提到的现实活动，决定如何自然接话",
+            source="proactive_curiosity",
+        )
+
+        self.assertEqual("success", result["status"])
+        self.assertEqual(1, policy["proactive_used_today"])
+        self.assertEqual("2026-08-11", policy["proactive_used_day"])
+        self.assertEqual("proactive_curiosity", policy["last_observation"]["source"])
+
+        second = await self.harness._reality_touch_camera_snapshot_for_user(
+            "u",
+            "再次主动查看",
+            source="proactive_curiosity",
+        )
+        self.assertEqual("forbidden", second["status"])
+        self.assertIn("额度", second["message"])
+
+    def test_policy_update_normalizes_mode_and_user_quota(self) -> None:
+        policy = self.harness._reality_touch_update_camera_policy(
+            self.user,
+            {
+                "camera_enabled": True,
+                "proactive_mode": "authorized",
+                "proactive_max_daily": 99,
+            },
+            user_id="u",
+        )
+        self.assertEqual("auto", policy["proactive_mode"])
+        self.assertEqual(10, policy["proactive_max_daily"])
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ class RealityTouchCameraMixin:
     _REALITY_TOUCH_CAMERA_ACTIVITY = {"sleeping", "at_desk", "eating", "moving", "unknown"}
     _REALITY_TOUCH_CAMERA_INTERRUPTIBILITY = {"low", "medium", "high", "unknown"}
     _REALITY_TOUCH_CAMERA_BRIGHTNESS = {"dark", "normal", "bright", "unknown"}
+    _REALITY_TOUCH_CAMERA_PROACTIVE_MODES = {"off", "ask", "auto"}
 
     def _reality_touch_camera_consent(self, user: dict[str, Any]) -> dict[str, Any]:
         consent = user.get("reality_touch_camera_consent")
@@ -144,6 +145,186 @@ class RealityTouchCameraMixin:
             user["reality_touch_camera_policy"] = policy
         return policy
 
+    @classmethod
+    def _normalize_reality_touch_camera_proactive_mode(cls, value: Any) -> str:
+        mode = str(value or "off").strip().lower()
+        aliases = {
+            "": "off",
+            "disabled": "off",
+            "manual": "off",
+            "confirm": "ask",
+            "ask_each_time": "ask",
+            "询问": "ask",
+            "authorized": "auto",
+            "proactive": "auto",
+            "主动": "auto",
+        }
+        mode = aliases.get(mode, mode)
+        return mode if mode in cls._REALITY_TOUCH_CAMERA_PROACTIVE_MODES else "off"
+
+    def _reality_touch_camera_today_key(self) -> str:
+        getter = getattr(self, "_environment_today_key", None)
+        if callable(getter):
+            try:
+                value = _single_line(getter(), 20)
+                if value:
+                    return value
+            except Exception:
+                pass
+        return time.strftime("%Y-%m-%d", time.localtime())
+
+    def _reality_touch_camera_proactive_state(
+        self,
+        user: dict[str, Any],
+        *,
+        user_id: str = "",
+    ) -> dict[str, Any]:
+        policy = self._reality_touch_camera_policy(user)
+        configured_mode = self._normalize_reality_touch_camera_proactive_mode(
+            policy.get("proactive_mode")
+        )
+        quota_getter = getattr(self, "_proactive_quota_policy", None)
+        quota_policy: dict[str, Any] = {}
+        if callable(quota_getter):
+            try:
+                value = quota_getter(user)
+                if isinstance(value, dict):
+                    quota_policy = value
+            except Exception:
+                quota_policy = {}
+        tier = _safe_int(quota_policy.get("tier"), 0, 0, 5)
+        tier_label = _single_line(quota_policy.get("label"), 30) or {
+            0: "已关闭",
+            1: "克制",
+            2: "轻陪伴",
+            3: "稳定陪伴",
+            4: "亲密陪伴",
+            5: "持续在线",
+        }.get(tier, "已关闭")
+        minimum_tier = _safe_int(
+            getattr(self, "reality_touch_camera_proactive_min_tier", 4),
+            4,
+            1,
+            5,
+        )
+        inherited_limit = _safe_int(
+            getattr(self, "reality_touch_camera_proactive_max_daily", 1),
+            1,
+            0,
+            10,
+        )
+        user_limit = _safe_int(policy.get("proactive_max_daily"), -1, -1, 10)
+        daily_limit = inherited_limit if user_limit < 0 else user_limit
+        cooldown_minutes = _safe_int(
+            getattr(self, "reality_touch_camera_proactive_cooldown_minutes", 240),
+            240,
+            10,
+            1440,
+        )
+        today = self._reality_touch_camera_today_key()
+        used_today = (
+            _safe_int(policy.get("proactive_used_today"), 0, 0)
+            if _single_line(policy.get("proactive_used_day"), 20) == today
+            else 0
+        )
+        last_at = _safe_int(policy.get("last_proactive_at"), 0, 0)
+        cooldown_left = max(0, cooldown_minutes * 60 - max(0, _now_ts() - last_at)) if last_at else 0
+
+        reason = ""
+        available = True
+        if not bool(getattr(self, "enable_experimental_bluetooth_wakeup", False)):
+            available, reason = False, "现实触及总开关未开启"
+        elif not bool(getattr(self, "enable_reality_touch_camera", False)):
+            available, reason = False, "摄像头总开关未开启"
+        elif not bool(getattr(self, "enable_reality_touch_camera_proactive_curiosity", False)):
+            available, reason = False, "主动视觉好奇未开启"
+        elif not self._reality_touch_camera_user_eligible(user_id or user.get("user_id")):
+            available, reason = False, "当前用户没有主机摄像头资格"
+        elif not self._reality_touch_camera_consented(user):
+            available, reason = False, "当前用户未完成摄像头独立授权"
+        elif not bool(policy.get("enabled")):
+            available, reason = False, "当前用户的摄像头策略已关闭"
+        elif configured_mode == "off":
+            available, reason = False, "当前用户未开启主动视觉好奇"
+        elif tier <= 0:
+            available, reason = False, "当前用户的主动消息已关闭"
+        elif _safe_int(user.get("ignored_streak"), 0, 0) > 0:
+            available, reason = False, "用户正在保持沉默，不应通过摄像头追问"
+
+        effective_mode = configured_mode
+        if configured_mode == "auto" and tier < minimum_tier:
+            effective_mode = "ask"
+        ask_allowed = bool(available and effective_mode in {"ask", "auto"})
+        direct_reason = ""
+        if not available:
+            direct_reason = reason
+        elif effective_mode != "auto":
+            direct_reason = (
+                "当前主动强度只允许先询问"
+                if configured_mode == "auto"
+                else "当前用户策略只允许先询问"
+            )
+        elif daily_limit <= 0:
+            direct_reason = "主动单帧日额度为 0，只可先询问"
+        elif used_today >= daily_limit:
+            direct_reason = "今天的主动单帧额度已用完，只可先询问"
+        elif cooldown_left > 0:
+            direct_reason = "主动单帧仍在行为冷却中，只可先询问"
+        direct_allowed = bool(available and effective_mode == "auto" and not direct_reason)
+        return {
+            "available": available,
+            "configured_mode": configured_mode,
+            "effective_mode": effective_mode,
+            "direct_allowed": direct_allowed,
+            "ask_allowed": ask_allowed,
+            "reason": reason,
+            "direct_reason": direct_reason,
+            "tier": tier,
+            "tier_label": tier_label,
+            "minimum_tier": minimum_tier,
+            "daily_limit": daily_limit,
+            "used_today": used_today,
+            "remaining_today": max(0, daily_limit - used_today),
+            "cooldown_minutes": cooldown_minutes,
+            "cooldown_left_seconds": cooldown_left,
+        }
+
+    def _reality_touch_camera_proactive_prompt(
+        self,
+        user: dict[str, Any],
+        *,
+        user_id: str = "",
+    ) -> str:
+        state = self._reality_touch_camera_proactive_state(user, user_id=user_id)
+        if not state.get("ask_allowed"):
+            return ""
+        shared = (
+            "【可选的现实视觉好奇】\n"
+            "这是一条独立、低频的可选能力，不是每轮主动消息的固定动作。只有对话历史或本轮动机里存在具体、"
+            "现实中可观察的活动、物件或场景，并且看一眼确实会让接下来的交流更具体时才考虑；普通问候、用户沉默、"
+            "泛泛的“在忙”或想确认用户有没有说实话，都不是理由。不要为了展示能力而询问或调用，也不要把它写成查岗、"
+            "监控、身份识别或情绪读脸。"
+        )
+        if state.get("direct_allowed"):
+            return shared + (
+                "\n当前策略允许本轮在真正有价值时调用 pc_reality_touch_camera_snapshot，purpose 必须写清这一次看什么、"
+                "为什么会改变回应。调用成功后只依据工具返回的有限状态自然接话，不复述技术字段，不声称看见工具未返回的细节；"
+                "结果不确定或调用失败时就放下，不追着重试。也完全可以不调用，直接发送普通主动消息。"
+            )
+        return shared + (
+            "\n当前主动强度或用户策略只允许表达一次自然好奇，不能调用摄像头工具。若这一刻确实值得看，可以像普通关系互动那样"
+            "简短问一句是否愿意给你看一眼；不要附授权说明，不催促，用户不接就结束这个念头。"
+        )
+
+    def _note_reality_touch_camera_proactive_attempt(self, user: dict[str, Any]) -> None:
+        policy = self._reality_touch_camera_policy(user)
+        today = self._reality_touch_camera_today_key()
+        if _single_line(policy.get("proactive_used_day"), 20) != today:
+            policy["proactive_used_day"] = today
+            policy["proactive_used_today"] = 0
+        policy["proactive_used_today"] = _safe_int(policy.get("proactive_used_today"), 0, 0) + 1
+        policy["last_proactive_at"] = _now_ts()
+
     def _reality_touch_update_camera_policy(
         self,
         user: dict[str, Any],
@@ -158,6 +339,15 @@ class RealityTouchCameraMixin:
             raise ValueError("该用户尚未在私聊中完成摄像头独立知情确认")
         policy = self._reality_touch_camera_policy(user)
         policy["enabled"] = enabled
+        policy["proactive_mode"] = self._normalize_reality_touch_camera_proactive_mode(
+            payload.get("proactive_mode", policy.get("proactive_mode"))
+        )
+        policy["proactive_max_daily"] = _safe_int(
+            payload.get("proactive_max_daily", policy.get("proactive_max_daily", -1)),
+            -1,
+            -1,
+            10,
+        )
         policy["updated_at"] = _now_ts()
         return policy
 
@@ -400,6 +590,7 @@ class RealityTouchCameraMixin:
         success: bool,
         observation: dict[str, Any] | None = None,
         error: Any = "",
+        source: str = "manual",
     ) -> dict[str, Any]:
         policy = self._reality_touch_camera_policy(user)
         item = {
@@ -407,6 +598,7 @@ class RealityTouchCameraMixin:
             "purpose": _single_line(purpose, 120),
             "success": bool(success),
             "error": _single_line(error, 180),
+            "source": _single_line(source, 40) or "manual",
         }
         if success and isinstance(observation, dict):
             for key in ("presence", "activity", "interruptibility", "brightness", "confidence", "analyzed", "width", "height", "summary"):
@@ -426,6 +618,7 @@ class RealityTouchCameraMixin:
         purpose: str,
         *,
         include_preview: bool = False,
+        source: str = "manual",
     ) -> dict[str, Any]:
         purpose_text = _single_line(purpose, 120)
         if not purpose_text:
@@ -450,6 +643,17 @@ class RealityTouchCameraMixin:
             policy = self._reality_touch_camera_policy(user)
             if not bool(policy.get("enabled")):
                 return {"status": "disabled", "message": "该用户的摄像头能力策略已关闭"}
+            source_key = _single_line(source, 40).lower() or "manual"
+            if source_key == "proactive_curiosity":
+                proactive_state = self._reality_touch_camera_proactive_state(user, user_id=user_id)
+                if not proactive_state.get("direct_allowed"):
+                    return {
+                        "status": "forbidden",
+                        "message": _single_line(proactive_state.get("direct_reason"), 160)
+                        or _single_line(proactive_state.get("reason"), 160)
+                        or "当前主动强度或用户策略不允许直接读取摄像头",
+                        "proactive_camera": proactive_state,
+                    }
             now = _now_ts()
             interval = _safe_int(getattr(self, "reality_touch_camera_min_interval_seconds", 60), 60, 10, 3600)
             last_attempt = _safe_int(policy.get("last_attempt_at"), 0, 0)
@@ -458,6 +662,8 @@ class RealityTouchCameraMixin:
                 return {"status": "cooldown", "message": f"摄像头单帧读取仍在冷却中，请 {remaining} 秒后再试", "retry_after": remaining}
             policy["last_attempt_at"] = now
             policy["last_purpose"] = purpose_text
+            if source_key == "proactive_curiosity":
+                self._note_reality_touch_camera_proactive_attempt(user)
             self._save_data_sync()
             try:
                 capture_timeout = _safe_int(getattr(self, "reality_touch_camera_capture_timeout_seconds", 5), 5, 2, 20)
@@ -476,6 +682,7 @@ class RealityTouchCameraMixin:
                     purpose=purpose_text,
                     success=True,
                     observation=observation,
+                    source=source_key,
                 )
                 self._save_data_sync()
                 result = {"status": "success", "message": "已完成一次单帧有限状态观察", "observation": item}
@@ -486,7 +693,13 @@ class RealityTouchCameraMixin:
                 message = "摄像头单帧读取超时"
             except Exception as exc:
                 message = _single_line(exc, 180) or "摄像头单帧读取失败"
-            self._record_reality_touch_camera_observation(user, purpose=purpose_text, success=False, error=message)
+            self._record_reality_touch_camera_observation(
+                user,
+                purpose=purpose_text,
+                success=False,
+                error=message,
+                source=source_key,
+            )
             self._save_data_sync()
             return {"status": "error", "message": message}
 
@@ -495,12 +708,16 @@ class RealityTouchCameraMixin:
         policy = self._reality_touch_camera_policy(user)
         latest = policy.get("last_observation") if isinstance(policy.get("last_observation"), dict) else {}
         eligible = self._reality_touch_camera_user_eligible(user_id)
+        proactive = self._reality_touch_camera_proactive_state(user, user_id=user_id)
         return {
             "eligible": eligible,
             "consented": eligible and self._reality_touch_camera_consented(user),
             "consent_version": _safe_int(consent.get("version"), 0, 0),
             "confirmed_at": _safe_int(consent.get("confirmed_at"), 0, 0),
             "enabled": eligible and bool(policy.get("enabled")),
+            "proactive_mode": self._normalize_reality_touch_camera_proactive_mode(policy.get("proactive_mode")),
+            "proactive_max_daily": _safe_int(policy.get("proactive_max_daily"), -1, -1, 10),
+            "proactive": proactive,
             "last_attempt_at": _safe_int(policy.get("last_attempt_at"), 0, 0),
             "last_observation": dict(latest),
         }
@@ -513,6 +730,10 @@ class RealityTouchCameraMixin:
             "min_interval_seconds": _safe_int(getattr(self, "reality_touch_camera_min_interval_seconds", 60), 60, 10, 3600),
             "capture_timeout_seconds": _safe_int(getattr(self, "reality_touch_camera_capture_timeout_seconds", 5), 5, 2, 20),
             "analysis_timeout_seconds": _safe_int(getattr(self, "reality_touch_camera_analysis_timeout_seconds", 25), 25, 5, 90),
+            "proactive_curiosity_enabled": bool(getattr(self, "enable_reality_touch_camera_proactive_curiosity", False)),
+            "proactive_min_tier": _safe_int(getattr(self, "reality_touch_camera_proactive_min_tier", 4), 4, 1, 5),
+            "proactive_max_daily": _safe_int(getattr(self, "reality_touch_camera_proactive_max_daily", 1), 1, 0, 10),
+            "proactive_cooldown_minutes": _safe_int(getattr(self, "reality_touch_camera_proactive_cooldown_minutes", 240), 240, 10, 1440),
             "confirmation_command": "陪伴 现实触及 摄像头确认",
             "backend": self._reality_touch_camera_backend_snapshot(),
             "devices": list(catalog.get("devices") or []),

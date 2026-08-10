@@ -367,6 +367,18 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.reality_touch_camera_analysis_timeout_seconds = self._cfg_int(
         c, "reality_touch_camera_analysis_timeout_seconds", 25, 5, 90
     )
+    self.enable_reality_touch_camera_proactive_curiosity = self._cfg_bool(
+        c, "enable_reality_touch_camera_proactive_curiosity", False
+    )
+    self.reality_touch_camera_proactive_min_tier = self._cfg_int(
+        c, "reality_touch_camera_proactive_min_tier", 4, 1, 5
+    )
+    self.reality_touch_camera_proactive_max_daily = self._cfg_int(
+        c, "reality_touch_camera_proactive_max_daily", 1, 0, 10
+    )
+    self.reality_touch_camera_proactive_cooldown_minutes = self._cfg_int(
+        c, "reality_touch_camera_proactive_cooldown_minutes", 240, 10, 1440
+    )
     self.target_platform = self._cfg_str(c, "target_platform", "aiocqhttp", "aiocqhttp")
     self.default_enable_configured_targets = self._cfg_bool(c, "default_enable_configured_targets", True)
     self.default_interaction_band = self._cfg_str(c, "default_interaction_band", "relaxed")

@@ -61,6 +61,14 @@ class RealityTouchUiTests(unittest.TestCase):
             'data-reality-touch-test-kind="device"',
             "data-reality-touch-camera-config",
             "data-reality-touch-camera-policy-form",
+            "启用主动视觉好奇链路",
+            "主动视觉策略",
+            "有价值时先自然询问",
+            "达到强度后可主动单帧",
+            "proactive_curiosity_enabled",
+            "proactive_min_tier",
+            "proactive_max_daily",
+            "proactive_cooldown_minutes",
             "data-reality-touch-camera-test",
             "data-reality-touch-camera-scan",
             "扫描摄像头",
@@ -118,6 +126,19 @@ class RealityTouchUiTests(unittest.TestCase):
         self.assertIn("soundfile>=", self.requirements)
         self.assertIn("opencv-python-headless>=", self.requirements)
         self.assertIn("cv2-enumerate-cameras>=", self.requirements)
+
+    def test_proactive_camera_is_semantic_optional_chain(self) -> None:
+        camera = (ROOT / "reality_touch_camera.py").read_text(encoding="utf-8")
+        for marker in (
+            "_reality_touch_camera_proactive_state",
+            "_reality_touch_camera_proactive_prompt",
+            "独立、低频的可选能力",
+            "不是理由",
+            'source_key == "proactive_curiosity"',
+        ):
+            self.assertIn(marker, camera)
+        self.assertIn('excluded_tools.add("pc_reality_touch_camera_snapshot")', self.proactive)
+        self.assertIn("camera_prompt_getter", self.proactive)
 
 
 if __name__ == "__main__":

@@ -33160,10 +33160,17 @@ function renderRealityTouchDevicePanel() {
           <input type="checkbox" name="camera_enabled" ${camera.global_enabled ? "checked" : ""}>
           <span><b>启用摄像头能力总开关</b><small>仍需当前用户单独授权并开启用户策略。</small></span>
         </label>
+        <label class="reality-enable-field">
+          <input type="checkbox" name="proactive_curiosity_enabled" ${camera.proactive_curiosity_enabled ? "checked" : ""}>
+          <span><b>启用主动视觉好奇链路</b><small>作为独立候选交给主动 Agent 按语义判断，不按吃饭、穿搭等关键词硬触发。</small></span>
+        </label>
         <label><span>摄像头设备</span><select name="camera_index">${cameraIndexKnown ? "" : `<option value="${currentCameraIndex}" selected>当前手动索引 ${currentCameraIndex}</option>`}${cameraIndexOptions || `<option value="${currentCameraIndex}">尚未扫描 · 当前索引 ${currentCameraIndex}</option>`}</select></label>
         <label><span>最小读取间隔</span><input type="number" name="min_interval_seconds" min="10" max="3600" step="10" value="${Number(camera.min_interval_seconds ?? 60)}"></label>
         <label><span>读取超时</span><input type="number" name="capture_timeout_seconds" min="2" max="20" step="1" value="${Number(camera.capture_timeout_seconds ?? 5)}"></label>
         <label><span>视觉分析超时</span><input type="number" name="analysis_timeout_seconds" min="5" max="90" step="5" value="${Number(camera.analysis_timeout_seconds ?? 25)}"></label>
+        <label><span>允许直看的最低主动档</span><select name="proactive_min_tier">${[[1, "L1 克制"], [2, "L2 轻陪伴"], [3, "L3 稳定陪伴"], [4, "L4 亲密陪伴"], [5, "L5 持续在线"]].map(([value, label]) => `<option value="${value}" ${Number(camera.proactive_min_tier ?? 4) === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+        <label><span>主动单帧每日上限</span><input type="number" name="proactive_max_daily" min="0" max="10" step="1" value="${Number(camera.proactive_max_daily ?? 1)}"><small>0 表示只可询问</small></label>
+        <label><span>主动单帧行为冷却</span><input type="number" name="proactive_cooldown_minutes" min="10" max="1440" step="10" value="${Number(camera.proactive_cooldown_minutes ?? 240)}"><small>分钟</small></label>
         <button type="submit" class="primary">保存摄像头配置</button>
         <button type="button" data-reality-touch-camera-scan ${cameraBackend.enumerator_available ? "" : "disabled"}>扫描摄像头</button>
         <button type="button" data-reality-touch-camera-test ${canTestCamera ? "" : "disabled"}>读取并预览单帧</button>
@@ -33204,6 +33211,21 @@ function renderRealityTouchSettings() {
   const confirmed = toBool(consent.confirmed);
   const command = String(data.confirmation_command || "");
   const cameraState = user.camera || {};
+  const cameraProactive = cameraState.proactive || {};
+  const cameraProactiveModeLabels = {
+    off: "已关闭",
+    ask: "先询问",
+    auto: "可主动单帧",
+  };
+  const cameraProactiveMode = String(cameraProactive.effective_mode || cameraState.proactive_mode || "off");
+  const cameraProactiveStatus = cameraProactive.direct_allowed
+    ? "可主动单帧"
+    : cameraProactive.ask_allowed
+      ? "先询问"
+      : cameraProactiveModeLabels[cameraProactiveMode] || "已关闭";
+  const cameraProactiveReason = cameraProactive.direct_allowed
+    ? ""
+    : String(cameraProactive.direct_reason || cameraProactive.reason || "");
   const cameraEligible = toBool(cameraState.eligible);
   const cameraConfirmed = toBool(cameraState.consented);
   const cameraCommand = String(data.camera?.confirmation_command || "");
@@ -33253,6 +33275,20 @@ function renderRealityTouchSettings() {
         <label class="reality-enable-field">
           <input type="checkbox" name="reality_camera_enabled" ${cameraState.enabled ? "checked" : ""} ${cameraEligible && cameraConfirmed ? "" : "disabled"}>
           <span><b>允许该主机管理用户的明确任务读取单帧</b><small>普通私聊用户不能获得此能力；仍受摄像头总开关、读取冷却和任务目的约束。</small></span>
+        </label>
+        <label class="reality-field">
+          <span>主动视觉策略</span>
+          <select name="reality_camera_proactive_mode" ${cameraEligible && cameraConfirmed ? "" : "disabled"}>
+            <option value="off" ${String(cameraState.proactive_mode || "off") === "off" ? "selected" : ""}>关闭主动视觉好奇</option>
+            <option value="ask" ${String(cameraState.proactive_mode || "off") === "ask" ? "selected" : ""}>有价值时先自然询问</option>
+            <option value="auto" ${String(cameraState.proactive_mode || "off") === "auto" ? "selected" : ""}>达到强度后可主动单帧</option>
+          </select>
+          <small>低于全局最低档时，auto 会自动降级为 ask。</small>
+        </label>
+        <label class="reality-field">
+          <span>该用户主动单帧日额度</span>
+          <input type="number" name="reality_camera_proactive_max_daily" min="-1" max="10" step="1" value="${Number(cameraState.proactive_max_daily ?? -1)}" ${cameraEligible && cameraConfirmed ? "" : "disabled"}>
+          <small>-1 继承全局，0 禁止直接主动读取。</small>
         </label>
         <button type="submit" ${cameraEligible && cameraConfirmed ? "" : "disabled"}>保存摄像头用户策略</button>
       </form>
@@ -33399,7 +33435,7 @@ function renderRealityTouchRuntime() {
           <div><dt>主动语音</dt><dd>${user.policy?.proactive_voice_enabled ? "同步到现实设备" : "未开放"}</dd></div>
           <div><dt>摄像头资格</dt><dd class="${cameraState.eligible ? "" : "denied"}">${cameraState.eligible ? "主机管理用户" : "普通私聊用户，不开放主机摄像头"}</dd></div>
           <div><dt>摄像头授权</dt><dd class="${cameraState.consented ? "" : "denied"}">${cameraState.consented ? "已授权 camera_single_frame" : "未授权，且不会继承音频或主动权限"}</dd></div>
-          <div><dt>摄像头策略</dt><dd>${cameraState.eligible && cameraState.enabled ? "允许明确任务读取单帧" : "关闭"}</dd></div>
+          <div><dt>摄像头策略</dt><dd>${cameraState.eligible && cameraState.enabled ? `明确任务可用 · 主动视觉 ${escapeHtml(cameraProactiveStatus)} · 今日 ${escapeHtml(String(cameraProactive.used_today || 0))}/${escapeHtml(String(cameraProactive.daily_limit || 0))}${cameraProactiveReason ? ` · ${escapeHtml(cameraProactiveReason)}` : ""}` : "关闭"}</dd></div>
           <div><dt>最近单帧观察</dt><dd>${cameraObservation.at ? `${cameraObservation.success ? "成功" : "失败"} · ${escapeHtml(cameraObservation.summary || cameraObservation.error || "已记录")}` : "暂无记录"}</dd></div>
           <div><dt>播放目标</dt><dd>${escapeHtml(data.audio_output?.label || "跟随系统默认输出")}</dd></div>
           <div><dt>起床提醒模板</dt><dd>${alarm.time ? `${escapeHtml(alarm.time)} · ${escapeHtml(dayText)}` : "未设置"}</dd></div>
@@ -34054,10 +34090,14 @@ function bindRealityTouchActions(root) {
       () => postJson("/reality-touch/update", {
         action: "save_camera_config",
         camera_enabled: Boolean(cameraConfigForm.elements.camera_enabled?.checked),
+        proactive_curiosity_enabled: Boolean(cameraConfigForm.elements.proactive_curiosity_enabled?.checked),
         camera_index: Number(cameraConfigForm.elements.camera_index?.value ?? 0),
         min_interval_seconds: Number(cameraConfigForm.elements.min_interval_seconds?.value ?? 60),
         capture_timeout_seconds: Number(cameraConfigForm.elements.capture_timeout_seconds?.value ?? 5),
         analysis_timeout_seconds: Number(cameraConfigForm.elements.analysis_timeout_seconds?.value ?? 25),
+        proactive_min_tier: Number(cameraConfigForm.elements.proactive_min_tier?.value ?? 4),
+        proactive_max_daily: Number(cameraConfigForm.elements.proactive_max_daily?.value ?? 1),
+        proactive_cooldown_minutes: Number(cameraConfigForm.elements.proactive_cooldown_minutes?.value ?? 240),
       }),
       "摄像头单帧配置已保存",
       button,
@@ -34079,6 +34119,8 @@ function bindRealityTouchActions(root) {
         action: "save_camera_policy",
         user_id: user.user_id,
         camera_enabled: Boolean(cameraPolicyForm.elements.reality_camera_enabled?.checked),
+        proactive_mode: String(cameraPolicyForm.elements.reality_camera_proactive_mode?.value || "off"),
+        proactive_max_daily: Number(cameraPolicyForm.elements.reality_camera_proactive_max_daily?.value ?? -1),
       }),
       "摄像头用户策略已保存",
       button,
