@@ -25,7 +25,7 @@ FORMAL_PURPOSES = frozenset({
     "memory_read", "memory_write", "rule_read", "rule_write", "cross_domain_projection",
 })
 CONTEXT_FIELDS = (
-    "contract_name", "contract_version", "contract_fingerprint", "kind", "identity_id", "group_id",
+    "contract_name", "contract_version", "contract_fingerprint", "kind", "persona_id", "identity_id", "group_id",
     "assurance", "profile_status", "policy_version", "migration_epoch",
 )
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}")
@@ -68,6 +68,7 @@ class NamespaceContext:
     profile_status: str
     policy_version: str
     migration_epoch: str
+    persona_id: str = "default"
 
     contract_name: ClassVar[str] = CONTRACT_NAME
     contract_version: ClassVar[str] = CONTRACT_VERSION
@@ -77,6 +78,8 @@ class NamespaceContext:
         errors: list[str] = []
         if self.kind not in NAMESPACE_KINDS:
             errors.append("namespace_kind_invalid")
+        if not _token(self.persona_id):
+            errors.append("namespace_persona_required")
         identity = _token(self.identity_id)
         group = _token(self.group_id)
         if self.kind in {"private", "group_member", "pending"} and not identity:
@@ -103,6 +106,7 @@ class NamespaceContext:
             "contract_version": CONTRACT_VERSION,
             "contract_fingerprint": CONTRACT_FINGERPRINT,
             "kind": self.kind,
+            "persona_id": self.persona_id,
             "identity_id": self.identity_id,
             "group_id": self.group_id,
             "assurance": self.assurance,
@@ -114,7 +118,8 @@ class NamespaceContext:
     def cache_scope(self) -> str:
         identity_hash = hashlib.sha256(self.identity_id.encode("utf-8")).hexdigest()[:16] if self.identity_id else "none"
         group_hash = hashlib.sha256(self.group_id.encode("utf-8")).hexdigest()[:16] if self.group_id else "none"
-        return f"{self.kind}:{identity_hash}:{group_hash}:{self.policy_version}:{self.migration_epoch}"
+        persona_hash = hashlib.sha256(self.persona_id.encode("utf-8")).hexdigest()[:16]
+        return f"{self.kind}:{persona_hash}:{identity_hash}:{group_hash}:{self.policy_version}:{self.migration_epoch}"
 
 
 def build_namespace_context(value: Any) -> NamespaceContext | None:
@@ -122,6 +127,7 @@ def build_namespace_context(value: Any) -> NamespaceContext | None:
         return None
     return NamespaceContext(
         kind=str(value.get("kind") or "").strip(),
+        persona_id=str(value.get("persona_id") or "").strip(),
         identity_id=str(value.get("identity_id") or "").strip(),
         group_id=str(value.get("group_id") or "").strip(),
         assurance=str(value.get("assurance") or "").strip(),

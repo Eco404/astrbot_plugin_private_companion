@@ -1891,3 +1891,9 @@ def initialize_plugin_post_runtime_state(self: Any, config: Any) -> None:
     self.req041_migration_backfill = None
     self.req041_relationship_store = None
     self.req041_dual_write_producer = None
+    self.req041_scoped_projection_sync = None
+    self.req041_scoped_projection_status = {
+        "ok": False, "code": "scoped_projection_not_initialized", "scopes": []
+    }
+    self._req041_scoped_sync_task = None
+    self._req041_scoped_sync_requested = False

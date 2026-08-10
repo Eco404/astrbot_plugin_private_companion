@@ -1215,6 +1215,9 @@ class CoreStoreMixin:
             self._save_data_sync()
 
     def _schedule_data_save(self, delay: float = 1.5) -> None:
+        scoped_scheduler = getattr(self, "_req041_schedule_scoped_sync", None)
+        if callable(scoped_scheduler):
+            scoped_scheduler()
         active_getter = getattr(self, "_active_persona_scope", None)
         persona_id = str(active_getter() if callable(active_getter) else "").strip()
         if bool(getattr(self, "enable_multi_persona_mode", False)) and persona_id:

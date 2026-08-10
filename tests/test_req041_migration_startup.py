@@ -18,6 +18,7 @@ from migration_dual_write import MigrationDualWriteProducer
 from migration_outbox import MigrationOutbox
 from migration_replay import MigrationReplayWorker
 from migration_read_router import MigrationRelationshipReadRouter
+from migration_scoped_projection import ScopedProjectionSynchronizer
 from relationship_ledger import normalize_relationship_positive_stage_cap_key
 from unified_person_registry import UnifiedPersonRegistry
 
@@ -44,6 +45,7 @@ def _load_methods(*names: str) -> dict[str, Any]:
         "MigrationDualWriteProducer": MigrationDualWriteProducer,
         "MigrationReplayWorker": MigrationReplayWorker,
         "MigrationRelationshipReadRouter": MigrationRelationshipReadRouter,
+        "ScopedProjectionSynchronizer": ScopedProjectionSynchronizer,
         "UnifiedPersonRegistry": UnifiedPersonRegistry,
         "normalize_relationship_positive_stage_cap_key": normalize_relationship_positive_stage_cap_key,
         "_single_line": lambda value, limit=240: " ".join(str(value or "").split())[:limit],
@@ -60,6 +62,8 @@ METHODS = _load_methods(
     "_req041_registry_for_person",
     "_req041_legacy_relationship_state",
     "_req041_schedule_replay",
+    "_req041_legacy_snapshots_locked",
+    "_req041_sync_scoped_now",
     "_req041_replay_finished",
     "_req041_run_replay_batch",
     "_req041_initialize_automatic_migration",
@@ -72,6 +76,8 @@ class Harness:
     _req041_registry_for_person = METHODS["_req041_registry_for_person"]
     _req041_legacy_relationship_state = METHODS["_req041_legacy_relationship_state"]
     _req041_schedule_replay = METHODS["_req041_schedule_replay"]
+    _req041_legacy_snapshots_locked = METHODS["_req041_legacy_snapshots_locked"]
+    _req041_sync_scoped_now = METHODS["_req041_sync_scoped_now"]
     _req041_replay_finished = METHODS["_req041_replay_finished"]
     _req041_run_replay_batch = METHODS["_req041_run_replay_batch"]
     _req041_initialize_automatic_migration = METHODS["_req041_initialize_automatic_migration"]
@@ -124,6 +130,18 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
             return {"ok": True, "state": "ready", "code": "bound"}
 
         host._memory_companion_bind_namespace_epoch = binder
+        host._memory_companion_read_scoped_record = lambda _bridge, _namespace, **_kwargs: {
+            "ok": True, "code": "not_found", "record": None
+        }
+        host._memory_companion_list_scoped_records = lambda _bridge, _namespace, **_kwargs: {
+            "ok": True, "code": "listed", "records": []
+        }
+        host._memory_companion_upsert_scoped_record = lambda _bridge, _namespace, **_kwargs: {
+            "ok": True, "code": "created"
+        }
+        host._memory_companion_tombstone_scoped_record = lambda _bridge, _namespace, **_kwargs: {
+            "ok": True, "code": "tombstoned"
+        }
         return host
 
     async def test_new_install_without_source_requires_no_action(self) -> None:

@@ -151,6 +151,7 @@ from .migration_backfill import MigrationBackfill
 from .migration_dual_write import MigrationDualWriteProducer
 from .migration_replay import MigrationReplayWorker
 from .migration_read_router import MigrationRelationshipReadRouter
+from .migration_scoped_projection import ScopedProjectionSynchronizer
 from .unified_profile_contract import (
     build_person_ref as req036_build_person_ref,
     build_profile_dto as req036_build_profile_dto,
@@ -4269,6 +4270,86 @@ class PrivateCompanionPlugin(
         except RuntimeError:
             raise RuntimeError("migration_replay_loop_unavailable")
 
+    def _req041_legacy_snapshots_locked(self) -> list[tuple[str, dict[str, Any]]]:
+        snapshots: list[tuple[str, dict[str, Any]]] = []
+        default_data = getattr(self, "_data_default", None)
+        if not isinstance(default_data, dict):
+            default_data = self.data if isinstance(getattr(self, "data", None), dict) else {}
+        snapshots.append(("default", deepcopy(default_data)))
+        profiles = getattr(self, "_persona_data_profiles", {})
+        if isinstance(profiles, dict):
+            for persona_id, profile_data in profiles.items():
+                if not isinstance(profile_data, dict):
+                    continue
+                scope_hash = hashlib.sha256(str(persona_id).encode("utf-8")).hexdigest()[:24]
+                snapshots.append((f"persona:{scope_hash}", deepcopy(profile_data)))
+        return snapshots
+
+    async def _req041_sync_scoped_now(self) -> dict[str, Any]:
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            return {"ok": False, "code": "scoped_projection_not_initialized", "scopes": []}
+        async with self._data_lock:
+            snapshots = self._req041_legacy_snapshots_locked()
+        results: list[dict[str, Any]] = []
+        for source_scope, snapshot in snapshots:
+            results.append(await asyncio.to_thread(
+                synchronizer.sync_snapshot, snapshot, source_scope=source_scope
+            ))
+        ok = all(item.get("ok") is True for item in results)
+        summary = {
+            "ok": ok,
+            "code": "scoped_projection_synced" if ok else "scoped_projection_degraded",
+            "scopes": results,
+            "records": sum(int(item.get("records") or 0) for item in results),
+            "errors": sum(int(item.get("errors") or 0) for item in results),
+        }
+        self.req041_scoped_projection_status = summary
+        return summary
+
+    async def _req041_run_scoped_sync(self) -> None:
+        while bool(getattr(self, "_req041_scoped_sync_requested", False)):
+            self._req041_scoped_sync_requested = False
+            result = await self._req041_sync_scoped_now()
+            if result.get("ok") is not True:
+                status = getattr(self, "req041_migration_status", None)
+                if isinstance(status, dict):
+                    status.update({"state": "degraded", "code": "scoped_projection_degraded", "scoped": result})
+                return
+
+    def _req041_scoped_sync_finished(self, task: Any) -> None:
+        self._req041_scoped_sync_task = None
+        if not task.cancelled():
+            try:
+                error = task.exception()
+            except Exception:
+                error = None
+            if error is not None:
+                self.req041_scoped_projection_status = {
+                    "ok": False, "code": _single_line(error, 120) or "scoped_projection_exception"
+                }
+        if bool(getattr(self, "_req041_scoped_sync_requested", False)):
+            self._req041_schedule_scoped_sync()
+
+    def _req041_schedule_scoped_sync(self) -> None:
+        if getattr(self, "req041_scoped_projection_sync", None) is None:
+            return
+        stop_event = getattr(self, "_stop_event", None)
+        if stop_event is not None and callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
+            return
+        self._req041_scoped_sync_requested = True
+        task = getattr(self, "_req041_scoped_sync_task", None)
+        if isinstance(task, asyncio.Task) and not task.done():
+            return
+        try:
+            task = asyncio.get_running_loop().create_task(
+                self._req041_run_scoped_sync(), name="req041-scoped-projection-sync"
+            )
+        except RuntimeError:
+            return
+        self._req041_scoped_sync_task = task
+        task.add_done_callback(self._req041_scoped_sync_finished)
+
     def _req041_replay_finished(self, _task: Any) -> None:
         self._req041_replay_task = None
         if bool(getattr(self, "_req041_replay_requested", False)):
@@ -4425,18 +4506,7 @@ class PrivateCompanionPlugin(
             if status.get("phase") in {"S3", "S4"}:
                 try:
                     async with self._data_lock:
-                        legacy_snapshots: list[tuple[str, dict[str, Any]]] = []
-                        default_data = getattr(self, "_data_default", None)
-                        if not isinstance(default_data, dict):
-                            default_data = self.data if isinstance(getattr(self, "data", None), dict) else {}
-                        legacy_snapshots.append(("default", deepcopy(default_data)))
-                        profiles = getattr(self, "_persona_data_profiles", {})
-                        if isinstance(profiles, dict):
-                            for persona_id, profile_data in profiles.items():
-                                if not isinstance(profile_data, dict):
-                                    continue
-                                scope_hash = hashlib.sha256(str(persona_id).encode("utf-8")).hexdigest()[:24]
-                                legacy_snapshots.append((f"persona:{scope_hash}", deepcopy(profile_data)))
+                        legacy_snapshots = self._req041_legacy_snapshots_locked()
                     backfiller = await asyncio.to_thread(
                         MigrationBackfill,
                         coordinator=coordinator,
@@ -4550,17 +4620,39 @@ class PrivateCompanionPlugin(
                     migration_epoch=epoch,
                     policy_version=policy,
                 )
+            scoped_result: dict[str, Any] = {
+                "ok": False, "code": "namespace_scoped_api_not_bound", "scopes": []
+            }
+            if remote.get("ok") and bridge is not None:
+                self.req041_scoped_projection_sync = ScopedProjectionSynchronizer(
+                    read=lambda namespace, **kwargs: self._memory_companion_read_scoped_record(
+                        bridge, namespace, **kwargs
+                    ),
+                    list_records=lambda namespace, **kwargs: self._memory_companion_list_scoped_records(
+                        bridge, namespace, **kwargs
+                    ),
+                    upsert=lambda namespace, **kwargs: self._memory_companion_upsert_scoped_record(
+                        bridge, namespace, **kwargs
+                    ),
+                    tombstone=lambda namespace, **kwargs: self._memory_companion_tombstone_scoped_record(
+                        bridge, namespace, **kwargs
+                    ),
+                    migration_epoch=epoch,
+                    policy_version=policy,
+                )
+                scoped_result = await self._req041_sync_scoped_now()
             self.req041_migration_status = {
                 "required": True,
-                "state": "active" if remote.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok" else (
+                "state": "active" if remote.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok" else (
                     "paused" if status.get("state") == "paused" else "degraded"
                 ),
                 "code": (
                     "migration_shadow_active"
-                    if remote.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok"
+                    if remote.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok"
                     else str(
                         backfill_result.get("code") if not backfill_result.get("ok")
                         else replay_result.get("error_code") if replay_result.get("status") == "paused"
+                        else scoped_result.get("code") if remote.get("ok") and not scoped_result.get("ok")
                         else remote.get("code") or "migration_degraded"
                     )[:120]
                 ),
@@ -4570,6 +4662,7 @@ class PrivateCompanionPlugin(
                 "s4": backfill_result,
                 "s5": replay_result,
                 "dual_write": "capturing",
+                "scoped": scoped_result,
             }
         except Exception as exc:
             status = coordinator.status()
@@ -4964,6 +5057,9 @@ class PrivateCompanionPlugin(
         replay_task = getattr(self, "_req041_replay_task", None)
         self._req041_replay_requested = False
         await cancel_task(replay_task, "req041_shadow_replay")
+        scoped_task = getattr(self, "_req041_scoped_sync_task", None)
+        self._req041_scoped_sync_requested = False
+        await cancel_task(scoped_task, "req041_scoped_projection_sync")
         startup_background_tasks = list(getattr(self, "_startup_background_tasks", {}).items())
         for label, task in startup_background_tasks:
             await cancel_task(task, f"startup_{label}")
