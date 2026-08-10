@@ -36,6 +36,7 @@ class MigrationReplayWorker:
         registry: UnifiedPersonRegistry,
         registry_resolver: Any = None,
         legacy_relationship_resolver: Any = None,
+        enable_gap_recovery: bool = False,
         migration_epoch: str,
         policy_version: str,
     ) -> None:
@@ -47,6 +48,7 @@ class MigrationReplayWorker:
         self.legacy_relationship_resolver = (
             legacy_relationship_resolver if callable(legacy_relationship_resolver) else None
         )
+        self.enable_gap_recovery = bool(enable_gap_recovery)
         self.migration_epoch = str(migration_epoch or "").strip()
         self.policy_version = str(policy_version or "").strip()
         if not self.migration_epoch or not self.policy_version:
@@ -156,7 +158,10 @@ class MigrationReplayWorker:
 
     def _apply_identity(self, item: OutboxItem, context: Any, payload: dict[str, Any]) -> int:
         operation = payload.get("operation")
-        if operation not in {"identity_baseline", "identity_create", "identity_link", "identity_unlink"}:
+        if operation not in {
+            "identity_baseline", "identity_create", "identity_link", "identity_unlink",
+            "identity_recovery_snapshot", "identity_recovery_unlink",
+        }:
             raise MigrationReplayError("migration_replay_operation_unsupported")
         identity_key = str(payload.get("identity_key_ref") or "")
         state = self._registry_for_person(context.identity_id).identity_link_state(
@@ -164,12 +169,13 @@ class MigrationReplayWorker:
         )
         if not state.get("ok"):
             raise MigrationReplayError(str(state.get("code") or "migration_replay_identity_missing"))
-        if operation == "identity_unlink":
+        if operation in {"identity_unlink", "identity_recovery_unlink"}:
             if state.get("state") != "detached":
                 raise MigrationReplayError("migration_replay_unlink_not_detached")
             tombstone = self.outbox.tombstone(f"identity-link:{identity_key}", self.migration_epoch)
+            expected_reason = "identity_unlink" if operation == "identity_unlink" else "identity_recovery_unlink"
             if (
-                tombstone.get("reason_code") != "identity_unlink"
+                tombstone.get("reason_code") != expected_reason
                 or int(tombstone.get("revision") or 0) < item.source_revision
             ):
                 raise MigrationReplayError("migration_replay_unlink_tombstone_missing")
@@ -181,6 +187,120 @@ class MigrationReplayWorker:
         if target_revision < int(payload.get("projection_revision") or 0):
             raise MigrationReplayError("migration_replay_projection_revision_stale")
         return target_revision
+
+    def _formal_context(self, person_id: str) -> Any:
+        resolution = self._registry_for_person(person_id).formal_namespace_for_person(
+            person_id, policy_version=self.policy_version,
+            migration_epoch=self.migration_epoch, purpose="relationship_write",
+        )
+        context = build_namespace_context(resolution.get("context") if isinstance(resolution, dict) else None)
+        if context is None or not resolution.get("ok") or context.errors():
+            raise MigrationReplayError("migration_gap_identity_not_formal")
+        return context
+
+    def _recover_relationship_gap(self, person_id: str) -> int:
+        if self.legacy_relationship_resolver is None:
+            return 0
+        stream = f"relationship:{person_id}"
+        if self.outbox.backlog_for_stream(stream, self.migration_epoch):
+            return 0
+        live = self.legacy_relationship_resolver(person_id)
+        if not isinstance(live, dict):
+            return 0
+        latest = self.outbox.latest_for_stream(stream, self.migration_epoch)
+        prior = self._source_relationship_state(latest.payload) if latest is not None else None
+        if prior == live:
+            return 0
+        context = build_namespace_context(latest.namespace) if latest is not None else self._formal_context(person_id)
+        if context is None or context.errors():
+            raise MigrationReplayError("migration_gap_relationship_namespace_invalid")
+        state_hash = _digest(live)
+        next_revision = self.outbox.stream_revision(stream, self.migration_epoch) + 1
+        event_id = "req041-rel-recovery-" + hashlib.sha256(
+            f"{self.migration_epoch}:{person_id}:{next_revision}:{state_hash}".encode("utf-8")
+        ).hexdigest()[:40]
+        emitted = self.outbox.enqueue_next(
+            stream_key=stream, event_id=event_id, namespace=context,
+            migration_epoch=self.migration_epoch, policy_version=self.policy_version,
+            payload={
+                "operation": "relationship_legacy_snapshot", "identity_ref": person_id,
+                **live, "snapshot_hash": state_hash, "reason_code": "migration_gap_recovery",
+                "legacy_event_ref": state_hash[:24],
+            },
+        )
+        return 1 if emitted.get("status") == "enqueued" else 0
+
+    def _recover_identity_gap(self, person_id: str) -> int:
+        stream = f"identity:{person_id}"
+        if self.outbox.backlog_for_stream(stream, self.migration_epoch):
+            return 0
+        registry = self._registry_for_person(person_id)
+        state = registry.identity_recovery_state(person_id)
+        if not state.get("ok"):
+            raise MigrationReplayError(str(state.get("code") or "migration_gap_identity_invalid"))
+        latest = self.outbox.latest_for_stream(stream, self.migration_epoch)
+        missing_detached = [
+            identity_key
+            for identity_key in state.get("detached_identity_keys", [])
+            if not self.outbox.tombstone(f"identity-link:{identity_key}", self.migration_epoch)
+        ]
+        if not missing_detached and latest is not None and (
+            latest.payload.get("projection_revision") == state.get("projection_revision")
+            and latest.payload.get("projection_checkpoint_hash") == state.get("checkpoint_hash")
+        ):
+            return 0
+        context = build_namespace_context(latest.namespace) if latest is not None else self._formal_context(person_id)
+        if context is None or context.errors():
+            raise MigrationReplayError("migration_gap_identity_namespace_invalid")
+        recovered = 0
+        for identity_key in missing_detached:
+            event_id = "req041-id-recovery-unlink-" + hashlib.sha256(
+                f"{self.migration_epoch}:{person_id}:{identity_key}:{state['checkpoint_hash']}".encode("utf-8")
+            ).hexdigest()[:32]
+            emitted = self.outbox.enqueue_next_with_tombstone(
+                stream_key=stream, event_id=event_id, namespace=context,
+                migration_epoch=self.migration_epoch, policy_version=self.policy_version,
+                payload={
+                    "operation": "identity_recovery_unlink", "identity_ref": person_id,
+                    "identity_key_ref": identity_key, "identity_assurance": context.assurance,
+                    "profile_status": context.profile_status,
+                    "projection_revision": state["projection_revision"],
+                    "projection_checkpoint_hash": state["checkpoint_hash"],
+                },
+                tombstone_key=f"identity-link:{identity_key}",
+                reason_code="identity_recovery_unlink",
+            )
+            recovered += int(emitted.get("status") == "enqueued")
+        if recovered:
+            return recovered
+        projection = registry.read_projection(person_id) or {}
+        identity_key = str(projection.get("resolved_identity_key") or "")
+        if not identity_key:
+            raise MigrationReplayError("migration_gap_identity_primary_missing")
+        event_id = "req041-id-recovery-snapshot-" + hashlib.sha256(
+            f"{self.migration_epoch}:{person_id}:{state['checkpoint_hash']}".encode("utf-8")
+        ).hexdigest()[:32]
+        emitted = self.outbox.enqueue_next(
+            stream_key=stream, event_id=event_id, namespace=context,
+            migration_epoch=self.migration_epoch, policy_version=self.policy_version,
+            payload={
+                "operation": "identity_recovery_snapshot", "identity_ref": person_id,
+                "identity_key_ref": identity_key, "identity_assurance": context.assurance,
+                "profile_status": context.profile_status,
+                "projection_revision": state["projection_revision"],
+                "projection_checkpoint_hash": state["checkpoint_hash"],
+            },
+        )
+        return int(emitted.get("status") == "enqueued")
+
+    def recover_gaps(self) -> int:
+        if not self.enable_gap_recovery:
+            return 0
+        recovered = 0
+        for person_id in self.coordinator.identity_ids():
+            recovered += self._recover_identity_gap(person_id)
+            recovered += self._recover_relationship_gap(person_id)
+        return recovered
 
     def apply_one(self, item: OutboxItem) -> dict[str, Any]:
         expected = self.outbox.applied_revision(item.stream_key, self.migration_epoch) + 1
@@ -341,6 +461,11 @@ class MigrationReplayWorker:
 
     def run_batch(self, *, limit: int = 100) -> dict[str, Any]:
         applied: list[dict[str, Any]] = []
+        try:
+            recovered = self.recover_gaps()
+        except Exception as exc:
+            code = self._pause_reconciliation(exc)
+            return {"status": "paused", "applied": applied, "error_code": code}
         for item in self.outbox.pending(self.migration_epoch, limit=limit):
             try:
                 applied.append(self.apply_one(item))
@@ -352,7 +477,10 @@ class MigrationReplayWorker:
         except Exception as exc:
             code = self._pause_reconciliation(exc)
             return {"status": "paused", "applied": applied, "error_code": code}
-        return {"status": "ok", "applied": applied, "count": len(applied), "reconciled": reconciled}
+        return {
+            "status": "ok", "applied": applied, "count": len(applied),
+            "recovered": recovered, "reconciled": reconciled,
+        }
 
 
 __all__ = ["MigrationReplayError", "MigrationReplayWorker"]

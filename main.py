@@ -3106,15 +3106,17 @@ class PrivateCompanionPlugin(
                 source_revision = max(0, int(user.get("req041_relationship_source_revision") or 0)) + 1
             except (TypeError, ValueError, OverflowError):
                 source_revision = 1
-            user["req041_relationship_source_revision"] = source_revision
             scope = self._unified_persona_domain()
-            return producer.emit_relationship_snapshot(
+            emitted = producer.emit_relationship_snapshot(
                 registry=self._active_unified_person_registry(),
                 user=user,
                 reason_code=reason_code,
                 source_scope=scope or "default",
                 source_revision=source_revision,
             )
+            if int(emitted.get("source_revision") or 0) > 0:
+                user["req041_relationship_source_revision"] = int(emitted["source_revision"])
+            return emitted
         except Exception as exc:
             producer.fail_closed("relationship_snapshot_dual_write_failed")
             migration_status = getattr(self, "req041_migration_status", None)
@@ -4435,6 +4437,7 @@ class PrivateCompanionPlugin(
                         registry=active_registry,
                         registry_resolver=self._req041_registry_for_person,
                         legacy_relationship_resolver=self._req041_legacy_relationship_state,
+                        enable_gap_recovery=True,
                         migration_epoch=epoch,
                         policy_version=policy,
                     )

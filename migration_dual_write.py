@@ -191,7 +191,7 @@ class MigrationDualWriteProducer:
         if expected_revision is None or expected_revision < 1:
             raise MigrationDualWriteError("dual_write_source_revision_invalid")
         event_id = "req041-rel-" + hashlib.sha256(
-            f"{self.migration_epoch}:{person_id}:{expected_revision}:{event_key}".encode("utf-8")
+            f"{self.migration_epoch}:{person_id}:{event_key}".encode("utf-8")
         ).hexdigest()[:40]
         emitted = self.outbox.enqueue_next(
             stream_key=f"relationship:{person_id}",
@@ -200,10 +200,7 @@ class MigrationDualWriteProducer:
             migration_epoch=self.migration_epoch,
             policy_version=self.policy_version,
             payload=payload,
-            expected_source_revision=expected_revision,
         )
-        if int(emitted["source_revision"]) != expected_revision:
-            raise MigrationDualWriteError("dual_write_source_revision_gap")
         return self._notify(emitted)
 
     def emit_relationship_snapshot(
@@ -258,7 +255,7 @@ class MigrationDualWriteProducer:
         if expected_revision is None or expected_revision < 1:
             raise MigrationDualWriteError("dual_write_source_revision_invalid")
         event_id = "req041-rel-snapshot-" + hashlib.sha256(
-            f"{self.migration_epoch}:{context.identity_id}:{expected_revision}:{reason}:{anchor}:{state_hash}".encode("utf-8")
+            f"{self.migration_epoch}:{context.identity_id}:{reason}:{anchor}:{state_hash}".encode("utf-8")
         ).hexdigest()[:32]
         emitted = self.outbox.enqueue_next(
             stream_key=f"relationship:{context.identity_id}",
@@ -267,10 +264,7 @@ class MigrationDualWriteProducer:
             migration_epoch=self.migration_epoch,
             policy_version=self.policy_version,
             payload=payload,
-            expected_source_revision=expected_revision,
         )
-        if int(emitted["source_revision"]) != expected_revision:
-            raise MigrationDualWriteError("dual_write_source_revision_gap")
         return self._notify(emitted)
 
     def emit_identity_change(

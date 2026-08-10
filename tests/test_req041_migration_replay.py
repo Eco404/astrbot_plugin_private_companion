@@ -230,6 +230,64 @@ class MigrationReplayTests(unittest.TestCase):
         self.assertEqual("paused", result["status"])
         self.assertEqual("migration_reconcile_mismatch", result["error_code"])
 
+    def test_gap_recovery_rebuilds_uncaptured_relationship_snapshot(self) -> None:
+        live_state = {
+            "relationship_role": "friend", "relationship_mode": "normal",
+            "relationship_score": 10, "positive_stage_cap_key": "close",
+            "daily_totals": {"day": "", "positive": 0, "negative": 0},
+            "last_effective_at": 0.0,
+        }
+        worker = MigrationReplayWorker(
+            outbox=self.outbox, coordinator=self.coordinator,
+            relationship_store=self.relationships, registry=self.registry,
+            legacy_relationship_resolver=lambda _person_id: dict(live_state),
+            enable_gap_recovery=True,
+            migration_epoch=self.epoch, policy_version=POLICY,
+        )
+        baseline = worker.run_batch()
+        self.assertEqual("ok", baseline["status"])
+        self.assertGreaterEqual(baseline["recovered"], 2)
+        live_state["relationship_score"] = 13
+        recovered = worker.run_batch()
+        self.assertEqual("ok", recovered["status"])
+        self.assertEqual(1, recovered["recovered"])
+        self.assertEqual(13, self.relationships.account(self.context)["relationship_score"])
+        self.assertEqual(2, self.outbox.stream_revision(f"relationship:{self.person_id}", self.epoch))
+        live_state["relationship_score"] = 10
+        repeated_state = worker.run_batch()
+        self.assertEqual("ok", repeated_state["status"])
+        self.assertEqual(1, repeated_state["recovered"])
+        self.assertEqual(10, self.relationships.account(self.context)["relationship_score"])
+        self.assertEqual(3, self.outbox.stream_revision(f"relationship:{self.person_id}", self.epoch))
+
+    def test_gap_recovery_captures_uncaptured_link_and_unlink_tombstone(self) -> None:
+        worker = MigrationReplayWorker(
+            outbox=self.outbox, coordinator=self.coordinator,
+            relationship_store=self.relationships, registry=self.registry,
+            enable_gap_recovery=True,
+            migration_epoch=self.epoch, policy_version=POLICY,
+        )
+        self.assertEqual("ok", worker.run_batch()["status"])
+        secondary = _identity("gap-secondary")
+        linked = self.registry.link_identity(
+            self.person_id, secondary, operation_id="gap-link-without-producer",
+        )
+        link_recovery = worker.run_batch()
+        self.assertEqual("ok", link_recovery["status"])
+        self.assertEqual(1, link_recovery["recovered"])
+        detached = self.registry.unlink_identity(
+            self.person_id, secondary, operation_id="gap-unlink-without-producer", dry_run=False,
+        )
+        unlink_recovery = worker.run_batch()
+        tombstone = self.outbox.tombstone(
+            f"identity-link:{detached['identity_key']}", self.epoch
+        )
+        self.assertTrue(linked["changed"])
+        self.assertTrue(detached["changed"])
+        self.assertEqual("ok", unlink_recovery["status"])
+        self.assertEqual(1, unlink_recovery["recovered"])
+        self.assertEqual("identity_recovery_unlink", tombstone["reason_code"])
+
 
 if __name__ == "__main__":
     unittest.main()

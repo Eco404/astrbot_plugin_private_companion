@@ -2616,7 +2616,6 @@ class CoreStoreMixin:
                     source_revision = max(0, int(user.get("req041_relationship_source_revision") or 0)) + 1
                 except (TypeError, ValueError, OverflowError):
                     source_revision = 1
-                user["req041_relationship_source_revision"] = source_revision
                 registry_getter = getattr(self, "_active_unified_person_registry", None)
                 registry = registry_getter() if callable(registry_getter) else None
                 if registry is None:
@@ -2632,6 +2631,8 @@ class CoreStoreMixin:
                     source_scope=source_scope or "default",
                     source_revision=source_revision,
                 )
+                if int(dual_write.get("source_revision") or 0) > 0:
+                    user["req041_relationship_source_revision"] = int(dual_write["source_revision"])
                 result["req041_dual_write"] = str(dual_write.get("status") or "unknown")
                 result["req041_dual_write_code"] = str(dual_write.get("code") or "")
             except Exception as exc:

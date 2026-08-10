@@ -985,6 +985,43 @@ class UnifiedPersonRegistry:
                 ).hexdigest(),
             }
 
+    def identity_recovery_state(self, person_id: str) -> dict[str, Any]:
+        """Return hash-only active/detached refs for durable gap recovery."""
+        checkpoint = self.identity_projection_checkpoint(person_id)
+        if not checkpoint.get("ok"):
+            return checkpoint
+        with _LOCK:
+            root = _root(self._store)
+            active_keys = sorted(
+                str(key)
+                for key, link in root["identity_links"].items()
+                if isinstance(link, dict)
+                and link.get("person_id") == person_id
+                and link.get("status") == "active"
+            )
+            detached_keys: list[str] = []
+            for key, link in root["detached_identity_links"].items():
+                if not isinstance(link, dict) or link.get("person_id") != person_id:
+                    continue
+                try:
+                    normalized = _identity(link.get("identity"))
+                    valid = (
+                        link.get("status") == "detached"
+                        and link.get("identity_key") == key
+                        and build_identity_key(normalized) == key
+                    )
+                except (TypeError, ValueError):
+                    valid = False
+                if not valid:
+                    return {"ok": False, "code": "identity_detached_link_corrupt"}
+                detached_keys.append(str(key))
+            return {
+                **checkpoint,
+                "resolved_identity_key": active_keys[0] if active_keys else "",
+                "active_identity_keys": active_keys,
+                "detached_identity_keys": sorted(detached_keys),
+            }
+
     def read_p4_effect_state(self, person_id: str) -> dict[str, Any]:
         """Read preparation state without creating a ledger or a person."""
         try:
