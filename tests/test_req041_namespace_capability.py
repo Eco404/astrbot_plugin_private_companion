@@ -9,10 +9,25 @@ from namespace_capability import (
     validate_namespace_capability,
 )
 from tests.test_c1_livingmemory_decoupling import MemoryCompanionAdapterMixin
+from identity_namespace import NamespaceContext
 
 
 class _AdapterHost(MemoryCompanionAdapterMixin):
     pass
+
+
+def _context(**changes: str) -> NamespaceContext:
+    values = {
+        "kind": "private",
+        "identity_id": "person-a",
+        "group_id": "",
+        "assurance": "verified",
+        "profile_status": "active",
+        "policy_version": "req041-v1",
+        "migration_epoch": "req041-20260810-001",
+    }
+    values.update(changes)
+    return NamespaceContext(**values)
 
 
 class NamespaceCapabilityTests(unittest.TestCase):
@@ -73,6 +88,87 @@ class NamespaceCapabilityTests(unittest.TestCase):
         ready = host._memory_companion_probe_namespace_capabilities(Ready())
         self.assertTrue(ready["available"])
         self.assertEqual("namespace_capability_ready", ready["code"])
+
+    def test_adapter_bind_and_scoped_calls_preserve_fail_closed_order(self) -> None:
+        class Bridge:
+            def __init__(self) -> None:
+                self.bound = False
+                self.calls = []
+                self.capability = object()
+
+            def register_emotion_producer(self, producer):
+                self.calls.append(("register", producer))
+                return self.capability
+
+            def probe_namespace_context_capabilities(self):
+                return namespace_capability_descriptor(
+                    available=self.bound,
+                    methods=API_METHODS if self.bound else (),
+                    error_code="" if self.bound else "namespace_scoped_api_not_bound",
+                )
+
+            def bind_namespace_migration_epoch(self, capability, **kwargs):
+                self.calls.append(("bind", capability, kwargs))
+                self.bound = True
+                return {"ok": True, "state": "ready", "code": "bound"}
+
+            def upsert_scoped_record(self, capability, namespace, **kwargs):
+                self.calls.append(("upsert", capability, namespace, kwargs))
+                return {"ok": True, "state": "ready", "code": "created"}
+
+        host = _AdapterHost()
+        bridge = Bridge()
+        unavailable = host._memory_companion_upsert_scoped_record(
+            bridge, _context(), record_kind="memory", record_id="m1", revision=1,
+            payload={"value": 1}, event_id="event-1",
+        )
+        self.assertEqual("namespace_capability_unavailable", unavailable["code"])
+        self.assertFalse(any(call[0] == "upsert" for call in bridge.calls))
+
+        invalid = _context().to_dict()
+        invalid.pop("group_id")
+        rejected = host._memory_companion_bind_namespace_epoch(
+            bridge, invalid, operation_id="bind-invalid"
+        )
+        self.assertEqual("namespace_context_fields_invalid", rejected["code"])
+        self.assertFalse(any(call[0] == "bind" for call in bridge.calls))
+
+        bound = host._memory_companion_bind_namespace_epoch(
+            bridge, _context(), operation_id="bind-1"
+        )
+        self.assertEqual("bound", bound["code"])
+        bind_call = next(call for call in bridge.calls if call[0] == "bind")
+        self.assertIs(bridge.capability, bind_call[1])
+        self.assertEqual("req041-20260810-001", bind_call[2]["migration_epoch"])
+        self.assertEqual("req041-v1", bind_call[2]["policy_version"])
+
+        created = host._memory_companion_upsert_scoped_record(
+            bridge, _context(), record_kind="memory", record_id="m1", revision=1,
+            payload={"value": 1}, event_id="event-1",
+        )
+        self.assertEqual("created", created["code"])
+        upsert_call = next(call for call in bridge.calls if call[0] == "upsert")
+        self.assertEqual(_context().to_dict(), upsert_call[2])
+
+    def test_adapter_scoped_remote_exception_never_falls_back(self) -> None:
+        class Bridge:
+            @staticmethod
+            def register_emotion_producer(_producer):
+                return object()
+
+            @staticmethod
+            def probe_namespace_context_capabilities():
+                return namespace_capability_descriptor(available=True, methods=API_METHODS)
+
+            @staticmethod
+            def read_scoped_record(*_args, **_kwargs):
+                raise RuntimeError("remote unavailable")
+
+        result = _AdapterHost()._memory_companion_read_scoped_record(
+            Bridge(), _context(), record_kind="memory", record_id="m1"
+        )
+        self.assertEqual("namespace_scoped_call_exception", result["code"])
+        self.assertNotIn("record", result)
 
 
 if __name__ == "__main__":

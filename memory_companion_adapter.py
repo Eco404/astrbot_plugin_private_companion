@@ -28,6 +28,7 @@ from .companion_interaction_expression import current_interaction_projection
 from .relationship_ledger import normalize_relationship_mode
 from .relationship_policy import relationship_projection_for_bridge
 from .namespace_capability import negotiate_namespace_capability
+from .identity_namespace import validate_namespace_context
 
 
 def _memory_companion_safe_float(value: Any, default: float, minimum: float = 0.0) -> float:
@@ -750,6 +751,115 @@ class MemoryCompanionAdapterMixin:
                 "mismatches": ["namespace_capability_probe_exception"],
             }
         return negotiate_namespace_capability(result)
+
+    @staticmethod
+    def _memory_companion_namespace_payload(namespace: Any) -> tuple[dict[str, Any], str]:
+        if isinstance(namespace, dict):
+            payload = dict(namespace)
+        else:
+            try:
+                serialized = namespace.to_dict()
+            except Exception:
+                serialized = None
+            payload = dict(serialized) if isinstance(serialized, dict) else {}
+        errors = validate_namespace_context(payload)
+        return payload, errors[0] if errors else ""
+
+    def _memory_companion_bind_namespace_epoch(
+        self,
+        bridge: Any,
+        namespace: Any,
+        *,
+        operation_id: str,
+        expected_previous_epoch: str = "",
+    ) -> dict[str, Any]:
+        payload, error = self._memory_companion_namespace_payload(namespace)
+        if error:
+            return {"ok": False, "state": "rejected", "code": error}
+        capability = self._memory_companion_emotion_producer_capability(bridge)
+        if capability is None:
+            return {"ok": False, "state": "forbidden", "code": "producer_capability_unavailable"}
+        try:
+            binder = getattr(bridge, "bind_namespace_migration_epoch", None)
+        except Exception:
+            binder = None
+        if not callable(binder):
+            return {"ok": False, "state": "degraded", "code": "namespace_epoch_bind_missing"}
+        try:
+            result = binder(
+                capability,
+                operation_id=operation_id,
+                expected_previous_epoch=expected_previous_epoch,
+                migration_epoch=payload["migration_epoch"],
+                policy_version=payload["policy_version"],
+            )
+        except Exception:
+            return {"ok": False, "state": "degraded", "code": "namespace_epoch_bind_exception"}
+        if not isinstance(result, dict):
+            return {"ok": False, "state": "degraded", "code": "namespace_epoch_bind_invalid"}
+        return dict(result)
+
+    def _memory_companion_scoped_invoke(
+        self,
+        bridge: Any,
+        method_name: str,
+        namespace: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        payload, error = self._memory_companion_namespace_payload(namespace)
+        if error:
+            return {"ok": False, "state": "rejected", "code": error}
+        negotiated = self._memory_companion_probe_namespace_capabilities(bridge)
+        if negotiated.get("available") is not True:
+            return {
+                "ok": False,
+                "state": "degraded",
+                "code": str(negotiated.get("code") or "namespace_capability_unavailable")[:120],
+            }
+        capability = self._memory_companion_emotion_producer_capability(bridge)
+        if capability is None:
+            return {"ok": False, "state": "forbidden", "code": "producer_capability_unavailable"}
+        try:
+            method = getattr(bridge, method_name, None)
+        except Exception:
+            method = None
+        if not callable(method):
+            return {"ok": False, "state": "degraded", "code": "namespace_scoped_method_missing"}
+        try:
+            result = method(capability, payload, **kwargs)
+        except Exception:
+            return {"ok": False, "state": "degraded", "code": "namespace_scoped_call_exception"}
+        if not isinstance(result, dict):
+            return {"ok": False, "state": "degraded", "code": "namespace_scoped_result_invalid"}
+        return dict(result)
+
+    def _memory_companion_upsert_scoped_record(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "upsert_scoped_record", namespace, **kwargs
+        )
+
+    def _memory_companion_read_scoped_record(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "read_scoped_record", namespace, **kwargs
+        )
+
+    def _memory_companion_list_scoped_records(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "list_scoped_records", namespace, **kwargs
+        )
+
+    def _memory_companion_tombstone_scoped_record(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "tombstone_scoped_record", namespace, **kwargs
+        )
 
     async def _memory_companion_read_profile(
         self,
