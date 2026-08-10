@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+from copy import deepcopy
+import hashlib
 from pathlib import Path
 import tempfile
 import types
@@ -10,7 +12,9 @@ import unittest
 from typing import Any
 
 from migration_coordinator import MigrationCoordinator
+from migration_backfill import MigrationBackfill
 from migration_outbox import MigrationOutbox
+from unified_person_registry import UnifiedPersonRegistry
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +32,9 @@ def _load_methods(*names: str) -> dict[str, Any]:
         "Any": Any,
         "Path": Path,
         "asyncio": asyncio,
+        "deepcopy": deepcopy,
+        "hashlib": hashlib,
+        "MigrationBackfill": MigrationBackfill,
         "_single_line": lambda value, limit=240: " ".join(str(value or "").split())[:limit],
         "logger": types.SimpleNamespace(warning=lambda *_args, **_kwargs: None),
     }
@@ -66,6 +73,7 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         if source:
             Path(host.data_file).write_text('{"users":{"u1":{}}}', encoding="utf-8")
         host._data_lock = asyncio.Lock()
+        host.data = {"users": {}}
         host.plugin_identity = {"version": "6.1.1"}
         host.req041_migration_coordinator = MigrationCoordinator(self.data_dir)
         host.req041_migration_outbox = MigrationOutbox(self.data_dir / "req041_migration_outbox.db")
@@ -104,7 +112,7 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         host = self._host()
         await host._req041_initialize_automatic_migration()
         status = host.req041_migration_coordinator.status()
-        self.assertEqual("S3", status["phase"])
+        self.assertEqual("S4", status["phase"])
         self.assertTrue(host.req041_migration_coordinator.verify_backup())
         self.assertEqual("active", host.req041_migration_status["state"])
         self.assertTrue(host.req041_migration_status["memory_bound"])
@@ -121,13 +129,50 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         host = self._host(bind=False)
         await host._req041_initialize_automatic_migration()
         first = host.req041_migration_coordinator.status()
-        self.assertEqual("S3", first["phase"])
+        self.assertEqual("S4", first["phase"])
         self.assertEqual("degraded", host.req041_migration_status["state"])
         self.assertEqual("memory_bridge_unavailable", host.req041_migration_status["code"])
         await host._req041_initialize_automatic_migration()
         second = host.req041_migration_coordinator.status()
         self.assertEqual(first["migration_epoch"], second["migration_epoch"])
-        self.assertEqual("S3", second["phase"])
+        self.assertEqual("S4", second["phase"])
+
+    async def test_startup_backfills_only_explicitly_linked_legacy_user(self) -> None:
+        host = self._host()
+        registry = UnifiedPersonRegistry(host.data)
+        identity = {
+            "companion_instance_id": "astrbot_plugin_private_companion",
+            "bot_account_id": "onebot:bot-1",
+            "adapter_instance_id": "onebot:default",
+            "subject_namespace": "onebot:user",
+            "platform_subject_id": "10001",
+        }
+        person = registry.create_or_link(identity, operation_id="startup-fixture")
+        host.data["users"] = {
+            "10001": {
+                "unified_person_id": person["person_id"],
+                "relationship_role": "owner",
+                "relationship_mode": "normal",
+                "relationship_score": 88,
+            }
+        }
+        await host._req041_initialize_automatic_migration()
+        account = host.req041_relationship_store.account(
+            __import__("identity_namespace").NamespaceContext(
+                kind="private",
+                identity_id=person["person_id"],
+                group_id="",
+                assurance="verified",
+                profile_status="active",
+                policy_version="req041-v1",
+                migration_epoch=host.req041_migration_coordinator.status()["migration_epoch"],
+            )
+        )
+        self.assertEqual("S4", host.req041_migration_status["phase"])
+        self.assertEqual(1, host.req041_migration_status["s4"]["migrated"])
+        self.assertEqual("owner", account["relationship_role"])
+        self.assertEqual("normal", account["relationship_mode"])
+        self.assertEqual(88, account["relationship_score"])
 
     async def test_external_sqlite_path_fails_safe_without_blocking_legacy_runtime(self) -> None:
         outside = Path(tempfile.mkdtemp())

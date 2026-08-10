@@ -147,6 +147,7 @@ from .person_context_contract import (
     contract_self_check as person_contract_self_check,
 )
 from .unified_person_registry import UnifiedPersonRegistry
+from .migration_backfill import MigrationBackfill
 from .unified_profile_contract import (
     build_person_ref as req036_build_person_ref,
     build_profile_dto as req036_build_profile_dto,
@@ -4132,6 +4133,60 @@ class PrivateCompanionPlugin(
             if status.get("phase") == "S2":
                 status = await asyncio.to_thread(coordinator.transition, "S3", checkpoint="durable_outbox_active")
 
+            backfill_result: dict[str, Any] = {"ok": True, "code": "s4_not_required"}
+            if status.get("phase") in {"S3", "S4"}:
+                try:
+                    async with self._data_lock:
+                        legacy_snapshots: list[tuple[str, dict[str, Any]]] = []
+                        default_data = getattr(self, "_data_default", None)
+                        if not isinstance(default_data, dict):
+                            default_data = self.data if isinstance(getattr(self, "data", None), dict) else {}
+                        legacy_snapshots.append(("default", deepcopy(default_data)))
+                        profiles = getattr(self, "_persona_data_profiles", {})
+                        if isinstance(profiles, dict):
+                            for persona_id, profile_data in profiles.items():
+                                if not isinstance(profile_data, dict):
+                                    continue
+                                scope_hash = hashlib.sha256(str(persona_id).encode("utf-8")).hexdigest()[:24]
+                                legacy_snapshots.append((f"persona:{scope_hash}", deepcopy(profile_data)))
+                    backfiller = await asyncio.to_thread(
+                        MigrationBackfill,
+                        coordinator=coordinator,
+                        relationship_path=Path(self.data_dir) / "req041_relationship.db",
+                        migration_epoch=epoch,
+                        policy_version=policy,
+                    )
+                    backfill_counts: dict[str, Any] = {
+                        "phase": status.get("phase", "S3"), "migrated": 0, "idempotent": 0,
+                        "pending": 0, "conflicts": 0, "formal_identities": 0, "legacy_users": 0,
+                        "source_scopes": len(legacy_snapshots),
+                    }
+                    for source_scope, legacy_snapshot in legacy_snapshots:
+                        scoped_counts = await asyncio.to_thread(
+                            backfiller.run,
+                            legacy_snapshot,
+                            source_scope=source_scope,
+                        )
+                        backfill_counts["phase"] = scoped_counts["phase"]
+                        for count_key in (
+                            "migrated", "idempotent", "pending", "conflicts",
+                            "formal_identities", "legacy_users",
+                        ):
+                            backfill_counts[count_key] += int(scoped_counts[count_key])
+                    self.req041_migration_backfill = backfiller
+                    self.req041_relationship_store = backfiller.relationships
+                    backfill_result = {"ok": True, "code": "s4_shadow_backfilled", **backfill_counts}
+                    status = coordinator.status()
+                except Exception as backfill_exc:
+                    backfill_result = {
+                        "ok": False,
+                        "code": _single_line(backfill_exc, 120) or "s4_backfill_failed",
+                    }
+                    logger.warning(
+                        "[PrivateCompanion] REQ-041 S4 Shadow 回填失败，继续使用 legacy 路径: %s",
+                        _single_line(backfill_exc, 160),
+                    )
+
             remote = {"ok": False, "state": "degraded", "code": "memory_bridge_unavailable"}
             bridge_getter = getattr(self, "_memory_companion_bridge", None)
             bridge = bridge_getter() if callable(bridge_getter) else None
@@ -4145,11 +4200,16 @@ class PrivateCompanionPlugin(
                 )
             self.req041_migration_status = {
                 "required": True,
-                "state": "active" if remote.get("ok") else "degraded",
-                "code": "migration_shadow_active" if remote.get("ok") else str(remote.get("code") or "memory_bind_failed")[:120],
-                "phase": status.get("phase", "S3"),
+                "state": "active" if remote.get("ok") and backfill_result.get("ok") else "degraded",
+                "code": (
+                    "migration_shadow_active"
+                    if remote.get("ok") and backfill_result.get("ok")
+                    else str(backfill_result.get("code") if not backfill_result.get("ok") else remote.get("code") or "migration_degraded")[:120]
+                ),
+                "phase": status.get("phase", "S4"),
                 "memory_bound": bool(remote.get("ok")),
                 "checkpoint": status.get("checkpoint", ""),
+                "s4": backfill_result,
             }
         except Exception as exc:
             status = coordinator.status()

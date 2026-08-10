@@ -1888,3 +1888,5 @@ def initialize_plugin_post_runtime_state(self: Any, config: Any) -> None:
         "state": "uninitialized",
         "code": "migration_not_started",
     }
+    self.req041_migration_backfill = None
+    self.req041_relationship_store = None

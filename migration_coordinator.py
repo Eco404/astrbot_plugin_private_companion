@@ -175,6 +175,14 @@ class MigrationCoordinator:
                     id INTEGER PRIMARY KEY AUTOINCREMENT, operation TEXT NOT NULL,
                     identity_hash TEXT NOT NULL, code TEXT NOT NULL, created_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS migration_pending_records (
+                    legacy_ref_hash TEXT PRIMARY KEY,
+                    source_kind TEXT NOT NULL,
+                    reason_code TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    first_seen_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
                 """
             )
 
@@ -410,6 +418,62 @@ class MigrationCoordinator:
                 (identity, assurance, state, "legacy", 1, 0, 0, "", "", 0, 0, "", now),
             )
         return self.identity_status(identity)
+
+    def record_pending(self, legacy_ref_hash: str, *, source_kind: str, reason_code: str) -> dict[str, Any]:
+        """Persist an opaque migration exception without retaining a raw user key."""
+        reference = _digest(legacy_ref_hash)
+        source = _token(source_kind, 40)
+        reason = _token(reason_code, 80)
+        if not reference or not source or not reason:
+            raise MigrationCoordinatorError("migration_pending_invalid")
+        now = float(self._clock())
+        with self._transaction() as connection:
+            prior = connection.execute(
+                "SELECT source_kind,reason_code,state FROM migration_pending_records WHERE legacy_ref_hash=?",
+                (reference,),
+            ).fetchone()
+            connection.execute(
+                """INSERT INTO migration_pending_records(
+                       legacy_ref_hash,source_kind,reason_code,state,first_seen_at,updated_at)
+                   VALUES(?,?,?,'pending',?,?)
+                   ON CONFLICT(legacy_ref_hash) DO UPDATE SET
+                       source_kind=excluded.source_kind,
+                       reason_code=excluded.reason_code,
+                       state='pending',
+                       updated_at=excluded.updated_at""",
+                (reference, source, reason, now, now),
+            )
+            if prior is None or prior["source_kind"] != source or prior["reason_code"] != reason or prior["state"] != "pending":
+                self._audit(connection, "pending_recorded", reference, reason)
+            row = connection.execute(
+                "SELECT * FROM migration_pending_records WHERE legacy_ref_hash=?", (reference,)
+            ).fetchone()
+        return dict(row) if row is not None else {}
+
+    def resolve_pending(self, legacy_ref_hash: str, *, resolution_code: str = "exact_identity_backfilled") -> bool:
+        reference = _digest(legacy_ref_hash)
+        resolution = _token(resolution_code, 80)
+        if not reference or not resolution:
+            raise MigrationCoordinatorError("migration_pending_invalid")
+        with self._transaction() as connection:
+            changed = connection.execute(
+                """UPDATE migration_pending_records SET state='resolved',reason_code=?,updated_at=?
+                   WHERE legacy_ref_hash=? AND state='pending'""",
+                (resolution, float(self._clock()), reference),
+            ).rowcount
+            if changed:
+                self._audit(connection, "pending_resolved", reference, resolution)
+        return bool(changed)
+
+    def pending_summary(self) -> dict[str, Any]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT source_kind,reason_code,COUNT(*) AS count
+                   FROM migration_pending_records WHERE state='pending'
+                   GROUP BY source_kind,reason_code ORDER BY source_kind,reason_code"""
+            ).fetchall()
+        items = [dict(row) for row in rows]
+        return {"total": sum(int(item["count"]) for item in items), "reasons": items}
 
     def reconcile_identity(
         self, identity_id: str, *, source_revision: int, target_revision: int,
