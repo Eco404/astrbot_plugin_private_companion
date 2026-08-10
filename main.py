@@ -151,7 +151,12 @@ from .migration_backfill import MigrationBackfill
 from .migration_dual_write import MigrationDualWriteProducer
 from .migration_replay import MigrationReplayWorker
 from .migration_read_router import MigrationRelationshipReadRouter
-from .migration_scoped_projection import ScopedProjectionSynchronizer
+from .identity_namespace import NamespaceContext
+from .migration_scoped_projection import (
+    ScopedProjectionSynchronizer,
+    scoped_group_ref,
+    scoped_persona_ref,
+)
 from .unified_profile_contract import (
     build_person_ref as req036_build_person_ref,
     build_profile_dto as req036_build_profile_dto,
@@ -4289,6 +4294,7 @@ class PrivateCompanionPlugin(
         synchronizer = getattr(self, "req041_scoped_projection_sync", None)
         if synchronizer is None:
             return {"ok": False, "code": "scoped_projection_not_initialized", "scopes": []}
+        synchronizer.mark_dirty()
         async with self._data_lock:
             snapshots = self._req041_legacy_snapshots_locked()
         results: list[dict[str, Any]] = []
@@ -4334,6 +4340,7 @@ class PrivateCompanionPlugin(
     def _req041_schedule_scoped_sync(self) -> None:
         if getattr(self, "req041_scoped_projection_sync", None) is None:
             return
+        self.req041_scoped_projection_sync.mark_dirty()
         stop_event = getattr(self, "_stop_event", None)
         if stop_event is not None and callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
             return
@@ -4349,6 +4356,133 @@ class PrivateCompanionPlugin(
             return
         self._req041_scoped_sync_task = task
         task.add_done_callback(self._req041_scoped_sync_finished)
+
+    def _req041_scoped_context_for_user(
+        self,
+        user: dict[str, Any],
+        *,
+        kind: str = "private",
+        group_id: str = "",
+        purpose: str = "memory_read",
+    ) -> NamespaceContext | None:
+        if not isinstance(user, dict):
+            return None
+        person_id = str(user.get("unified_person_id") or "").strip()
+        subject = str(user.get("identity_subject_id") or user.get("user_id") or "").strip()
+        if not person_id or not subject:
+            return None
+        registry = self._active_unified_person_registry()
+        if not registry.matches_person_subject(person_id, subject):
+            return None
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            return None
+        active_persona = self._active_persona_scope()
+        persona_id = scoped_persona_ref(active_persona)
+        safe_group = scoped_group_ref(persona_id, group_id) if kind == "group_member" else ""
+        resolution = registry.formal_namespace_for_person(
+            person_id, kind=kind, group_id=safe_group,
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+            purpose=purpose,
+        )
+        raw = resolution.get("context") if isinstance(resolution, dict) else None
+        if not resolution.get("ok") or not isinstance(raw, dict):
+            return None
+        context = NamespaceContext(
+            kind=kind, persona_id=persona_id, identity_id=person_id, group_id=safe_group,
+            assurance=str(raw.get("assurance") or "verified"),
+            profile_status=str(raw.get("profile_status") or "active"),
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        return context if not context.errors() else None
+
+    def _req041_scoped_private_read_view(self, event: Any, user: dict[str, Any]) -> dict[str, Any]:
+        existing = getattr(event, "req041_scoped_private_read_view", None)
+        if isinstance(existing, dict):
+            return existing
+        view = dict(user) if isinstance(user, dict) else user
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        context = self._req041_scoped_context_for_user(user, kind="private")
+        if synchronizer is None or context is None:
+            return view
+        projection = synchronizer.read_projection(context)
+        if projection.get("ok") is not True:
+            return view
+        for key, value in projection.get("fields", {}).items():
+            if key in {
+                "nickname", "style", "profile_origin", "auto_profile_created",
+                "companion_memory", "intent_profile", "dialogue_episodes", "open_loops",
+                "behavior_habits", "action_preferences", "action_consequences", "state_continuity",
+                "recent_reply_topics", "expression_profile",
+            }:
+                view[key] = deepcopy(value)
+        view["req041_scoped_read_generation"] = "new"
+        try:
+            setattr(event, "req041_scoped_private_read_view", view)
+        except Exception:
+            pass
+        return view
+
+    def _req041_scoped_group_read_view(
+        self,
+        event: Any,
+        *,
+        group_id: str,
+        group: dict[str, Any],
+        sender_id: str,
+        relationship_user: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        existing = getattr(event, "req041_scoped_group_read_view", None)
+        if isinstance(existing, dict):
+            return existing
+        view = deepcopy(group) if isinstance(group, dict) else group
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None or not isinstance(view, dict):
+            return view
+        persona_id = scoped_persona_ref(self._active_persona_scope())
+        safe_group = scoped_group_ref(persona_id, group_id)
+        shared = NamespaceContext(
+            kind="group_shared", persona_id=persona_id, identity_id="", group_id=safe_group,
+            assurance="verified", profile_status="active", policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        shared_projection = synchronizer.read_projection(shared)
+        applied = False
+        if shared_projection.get("ok") is True:
+            applied = True
+            for key, value in shared_projection.get("fields", {}).items():
+                if key in {
+                    "recent_messages", "slang_terms", "slang_meanings", "topic_signatures", "topic_threads",
+                    "group_episodes", "relationship_edges", "atmosphere", "interjection_feedback", "expression_profile",
+                }:
+                    view[key] = deepcopy(value)
+        member_context = self._req041_scoped_context_for_user(
+            relationship_user or {}, kind="group_member", group_id=group_id, purpose="profile_read"
+        )
+        if member_context is not None:
+            member_projection = synchronizer.read_projection(member_context)
+            if member_projection.get("ok") is True:
+                applied = True
+                members = view.setdefault("members", {})
+                if isinstance(members, dict):
+                    member = dict(members.get(sender_id) or {})
+                    for key, value in member_projection.get("fields", {}).items():
+                        if key in {
+                            "name", "identity_name", "group_role", "group_role_label", "count", "last_seen",
+                            "display_name_events", "recent_phrases",
+                        }:
+                            member[key] = deepcopy(value)
+                    members[sender_id] = member
+        if not applied:
+            return view
+        view["req041_scoped_read_generation"] = "new"
+        try:
+            setattr(event, "req041_scoped_group_read_view", view)
+        except Exception:
+            pass
+        return view
 
     def _req041_replay_finished(self, _task: Any) -> None:
         self._req041_replay_task = None

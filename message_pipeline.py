@@ -316,6 +316,9 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 read_view_getter(event, fast_user, kind="private")
                 if callable(read_view_getter) else fast_user
             )
+            scoped_read_getter = getattr(self, "_req041_scoped_private_read_view", None)
+            if callable(scoped_read_getter):
+                fast_read_user = scoped_read_getter(event, fast_read_user)
             await self._memory_companion_apply_emotional_drift(
                 event=event,
                 user_id=user_id,
@@ -940,6 +943,9 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     read_view_getter(event, user, kind="private")
                     if callable(read_view_getter) else user
                 )
+                scoped_read_getter = getattr(self, "_req041_scoped_private_read_view", None)
+                if callable(scoped_read_getter):
+                    relationship_read_user = scoped_read_getter(event, relationship_read_user)
                 self._memory_companion_attach_private_context(
                     event,
                     user_id=user_id,
@@ -1576,10 +1582,17 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             read_view_getter(
                 event, relationship_user, kind="group_member", group_id=group_id,
             )
+        group_read_view = group
+        scoped_group_getter = getattr(self, "_req041_scoped_group_read_view", None)
+        if callable(scoped_group_getter):
+            group_read_view = scoped_group_getter(
+                event, group_id=group_id, group=group, sender_id=sender_id,
+                relationship_user=relationship_user if isinstance(relationship_user, dict) else None,
+            )
         self._memory_companion_attach_group_context(
             event,
             group_id=group_id,
-            group=group,
+            group=group_read_view,
             sender_id=sender_id,
             sender_name=sender_name,
             text=text,

@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
+import threading
 from typing import Any, Callable
 
 from identity_namespace import NamespaceContext
@@ -50,11 +51,21 @@ def _persona_ref(source_scope: str) -> str:
     return "persona-" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
 
 
+def scoped_persona_ref(active_persona: Any = "") -> str:
+    value = str(active_persona or "").strip()
+    source_scope = "default" if not value else "persona:" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+    return _persona_ref(source_scope)
+
+
 def _group_ref(persona_id: str, group_id: Any) -> str:
     raw = str(group_id or "").strip()
     if not raw:
         return ""
     return "group-" + hashlib.sha256(f"{persona_id}:{raw}".encode("utf-8")).hexdigest()[:32]
+
+
+def scoped_group_ref(persona_id: str, group_id: Any) -> str:
+    return _group_ref(persona_id, group_id)
 
 
 def _present(value: Any) -> bool:
@@ -110,6 +121,40 @@ class ScopedProjectionSynchronizer:
         self.policy_version = str(policy_version or "").strip()
         if not self.migration_epoch or not self.policy_version:
             raise ScopedProjectionError("scoped_projection_contract_invalid")
+        self._state_lock = threading.RLock()
+        self._ready_scopes: set[str] = set()
+        self._projection_cache: dict[str, dict[str, Any]] = {}
+
+    def mark_dirty(self) -> None:
+        with self._state_lock:
+            self._ready_scopes.clear()
+
+    def is_ready(self, context: NamespaceContext) -> bool:
+        with self._state_lock:
+            return context.cache_scope() in self._ready_scopes
+
+    @staticmethod
+    def _projection_fields(records: list[ScopedProjectionRecord]) -> dict[str, dict[str, Any]]:
+        projected: dict[str, dict[str, Any]] = {}
+        for record in records:
+            scope = record.context.cache_scope()
+            fields = projected.setdefault(scope, {})
+            payload = record.payload
+            content = payload.get("content") if isinstance(payload.get("content"), dict) else {}
+            domain = str(payload.get("domain") or "")
+            if domain in {"profile", "memory"}:
+                fields.update(deepcopy(content))
+                continue
+            expression_profile = fields.setdefault("expression_profile", {})
+            if record.record_kind == "rule":
+                rules = content.get("rules") if isinstance(content.get("rules"), list) else []
+                if payload.get("approval_state") == "approved":
+                    expression_profile["learned_rules"] = deepcopy(rules)
+                elif payload.get("approval_state") == "pending":
+                    expression_profile["pending_rules"] = deepcopy(rules)
+            elif record.record_kind == "evidence":
+                expression_profile.update(deepcopy(content))
+        return projected
 
     def _context(
         self,
@@ -383,6 +428,17 @@ class ScopedProjectionSynchronizer:
                     else:
                         counts["errors"] += 1
                         errors.append(str((result or {}).get("code") or "scoped_clear_failed")[:80])
+        involved_scopes = {context.cache_scope() for context in contexts}
+        projected = self._projection_fields(records)
+        with self._state_lock:
+            if counts["errors"] == 0:
+                self._ready_scopes.update(involved_scopes)
+                for scope in involved_scopes:
+                    self._projection_cache[scope] = deepcopy(projected.get(scope, {}))
+            else:
+                self._ready_scopes.difference_update(involved_scopes)
+                for scope in involved_scopes:
+                    self._projection_cache.pop(scope, None)
         return {
             "ok": counts["errors"] == 0,
             "code": "scoped_projection_synced" if counts["errors"] == 0 else "scoped_projection_degraded",
@@ -392,7 +448,16 @@ class ScopedProjectionSynchronizer:
             "error_codes": sorted(set(errors))[:16],
         }
 
+    def read_projection(self, context: NamespaceContext) -> dict[str, Any]:
+        scope = context.cache_scope()
+        with self._state_lock:
+            if scope not in self._ready_scopes:
+                return {"ok": False, "code": "scoped_projection_not_reconciled", "fields": {}}
+            fields = deepcopy(self._projection_cache.get(scope, {}))
+        return {"ok": True, "code": "scoped_projection_read", "fields": fields}
+
 
 __all__ = [
     "ScopedProjectionError", "ScopedProjectionRecord", "ScopedProjectionSynchronizer",
+    "scoped_group_ref", "scoped_persona_ref",
 ]

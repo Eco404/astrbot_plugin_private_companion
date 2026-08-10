@@ -136,6 +136,26 @@ class ScopedProjectionTests(unittest.TestCase):
         self.assertNotEqual(default_records[0].context.persona_id, persona_records[0].context.persona_id)
         self.assertFalse(any(item.context.kind == "persona_global" for item in default_records + persona_records))
 
+    def test_read_projection_only_opens_after_reconciliation_and_preserves_group_isolation(self) -> None:
+        records, _ = self.sync.build_records(self.snapshot)
+        private = next(item.context for item in records if item.context.kind == "private")
+        group_contexts = {
+            item.context.group_id: item.context for item in records if item.context.kind == "group_shared"
+        }
+        self.assertFalse(self.sync.read_projection(private)["ok"])
+        self.sync.sync_snapshot(self.snapshot)
+        private_view = self.sync.read_projection(private)
+        self.assertTrue(private_view["ok"])
+        self.assertEqual("private-name", private_view["fields"]["nickname"])
+        self.assertEqual("private-rule", private_view["fields"]["expression_profile"]["learned_rules"][0]["style"])
+        observed = {
+            context.group_id: self.sync.read_projection(context)["fields"]["recent_messages"][0]["text"]
+            for context in group_contexts.values()
+        }
+        self.assertEqual({"group-a-sentinel", "group-b-sentinel"}, set(observed.values()))
+        self.sync.mark_dirty()
+        self.assertEqual("scoped_projection_not_reconciled", self.sync.read_projection(private)["code"])
+
     def test_unlinked_user_and_ambiguous_subject_are_not_projected(self) -> None:
         unlinked = {"users": {"10001": deepcopy(self.snapshot["users"]["10001"])}}
         records, _ = self.sync.build_records(unlinked)

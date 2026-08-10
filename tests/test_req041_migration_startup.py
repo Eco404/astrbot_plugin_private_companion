@@ -19,6 +19,9 @@ from migration_outbox import MigrationOutbox
 from migration_replay import MigrationReplayWorker
 from migration_read_router import MigrationRelationshipReadRouter
 from migration_scoped_projection import ScopedProjectionSynchronizer
+from migration_scoped_projection import scoped_group_ref, scoped_persona_ref
+from identity_namespace import NamespaceContext
+from tests.test_req041_scoped_projection import _Remote
 from relationship_ledger import normalize_relationship_positive_stage_cap_key
 from unified_person_registry import UnifiedPersonRegistry
 
@@ -46,6 +49,9 @@ def _load_methods(*names: str) -> dict[str, Any]:
         "MigrationReplayWorker": MigrationReplayWorker,
         "MigrationRelationshipReadRouter": MigrationRelationshipReadRouter,
         "ScopedProjectionSynchronizer": ScopedProjectionSynchronizer,
+        "NamespaceContext": NamespaceContext,
+        "scoped_group_ref": scoped_group_ref,
+        "scoped_persona_ref": scoped_persona_ref,
         "UnifiedPersonRegistry": UnifiedPersonRegistry,
         "normalize_relationship_positive_stage_cap_key": normalize_relationship_positive_stage_cap_key,
         "_single_line": lambda value, limit=240: " ".join(str(value or "").split())[:limit],
@@ -64,6 +70,9 @@ METHODS = _load_methods(
     "_req041_schedule_replay",
     "_req041_legacy_snapshots_locked",
     "_req041_sync_scoped_now",
+    "_req041_scoped_context_for_user",
+    "_req041_scoped_private_read_view",
+    "_req041_scoped_group_read_view",
     "_req041_replay_finished",
     "_req041_run_replay_batch",
     "_req041_initialize_automatic_migration",
@@ -78,6 +87,9 @@ class Harness:
     _req041_schedule_replay = METHODS["_req041_schedule_replay"]
     _req041_legacy_snapshots_locked = METHODS["_req041_legacy_snapshots_locked"]
     _req041_sync_scoped_now = METHODS["_req041_sync_scoped_now"]
+    _req041_scoped_context_for_user = METHODS["_req041_scoped_context_for_user"]
+    _req041_scoped_private_read_view = METHODS["_req041_scoped_private_read_view"]
+    _req041_scoped_group_read_view = METHODS["_req041_scoped_group_read_view"]
     _req041_replay_finished = METHODS["_req041_replay_finished"]
     _req041_run_replay_batch = METHODS["_req041_run_replay_batch"]
     _req041_initialize_automatic_migration = METHODS["_req041_initialize_automatic_migration"]
@@ -105,6 +117,7 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         host._data_default = host.data
         host._persona_data_profiles = {}
         host._active_unified_person_registry = lambda: UnifiedPersonRegistry(host.data)
+        host._active_persona_scope = lambda: ""
         host.plugin_identity = {"version": "6.1.1"}
         host.req041_migration_coordinator = MigrationCoordinator(self.data_dir)
         host.req041_migration_outbox = MigrationOutbox(self.data_dir / "req041_migration_outbox.db")
@@ -143,6 +156,16 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
             "ok": True, "code": "tombstoned"
         }
         return host
+
+    def _scoped_remote(self, host: Harness) -> _Remote:
+        remote = _Remote()
+        status = host.req041_migration_coordinator.status()
+        host.req041_scoped_projection_sync = ScopedProjectionSynchronizer(
+            read=remote.read, list_records=remote.list_records,
+            upsert=remote.upsert, tombstone=remote.tombstone,
+            migration_epoch=status["migration_epoch"], policy_version=status["policy_version"],
+        )
+        return remote
 
     async def test_new_install_without_source_requires_no_action(self) -> None:
         host = self._host(source=False)
@@ -278,6 +301,53 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(12, host.req041_relationship_store.account(context)["relationship_score"])
         self.assertEqual([], host.req041_migration_outbox.pending(context.migration_epoch))
+
+    async def test_reconciled_scoped_views_overlay_copies_without_mutating_legacy_or_crossing_groups(self) -> None:
+        host = self._host()
+        registry = UnifiedPersonRegistry(host.data)
+        person = registry.create_or_link(
+            {
+                "companion_instance_id": "astrbot_plugin_private_companion",
+                "bot_account_id": "onebot:bot-1", "adapter_instance_id": "onebot:default",
+                "subject_namespace": "onebot:user", "platform_subject_id": "10001",
+            },
+            operation_id="scoped-view-fixture",
+        )
+        user = {
+            "user_id": "10001", "identity_subject_id": "10001", "unified_person_id": person["person_id"],
+            "nickname": "legacy-name", "companion_memory": {"items": [{"text": "private-sentinel"}]},
+            "expression_profile": {"learned_rules": [{"id": "p", "style": "private-rule"}]},
+            "relationship_score": 8,
+        }
+        host.data["users"] = {"10001": user}
+        host.data["groups"] = {
+            "group-a": {
+                "group_id": "group-a", "recent_messages": [{"text": "group-a-sentinel"}],
+                "members": {"10001": {"name": "group-a-name", "recent_phrases": ["a"]}},
+            },
+            "group-b": {
+                "group_id": "group-b", "recent_messages": [{"text": "group-b-sentinel"}],
+                "members": {"10001": {"name": "group-b-name", "recent_phrases": ["b"]}},
+            },
+        }
+        await host._req041_initialize_automatic_migration()
+        self._scoped_remote(host)
+        synced = host.req041_scoped_projection_sync.sync_snapshot(host.data)
+        self.assertTrue(synced["ok"])
+        private_event = types.SimpleNamespace()
+        relation_copy = dict(user)
+        private_view = host._req041_scoped_private_read_view(private_event, relation_copy)
+        self.assertEqual("new", private_view["req041_scoped_read_generation"])
+        self.assertEqual("private-sentinel", private_view["companion_memory"]["items"][0]["text"])
+        self.assertNotIn("req041_scoped_read_generation", user)
+        group_event = types.SimpleNamespace()
+        group_view = host._req041_scoped_group_read_view(
+            group_event, group_id="group-a", group=host.data["groups"]["group-a"],
+            sender_id="10001", relationship_user=user,
+        )
+        self.assertEqual("group-a-sentinel", group_view["recent_messages"][0]["text"])
+        self.assertNotIn("group-b-sentinel", str(group_view))
+        self.assertNotIn("req041_scoped_read_generation", host.data["groups"]["group-a"])
 
     async def test_external_sqlite_path_fails_safe_without_blocking_legacy_runtime(self) -> None:
         outside = Path(tempfile.mkdtemp())
