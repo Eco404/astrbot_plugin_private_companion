@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import re
 import unittest
 
 
@@ -11,6 +13,31 @@ PHOTO_REFERENCE_METADATA = (PLUGIN_ROOT / "photo_reference_metadata.py").read_te
 
 
 class PhotoReferenceWebUiTests(unittest.TestCase):
+    def test_photo_scope_checkboxes_persist_through_hidden_textarea(self) -> None:
+        schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        scope_spec = schema["photo_action_config"]["items"]["photo_generation_allowed_scopes"]
+        self.assertEqual("checkbox", scope_spec["render_type"])
+        self.assertEqual(
+            ["private_owner", "private_friend", "group", "proactive"],
+            scope_spec["options"],
+        )
+
+        for page_name in ("陪伴面板", "companion-panel"):
+            with self.subTest(page=page_name):
+                script = (PLUGIN_ROOT / "pages" / page_name / "app.js").read_text(encoding="utf-8")
+                html = (PLUGIN_ROOT / "pages" / page_name / "index.html").read_text(encoding="utf-8")
+                checkbox_template = re.search(
+                    r'<input type="checkbox" data-photo-scope-value="\$\{scope\}"([^>]*)>',
+                    script,
+                )
+                self.assertIsNotNone(checkbox_template)
+                self.assertNotIn("data-feature-param", checkbox_template.group(1))
+                self.assertIn(
+                    "host?.querySelector('textarea[data-feature-param=\"photo_generation_allowed_scopes\"]')",
+                    script,
+                )
+                self.assertIn("scope=photo-scope-save-v1", html)
+
     def test_catalog_dirty_signature_normalizes_array_and_line_formats(self) -> None:
         self.assertIn('paramKey === "photo_reference_catalog"', APP_JS)
         self.assertIn("photoReferenceCatalogSignature(value)", APP_JS)
