@@ -7,8 +7,10 @@ const TRANSPARENT_IMAGE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAA
 let cachedPageBridge = null;
 let cachedPageEndpointStyle = "";
 let pageBridgeProbePromise = null;
+let pageBridgeReadyPromise = null;
 let loadAllRequestSeq = 0;
 let featureDetailDirtyRefreshScheduled = false;
+const inFlightGetRequests = new Map();
 
 const state = {
   overview: null,
@@ -199,8 +201,12 @@ const state = {
     memoNotes: false,
   },
   lazyScripts: {},
+  lazyScriptErrors: {},
+  lazyScriptAttempts: {},
   userGroupListPromise: null,
   userGroupListError: "",
+  userGroupPrefetchTimer: null,
+  userGroupPrefetchIdleHandle: null,
   dailyOutfitHydrateTimer: null,
   dailyOutfitHydrateKey: "",
   pageFontFamily: "original",
@@ -5374,31 +5380,51 @@ async function hydrateDailyOutfitLogo() {
   }
 }
 
-const optionalScriptSources = {};
+// AstrBot rewrites literal dynamic imports with the current Page asset token.
+// Keep these paths relative; manually constructed content URLs expire quickly.
+const optionalModuleLoaders = {
+  providerTree: [
+    () => import("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1"),
+    () => import("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1&retry=1"),
+    () => import("./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1&retry=2"),
+  ],
+  qzonePanel: [
+    () => import("./js/panels/qzone-panel.js?v=20260731-qzone-platform-support-v1"),
+    () => import("./js/panels/qzone-panel.js?v=20260731-qzone-platform-support-v1&retry=1"),
+    () => import("./js/panels/qzone-panel.js?v=20260731-qzone-platform-support-v1&retry=2"),
+  ],
+};
 
-function loadOptionalScript(name) {
-  if (!optionalScriptSources[name]) return Promise.resolve(false);
+const optionalModuleGlobals = {
+  providerTree: "PrivateCompanionProviderTree",
+  qzonePanel: "PrivateCompanionQzonePanel",
+};
+
+function loadOptionalModule(name) {
+  const globalName = optionalModuleGlobals[name];
+  if (globalName && window[globalName]) return Promise.resolve(true);
+  const loaders = optionalModuleLoaders[name];
+  if (!loaders) return Promise.reject(new Error(`未知页面模块：${name}`));
   if (state.lazyScripts[name]) return state.lazyScripts[name];
-  const existing = document.querySelector(`script[data-optional-script="${name}"]`);
-  if (existing?.dataset.loaded === "1") return Promise.resolve(true);
-  state.lazyScripts[name] = new Promise((resolve, reject) => {
-    const script = existing || document.createElement("script");
-    script.dataset.optionalScript = name;
-    script.async = true;
-    script.onload = () => {
-      script.dataset.loaded = "1";
-      resolve(true);
-    };
-    script.onerror = () => {
-      delete state.lazyScripts[name];
-      reject(new Error(`脚本加载失败：${name}`));
-    };
-    if (!existing) {
-      script.src = optionalScriptSources[name];
-      document.body.appendChild(script);
-    }
-  });
-  return state.lazyScripts[name];
+  delete state.lazyScriptErrors[name];
+  const attempt = Number(state.lazyScriptAttempts[name] || 0);
+  const loader = loaders[Math.min(attempt, loaders.length - 1)];
+  state.lazyScriptAttempts[name] = attempt + 1;
+  const pending = Promise.resolve()
+    .then(loader)
+    .then(() => {
+      if (globalName && !window[globalName]) {
+        throw new Error(`页面模块未注册兼容出口：${name}`);
+      }
+      return true;
+    })
+    .catch((error) => {
+      state.lazyScriptErrors[name] = error?.message || `页面模块加载失败：${name}`;
+      if (state.lazyScripts[name] === pending) delete state.lazyScripts[name];
+      throw error;
+    });
+  state.lazyScripts[name] = pending;
+  return pending;
 }
 
 function runWhenIdle(callback, timeout = 1200) {
@@ -5415,6 +5441,28 @@ function cancelIdleTask(handle) {
   } else {
     window.clearTimeout(handle);
   }
+}
+
+function cancelUserGroupPrefetch() {
+  if (state.userGroupPrefetchTimer) {
+    window.clearTimeout(state.userGroupPrefetchTimer);
+    state.userGroupPrefetchTimer = null;
+  }
+  if (state.userGroupPrefetchIdleHandle) {
+    cancelIdleTask(state.userGroupPrefetchIdleHandle);
+    state.userGroupPrefetchIdleHandle = null;
+  }
+}
+
+function scheduleUserGroupPrefetch(callback, delay = 1600) {
+  cancelUserGroupPrefetch();
+  state.userGroupPrefetchTimer = window.setTimeout(() => {
+    state.userGroupPrefetchTimer = null;
+    state.userGroupPrefetchIdleHandle = runWhenIdle(() => {
+      state.userGroupPrefetchIdleHandle = null;
+      callback();
+    }, 1200);
+  }, delay);
 }
 
 function scheduleDailyOutfitHydration(force = false) {
@@ -5472,12 +5520,29 @@ function scopePagePersonaRequest(path, options, method) {
   };
 }
 
-async function fetchJson(path, options = {}) {
-  const bridge = await getPageBridge();
-  const method = (options.method || "GET").toUpperCase();
-  const scoped = scopePagePersonaRequest(path, options, method);
-  path = scoped.path;
-  options = scoped.options;
+function fetchJson(path, options = {}) {
+  const requestOptions = { ...options };
+  const dedupe = requestOptions.dedupe !== false;
+  delete requestOptions.dedupe;
+  const method = (requestOptions.method || "GET").toUpperCase();
+  const scoped = scopePagePersonaRequest(path, requestOptions, method);
+  const requestKey = method === "GET" && dedupe ? `${method}:${scoped.path}` : "";
+  if (requestKey && inFlightGetRequests.has(requestKey)) {
+    return inFlightGetRequests.get(requestKey);
+  }
+  const request = performJsonRequest(scoped.path, scoped.options, method);
+  if (!requestKey) return request;
+  const trackedRequest = request.finally(() => {
+    if (inFlightGetRequests.get(requestKey) === trackedRequest) {
+      inFlightGetRequests.delete(requestKey);
+    }
+  });
+  inFlightGetRequests.set(requestKey, trackedRequest);
+  return trackedRequest;
+}
+
+async function performJsonRequest(path, options, method) {
+  const bridge = await getReadyPageBridge();
   let payload;
 
   if (bridge && typeof bridge.apiGet === "function" && typeof bridge.apiPost === "function") {
@@ -5550,6 +5615,25 @@ async function getPageBridge(timeoutMs = 2500) {
   }
 
   return pageBridgeProbePromise;
+}
+
+async function getReadyPageBridge(timeoutMs = 2500) {
+  if (isDebugHttpMode()) return null;
+  const bridge = await getPageBridge(timeoutMs);
+  if (!bridge || typeof bridge.ready !== "function") return bridge;
+  if (!pageBridgeReadyPromise) {
+    pageBridgeReadyPromise = Promise.resolve()
+      .then(() => bridge.ready())
+      .then(() => {
+        cachedPageBridge = bridge;
+        return bridge;
+      })
+      .catch((error) => {
+        pageBridgeReadyPromise = null;
+        throw error;
+      });
+  }
+  return pageBridgeReadyPromise;
 }
 
 async function waitForBridge(timeoutMs = 2500) {
@@ -6280,6 +6364,7 @@ async function loadUserGroupLists(requestSeq = loadAllRequestSeq, options = {}) 
 async function loadAll(options = {}) {
   const requestSeq = ++loadAllRequestSeq;
   const { waitForLists = false } = options;
+  cancelUserGroupPrefetch();
   state.lazyLoaded.userGroupLists = false;
   state.userGroupListPromise = null;
   state.userGroupListError = "";
@@ -6303,7 +6388,11 @@ async function loadAll(options = {}) {
     if (waitForLists) {
       await loadLists();
     } else {
-      runWhenIdle(() => { loadLists(); }, 900);
+      // Let the dashboard become interactive before fetching the larger lists.
+      // A tab switch still loads them immediately through ensureTabData().
+      scheduleUserGroupPrefetch(() => {
+        if (requestSeq === loadAllRequestSeq) void loadLists();
+      });
     }
   } catch (error) {
     if (requestSeq !== loadAllRequestSeq) return;
@@ -6346,8 +6435,14 @@ function renderActiveTab(tabName = state.activeTab || "dashboard") {
     } else {
       const meta = document.getElementById("qzoneFeedMeta");
       const feed = document.getElementById("qzoneFeed");
-      if (meta) meta.textContent = "QQ 空间面板脚本未加载";
-      if (feed && !feed.innerHTML.trim()) feed.innerHTML = `<div class="empty small">QQ 空间面板脚本未加载。请刷新拓展页；若仍失败，检查 qzone-panel.js 是否被浏览器拦截。</div>`;
+      const moduleError = state.lazyScriptErrors.qzonePanel || "";
+      const canRetryModule = Number(state.lazyScriptAttempts.qzonePanel || 0) < optionalModuleLoaders.qzonePanel.length;
+      if (meta) meta.textContent = moduleError ? "QQ 空间模块加载失败" : "正在加载 QQ 空间模块...";
+      if (feed) {
+        feed.innerHTML = moduleError
+          ? `<div class="empty small">${escapeHtml(moduleError)}<br />${canRetryModule ? `<button type="button" data-optional-module-retry="qzonePanel">重试加载</button>` : "请关闭后重新打开拓展页。"}</div>`
+          : `<div class="empty small">正在按需加载 QQ 空间面板...</div>`;
+      }
     }
   } else if (tabName === "image-cache") {
     renderImageCache();
@@ -6508,11 +6603,16 @@ async function ensureTabData(tabName, force = false) {
   } else if (tabName === "bookshelf") {
     await loadMemoNotes(force);
   } else if (tabName === "models") {
-    await Promise.all([
-      loadAvailableProviders(force),
-      loadTtsProviderConfigs(force),
-      loadImageApiStatus(force),
-    ]);
+    try {
+      await Promise.all([
+        loadOptionalModule("providerTree"),
+        loadAvailableProviders(force),
+        loadTtsProviderConfigs(force),
+        loadImageApiStatus(force),
+      ]);
+    } finally {
+      if (state.activeTab === "models") renderProviders();
+    }
   } else if (tabName === "roleplay") {
     loadAvailableProviders(force).catch(() => {});
   } else if (tabName === "config") {
@@ -6520,6 +6620,12 @@ async function ensureTabData(tabName, force = false) {
   } else if (tabName === "image-cache") {
     renderImageCache();
     await Promise.all([loadImageCache(), loadOwnedReactionAssets()]);
+  } else if (tabName === "qzone") {
+    try {
+      await loadOptionalModule("qzonePanel");
+    } finally {
+      if (state.activeTab === "qzone") renderActiveTab("qzone");
+    }
   } else if (tabName === "troubleshooting") {
     renderTroubleshooting();
     loadDiagnostics(force).catch(() => {});
@@ -28468,8 +28574,12 @@ function renderProviders() {
   const testButton = document.getElementById("testAllProvidersBtn");
   if (saveButton) saveButton.disabled = true;
   if (testButton) testButton.disabled = true;
-  if (form && !form.innerHTML.trim()) {
-    form.innerHTML = `<div class="empty small">模型配置面板脚本未加载。请刷新拓展页；若仍失败，检查 provider-tree.js 是否被浏览器拦截。</div>`;
+  if (form) {
+    const moduleError = state.lazyScriptErrors.providerTree || "";
+    const canRetryModule = Number(state.lazyScriptAttempts.providerTree || 0) < optionalModuleLoaders.providerTree.length;
+    form.innerHTML = moduleError
+      ? `<div class="empty small">${escapeHtml(moduleError)}<br />${canRetryModule ? `<button type="button" data-optional-module-retry="providerTree">重试加载</button>` : "请关闭后重新打开拓展页。"}</div>`
+      : `<div class="empty small">正在按需加载模型配置模块...</div>`;
   }
 }
 
@@ -33437,6 +33547,21 @@ async function saveExperimentalSettings(key, form, successMessage) {
 
 let activeTabTransition = null;
 
+function watchTabTransition(transition) {
+  const cleanup = () => {
+    if (activeTabTransition === transition) {
+      activeTabTransition = null;
+      delete document.documentElement.dataset.tabDirection;
+    }
+  };
+  // Chromium rejects these promises when a rapid tab switch supersedes a
+  // transition. The cancellation is expected and must not surface as an
+  // unhandled page error.
+  void transition.ready?.catch(() => {});
+  void transition.updateCallbackDone?.catch(() => {});
+  void transition.finished.then(cleanup, cleanup);
+}
+
 function revealActiveTab(tabButton, reduceMotion = false) {
   const nav = tabButton?.closest(".annotations");
   if (!nav) return;
@@ -33491,6 +33616,13 @@ function switchTab(tabName) {
   document.documentElement.dataset.tabDirection = direction;
 
   const commit = (fallbackMotion = false) => {
+    if (tabName !== "dashboard") {
+      cancelUserGroupPrefetch();
+    } else if (!state.lazyLoaded.userGroupLists && !state.userGroupListPromise) {
+      scheduleUserGroupPrefetch(() => {
+        void loadUserGroupLists(loadAllRequestSeq, { showErrors: true });
+      });
+    }
     state.activeTab = tabName;
     tabs.forEach((item) => item.classList.toggle("is-active", item.dataset.tab === tabName));
     revealActiveTab(tabs.find((item) => item.dataset.tab === tabName), reduceMotion);
@@ -33512,18 +33644,15 @@ function switchTab(tabName) {
     try {
       const transition = document.startViewTransition(() => commit(false));
       activeTabTransition = transition;
-      transition.finished.finally(() => {
-        if (activeTabTransition === transition) {
-          activeTabTransition = null;
-          delete document.documentElement.dataset.tabDirection;
-        }
-      });
+      watchTabTransition(transition);
     } catch (_error) {
       commit(true);
       activeTabTransition = null;
+      delete document.documentElement.dataset.tabDirection;
     }
   } else {
     commit(!reduceMotion);
+    delete document.documentElement.dataset.tabDirection;
   }
   ensureTabData(tabName).catch((error) => showToast(`页面数据加载失败：${error.message}`, "error"));
 }
@@ -33532,6 +33661,26 @@ document.querySelectorAll(".annotations .tab[data-tab]").forEach((button) => {
   button.addEventListener("click", () => {
     switchTab(button.dataset.tab);
   });
+});
+
+document.addEventListener("click", (event) => {
+  const retryButton = event.target instanceof Element
+    ? event.target.closest("[data-optional-module-retry]")
+    : null;
+  if (!retryButton) return;
+  event.preventDefault();
+  const moduleName = retryButton.dataset.optionalModuleRetry || "";
+  const tabName = moduleName === "providerTree" ? "models" : "qzone";
+  retryButton.disabled = true;
+  retryButton.textContent = "正在重试...";
+  loadOptionalModule(moduleName)
+    .then(() => {
+      if (state.activeTab === tabName) renderActiveTab(tabName);
+    })
+    .catch((error) => {
+      if (state.activeTab === tabName) renderActiveTab(tabName);
+      showToast(`页面模块加载失败：${error.message}`, "error");
+    });
 });
 
 document.addEventListener("click", async (event) => {
@@ -35358,4 +35507,18 @@ $("#testAllProvidersBtn").addEventListener("click", async () => {
 
 document.documentElement.dataset.pcAppLoaded = "1";
 window.dispatchEvent(new Event("pc-panel-app-ready"));
-loadAll();
+
+async function bootstrapPage() {
+  try {
+    const bridge = await getReadyPageBridge();
+    if (!bridge && !isDebugHttpMode()) {
+      throw new Error("未检测到 AstrBot 官方插件 Page 桥接，请从 AstrBot 后台的插件拓展页打开");
+    }
+    await loadAll();
+  } catch (error) {
+    const subtitle = document.getElementById("subtitle");
+    if (subtitle) subtitle.textContent = `加载失败：${error.message}`;
+  }
+}
+
+void bootstrapPage();

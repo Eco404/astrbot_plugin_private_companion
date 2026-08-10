@@ -11,9 +11,9 @@
         "default": false
       },
       "enable_p4_b_legacy_score_isolation": {
-        "description": "Isolate legacy relationship score writes",
+        "description": "隔离旧版关系分数写入",
         "type": "bool",
-        "hint": "Disabled by default for compatibility. When enabled, legacy relationship_score writes are suppressed and never become P4 authority.",
+        "hint": "默认关闭以保持兼容。开启后将拦截旧版 relationship_score 写入，使其不会成为 P4 权威数据源。",
         "default": false
       },
       "bot_name": {
@@ -1893,7 +1893,7 @@
     "invisible": true
   },
   "enable_proactive_message_review": {
-    "description": "Legacy flat config: proactive final content gate",
+    "description": "旧版扁平配置：主动消息最终内容门禁",
     "type": "bool",
     "default": true,
     "invisible": true
@@ -3479,19 +3479,19 @@
     "invisible": true
   },
   "photo_reference_catalog": {
-    "description": "Canonical photo reference catalog with roles, outfit, scene, time, preset, and lock metadata",
+    "description": "标准照片参考目录，包含角色、穿搭、场景、时间、预设和锁定元数据",
     "type": "list",
     "default": [],
     "invisible": true
   },
   "photo_reference_catalog_version": {
-    "description": "Canonical photo reference catalog migration version",
+    "description": "标准照片参考目录迁移版本",
     "type": "int",
     "default": 0,
     "invisible": true
   },
   "photo_reference_catalog_user_cleared": {
-    "description": "Canonical photo reference catalog was explicitly cleared by the user",
+    "description": "用户已明确清空标准照片参考目录",
     "type": "bool",
     "default": false,
     "invisible": true
@@ -9322,8 +9322,8 @@
         }
       },
       "enable_group_cycle_awareness": {
-        "description": "Allow minimal Bot cycle tone boundary in permitted groups",
-        "hint": "Default off. Reads only the Bot simulated state for reply pacing. It never records user health facts or group-private body details.",
+        "description": "允许在已授权群聊中使用最低限度的 Bot 周期语气边界",
+        "hint": "默认关闭。仅读取 Bot 的模拟状态来调整回复节奏，不记录用户健康事实或群聊私密身体信息。",
         "type": "bool",
         "default": false,
         "condition": {

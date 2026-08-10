@@ -1,4 +1,18 @@
 {
+  "config": {
+    "basic_config": {
+      "enable_p4_b_legacy_score_isolation": {
+        "description": "Isolate legacy relationship score writes",
+        "hint": "Disabled by default for compatibility. When enabled, legacy relationship_score writes are suppressed and never become P4 authority."
+      }
+    },
+    "humanized_state_config": {
+      "enable_group_cycle_awareness": {
+        "description": "Allow minimal Bot cycle tone boundary in permitted groups",
+        "hint": "Disabled by default. Reads only the Bot simulated state to pace replies. It never records user health facts or private body details from group chats."
+      }
+    }
+  },
   "pages": {
     "companion-panel": {
       "title": "Companion Panel"

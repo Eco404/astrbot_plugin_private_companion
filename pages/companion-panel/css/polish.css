@@ -3804,3 +3804,323 @@ small {
   overflow-y: hidden;
   resize: none;
 }
+
+/* Responsive containment and sticky-stack safety. Keep this layer last. */
+:root {
+  --panel-nav-height: 68px;
+}
+
+html,
+body {
+  width: 100%;
+  max-width: 100%;
+}
+
+body {
+  min-height: 100dvh;
+  overflow-x: hidden;
+  overflow-x: clip;
+}
+
+.shell,
+.folio,
+.folio-meta,
+.folio-heading,
+.layout,
+.panel,
+.panel > *,
+.section-head,
+.section-head > *,
+.dashboard-grid > *,
+.config-grid > *,
+.bookcase-layout > *,
+.image-cache-layout > *,
+.proactive-layout > *,
+.diagnostic-main-grid > *,
+.qzone-shell > *,
+.world-workspace > *,
+.user-workspace > * {
+  min-width: 0;
+}
+
+img,
+video,
+canvas {
+  max-width: 100%;
+}
+
+input,
+select,
+textarea,
+button {
+  max-width: 100%;
+}
+
+/* These controls are visually represented by their adjacent toggle track. */
+.exp-card-toggle input,
+.feature-switch-item input {
+  width: 1px;
+  height: 1px;
+  max-width: none;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+}
+
+pre {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+
+.mono,
+code,
+.provider-card,
+.provider-tree-row,
+.config-card,
+.diagnostic-check,
+.image-cache-row,
+.qzone-card {
+  overflow-wrap: anywhere;
+}
+
+.annotations,
+.table-wrap,
+.table-scroll,
+.table-responsive,
+.user-detail-tabs,
+.world-outline {
+  max-width: 100%;
+  overscroll-behavior-inline: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.annotations {
+  scroll-padding-inline: max(12px, env(safe-area-inset-left));
+  touch-action: pan-x pan-y;
+}
+
+.table-wrap,
+.table-scroll,
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.table-wrap table,
+.table-scroll table,
+.table-responsive table {
+  max-width: none;
+}
+
+.provider-toolbar,
+.image-cache-batch-bar,
+.exp-subpage-toolbar,
+.user-detail-tabs,
+.module-nav {
+  top: calc(var(--panel-nav-height) + 8px);
+}
+
+@media (max-width: 1080px) {
+  .world-outline {
+    top: var(--panel-nav-height);
+  }
+}
+
+.pc-dialog,
+.reaction-import-dialog {
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.pc-dialog form,
+.pc-dialog header > *,
+.pc-dialog footer,
+.reaction-import-dialog form,
+.reaction-import-dialog header > *,
+.reaction-import-dialog footer {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.daily-outfit-preview,
+.bookshelf-cover-preview {
+  padding-top: max(8px, env(safe-area-inset-top));
+  padding-right: max(8px, env(safe-area-inset-right));
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  padding-left: max(8px, env(safe-area-inset-left));
+}
+
+.daily-outfit-preview__dialog,
+.bookshelf-cover-preview__dialog {
+  max-width: 100%;
+  max-height: calc(100vh - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.daily-outfit-preview__image {
+  max-height: calc(100vh - 104px);
+  max-height: calc(100dvh - 104px);
+}
+
+@media (max-width: 900px) {
+  .image-cache-layout,
+  .bookcase-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .image-cache-list {
+    max-height: min(48dvh, 520px);
+    min-height: 280px;
+  }
+}
+
+@media (max-width: 760px) {
+  :root {
+    --panel-nav-height: 58px;
+  }
+
+  html {
+    scrollbar-gutter: auto;
+    scroll-padding-top: calc(var(--panel-nav-height) + 12px);
+  }
+
+  .shell {
+    width: 100%;
+    padding-top: max(8px, env(safe-area-inset-top));
+    padding-right: max(8px, env(safe-area-inset-right));
+    padding-bottom: max(24px, env(safe-area-inset-bottom));
+    padding-left: max(8px, env(safe-area-inset-left));
+  }
+
+  .annotations {
+    scroll-padding-right: max(10px, env(safe-area-inset-right));
+    scroll-padding-left: max(10px, env(safe-area-inset-left));
+  }
+
+  .section-head .actions,
+  .section-head .toolbar,
+  .world-page-actions,
+  .user-page-actions,
+  .provider-toolbar-actions,
+  .image-cache-batch-bar .actions {
+    min-width: 0;
+    max-width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .section-head .actions button,
+  .section-head .toolbar button,
+  .world-page-actions button,
+  .user-page-actions button,
+  .provider-toolbar-actions button,
+  .image-cache-batch-bar button,
+  .pc-dialog footer button,
+  .reaction-import-dialog footer button {
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .provider-toolbar,
+  .module-nav,
+  .setup-preview-panel,
+  .creative-chapter-rail,
+  .proactive-filters,
+  .persona-final-nav,
+  .persona-final-audit {
+    position: static;
+    top: auto;
+    max-height: none;
+  }
+
+  .provider-toolbar,
+  .image-cache-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .provider-mode-switch,
+  .provider-toolbar-actions {
+    justify-content: flex-start;
+  }
+
+  .image-cache-batch-bar {
+    top: calc(var(--panel-nav-height) + 8px);
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .image-cache-batch-bar > strong {
+    white-space: normal;
+  }
+
+  .image-cache-batch-bar .actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .token-toolbar,
+  .feature-switch-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .token-source-switch,
+  .token-view-switch,
+  .provider-config-mode,
+  .expression-view-tabs {
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+  }
+
+  .world-preview {
+    top: calc(var(--panel-nav-height) + 8px);
+    right: max(8px, env(safe-area-inset-right));
+    left: max(8px, env(safe-area-inset-left));
+    width: auto;
+    max-height: calc(100vh - var(--panel-nav-height) - 16px);
+    max-height: calc(100dvh - var(--panel-nav-height) - 16px);
+  }
+}
+
+@media (max-width: 480px) {
+  .panel {
+    padding: 10px;
+  }
+
+  .folio-meta,
+  .user-detail-shell,
+  .memory-module,
+  .qzone-card,
+  .qzone-post-card,
+  .qzone-detail-card,
+  .qzone-comment-block {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .folio-tools,
+  .pc-dialog footer,
+  .reaction-import-dialog footer {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .pc-dialog footer button,
+  .reaction-import-dialog footer button {
+    flex: 1 1 120px;
+  }
+
+  .memory-view-stats,
+  .reaction-library-summary,
+  .image-cache-summary,
+  .proactive-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
