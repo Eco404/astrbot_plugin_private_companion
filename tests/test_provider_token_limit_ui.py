@@ -104,8 +104,11 @@ process.stdout.write(JSON.stringify(result));
                 (self.localized_dir / relative).read_bytes(),
                 relative,
             )
-        # The provider editor changes must invalidate cached panel assets.
-        self.assertIn("provider-token-limit-v1", self.html)
+        # Provider editor code is now loaded on demand; verify its cache marker
+        # and the dynamic import instead of an eager script tag.
+        self.assertIn("page=lazy-bridge-v1", self.html)
+        self.assertNotIn('<script src="./js/panels/provider-tree.js', self.html)
+        self.assertIn('import("./js/panels/provider-tree.js?', self.app)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@
 
 - `pages/companion-panel/css/polish.css`
 - `pages/陪伴面板/css/polish.css`
-- 两个 `index.html` 中的 CSS 缓存版本已同步为 `20260810-responsive-containment-v1`。
+- 两个 `index.html` 中的 CSS 缓存版本已同步为 `20260810-responsive-containment-v1`；合并上游照片上传改动后，`app.js` URL 也保留 `reference-upload-v2` 并追加 `page=lazy-bridge-v1`。
 
 ### 2.1 全局约束
 
@@ -170,7 +170,7 @@
 ### 自动化测试
 
 - 新增专项测试：`13 passed`。
-- 相关页面、Schema、图片模型、布局和配置测试：`131 passed`，另有 2 项旧测试失败。这 2 项只断言基线中已过期的 `app.css` 版本号，未触及本次逻辑。
+- 合并上游最新代码后的相关页面、Schema、图片模型、布局和配置测试：`151 passed`，另有 1 项基线已有的学习页目的地断言失败。资源版本和 eager 脚本断言已同步为当前实现，并未放宽功能校验。
 - AstrBot 官方镜像实际加载 `zh-CN` / `en-US`：通过，嵌套中文 labels 可被 PluginManager 读取。
 - 全量测试在 10 分钟时达到 `2077 passed, 14 failed, 461 subtests passed` 后中止。失败集中在仓库基线已有的旧资源版本断言、未修改的后端并发/关系分析测试和既有配置权威断言；本次新增测试及本次修改覆盖的行为均通过。
 

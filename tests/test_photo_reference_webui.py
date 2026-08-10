@@ -358,11 +358,49 @@ class PhotoReferenceWebUiTests(unittest.TestCase):
         self.assertGreater(override_restore, questionnaire_branch)
         self.assertIn('root.querySelectorAll("[data-photo-guided-answer-label]")', APP_JS)
 
+    def test_file_upload_submission_cannot_be_overwritten_by_status_refresh(self) -> None:
+        for marker in (
+            "photoReferenceLibraryRequestSeq: 0",
+            "photoReferenceSubmissionToken: null",
+            "const requestSeq = ++state.photoReferenceLibraryRequestSeq",
+            "requestSeq !== state.photoReferenceLibraryRequestSeq || photoReferenceManagerBusy()",
+            "state.photoReferenceSubmissionToken !== submissionToken",
+            "state.featureDetailSubpage === \"photo_reference_library\"\n    && (state.photoReferenceSubmitting || state.photoReferenceAddDialogOpen)",
+        ):
+            self.assertIn(marker, APP_JS)
+
+    def test_server_upload_uses_full_image_decode_and_bounded_content_addressed_storage(self) -> None:
+        for marker in (
+            "PILImage.open(io.BytesIO(raw))",
+            "image.verify()",
+            "image.load()",
+            "hashlib.sha256(raw).hexdigest()",
+            'target = target_dir / f"webui_{digest}{suffix}"',
+            "PHOTO_REFERENCE_UPLOAD_MAX_COUNT = 256",
+            "PHOTO_REFERENCE_UPLOAD_MAX_TOTAL_BYTES = 1024 * 1024 * 1024",
+            "PHOTO_REFERENCE_UPLOAD_MAX_REQUEST_BYTES = 20 * 1024 * 1024",
+            "content_length = request.content_length",
+            "os.replace",
+        ):
+            self.assertIn(marker, PAGE_API)
+
+    def test_reference_manager_is_locked_while_feature_settings_save(self) -> None:
+        for marker in (
+            "function photoReferenceManagerBusy()",
+            "function setPhotoReferenceManagerBusy(busy)",
+            "setPhotoReferenceManagerBusy(true)",
+            "setPhotoReferenceManagerBusy(false)",
+            "const submitting = photoReferenceManagerBusy()",
+            "if (photoReferenceManagerBusy()) return;",
+            "const keepManagerLocked = !busy",
+        ):
+            self.assertIn(marker, APP_JS)
+
     def test_metadata_editor_assets_are_cache_busted(self) -> None:
-        self.assertIn('app.css?v=20260804-reference-guided-dialog-v6', INDEX_HTML)
-        self.assertIn('css/polish.css?v=20260804-expression-batch-review-v1', INDEX_HTML)
+        self.assertIn('app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1', INDEX_HTML)
+        self.assertIn('css/polish.css?v=20260810-responsive-containment-v1', INDEX_HTML)
         self.assertIn(
-            'app.js?v=20260806-reference-guided-busy-release-v2',
+            'app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2',
             INDEX_HTML,
         )
 

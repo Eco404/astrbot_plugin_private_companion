@@ -263,11 +263,120 @@ class ConfigGroupAuthorityTests(unittest.TestCase):
         self.assertTrue(config["enable_custom_relationship_stage_policy"])
         self.assertTrue(config["basic_config"]["enable_custom_relationship_stage_policy"])
 
-    def test_owner_companion_switch_is_runtime_writable(self):
+    def test_legacy_zero_command_photo_quota_is_migrated_once_to_unlimited(self):
+        config = {
+            "command_photo_generation_max_daily": 0,
+            "photo_action_config": {"command_photo_generation_max_daily": 0},
+        }
+
+        changed = migrate_flat_config_into_schema_groups(
+            config,
+            schema_path=ROOT / "_conf_schema.json",
+            save=False,
+        )
+
+        self.assertGreater(changed, 0)
+        self.assertEqual(-1, config["command_photo_generation_max_daily"])
+        self.assertEqual(
+            -1,
+            config["photo_action_config"]["command_photo_generation_max_daily"],
+        )
+        self.assertEqual(1, config["_command_photo_quota_semantics_version"])
+
+        # After the one-time upgrade, zero is an explicit administrator disable.
+        config["command_photo_generation_max_daily"] = 0
+        config["photo_action_config"]["command_photo_generation_max_daily"] = 0
+        migrate_flat_config_into_schema_groups(
+            config,
+            schema_path=ROOT / "_conf_schema.json",
+            save=False,
+        )
+
+        self.assertEqual(0, config["command_photo_generation_max_daily"])
+        self.assertEqual(
+            0,
+            config["photo_action_config"]["command_photo_generation_max_daily"],
+        )
+
+    def test_command_photo_quota_migrates_flat_or_grouped_legacy_zero(self):
+        configs = (
+            ("flat", {"command_photo_generation_max_daily": 0}),
+            ("grouped", {"photo_action_config": {"command_photo_generation_max_daily": 0}}),
+        )
+
+        for source, config in configs:
+            with self.subTest(source=source):
+                migrate_flat_config_into_schema_groups(
+                    config,
+                    schema_path=ROOT / "_conf_schema.json",
+                    save=False,
+                )
+                self.assertEqual(-1, config["command_photo_generation_max_daily"])
+                if source == "grouped":
+                    self.assertEqual(
+                        -1,
+                        config["photo_action_config"]["command_photo_generation_max_daily"],
+                    )
+                self.assertEqual(1, config["_command_photo_quota_semantics_version"])
+
+    def test_command_photo_quota_marks_new_semantics_without_a_legacy_value(self):
+        config = {}
+
+        migrate_flat_config_into_schema_groups(
+            config,
+            schema_path=ROOT / "_conf_schema.json",
+            save=False,
+        )
+
+        self.assertEqual(1, config["_command_photo_quota_semantics_version"])
+
+        config["command_photo_generation_max_daily"] = 0
+        migrate_flat_config_into_schema_groups(
+            config,
+            schema_path=ROOT / "_conf_schema.json",
+            save=False,
+        )
+        self.assertEqual(0, config["command_photo_generation_max_daily"])
+
+    def test_command_photo_quota_config_surface_uses_negative_one_for_unlimited(self):
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        item = schema["photo_action_config"]["items"]["command_photo_generation_max_daily"]
+
+        self.assertEqual(-1, item["default"])
+        self.assertEqual(-1, item["slider"]["min"])
+        self.assertIn("-1 表示不限量", item["hint"])
+        self.assertIn("0 表示不允许", item["hint"])
+
+        api = PrivateCompanionPageApi(None)
+        self.assertEqual(-1, api._normalize_setting_value("command_photo_generation_max_daily", -5))
+        self.assertEqual(0, api._normalize_setting_value("command_photo_generation_max_daily", 0))
+        self.assertEqual(100, api._normalize_setting_value("command_photo_generation_max_daily", 200))
+
+        scripts = [
+            (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8"),
+            (ROOT / "pages" / "companion-panel" / "app.js").read_text(encoding="utf-8"),
+        ]
+        for script in scripts:
+            self.assertIn(
+                'keys: ["photo_generation_allowed_scopes", "command_photo_generation_max_daily"]',
+                script,
+            )
+            self.assertIn(
+                'command_photo_generation_max_daily: { type: "number", min: -1, max: 100, step: 1 }',
+                script,
+            )
+            self.assertIn('placeholder: "-1（不限量）"', script)
+
+    def test_removed_owner_companion_switch_stays_absent(self):
         source = (ROOT / "plugin_bootstrap.py").read_text(encoding="utf-8")
         page_api = (ROOT / "page_api.py").read_text(encoding="utf-8")
-        self.assertIn('self._cfg_bool(c, "owner_companion_enabled", True)', source)
-        self.assertGreaterEqual(page_api.count('"owner_companion_enabled"'), 2)
+        self.assertNotIn("owner_companion_enabled", source)
+        self.assertNotIn('"owner_companion_enabled"', page_api)
+        self.assertIn(
+            'self.default_proactive_enabled = self._cfg_bool(c, "default_proactive_enabled", False)',
+            source,
+        )
+        self.assertGreaterEqual(page_api.count('"proactive_private_enabled"'), 2)
 
     def test_empty_new_reference_defaults_preserve_nonempty_legacy_fields(self):
         config = {

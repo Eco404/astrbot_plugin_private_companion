@@ -2873,13 +2873,19 @@ class LlmToolActionsMixin:
             else:
                 quota_left = None
             if quota_left is not None and quota_left <= 0:
+                quota_message_getter = getattr(self, "_command_photo_quota_block_message", None)
+                quota_message = (
+                    quota_message_getter()
+                    if callable(quota_message_getter)
+                    else "当前不允许用户请求生图/改图，或今天的用户请求生图额度已经用完。"
+                )
                 return public_receipt(
                     {
                         "status": "quota_exhausted",
                         "success": False,
                         "generated": False,
                         "sent": False,
-                        "message": "今天用户请求生图/改图额度用完了。管理员可调整“用户请求生图每日上限”，0 表示不限量。",
+                        "message": quota_message,
                         "must_not_claim_sent": True,
                         "retryable": False,
                     },

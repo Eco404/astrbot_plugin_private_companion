@@ -174,16 +174,14 @@ class LearningPageUiTests(unittest.TestCase):
         self.assertIn(".expression-review-select-toggle", self.polish_css)
 
     def test_learning_page_assets_use_current_cache_versions(self) -> None:
-        self.assertIn('./app.css?v=20260804-reference-guided-dialog-v6', self.html)
-        self.assertIn('./css/polish.css?v=20260804-expression-batch-review-v1', self.html)
+        self.assertIn('./app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1', self.html)
+        self.assertIn('./css/polish.css?v=20260810-responsive-containment-v1', self.html)
         self.assertIn(
-            './app.js?v=20260806-reference-guided-busy-release-v2',
+            './app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2',
             self.html,
         )
-        self.assertIn(
-            './js/panels/qzone-panel.js?v=20260731-qzone-platform-support-v1',
-            self.html,
-        )
+        self.assertNotIn('<script src="./js/panels/qzone-panel.js', self.html)
+        self.assertIn('import("./js/panels/qzone-panel.js?', self.script)
 
     def test_compact_folio_overrides_follow_legacy_cover_rules(self) -> None:
         marker = "/* Keep the compact utility header after all legacy folio rules"
