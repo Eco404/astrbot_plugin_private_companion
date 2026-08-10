@@ -9786,6 +9786,9 @@
         "description": "生图使用范围",
         "type": "list",
         "hint": "可选：主要用户私聊、其他陪伴用户私聊、群聊、Bot 主动生图。留空按全部范围开放。",
+        "render_type": "checkbox",
+        "options": ["private_owner", "private_friend", "group", "proactive"],
+        "labels": ["主要用户私聊", "其他陪伴用户私聊", "群聊", "Bot 主动生图"],
         "default": ["private_owner", "private_friend", "group", "proactive"],
         "condition": {
           "enable_photo_text_action": true
