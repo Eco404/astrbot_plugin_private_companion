@@ -603,6 +603,13 @@ class MigrationCoordinator:
             row = connection.execute("SELECT * FROM migration_identities WHERE identity_id=?", (_token(identity_id),)).fetchone()
         return dict(row) if row is not None else {}
 
+    def identity_ids(self) -> list[str]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT identity_id FROM migration_identities ORDER BY identity_id"
+            ).fetchall()
+        return [str(row["identity_id"]) for row in rows]
+
 
 __all__ = [
     "COMPATIBILITY_KEYS", "FORMAL_ASSURANCE", "IDENTITY_STATES", "MigrationCoordinator",

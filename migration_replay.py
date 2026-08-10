@@ -1,0 +1,358 @@
+"""REQ-041 ordered, idempotent Shadow target replay and verification."""
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+from identity_namespace import build_namespace_context
+from migration_coordinator import MigrationCoordinator
+from migration_outbox import MigrationOutbox, OutboxItem
+from relationship_account_store import RelationshipAccountStore, RelationshipNotFound
+from unified_person_registry import UnifiedPersonRegistry
+
+
+def _canonical(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+class MigrationReplayError(RuntimeError):
+    pass
+
+
+class MigrationReplayWorker:
+    """Apply one epoch in source order and stop the cutover on any mismatch."""
+
+    def __init__(
+        self,
+        *,
+        outbox: MigrationOutbox,
+        coordinator: MigrationCoordinator,
+        relationship_store: RelationshipAccountStore,
+        registry: UnifiedPersonRegistry,
+        registry_resolver: Any = None,
+        legacy_relationship_resolver: Any = None,
+        migration_epoch: str,
+        policy_version: str,
+    ) -> None:
+        self.outbox = outbox
+        self.coordinator = coordinator
+        self.relationship_store = relationship_store
+        self.registry = registry
+        self.registry_resolver = registry_resolver if callable(registry_resolver) else None
+        self.legacy_relationship_resolver = (
+            legacy_relationship_resolver if callable(legacy_relationship_resolver) else None
+        )
+        self.migration_epoch = str(migration_epoch or "").strip()
+        self.policy_version = str(policy_version or "").strip()
+        if not self.migration_epoch or not self.policy_version:
+            raise MigrationReplayError("migration_replay_contract_invalid")
+
+    def _registry_for_person(self, person_id: str) -> UnifiedPersonRegistry:
+        if self.registry_resolver is None:
+            return self.registry
+        candidate = self.registry_resolver(person_id)
+        if not isinstance(candidate, UnifiedPersonRegistry):
+            raise MigrationReplayError("migration_replay_registry_missing")
+        return candidate
+
+    @staticmethod
+    def _relationship_state(account: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "relationship_role": account.get("relationship_role"),
+            "relationship_mode": account.get("relationship_mode"),
+            "relationship_score": account.get("relationship_score"),
+            "positive_stage_cap_key": account.get("relationship_positive_stage_cap_key"),
+            "daily_totals": account.get("relationship_daily_totals"),
+            "last_effective_at": account.get("relationship_last_effective_at"),
+        }
+
+    def _validate_envelope(self, item: OutboxItem) -> tuple[Any, dict[str, Any]]:
+        if item.migration_epoch != self.migration_epoch or item.policy_version != self.policy_version:
+            raise MigrationReplayError("migration_replay_epoch_stale")
+        context = build_namespace_context(item.namespace)
+        payload = item.payload
+        if context is None or context.errors() or not isinstance(payload, dict):
+            raise MigrationReplayError("migration_replay_envelope_invalid")
+        if context.migration_epoch != self.migration_epoch or context.policy_version != self.policy_version:
+            raise MigrationReplayError("migration_replay_namespace_stale")
+        if payload.get("identity_ref") != context.identity_id:
+            raise MigrationReplayError("migration_replay_identity_mismatch")
+        expected_stream = (
+            f"relationship:{context.identity_id}"
+            if str(payload.get("operation") or "").startswith("relationship_")
+            else f"identity:{context.identity_id}"
+        )
+        if item.stream_key != expected_stream:
+            raise MigrationReplayError("migration_replay_stream_mismatch")
+        return context, payload
+
+    def _apply_relationship(self, item: OutboxItem, context: Any, payload: dict[str, Any]) -> int:
+        operation = payload.get("operation")
+        common = {
+            "relationship_role": payload.get("relationship_role"),
+            "relationship_mode": payload.get("relationship_mode"),
+            "positive_stage_cap_key": payload.get("positive_stage_cap_key"),
+            "daily_totals": payload.get("daily_totals"),
+            "last_effective_at": payload.get("last_effective_at"),
+        }
+        if operation == "relationship_legacy_event":
+            proof = {
+                "event_key": payload.get("event_key"),
+                "reason_code": payload.get("reason_code"),
+                "applied_delta": payload.get("applied_delta"),
+                "score_before": payload.get("score_before"),
+                "score_after": payload.get("score_after"),
+            }
+            if payload.get("legacy_event_hash") != _digest(proof):
+                raise MigrationReplayError("migration_replay_event_proof_mismatch")
+            result = self.relationship_store.replay_legacy_event(
+                context,
+                event_id=item.event_id,
+                reason_code=payload.get("reason_code"),
+                requested_delta=payload.get("requested_delta"),
+                applied_delta=payload.get("applied_delta"),
+                score_before=payload.get("score_before"),
+                score_after=payload.get("score_after"),
+                **common,
+            )
+            if result.applied_delta != payload.get("applied_delta") or result.score != payload.get("score_after"):
+                raise MigrationReplayError("migration_replay_event_result_mismatch")
+        elif operation == "relationship_legacy_snapshot":
+            expected = {
+                "relationship_role": common["relationship_role"],
+                "relationship_mode": common["relationship_mode"],
+                "relationship_score": payload.get("relationship_score"),
+                "positive_stage_cap_key": common["positive_stage_cap_key"],
+                "daily_totals": common["daily_totals"],
+                "last_effective_at": common["last_effective_at"],
+            }
+            if payload.get("snapshot_hash") != _digest(expected):
+                raise MigrationReplayError("migration_replay_snapshot_proof_mismatch")
+            self.relationship_store.replay_legacy_snapshot(
+                context,
+                operation_id=item.event_id,
+                score=payload.get("relationship_score"),
+                **common,
+            )
+        else:
+            raise MigrationReplayError("migration_replay_operation_unsupported")
+        account = self.relationship_store.account(context)
+        expected_state = {
+            "relationship_role": common["relationship_role"],
+            "relationship_mode": common["relationship_mode"],
+            "relationship_score": payload.get("score_after", payload.get("relationship_score")),
+            "positive_stage_cap_key": common["positive_stage_cap_key"],
+            "daily_totals": common["daily_totals"],
+            "last_effective_at": float(common["last_effective_at"]),
+        }
+        if self._relationship_state(account) != expected_state:
+            raise MigrationReplayError("migration_replay_relationship_state_mismatch")
+        return int(account["revision"])
+
+    def _apply_identity(self, item: OutboxItem, context: Any, payload: dict[str, Any]) -> int:
+        operation = payload.get("operation")
+        if operation not in {"identity_baseline", "identity_create", "identity_link", "identity_unlink"}:
+            raise MigrationReplayError("migration_replay_operation_unsupported")
+        identity_key = str(payload.get("identity_key_ref") or "")
+        state = self._registry_for_person(context.identity_id).identity_link_state(
+            context.identity_id, identity_key
+        )
+        if not state.get("ok"):
+            raise MigrationReplayError(str(state.get("code") or "migration_replay_identity_missing"))
+        if operation == "identity_unlink":
+            if state.get("state") != "detached":
+                raise MigrationReplayError("migration_replay_unlink_not_detached")
+            tombstone = self.outbox.tombstone(f"identity-link:{identity_key}", self.migration_epoch)
+            if (
+                tombstone.get("reason_code") != "identity_unlink"
+                or int(tombstone.get("revision") or 0) < item.source_revision
+            ):
+                raise MigrationReplayError("migration_replay_unlink_tombstone_missing")
+        elif state.get("state") not in {"active", "detached"}:
+            raise MigrationReplayError("migration_replay_link_state_invalid")
+        if state.get("profile_status") != payload.get("profile_status"):
+            raise MigrationReplayError("migration_replay_profile_status_mismatch")
+        target_revision = int(state.get("projection_revision") or 0)
+        if target_revision < int(payload.get("projection_revision") or 0):
+            raise MigrationReplayError("migration_replay_projection_revision_stale")
+        return target_revision
+
+    def apply_one(self, item: OutboxItem) -> dict[str, Any]:
+        expected = self.outbox.applied_revision(item.stream_key, self.migration_epoch) + 1
+        if item.source_revision != expected:
+            raise MigrationReplayError("migration_replay_revision_gap")
+        context, payload = self._validate_envelope(item)
+        if str(payload.get("operation") or "").startswith("relationship_"):
+            target_revision = self._apply_relationship(item, context, payload)
+        else:
+            target_revision = self._apply_identity(item, context, payload)
+        self.outbox.mark_applied(item.event_id, self.migration_epoch, target_revision=target_revision)
+        return {
+            "event_id": item.event_id,
+            "stream_key": item.stream_key,
+            "source_revision": item.source_revision,
+            "target_revision": target_revision,
+            "status": "applied",
+        }
+
+    def _fail_closed(self, item: OutboxItem, error: Exception) -> None:
+        code = str(error).split(":", 1)[0].strip() or "migration_replay_failed"
+        if len(code) > 80 or not code.replace("_", "").isalnum():
+            code = "migration_replay_failed"
+        self.outbox.mark_failed(item.event_id, self.migration_epoch, error_code=code)
+        self.coordinator.pause(code)
+        try:
+            self.outbox.set_epoch_state(self.migration_epoch, "degraded", checkpoint=code)
+        except Exception:
+            pass
+
+    def _pause_reconciliation(self, error: Exception) -> str:
+        code = str(error).split(":", 1)[0].strip() or "migration_reconcile_failed"
+        if len(code) > 80 or not code.replace("_", "").isalnum():
+            code = "migration_reconcile_failed"
+        self.coordinator.pause(code)
+        try:
+            self.outbox.set_epoch_state(self.migration_epoch, "degraded", checkpoint=code)
+        except Exception:
+            pass
+        return code
+
+    @staticmethod
+    def _source_relationship_state(payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "relationship_role": payload.get("relationship_role"),
+            "relationship_mode": payload.get("relationship_mode"),
+            "relationship_score": payload.get("score_after", payload.get("relationship_score")),
+            "positive_stage_cap_key": payload.get("positive_stage_cap_key"),
+            "daily_totals": payload.get("daily_totals"),
+            "last_effective_at": float(payload.get("last_effective_at") or 0.0),
+        }
+
+    @staticmethod
+    def _identity_projection_state(projection: dict[str, Any] | None) -> dict[str, Any]:
+        value = projection if isinstance(projection, dict) else {}
+        return {
+            "person_id": value.get("person_id"),
+            "resolved_identity_key": value.get("resolved_identity_key"),
+            "identity_assurance": value.get("identity_assurance"),
+            "profile_status": value.get("profile_status"),
+            "projection_revision": value.get("projection_revision"),
+        }
+
+    def reconcile_all(self) -> list[dict[str, Any]]:
+        """Reconcile one combined identity, relationship and backlog checkpoint."""
+        streams = self.outbox.stream_keys(self.migration_epoch)
+        people = sorted(
+            {stream.split(":", 1)[1] for stream in streams if ":" in stream}
+            | set(self.coordinator.identity_ids())
+        )
+        results: list[dict[str, Any]] = []
+        for person_id in people:
+            identity_stream = f"identity:{person_id}"
+            relationship_stream = f"relationship:{person_id}"
+            source_revision = sum(
+                self.outbox.stream_revision(stream, self.migration_epoch)
+                for stream in (identity_stream, relationship_stream)
+            )
+            target_revision = sum(
+                self.outbox.applied_revision(stream, self.migration_epoch)
+                for stream in (identity_stream, relationship_stream)
+            )
+            backlog = sum(
+                self.outbox.backlog_for_stream(stream, self.migration_epoch)
+                for stream in (identity_stream, relationship_stream)
+            )
+            projection_state = self._identity_projection_state(
+                self._registry_for_person(person_id).read_projection(person_id)
+            )
+            source_state: dict[str, Any] = {"identity": projection_state}
+            target_state: dict[str, Any] = {"identity": projection_state}
+            latest_identity = self.outbox.latest_for_stream(identity_stream, self.migration_epoch)
+            if latest_identity is not None:
+                checkpoint = self._registry_for_person(person_id).identity_projection_checkpoint(person_id)
+                if not checkpoint.get("ok"):
+                    raise MigrationReplayError("migration_reconcile_identity_checkpoint_invalid")
+                source_state["identity_checkpoint"] = {
+                    "projection_revision": latest_identity.payload.get("projection_revision"),
+                    "checkpoint_hash": latest_identity.payload.get("projection_checkpoint_hash"),
+                }
+                target_state["identity_checkpoint"] = {
+                    "projection_revision": checkpoint.get("projection_revision"),
+                    "checkpoint_hash": checkpoint.get("checkpoint_hash"),
+                }
+            latest_relationship = self.outbox.latest_for_stream(relationship_stream, self.migration_epoch)
+            if latest_relationship is not None:
+                context = build_namespace_context(latest_relationship.namespace)
+                if context is None or context.errors():
+                    raise MigrationReplayError("migration_reconcile_namespace_invalid")
+                payload_state = self._source_relationship_state(latest_relationship.payload)
+                live_state = (
+                    self.legacy_relationship_resolver(person_id)
+                    if self.legacy_relationship_resolver is not None else payload_state
+                )
+                if not isinstance(live_state, dict):
+                    raise MigrationReplayError("migration_reconcile_legacy_relationship_missing")
+                source_state["relationship"] = live_state
+                target_state["relationship"] = self._relationship_state(
+                    self.relationship_store.account(context)
+                )
+            else:
+                registry = self._registry_for_person(person_id)
+                resolution = registry.formal_namespace_for_person(
+                    person_id, policy_version=self.policy_version,
+                    migration_epoch=self.migration_epoch, purpose="relationship_read",
+                )
+                context = build_namespace_context(resolution.get("context") if isinstance(resolution, dict) else None)
+                if context is None or not resolution.get("ok") or context.errors():
+                    continue
+                try:
+                    baseline = self._relationship_state(self.relationship_store.account(context))
+                except RelationshipNotFound:
+                    continue
+                live_state = (
+                    self.legacy_relationship_resolver(person_id)
+                    if self.legacy_relationship_resolver is not None else baseline
+                )
+                if not isinstance(live_state, dict):
+                    raise MigrationReplayError("migration_reconcile_legacy_relationship_missing")
+                source_state["relationship"] = live_state
+                target_state["relationship"] = baseline
+            source_hash = _digest(source_state)
+            target_hash = _digest(target_state)
+            reconciled = self.coordinator.reconcile_identity(
+                person_id,
+                source_revision=source_revision,
+                target_revision=target_revision,
+                source_hash=source_hash,
+                target_hash=target_hash,
+                backlog=backlog,
+            )
+            results.append(reconciled)
+            if backlog == 0 and (
+                source_revision != target_revision or source_hash != target_hash
+            ):
+                raise MigrationReplayError("migration_reconcile_mismatch")
+        return results
+
+    def run_batch(self, *, limit: int = 100) -> dict[str, Any]:
+        applied: list[dict[str, Any]] = []
+        for item in self.outbox.pending(self.migration_epoch, limit=limit):
+            try:
+                applied.append(self.apply_one(item))
+            except Exception as exc:
+                self._fail_closed(item, exc)
+                return {"status": "paused", "applied": applied, "error_code": str(exc).split(":", 1)[0]}
+        try:
+            reconciled = self.reconcile_all()
+        except Exception as exc:
+            code = self._pause_reconciliation(exc)
+            return {"status": "paused", "applied": applied, "error_code": code}
+        return {"status": "ok", "applied": applied, "count": len(applied), "reconciled": reconciled}
+
+
+__all__ = ["MigrationReplayError", "MigrationReplayWorker"]

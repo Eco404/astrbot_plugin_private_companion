@@ -902,6 +902,89 @@ class UnifiedPersonRegistry:
             projection = build_person_projection(self._store, str(person_id or ""))
             return deepcopy(projection) if projection and not validate_projection(projection) else None
 
+    def identity_link_state(self, person_id: str, identity_key: str) -> dict[str, Any]:
+        """Verify one redacted link reference without exposing its raw identity."""
+        try:
+            clean_person = _text(person_id, "person_id")
+            clean_key = _text(identity_key, "identity_key", 160)
+        except ValueError:
+            return {"ok": False, "code": "identity_reference_invalid"}
+        with _LOCK:
+            root = _root(self._store)
+            profile = root["profiles"].get(clean_person)
+            projection_revision = (
+                int(profile.get("projection_revision") or 0) if isinstance(profile, dict) else 0
+            )
+            for state, container_name in (
+                ("active", "identity_links"), ("detached", "detached_identity_links")
+            ):
+                candidate = root[container_name].get(clean_key)
+                if not isinstance(candidate, dict) or candidate.get("person_id") != clean_person:
+                    continue
+                try:
+                    normalized = _identity(candidate.get("identity"))
+                    exact = (
+                        candidate.get("identity_key") == clean_key
+                        and build_identity_key(normalized) == clean_key
+                        and candidate.get("status") == state
+                    )
+                except (TypeError, ValueError):
+                    exact = False
+                if not exact:
+                    return {"ok": False, "code": "identity_link_corrupt"}
+                return {
+                    "ok": True,
+                    "code": "identity_link_verified",
+                    "state": state,
+                    "identity_assurance": str(candidate.get("identity_assurance") or "observed"),
+                    "profile_status": str(profile.get("profile_status") or "active") if isinstance(profile, dict) else "deleted",
+                    "projection_revision": projection_revision,
+                }
+        return {"ok": False, "code": "identity_link_missing"}
+
+    def identity_projection_checkpoint(self, person_id: str) -> dict[str, Any]:
+        """Return a hash-only checkpoint for detecting uncaptured identity writes."""
+        try:
+            clean_person = _text(person_id, "person_id")
+        except ValueError:
+            return {"ok": False, "code": "identity_reference_invalid"}
+        with _LOCK:
+            root = _root(self._store)
+            profile = root["profiles"].get(clean_person)
+            projection = build_person_projection(self._store, clean_person)
+            if not isinstance(profile, dict) or projection is None or validate_projection(projection):
+                return {"ok": False, "code": "identity_projection_invalid"}
+            profile_keys = profile.get("identity_keys")
+            if not isinstance(profile_keys, list) or any(not isinstance(item, str) for item in profile_keys):
+                return {"ok": False, "code": "identity_projection_invalid"}
+            active_keys = sorted(
+                str(key)
+                for key, link in root["identity_links"].items()
+                if isinstance(link, dict)
+                and link.get("person_id") == clean_person
+                and link.get("status") == "active"
+            )
+            if sorted(profile_keys) != active_keys:
+                return {"ok": False, "code": "identity_projection_invalid"}
+            state = {
+                "person_id": clean_person,
+                "resolved_identity_key": projection["resolved_identity_key"],
+                "identity_assurance": projection["identity_assurance"],
+                "profile_status": projection["profile_status"],
+                "projection_revision": projection["projection_revision"],
+                "active_identity_keys_hash": hashlib.sha256(
+                    json.dumps(active_keys, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+            }
+            return {
+                "ok": True,
+                "code": "identity_projection_checkpoint",
+                "projection_revision": state["projection_revision"],
+                "checkpoint_hash": hashlib.sha256(
+                    json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+            }
+
     def read_p4_effect_state(self, person_id: str) -> dict[str, Any]:
         """Read preparation state without creating a ledger or a person."""
         try:

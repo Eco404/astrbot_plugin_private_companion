@@ -103,6 +103,9 @@ class MigrationDualWriteTests(unittest.TestCase):
             "relationship_role": "friend",
             "relationship_mode": "normal",
             "relationship_score": 12,
+            "relationship_positive_stage_cap_key": "close",
+            "relationship_daily_totals": {"day": "2026-08-10", "positive": 2, "negative": 0},
+            "relationship_last_effective_at": 1_700_000_000,
         }
 
     def tearDown(self) -> None:
@@ -131,8 +134,47 @@ class MigrationDualWriteTests(unittest.TestCase):
         self.assertEqual("relationship_legacy_event", item.payload["operation"])
         self.assertEqual(self.person_id, item.payload["identity_ref"])
         self.assertEqual(2, item.payload["applied_delta"])
+        self.assertEqual({"day": "2026-08-10", "positive": 2, "negative": 0}, item.payload["daily_totals"])
         self.assertNotIn("10001", str(item.payload))
         self.assertNotIn("created_at", item.payload)
+
+    def test_successful_enqueue_notifies_replay_scheduler_once(self) -> None:
+        calls: list[str] = []
+        producer = MigrationDualWriteProducer(
+            outbox=self.outbox, coordinator=self.coordinator,
+            migration_epoch=self.epoch, policy_version=EPOCH_POLICY,
+            on_enqueued=lambda: calls.append("scheduled"),
+        )
+        producer.emit_relationship(
+            registry=self.registry, user=self.user, requested_delta=2,
+            reason_code="inbound", result=_result(), source_revision=1,
+        )
+        producer.emit_relationship(
+            registry=self.registry, user=self.user, requested_delta=2,
+            reason_code="inbound", result=_result(), source_revision=1,
+        )
+        self.assertEqual(["scheduled"], calls)
+
+    def test_runtime_totals_are_preserved_exactly_and_invalid_values_fail(self) -> None:
+        user = {
+            **self.user,
+            "relationship_daily_totals": {"day": "2026-08-10", "positive": 2, "negative": -132},
+        }
+        self.producer.emit_relationship(
+            registry=self.registry, user=user, requested_delta=-12,
+            reason_code="boundary_violation",
+            result=_result(before=12, after=0), source_revision=1,
+        )
+        self.assertEqual(-132, self.outbox.pending(self.epoch)[0].payload["daily_totals"]["negative"])
+        invalid = {
+            **self.user,
+            "relationship_daily_totals": {"day": "2026-08-10", "positive": 999, "negative": 0},
+        }
+        with self.assertRaisesRegex(Exception, "dual_write_relationship_runtime_invalid"):
+            self.producer.emit_relationship_snapshot(
+                registry=self.registry, user=invalid,
+                reason_code="administrator_relationship_update", source_revision=2,
+            )
 
     def test_two_distinct_legacy_events_receive_contiguous_revisions(self) -> None:
         self.producer.emit_relationship(

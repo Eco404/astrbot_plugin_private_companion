@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any
 
 from identity_namespace import build_namespace_context
@@ -33,6 +34,34 @@ def _integer(value: Any) -> int | None:
         return None
 
 
+def _relationship_runtime_state(user: dict[str, Any]) -> dict[str, Any]:
+    raw_totals = user.get("relationship_daily_totals")
+    if raw_totals is not None and not isinstance(raw_totals, dict):
+        raise MigrationDualWriteError("dual_write_relationship_runtime_invalid")
+    totals = raw_totals if isinstance(raw_totals, dict) else {}
+    day = _token(totals.get("day"), 16)
+    positive = _integer(totals.get("positive", 0))
+    negative = _integer(totals.get("negative", 0))
+    try:
+        last_effective = float(user.get("relationship_last_effective_at") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        raise MigrationDualWriteError("dual_write_relationship_runtime_invalid")
+    if (
+        positive is None or negative is None or not 0 <= positive <= 120
+        or not -180 <= negative <= 0 or not math.isfinite(last_effective) or last_effective < 0
+    ):
+        raise MigrationDualWriteError("dual_write_relationship_runtime_invalid")
+    return {
+        "positive_stage_cap_key": _token(user.get("relationship_positive_stage_cap_key"), 40) or "deeply_bonded",
+        "daily_totals": {
+            "day": day,
+            "positive": positive,
+            "negative": negative,
+        },
+        "last_effective_at": last_effective,
+    }
+
+
 class MigrationDualWriteError(RuntimeError):
     pass
 
@@ -45,13 +74,20 @@ class MigrationDualWriteProducer:
         coordinator: MigrationCoordinator,
         migration_epoch: str,
         policy_version: str,
+        on_enqueued: Any = None,
     ) -> None:
         self.outbox = outbox
         self.coordinator = coordinator
         self.migration_epoch = _token(migration_epoch)
         self.policy_version = _token(policy_version, 64)
+        self.on_enqueued = on_enqueued if callable(on_enqueued) else None
         if not self.migration_epoch or not self.policy_version:
             raise MigrationDualWriteError("dual_write_contract_invalid")
+
+    def _notify(self, result: dict[str, Any]) -> dict[str, Any]:
+        if result.get("status") == "enqueued" and self.on_enqueued is not None:
+            self.on_enqueued()
+        return result
 
     def _pending(self, user: dict[str, Any], reason: str, source_scope: str) -> None:
         raw_reference = str(user.get("unified_person_id") or user.get("user_id") or "missing")
@@ -140,6 +176,7 @@ class MigrationDualWriteProducer:
             "score_after": score_after,
             "relationship_role": role,
             "relationship_mode": mode,
+            **_relationship_runtime_state(user),
             "legacy_event_hash": hashlib.sha256(
                 _canonical({
                     "event_key": event_key,
@@ -167,7 +204,7 @@ class MigrationDualWriteProducer:
         )
         if int(emitted["source_revision"]) != expected_revision:
             raise MigrationDualWriteError("dual_write_source_revision_gap")
-        return emitted
+        return self._notify(emitted)
 
     def emit_relationship_snapshot(
         self,
@@ -189,12 +226,12 @@ class MigrationDualWriteProducer:
             raise MigrationDualWriteError("dual_write_relationship_snapshot_invalid")
         role = "owner" if str(user.get("relationship_role") or "").strip().lower() == "owner" else "friend"
         mode = "owner_exclusive" if role == "owner" and str(user.get("relationship_mode") or "").strip().lower() == "owner_exclusive" else "normal"
-        cap = _token(user.get("relationship_positive_stage_cap_key"), 40) or "deeply_bonded"
+        runtime_state = _relationship_runtime_state(user)
         state = {
             "relationship_role": role,
             "relationship_mode": mode,
             "relationship_score": score,
-            "positive_stage_cap_key": cap,
+            **runtime_state,
         }
         state_hash = hashlib.sha256(_canonical(state).encode("utf-8")).hexdigest()
         ledger = user.get("relationship_ledger")
@@ -234,7 +271,7 @@ class MigrationDualWriteProducer:
         )
         if int(emitted["source_revision"]) != expected_revision:
             raise MigrationDualWriteError("dual_write_source_revision_gap")
-        return emitted
+        return self._notify(emitted)
 
     def emit_identity_change(
         self,
@@ -270,6 +307,13 @@ class MigrationDualWriteProducer:
         revision = _integer(projection.get("projection_revision"))
         if revision is None or revision < 1:
             raise MigrationDualWriteError("dual_write_identity_revision_invalid")
+        checkpoint = registry.identity_projection_checkpoint(person_id)
+        if (
+            not checkpoint.get("ok")
+            or int(checkpoint.get("projection_revision") or 0) != revision
+            or not _token(checkpoint.get("checkpoint_hash"), 80)
+        ):
+            raise MigrationDualWriteError("dual_write_identity_checkpoint_invalid")
         target_assurance = (
             "explicit_linked"
             if projection.get("identity_assurance") == "explicit_linked"
@@ -282,6 +326,7 @@ class MigrationDualWriteProducer:
             "identity_assurance": target_assurance,
             "profile_status": context.profile_status,
             "projection_revision": revision,
+            "projection_checkpoint_hash": checkpoint["checkpoint_hash"],
         }
         operation_hash = hashlib.sha256(str(operation_id or "").encode("utf-8")).hexdigest()[:24]
         event_id = "req041-id-" + hashlib.sha256(
@@ -296,12 +341,12 @@ class MigrationDualWriteProducer:
             "payload": payload,
         }
         if clean_action == "unlink":
-            return self.outbox.enqueue_next_with_tombstone(
+            return self._notify(self.outbox.enqueue_next_with_tombstone(
                 **envelope,
                 tombstone_key=f"identity-link:{identity_key}",
                 reason_code="identity_unlink",
-            )
-        return self.outbox.enqueue_next(**envelope)
+            ))
+        return self._notify(self.outbox.enqueue_next(**envelope))
 
     def fail_closed(self, reason_code: str) -> None:
         reason = _token(reason_code, 80) or "dual_write_failed"

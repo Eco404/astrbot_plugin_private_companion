@@ -51,6 +51,7 @@ class OutboxItem:
     retry_count: int
     error_code: str
     target_revision: int
+    stream_key: str = ""
 
 
 def _canonical(value: Any) -> str:
@@ -152,6 +153,7 @@ class MigrationOutbox:
                     source_revision INTEGER NOT NULL,
                     namespace_json TEXT NOT NULL,
                     namespace_scope TEXT NOT NULL,
+                    stream_key TEXT NOT NULL DEFAULT '',
                     policy_version TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     payload_hash TEXT NOT NULL,
@@ -183,6 +185,13 @@ class MigrationOutbox:
                     FOREIGN KEY (migration_epoch) REFERENCES migration_epochs(migration_epoch)
                 );
                 """
+            )
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(outbox)").fetchall()}
+            if "stream_key" not in columns:
+                conn.execute("ALTER TABLE outbox ADD COLUMN stream_key TEXT NOT NULL DEFAULT ''")
+            conn.execute(
+                """CREATE INDEX IF NOT EXISTS idx_outbox_stream
+                   ON outbox(migration_epoch,stream_key,state,source_revision)"""
             )
 
     def begin_epoch(self, migration_epoch: str, *, policy_version: str, state: str = "active") -> dict[str, Any]:
@@ -282,11 +291,11 @@ class MigrationOutbox:
                 raise OutboxConflict("outbox_event_conflict")
             conn.execute(
                 """INSERT INTO outbox(
-                    event_id,migration_epoch,source_revision,namespace_json,namespace_scope,policy_version,
+                    event_id,migration_epoch,source_revision,namespace_json,namespace_scope,stream_key,policy_version,
                     payload_json,payload_hash,state,retry_count,error_code,target_revision,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    event, epoch, source_revision, namespace_json, namespace.cache_scope(), policy,
+                    event, epoch, source_revision, namespace_json, namespace.cache_scope(), "", policy,
                     encoded, digest, "pending", 0, "", 0, now, now,
                 ),
             )
@@ -354,11 +363,11 @@ class MigrationOutbox:
                 raise RevisionGap(f"revision_gap:{current}:{expected_source_revision}:{next_revision}")
             conn.execute(
                 """INSERT INTO outbox(
-                    event_id,migration_epoch,source_revision,namespace_json,namespace_scope,policy_version,
+                    event_id,migration_epoch,source_revision,namespace_json,namespace_scope,stream_key,policy_version,
                     payload_json,payload_hash,state,retry_count,error_code,target_revision,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    event, epoch, next_revision, namespace_json, namespace.cache_scope(), policy,
+                    event, epoch, next_revision, namespace_json, namespace.cache_scope(), stream, policy,
                     encoded, digest, "pending", 0, "", 0, now, now,
                 ),
             )
@@ -443,11 +452,11 @@ class MigrationOutbox:
                 raise OutboxConflict("tombstone_revision_conflict")
             conn.execute(
                 """INSERT INTO outbox(
-                    event_id,migration_epoch,source_revision,namespace_json,namespace_scope,policy_version,
+                    event_id,migration_epoch,source_revision,namespace_json,namespace_scope,stream_key,policy_version,
                     payload_json,payload_hash,state,retry_count,error_code,target_revision,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    event, epoch, next_revision, namespace_json, namespace.cache_scope(), policy,
+                    event, epoch, next_revision, namespace_json, namespace.cache_scope(), stream, policy,
                     encoded, digest, "pending", 0, "", 0, now, now,
                 ),
             )
@@ -473,6 +482,7 @@ class MigrationOutbox:
             namespace=json.loads(row["namespace_json"]), policy_version=row["policy_version"],
             payload=json.loads(row["payload_json"]), payload_hash=row["payload_hash"], state=row["state"],
             retry_count=row["retry_count"], error_code=row["error_code"], target_revision=row["target_revision"],
+            stream_key=str(row["stream_key"] or ""),
         )
 
     def pending(self, migration_epoch: str, *, limit: int = 100) -> list[OutboxItem]:
@@ -480,17 +490,66 @@ class MigrationOutbox:
         safe_limit = max(1, min(1000, int(limit)))
         with self._connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM outbox WHERE migration_epoch=? AND state IN ('pending','failed') ORDER BY source_revision,created_at LIMIT ?",
+                """SELECT * FROM outbox WHERE migration_epoch=? AND state IN ('pending','failed')
+                   ORDER BY stream_key,source_revision,created_at LIMIT ?""",
                 (epoch, safe_limit),
             ).fetchall()
         return [self._item(row) for row in rows]
+
+    def applied_revision(self, stream_key: str, migration_epoch: str) -> int:
+        stream, epoch = _token(stream_key), _token(migration_epoch)
+        with self._connection() as conn:
+            row = conn.execute(
+                """SELECT COALESCE(MAX(source_revision),0) AS revision FROM outbox
+                   WHERE migration_epoch=? AND stream_key=? AND state='applied'""",
+                (epoch, stream),
+            ).fetchone()
+        return int(row["revision"]) if row is not None else 0
+
+    def backlog_for_stream(self, stream_key: str, migration_epoch: str) -> int:
+        stream, epoch = _token(stream_key), _token(migration_epoch)
+        with self._connection() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) AS count FROM outbox
+                   WHERE migration_epoch=? AND stream_key=? AND state IN ('pending','failed')""",
+                (epoch, stream),
+            ).fetchone()
+        return int(row["count"]) if row is not None else 0
+
+    def stream_keys(self, migration_epoch: str) -> list[str]:
+        epoch = _token(migration_epoch)
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT stream_key FROM outbox WHERE migration_epoch=? AND stream_key<>'' ORDER BY stream_key",
+                (epoch,),
+            ).fetchall()
+        return [str(row["stream_key"]) for row in rows]
+
+    def latest_for_stream(self, stream_key: str, migration_epoch: str) -> OutboxItem | None:
+        stream, epoch = _token(stream_key), _token(migration_epoch)
+        with self._connection() as conn:
+            row = conn.execute(
+                """SELECT * FROM outbox WHERE migration_epoch=? AND stream_key=?
+                   ORDER BY source_revision DESC,created_at DESC LIMIT 1""",
+                (epoch, stream),
+            ).fetchone()
+        return self._item(row) if row is not None else None
 
     def mark_applied(self, event_id: str, migration_epoch: str, *, target_revision: int) -> None:
         if target_revision < 1:
             raise OutboxError("target_revision_invalid")
         with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT state,target_revision FROM outbox WHERE event_id=? AND migration_epoch=?",
+                (_token(event_id), _token(migration_epoch)),
+            ).fetchone()
+            if row is not None and row["state"] == "applied":
+                if int(row["target_revision"]) != target_revision:
+                    raise OutboxConflict("outbox_target_revision_conflict")
+                return
             changed = conn.execute(
-                "UPDATE outbox SET state='applied',target_revision=?,error_code='',updated_at=? WHERE event_id=? AND migration_epoch=?",
+                """UPDATE outbox SET state='applied',target_revision=?,error_code='',updated_at=?
+                   WHERE event_id=? AND migration_epoch=? AND state IN ('pending','failed')""",
                 (target_revision, float(self._clock()), _token(event_id), _token(migration_epoch)),
             ).rowcount
             if changed != 1:
@@ -500,7 +559,8 @@ class MigrationOutbox:
         error = _token(error_code, limit=80) or "target_write_failed"
         with self._transaction() as conn:
             changed = conn.execute(
-                "UPDATE outbox SET state='failed',retry_count=retry_count+1,error_code=?,updated_at=? WHERE event_id=? AND migration_epoch=?",
+                """UPDATE outbox SET state='failed',retry_count=retry_count+1,error_code=?,updated_at=?
+                   WHERE event_id=? AND migration_epoch=? AND state IN ('pending','failed')""",
                 (error, float(self._clock()), _token(event_id), _token(migration_epoch)),
             ).rowcount
             if changed != 1:

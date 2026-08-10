@@ -287,6 +287,8 @@ class RelationshipAccountStore:
         relationship_mode: str = "normal",
         score: int = 0,
         positive_stage_cap_key: str = "deeply_bonded",
+        daily_totals: dict[str, Any] | None = None,
+        last_effective_at: float = 0.0,
         legacy_snapshot: bool = False,
     ) -> dict[str, Any]:
         context = self._authorize(context, "relationship_write")
@@ -305,6 +307,10 @@ class RelationshipAccountStore:
         if numeric_score is None or not -1200 <= numeric_score <= 1200:
             raise RelationshipStoreError("relationship_account_score_invalid")
         cap_key = normalize_relationship_positive_stage_cap_key(positive_stage_cap_key)
+        if daily_totals is None:
+            totals, effective = {}, 0.0
+        else:
+            totals, effective = self._validated_legacy_runtime(daily_totals, last_effective_at)
         request = {
             "operation": "create",
             "identity_id": context.identity_id,
@@ -313,6 +319,7 @@ class RelationshipAccountStore:
             "score": numeric_score,
             "cap_key": cap_key,
             "legacy_snapshot": bool(legacy_snapshot),
+            "daily_totals": totals, "last_effective_at": effective,
             "actor": clean_actor,
             "policy_version": context.policy_version,
         }
@@ -339,7 +346,7 @@ class RelationshipAccountStore:
                        daily_totals_json,ledger_json,last_effective_at,stage_key,revision,legacy_snapshot,
                        created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    context.identity_id, role, mode, numeric_score, cap_key, "{}", "[]", 0.0,
+                    context.identity_id, role, mode, numeric_score, cap_key, _canonical(totals), "[]", effective,
                     stage, 1, int(bool(legacy_snapshot)), now, now,
                 ),
             )
@@ -415,6 +422,190 @@ class RelationshipAccountStore:
                     account["relationship_role"], role, account["relationship_mode"], mode,
                     account["relationship_score"], next_score, revision, now,
                 ),
+            )
+            return self._account_from_row(self._load_row(connection, context.identity_id))
+
+    @staticmethod
+    def _validated_legacy_runtime(
+        daily_totals: Any,
+        last_effective_at: Any,
+    ) -> tuple[dict[str, Any], float]:
+        if not isinstance(daily_totals, dict) or set(daily_totals) != {"day", "positive", "negative"}:
+            raise RelationshipStoreError("relationship_legacy_runtime_invalid")
+        day = _token(daily_totals.get("day"), limit=16) if daily_totals.get("day") else ""
+        positive = _integer(daily_totals.get("positive"))
+        negative = _integer(daily_totals.get("negative"))
+        try:
+            effective = float(last_effective_at)
+        except (TypeError, ValueError, OverflowError):
+            effective = -1.0
+        if (
+            positive is None or negative is None or not 0 <= positive <= 120
+            or not -180 <= negative <= 0 or not math.isfinite(effective) or effective < 0
+        ):
+            raise RelationshipStoreError("relationship_legacy_runtime_invalid")
+        return {"day": day, "positive": positive, "negative": negative}, effective
+
+    def replay_legacy_event(
+        self,
+        context: NamespaceContext,
+        *,
+        event_id: str,
+        reason_code: str,
+        requested_delta: int,
+        applied_delta: int,
+        score_before: int,
+        score_after: int,
+        relationship_role: str,
+        relationship_mode: str,
+        positive_stage_cap_key: str,
+        daily_totals: dict[str, Any],
+        last_effective_at: float,
+    ) -> RelationshipEventResult:
+        """Replay one proven legacy result with strict before/after preconditions."""
+        context = self._authorize(context, "relationship_write")
+        event = _token(event_id)
+        reason = _token(reason_code, limit=80).lower()
+        requested, applied = _integer(requested_delta), _integer(applied_delta)
+        before, after = _integer(score_before), _integer(score_after)
+        role = _token(relationship_role, limit=20).lower()
+        mode = _token(relationship_mode, limit=32).lower()
+        cap = normalize_relationship_positive_stage_cap_key(positive_stage_cap_key)
+        totals, effective = self._validated_legacy_runtime(daily_totals, last_effective_at)
+        if (
+            context.kind != "private" or not event or reason not in PRIVATE_EVENT_REASONS
+            or None in {requested, applied, before, after} or applied == 0
+            or after - before != applied or not -1200 <= before <= 1200 or not -1200 <= after <= 1200
+            or role not in ACCOUNT_ROLES or mode not in ACCOUNT_MODES
+            or normalize_relationship_mode(mode, role) != mode
+        ):
+            raise RelationshipStoreError("relationship_legacy_event_invalid")
+        request = {
+            "operation": "legacy_event_replay", "identity_id": context.identity_id,
+            "reason": reason, "requested": requested, "applied": applied,
+            "before": before, "after": after, "role": role, "mode": mode,
+            "cap": cap, "daily_totals": totals, "last_effective_at": effective,
+            "policy_version": context.policy_version,
+        }
+        request_hash = hashlib.sha256(_canonical(request).encode("utf-8")).hexdigest()
+        now = float(self._clock())
+        with self._transaction() as connection:
+            previous = connection.execute(
+                "SELECT * FROM relationship_events WHERE event_id=? AND migration_epoch=?",
+                (event, context.migration_epoch),
+            ).fetchone()
+            if previous is not None:
+                if previous["request_hash"] != request_hash:
+                    raise RelationshipConflict("relationship_event_conflict")
+                return self._event_result(previous, connection)
+            account = self._account_from_row(self._load_row(connection, context.identity_id))
+            if (
+                account["relationship_role"] != role
+                or account["relationship_mode"] != mode
+                or account["relationship_score"] != before
+            ):
+                raise RelationshipConflict("relationship_legacy_event_precondition_failed")
+            revision = account["revision"] + 1
+            ledger = account.get("relationship_ledger")
+            ledger = list(ledger) if isinstance(ledger, list) else []
+            ledger.append({
+                "event_key": event,
+                "reason_code": reason,
+                "delta": applied,
+                "score_before": before,
+                "score_after": after,
+                "source": "migration_replay",
+            })
+            del ledger[:-200]
+            stage_key = relationship_stage_for_score(
+                after, previous_stage_key=account["relationship_stage_key"]
+            )["phase"]["key"]
+            connection.execute(
+                """UPDATE relationship_accounts SET score=?,positive_stage_cap_key=?,daily_totals_json=?,
+                       ledger_json=?,last_effective_at=?,stage_key=?,revision=?,updated_at=? WHERE identity_id=?""",
+                (after, cap, _canonical(totals), _canonical(ledger), effective, stage_key,
+                 revision, now, context.identity_id),
+            )
+            connection.execute(
+                """INSERT INTO relationship_events(
+                       event_id,migration_epoch,request_hash,identity_id,source_scope,source_kind,
+                       reason_code,actor,policy_version,requested_delta,weighted_delta,applied_delta,
+                       score_after,weight,result_code,account_revision,day_key,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (event, context.migration_epoch, request_hash, context.identity_id, _source_scope(context),
+                 context.kind, reason, "migration", context.policy_version, requested, applied, applied,
+                 after, 1.0, "legacy_result_replayed", revision, str(totals.get("day") or ""), now),
+            )
+            inserted = connection.execute(
+                "SELECT * FROM relationship_events WHERE event_id=? AND migration_epoch=?",
+                (event, context.migration_epoch),
+            ).fetchone()
+            assert inserted is not None
+            return self._event_result(inserted, connection)
+
+    def replay_legacy_snapshot(
+        self,
+        context: NamespaceContext,
+        *,
+        operation_id: str,
+        relationship_role: str,
+        relationship_mode: str,
+        score: int,
+        positive_stage_cap_key: str,
+        daily_totals: dict[str, Any],
+        last_effective_at: float,
+    ) -> dict[str, Any]:
+        context = self._authorize(context, "relationship_write")
+        operation = _token(operation_id)
+        role = _token(relationship_role, limit=20).lower()
+        mode = _token(relationship_mode, limit=32).lower()
+        numeric_score = _integer(score)
+        cap = normalize_relationship_positive_stage_cap_key(positive_stage_cap_key)
+        totals, effective = self._validated_legacy_runtime(daily_totals, last_effective_at)
+        if (
+            context.kind != "private" or not operation or role not in ACCOUNT_ROLES
+            or mode not in ACCOUNT_MODES or normalize_relationship_mode(mode, role) != mode
+            or numeric_score is None or not -1200 <= numeric_score <= 1200
+        ):
+            raise RelationshipStoreError("relationship_legacy_snapshot_invalid")
+        request = {
+            "operation": "legacy_snapshot_replay", "identity_id": context.identity_id,
+            "role": role, "mode": mode, "score": numeric_score, "cap": cap,
+            "daily_totals": totals, "last_effective_at": effective,
+            "policy_version": context.policy_version,
+        }
+        request_hash = hashlib.sha256(_canonical(request).encode("utf-8")).hexdigest()
+        now = float(self._clock())
+        with self._transaction() as connection:
+            previous = connection.execute(
+                """SELECT request_hash FROM relationship_account_changes
+                   WHERE operation_id=? AND migration_epoch=?""",
+                (operation, context.migration_epoch),
+            ).fetchone()
+            if previous is not None:
+                if previous["request_hash"] != request_hash:
+                    raise RelationshipConflict("relationship_operation_conflict")
+                return self._account_from_row(self._load_row(connection, context.identity_id))
+            account = self._account_from_row(self._load_row(connection, context.identity_id))
+            revision = account["revision"] + 1
+            stage_key = relationship_stage_for_score(
+                numeric_score, previous_stage_key=account["relationship_stage_key"]
+            )["phase"]["key"]
+            connection.execute(
+                """UPDATE relationship_accounts SET relationship_role=?,relationship_mode=?,score=?,
+                       positive_stage_cap_key=?,daily_totals_json=?,last_effective_at=?,stage_key=?,
+                       revision=?,updated_at=? WHERE identity_id=?""",
+                (role, mode, numeric_score, cap, _canonical(totals), effective, stage_key,
+                 revision, now, context.identity_id),
+            )
+            connection.execute(
+                """INSERT INTO relationship_account_changes(
+                       operation_id,migration_epoch,request_hash,identity_id,actor,role_before,role_after,
+                       mode_before,mode_after,score_before,score_after,revision,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (operation, context.migration_epoch, request_hash, context.identity_id, "migration",
+                 account["relationship_role"], role, account["relationship_mode"], mode,
+                 account["relationship_score"], numeric_score, revision, now),
             )
             return self._account_from_row(self._load_row(connection, context.identity_id))
 

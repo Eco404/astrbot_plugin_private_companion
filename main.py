@@ -149,6 +149,7 @@ from .person_context_contract import (
 from .unified_person_registry import UnifiedPersonRegistry
 from .migration_backfill import MigrationBackfill
 from .migration_dual_write import MigrationDualWriteProducer
+from .migration_replay import MigrationReplayWorker
 from .unified_profile_contract import (
     build_person_ref as req036_build_person_ref,
     build_profile_dto as req036_build_profile_dto,
@@ -4167,6 +4168,133 @@ class PrivateCompanionPlugin(
             },
         }
 
+    def _req041_registry_for_person(self, person_id: str) -> UnifiedPersonRegistry | None:
+        """Locate exactly one persona-scoped registry for a stable person id."""
+        stores: list[dict[str, Any]] = []
+        default_data = getattr(self, "_data_default", None)
+        if not isinstance(default_data, dict):
+            default_data = self.data if isinstance(getattr(self, "data", None), dict) else None
+        if isinstance(default_data, dict):
+            stores.append(default_data)
+        profiles = getattr(self, "_persona_data_profiles", {})
+        if isinstance(profiles, dict):
+            for profile_data in profiles.values():
+                if isinstance(profile_data, dict) and all(profile_data is not item for item in stores):
+                    stores.append(profile_data)
+        matches = [
+            UnifiedPersonRegistry(store)
+            for store in stores
+            if UnifiedPersonRegistry(store).read_projection(person_id) is not None
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _req041_legacy_relationship_state(self, person_id: str) -> dict[str, Any] | None:
+        """Read exactly one live legacy authority row for S5 reconciliation."""
+        stores: list[dict[str, Any]] = []
+        default_data = getattr(self, "_data_default", None)
+        if not isinstance(default_data, dict):
+            default_data = self.data if isinstance(getattr(self, "data", None), dict) else None
+        if isinstance(default_data, dict):
+            stores.append(default_data)
+        profiles = getattr(self, "_persona_data_profiles", {})
+        if isinstance(profiles, dict):
+            for profile_data in profiles.values():
+                if isinstance(profile_data, dict) and all(profile_data is not item for item in stores):
+                    stores.append(profile_data)
+        matches: list[dict[str, Any]] = []
+        for store in stores:
+            registry = UnifiedPersonRegistry(store)
+            users = store.get("users") if isinstance(store.get("users"), dict) else {}
+            for legacy_key, user in users.items():
+                if not isinstance(user, dict) or user.get("unified_person_id") != person_id:
+                    continue
+                subject = _single_line(
+                    user.get("identity_subject_id") or user.get("user_id") or legacy_key, 160
+                )
+                if not subject or not registry.matches_person_subject(person_id, subject):
+                    continue
+                try:
+                    score = int(user.get("relationship_score", 0))
+                    totals = user.get("relationship_daily_totals")
+                    totals = totals if isinstance(totals, dict) else {}
+                    positive = int(totals.get("positive", 0))
+                    negative = int(totals.get("negative", 0))
+                    effective = float(user.get("relationship_last_effective_at") or 0.0)
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                if (
+                    any(isinstance(value, bool) for value in (user.get("relationship_score"), totals.get("positive"), totals.get("negative")))
+                    or not -1200 <= score <= 1200 or not 0 <= positive <= 120
+                    or not -180 <= negative <= 0 or not math.isfinite(effective) or effective < 0
+                ):
+                    return None
+                role = "owner" if str(user.get("relationship_role") or "").strip().lower() == "owner" else "friend"
+                mode = (
+                    "owner_exclusive"
+                    if role == "owner" and str(user.get("relationship_mode") or "").strip().lower() == "owner_exclusive"
+                    else "normal"
+                )
+                matches.append({
+                    "relationship_role": role,
+                    "relationship_mode": mode,
+                    "relationship_score": score,
+                    "positive_stage_cap_key": normalize_relationship_positive_stage_cap_key(
+                        user.get("relationship_positive_stage_cap_key")
+                    ),
+                    "daily_totals": {
+                        "day": _single_line(totals.get("day"), 16),
+                        "positive": positive,
+                        "negative": negative,
+                    },
+                    "last_effective_at": effective,
+                })
+        return matches[0] if len(matches) == 1 else None
+
+    def _req041_schedule_replay(self) -> None:
+        worker = getattr(self, "req041_migration_replay", None)
+        if worker is None:
+            return
+        self._req041_replay_requested = True
+        task = getattr(self, "_req041_replay_task", None)
+        if task is not None and not task.done():
+            return
+        try:
+            self._req041_replay_task = asyncio.get_running_loop().create_task(
+                self._req041_run_replay_batch(), name="req041-shadow-replay"
+            )
+            self._req041_replay_task.add_done_callback(self._req041_replay_finished)
+        except RuntimeError:
+            raise RuntimeError("migration_replay_loop_unavailable")
+
+    def _req041_replay_finished(self, _task: Any) -> None:
+        self._req041_replay_task = None
+        if bool(getattr(self, "_req041_replay_requested", False)):
+            try:
+                self._req041_schedule_replay()
+            except RuntimeError:
+                status = getattr(self, "req041_migration_status", None)
+                if isinstance(status, dict):
+                    status.update({"state": "paused", "code": "migration_replay_loop_unavailable"})
+
+    async def _req041_run_replay_batch(self) -> None:
+        worker = getattr(self, "req041_migration_replay", None)
+        if worker is None:
+            return
+        while bool(getattr(self, "_req041_replay_requested", False)):
+            self._req041_replay_requested = False
+            result = await asyncio.to_thread(worker.run_batch)
+            if result.get("status") == "paused":
+                status = getattr(self, "req041_migration_status", None)
+                if isinstance(status, dict):
+                    status.update({
+                        "state": "paused",
+                        "code": str(result.get("error_code") or "migration_replay_failed")[:120],
+                        "s5": result,
+                    })
+                return
+            if int(result.get("count") or 0) >= 100:
+                self._req041_replay_requested = True
+
     async def _req041_initialize_automatic_migration(self) -> None:
         coordinator = getattr(self, "req041_migration_coordinator", None)
         outbox = getattr(self, "req041_migration_outbox", None)
@@ -4210,6 +4338,7 @@ class PrivateCompanionPlugin(
                 coordinator=coordinator,
                 migration_epoch=epoch,
                 policy_version=policy,
+                on_enqueued=self._req041_schedule_replay,
             )
             if status.get("state") == "paused":
                 self.req041_migration_status = {
@@ -4242,10 +4371,12 @@ class PrivateCompanionPlugin(
                         relationship_path=Path(self.data_dir) / "req041_relationship.db",
                         migration_epoch=epoch,
                         policy_version=policy,
+                        outbox=outbox,
                     )
                     backfill_counts: dict[str, Any] = {
                         "phase": status.get("phase", "S3"), "migrated": 0, "idempotent": 0,
                         "pending": 0, "conflicts": 0, "formal_identities": 0, "legacy_users": 0,
+                        "identity_baselines": 0,
                         "source_scopes": len(legacy_snapshots),
                     }
                     for source_scope, legacy_snapshot in legacy_snapshots:
@@ -4258,6 +4389,7 @@ class PrivateCompanionPlugin(
                         for count_key in (
                             "migrated", "idempotent", "pending", "conflicts",
                             "formal_identities", "legacy_users",
+                            "identity_baselines",
                         ):
                             backfill_counts[count_key] += int(scoped_counts[count_key])
                     self.req041_migration_backfill = backfiller
@@ -4274,6 +4406,50 @@ class PrivateCompanionPlugin(
                         _single_line(backfill_exc, 160),
                     )
 
+            relationship_store = getattr(self, "req041_relationship_store", None)
+            if relationship_store is None and status.get("phase") in {"S4", "S5", "S6", "S7", "S8", "S9"}:
+                backfiller = await asyncio.to_thread(
+                    MigrationBackfill,
+                    coordinator=coordinator,
+                    relationship_path=Path(self.data_dir) / "req041_relationship.db",
+                    migration_epoch=epoch,
+                    policy_version=policy,
+                    outbox=outbox,
+                )
+                self.req041_migration_backfill = backfiller
+                self.req041_relationship_store = backfiller.relationships
+                relationship_store = backfiller.relationships
+
+            replay_result: dict[str, Any] = {"status": "skipped", "code": "s5_not_ready"}
+            if relationship_store is not None and backfill_result.get("ok"):
+                if status.get("phase") == "S4":
+                    status = await asyncio.to_thread(
+                        coordinator.transition, "S5", checkpoint="ordered_shadow_replay_active"
+                    )
+                if status.get("phase") in {"S5", "S6", "S7", "S8", "S9"}:
+                    active_registry = self._active_unified_person_registry()
+                    replay_worker = MigrationReplayWorker(
+                        outbox=outbox,
+                        coordinator=coordinator,
+                        relationship_store=relationship_store,
+                        registry=active_registry,
+                        registry_resolver=self._req041_registry_for_person,
+                        legacy_relationship_resolver=self._req041_legacy_relationship_state,
+                        migration_epoch=epoch,
+                        policy_version=policy,
+                    )
+                    self.req041_migration_replay = replay_worker
+                    await asyncio.to_thread(
+                        outbox.set_epoch_state, epoch, "replaying", checkpoint="s5_replay_batch"
+                    )
+                    replay_result = await asyncio.to_thread(replay_worker.run_batch)
+                    if replay_result.get("status") == "ok":
+                        await asyncio.to_thread(
+                            outbox.set_epoch_state, epoch, "active", checkpoint="s5_reconciled"
+                        )
+                    else:
+                        status = coordinator.status()
+
             remote = {"ok": False, "state": "degraded", "code": "memory_bridge_unavailable"}
             bridge_getter = getattr(self, "_memory_companion_bridge", None)
             bridge = bridge_getter() if callable(bridge_getter) else None
@@ -4287,16 +4463,23 @@ class PrivateCompanionPlugin(
                 )
             self.req041_migration_status = {
                 "required": True,
-                "state": "active" if remote.get("ok") and backfill_result.get("ok") else "degraded",
+                "state": "active" if remote.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok" else (
+                    "paused" if status.get("state") == "paused" else "degraded"
+                ),
                 "code": (
                     "migration_shadow_active"
-                    if remote.get("ok") and backfill_result.get("ok")
-                    else str(backfill_result.get("code") if not backfill_result.get("ok") else remote.get("code") or "migration_degraded")[:120]
+                    if remote.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok"
+                    else str(
+                        backfill_result.get("code") if not backfill_result.get("ok")
+                        else replay_result.get("error_code") if replay_result.get("status") == "paused"
+                        else remote.get("code") or "migration_degraded"
+                    )[:120]
                 ),
-                "phase": status.get("phase", "S4"),
+                "phase": status.get("phase", "S5"),
                 "memory_bound": bool(remote.get("ok")),
                 "checkpoint": status.get("checkpoint", ""),
                 "s4": backfill_result,
+                "s5": replay_result,
                 "dual_write": "capturing",
             }
         except Exception as exc:
@@ -4689,6 +4872,9 @@ class PrivateCompanionPlugin(
         self._passive_input_status_tasks.clear()
         startup_task = getattr(self, "_startup_maintenance_task", None)
         await cancel_task(startup_task, "startup_maintenance")
+        replay_task = getattr(self, "_req041_replay_task", None)
+        self._req041_replay_requested = False
+        await cancel_task(replay_task, "req041_shadow_replay")
         startup_background_tasks = list(getattr(self, "_startup_background_tasks", {}).items())
         for label, task in startup_background_tasks:
             await cancel_task(task, f"startup_{label}")

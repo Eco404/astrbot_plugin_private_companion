@@ -148,6 +148,55 @@ class RelationshipAccountStoreTests(unittest.TestCase):
                 _context(), event_id="stable-event", actor="private_pipeline", reason_code="support", delta=3,
             )
 
+    def test_legacy_event_replay_requires_exact_before_after_and_is_idempotent(self) -> None:
+        self._create(score=10)
+        kwargs = {
+            "event_id": "legacy-event-1",
+            "reason_code": "inbound",
+            "requested_delta": 4,
+            "applied_delta": 2,
+            "score_before": 10,
+            "score_after": 12,
+            "relationship_role": "friend",
+            "relationship_mode": "normal",
+            "positive_stage_cap_key": "close",
+            "daily_totals": {"day": "2026-08-10", "positive": 2, "negative": 0},
+            "last_effective_at": 1_700_000_000,
+        }
+        first = self.store.replay_legacy_event(_context(), **kwargs)
+        replay = self.store.replay_legacy_event(_context(), **kwargs)
+        account = self.store.account(_context())
+        self.assertEqual(first, replay)
+        self.assertEqual(12, account["relationship_score"])
+        self.assertEqual(2, account["revision"])
+        self.assertEqual(kwargs["daily_totals"], account["relationship_daily_totals"])
+        self.assertEqual("migration_replay", account["relationship_ledger"][-1]["source"])
+        with self.assertRaisesRegex(RelationshipConflict, "relationship_legacy_event_precondition_failed"):
+            self.store.replay_legacy_event(
+                _context(),
+                **{**kwargs, "event_id": "legacy-event-2", "score_before": 10, "score_after": 11, "applied_delta": 1},
+            )
+
+    def test_legacy_snapshot_replay_preserves_owner_mode_runtime_and_revision(self) -> None:
+        self._create(score=12)
+        kwargs = {
+            "operation_id": "legacy-snapshot-1",
+            "relationship_role": "owner",
+            "relationship_mode": "normal",
+            "score": 777,
+            "positive_stage_cap_key": "close",
+            "daily_totals": {"day": "2026-08-10", "positive": 7, "negative": -2},
+            "last_effective_at": 1_700_000_100,
+        }
+        first = self.store.replay_legacy_snapshot(_context(), **kwargs)
+        replay = self.store.replay_legacy_snapshot(_context(), **kwargs)
+        self.assertEqual(first, replay)
+        self.assertEqual("owner", first["relationship_role"])
+        self.assertEqual("normal", first["relationship_mode"])
+        self.assertEqual(777, first["relationship_score"])
+        self.assertEqual(2, first["revision"])
+        self.assertEqual(kwargs["daily_totals"], first["relationship_daily_totals"])
+
     def test_pending_and_cross_identity_contexts_fail_closed(self) -> None:
         pending = _context(kind="pending", assurance="unverified")
         with self.assertRaisesRegex(RelationshipAccessDenied, "namespace_pending_denied"):

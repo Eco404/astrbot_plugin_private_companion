@@ -11,11 +11,13 @@ from __future__ import annotations
 from collections import defaultdict
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
 from identity_namespace import NamespaceContext
 from migration_coordinator import MigrationCoordinator
+from migration_outbox import MigrationOutbox
 from person_context_contract import build_identity_key, canonical_identity
 from relationship_account_store import (
     RelationshipAccountStore,
@@ -23,6 +25,7 @@ from relationship_account_store import (
     RelationshipNotFound,
     RelationshipStoreError,
 )
+from unified_person_registry import UnifiedPersonRegistry
 
 
 def _canonical(value: Any) -> str:
@@ -58,6 +61,26 @@ def _score(value: Any) -> int | None:
     return number if -1200 <= number <= 1200 else None
 
 
+def _runtime(user: dict[str, Any]) -> tuple[dict[str, Any], float] | None:
+    raw = user.get("relationship_daily_totals")
+    if raw is not None and not isinstance(raw, dict):
+        return None
+    totals = raw if isinstance(raw, dict) else {}
+    day = _token(totals.get("day"), 16) if totals.get("day") else ""
+    positive = _score(totals.get("positive", 0))
+    negative = _score(totals.get("negative", 0))
+    try:
+        effective = float(user.get("relationship_last_effective_at") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (
+        positive is None or negative is None or not 0 <= positive <= 120
+        or not -180 <= negative <= 0 or not math.isfinite(effective) or effective < 0
+    ):
+        return None
+    return {"day": day, "positive": positive, "negative": negative}, effective
+
+
 class MigrationBackfill:
     """Create local S4 Shadow projections while preserving legacy authority."""
 
@@ -68,16 +91,76 @@ class MigrationBackfill:
         relationship_path: str | Path,
         migration_epoch: str,
         policy_version: str,
+        outbox: MigrationOutbox | None = None,
     ) -> None:
         self.coordinator = coordinator
         self.migration_epoch = _token(migration_epoch)
         self.policy_version = _token(policy_version, 64)
+        self.outbox = outbox if isinstance(outbox, MigrationOutbox) else None
         if not self.migration_epoch or not self.policy_version:
             raise ValueError("migration_backfill_contract_invalid")
         self.relationships = RelationshipAccountStore(
             relationship_path,
             active_migration_epoch=self.migration_epoch,
         )
+
+    def _seed_identity_baselines(
+        self,
+        snapshot: dict[str, Any],
+        formal_people: dict[str, tuple[str, frozenset[tuple[str, str]]]],
+    ) -> int:
+        if self.outbox is None:
+            return 0
+        registry = UnifiedPersonRegistry(snapshot)
+        root = snapshot.get("unified_person") if isinstance(snapshot.get("unified_person"), dict) else {}
+        profiles = root.get("profiles") if isinstance(root.get("profiles"), dict) else {}
+        seeded = 0
+        for person_id in sorted(formal_people):
+            profile = profiles.get(person_id)
+            identity_keys = sorted(profile.get("identity_keys", [])) if isinstance(profile, dict) else []
+            checkpoint = registry.identity_projection_checkpoint(person_id)
+            resolution = registry.formal_namespace_for_person(
+                person_id,
+                policy_version=self.policy_version,
+                migration_epoch=self.migration_epoch,
+                purpose="relationship_write",
+            )
+            context_payload = resolution.get("context") if isinstance(resolution, dict) else None
+            context = NamespaceContext(**{
+                key: context_payload[key]
+                for key in (
+                    "kind", "identity_id", "group_id", "assurance", "profile_status",
+                    "policy_version", "migration_epoch",
+                )
+            }) if isinstance(context_payload, dict) else None
+            if (
+                context is None or context.errors() or not resolution.get("ok")
+                or not checkpoint.get("ok") or not identity_keys
+            ):
+                raise ValueError("migration_identity_baseline_invalid")
+            for identity_key in identity_keys:
+                event_id = "req041-id-baseline-" + hashlib.sha256(
+                    f"{self.migration_epoch}:{person_id}:{identity_key}".encode("utf-8")
+                ).hexdigest()[:40]
+                emitted = self.outbox.enqueue_next(
+                    stream_key=f"identity:{person_id}",
+                    event_id=event_id,
+                    namespace=context,
+                    migration_epoch=self.migration_epoch,
+                    policy_version=self.policy_version,
+                    payload={
+                        "operation": "identity_baseline",
+                        "identity_ref": person_id,
+                        "identity_key_ref": identity_key,
+                        "identity_assurance": context.assurance,
+                        "profile_status": context.profile_status,
+                        "projection_revision": checkpoint["projection_revision"],
+                        "projection_checkpoint_hash": checkpoint["checkpoint_hash"],
+                    },
+                )
+                if emitted.get("status") == "enqueued":
+                    seeded += 1
+        return seeded
 
     def _pending(self, legacy_key: Any, reason: str, source_scope: str) -> None:
         self.coordinator.record_pending(
@@ -184,6 +267,9 @@ class MigrationBackfill:
 
         users = legacy_snapshot.get("users") if isinstance(legacy_snapshot.get("users"), dict) else {}
         formal_people = self._formal_people(legacy_snapshot)
+        for person_id, (assurance, _subjects) in formal_people.items():
+            self.coordinator.register_identity(person_id, assurance=assurance)
+        identity_baselines = self._seed_identity_baselines(legacy_snapshot, formal_people)
         users_by_person: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
         pending = 0
         for legacy_key, raw_user in users.items():
@@ -220,14 +306,20 @@ class MigrationBackfill:
                 pending += 1
                 continue
             score = _score(user.get("relationship_score", 0))
-            if score is None:
-                self._pending(legacy_key, "relationship_score_invalid", scope)
+            runtime = _runtime(user)
+            if score is None or runtime is None:
+                self._pending(
+                    legacy_key,
+                    "relationship_score_invalid" if score is None else "relationship_runtime_invalid",
+                    scope,
+                )
                 pending += 1
                 continue
             role = "owner" if str(user.get("relationship_role") or "").strip().lower() == "owner" else "friend"
             raw_mode = str(user.get("relationship_mode") or "normal").strip().lower()
             mode = "owner_exclusive" if role == "owner" and raw_mode == "owner_exclusive" else "normal"
             cap = _token(user.get("relationship_positive_stage_cap_key"), 40) or "deeply_bonded"
+            daily_totals, last_effective_at = runtime
             context = NamespaceContext(
                 kind="private",
                 identity_id=person_id,
@@ -237,7 +329,6 @@ class MigrationBackfill:
                 policy_version=self.policy_version,
                 migration_epoch=self.migration_epoch,
             )
-            self.coordinator.register_identity(person_id, assurance=assurance)
             try:
                 self.relationships.account(context)
                 existed = True
@@ -255,6 +346,8 @@ class MigrationBackfill:
                     relationship_mode=mode,
                     score=score,
                     positive_stage_cap_key=cap,
+                    daily_totals=daily_totals,
+                    last_effective_at=last_effective_at,
                     legacy_snapshot=True,
                 )
                 if existed:
@@ -284,6 +377,7 @@ class MigrationBackfill:
             "conflicts": conflicts,
             "formal_identities": len(formal_people),
             "legacy_users": len(users),
+            "identity_baselines": identity_baselines,
         }
 
 

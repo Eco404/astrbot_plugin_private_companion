@@ -5,6 +5,7 @@ import asyncio
 import copy
 from copy import deepcopy
 import hashlib
+import math
 from pathlib import Path
 import tempfile
 import types
@@ -15,6 +16,8 @@ from migration_coordinator import MigrationCoordinator
 from migration_backfill import MigrationBackfill
 from migration_dual_write import MigrationDualWriteProducer
 from migration_outbox import MigrationOutbox
+from migration_replay import MigrationReplayWorker
+from relationship_ledger import normalize_relationship_positive_stage_cap_key
 from unified_person_registry import UnifiedPersonRegistry
 
 
@@ -35,8 +38,12 @@ def _load_methods(*names: str) -> dict[str, Any]:
         "asyncio": asyncio,
         "deepcopy": deepcopy,
         "hashlib": hashlib,
+        "math": math,
         "MigrationBackfill": MigrationBackfill,
         "MigrationDualWriteProducer": MigrationDualWriteProducer,
+        "MigrationReplayWorker": MigrationReplayWorker,
+        "UnifiedPersonRegistry": UnifiedPersonRegistry,
+        "normalize_relationship_positive_stage_cap_key": normalize_relationship_positive_stage_cap_key,
         "_single_line": lambda value, limit=240: " ".join(str(value or "").split())[:limit],
         "logger": types.SimpleNamespace(warning=lambda *_args, **_kwargs: None),
     }
@@ -47,6 +54,11 @@ def _load_methods(*names: str) -> dict[str, Any]:
 METHODS = _load_methods(
     "_req041_migration_source_files",
     "_req041_compatibility_snapshot",
+    "_req041_registry_for_person",
+    "_req041_legacy_relationship_state",
+    "_req041_schedule_replay",
+    "_req041_replay_finished",
+    "_req041_run_replay_batch",
     "_req041_initialize_automatic_migration",
 )
 
@@ -54,6 +66,11 @@ METHODS = _load_methods(
 class Harness:
     _req041_migration_source_files = METHODS["_req041_migration_source_files"]
     _req041_compatibility_snapshot = METHODS["_req041_compatibility_snapshot"]
+    _req041_registry_for_person = METHODS["_req041_registry_for_person"]
+    _req041_legacy_relationship_state = METHODS["_req041_legacy_relationship_state"]
+    _req041_schedule_replay = METHODS["_req041_schedule_replay"]
+    _req041_replay_finished = METHODS["_req041_replay_finished"]
+    _req041_run_replay_batch = METHODS["_req041_run_replay_batch"]
     _req041_initialize_automatic_migration = METHODS["_req041_initialize_automatic_migration"]
 
 
@@ -76,6 +93,9 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
             Path(host.data_file).write_text('{"users":{"u1":{}}}', encoding="utf-8")
         host._data_lock = asyncio.Lock()
         host.data = {"users": {}}
+        host._data_default = host.data
+        host._persona_data_profiles = {}
+        host._active_unified_person_registry = lambda: UnifiedPersonRegistry(host.data)
         host.plugin_identity = {"version": "6.1.1"}
         host.req041_migration_coordinator = MigrationCoordinator(self.data_dir)
         host.req041_migration_outbox = MigrationOutbox(self.data_dir / "req041_migration_outbox.db")
@@ -114,7 +134,7 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         host = self._host()
         await host._req041_initialize_automatic_migration()
         status = host.req041_migration_coordinator.status()
-        self.assertEqual("S4", status["phase"])
+        self.assertEqual("S5", status["phase"])
         self.assertTrue(host.req041_migration_coordinator.verify_backup())
         self.assertEqual("active", host.req041_migration_status["state"])
         self.assertTrue(host.req041_migration_status["memory_bound"])
@@ -131,13 +151,13 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         host = self._host(bind=False)
         await host._req041_initialize_automatic_migration()
         first = host.req041_migration_coordinator.status()
-        self.assertEqual("S4", first["phase"])
+        self.assertEqual("S5", first["phase"])
         self.assertEqual("degraded", host.req041_migration_status["state"])
         self.assertEqual("memory_bridge_unavailable", host.req041_migration_status["code"])
         await host._req041_initialize_automatic_migration()
         second = host.req041_migration_coordinator.status()
         self.assertEqual(first["migration_epoch"], second["migration_epoch"])
-        self.assertEqual("S4", second["phase"])
+        self.assertEqual("S5", second["phase"])
 
     async def test_paused_restart_keeps_durable_dual_write_capture_available(self) -> None:
         first_host = self._host()
@@ -180,11 +200,59 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
                 migration_epoch=host.req041_migration_coordinator.status()["migration_epoch"],
             )
         )
-        self.assertEqual("S4", host.req041_migration_status["phase"])
+        self.assertEqual("S5", host.req041_migration_status["phase"])
         self.assertEqual(1, host.req041_migration_status["s4"]["migrated"])
         self.assertEqual("owner", account["relationship_role"])
         self.assertEqual("normal", account["relationship_mode"])
         self.assertEqual(88, account["relationship_score"])
+        self.assertEqual(
+            1,
+            host.req041_migration_coordinator.identity_status(person["person_id"])["stable_cycles"],
+        )
+
+    async def test_live_dual_write_schedules_and_drains_s5_replay(self) -> None:
+        host = self._host()
+        registry = UnifiedPersonRegistry(host.data)
+        identity = {
+            "companion_instance_id": "astrbot_plugin_private_companion",
+            "bot_account_id": "onebot:bot-1",
+            "adapter_instance_id": "onebot:default",
+            "subject_namespace": "onebot:user",
+            "platform_subject_id": "10001",
+        }
+        person = registry.create_or_link(identity, operation_id="live-fixture")
+        user = {
+            "user_id": "10001", "unified_person_id": person["person_id"],
+            "relationship_role": "friend", "relationship_mode": "normal",
+            "relationship_score": 10, "relationship_positive_stage_cap_key": "close",
+            "relationship_daily_totals": {"day": "2026-08-10", "positive": 0, "negative": 0},
+            "relationship_last_effective_at": 1_700_000_000,
+        }
+        host.data["users"] = {"10001": user}
+        await host._req041_initialize_automatic_migration()
+        user.update({
+            "relationship_score": 12,
+            "relationship_daily_totals": {"day": "2026-08-10", "positive": 2, "negative": 0},
+        })
+        emitted = host.req041_dual_write_producer.emit_relationship(
+            registry=registry, user=user, requested_delta=2, reason_code="inbound",
+            source_revision=1,
+            result={
+                "changed": True, "delta": 2,
+                "entry": {"event_key": "f" * 24, "score_before": 10, "score_after": 12},
+            },
+        )
+        task = host._req041_replay_task
+        self.assertEqual("enqueued", emitted["status"])
+        self.assertIsInstance(task, asyncio.Task)
+        await asyncio.wait_for(task, timeout=2.0)
+        context = __import__("identity_namespace").NamespaceContext(
+            kind="private", identity_id=person["person_id"], group_id="",
+            assurance="verified", profile_status="active", policy_version="req041-v1",
+            migration_epoch=host.req041_migration_coordinator.status()["migration_epoch"],
+        )
+        self.assertEqual(12, host.req041_relationship_store.account(context)["relationship_score"])
+        self.assertEqual([], host.req041_migration_outbox.pending(context.migration_epoch))
 
     async def test_external_sqlite_path_fails_safe_without_blocking_legacy_runtime(self) -> None:
         outside = Path(tempfile.mkdtemp())

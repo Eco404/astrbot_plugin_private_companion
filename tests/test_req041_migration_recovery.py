@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
@@ -93,6 +94,40 @@ class MigrationOutboxTests(unittest.TestCase):
         self.assertEqual("failed", item.state)
         self.assertEqual(1, item.retry_count)
         self.assertEqual("target_timeout", item.error_code)
+
+    def test_applied_event_cannot_be_reopened_or_change_target_revision(self) -> None:
+        self._enqueue()
+        self.outbox.mark_applied("event-1", EPOCH, target_revision=3)
+        with self.assertRaisesRegex(OutboxError, "outbox_event_missing"):
+            self.outbox.mark_failed("event-1", EPOCH, error_code="late_failure")
+        self.outbox.mark_applied("event-1", EPOCH, target_revision=3)
+        with self.assertRaisesRegex(OutboxConflict, "outbox_target_revision_conflict"):
+            self.outbox.mark_applied("event-1", EPOCH, target_revision=4)
+        self.assertEqual([], self.outbox.pending(EPOCH))
+
+    def test_existing_outbox_schema_is_upgraded_with_stream_key(self) -> None:
+        legacy_path = Path(self.tmp.name) / "legacy-outbox.sqlite3"
+        connection = sqlite3.connect(legacy_path)
+        try:
+            connection.execute(
+                """CREATE TABLE outbox(
+                    event_id TEXT NOT NULL,migration_epoch TEXT NOT NULL,source_revision INTEGER NOT NULL,
+                    namespace_json TEXT NOT NULL,namespace_scope TEXT NOT NULL,policy_version TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,payload_hash TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',
+                    retry_count INTEGER NOT NULL DEFAULT 0,error_code TEXT NOT NULL DEFAULT '',
+                    target_revision INTEGER NOT NULL DEFAULT 0,created_at REAL NOT NULL,updated_at REAL NOT NULL,
+                    PRIMARY KEY(event_id,migration_epoch))"""
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        MigrationOutbox(legacy_path)
+        reopened = sqlite3.connect(legacy_path)
+        try:
+            columns = {row[1] for row in reopened.execute("PRAGMA table_info(outbox)")}
+        finally:
+            reopened.close()
+        self.assertIn("stream_key", columns)
 
     def test_revision_sequence_rejects_gap_and_accepts_duplicate(self) -> None:
         self.assertEqual("advanced", self.outbox.advance_revision("identity:person-a", EPOCH, expected=0, target=1))
