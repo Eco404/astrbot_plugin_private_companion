@@ -50,6 +50,19 @@ class ScopedDomainContractTests(unittest.TestCase):
         )
         validate_scoped_domain_payload(_context("persona_global", identity=""), "rule", approved)
 
+    def test_rejected_and_revoked_rules_remain_auditable_but_require_admin_for_global(self) -> None:
+        for state in ("rejected", "revoked"):
+            private = build_scoped_domain_payload(
+                domain="learning", source_kind="private", content={"rule_id": "opaque"},
+                source_revision=3, approval_state=state, approved_by="administrator",
+            )
+            validate_scoped_domain_payload(_context("private"), "rule", private)
+            global_rule = build_scoped_domain_payload(
+                domain="learning", source_kind="persona_global", content={"rule_id": "opaque"},
+                source_revision=3, approval_state=state, approved_by="administrator",
+            )
+            validate_scoped_domain_payload(_context("persona_global", identity=""), "rule", global_rule)
+
 
 if __name__ == "__main__":
     unittest.main()

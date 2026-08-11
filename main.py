@@ -152,7 +152,7 @@ from .migration_dual_write import MigrationDualWriteProducer
 from .migration_replay import MigrationReplayWorker
 from .migration_read_router import MigrationRelationshipReadRouter
 from .migration_source_inspector import inspect_migration_sources
-from .identity_namespace import NamespaceContext
+from .identity_namespace import AssurancePolicy, NamespaceContext
 from .migration_scoped_projection import (
     ScopedProjectionSynchronizer,
     scoped_group_ref,
@@ -4610,6 +4610,27 @@ class PrivateCompanionPlugin(
             migration_epoch=synchronizer.migration_epoch,
         )
         return context if not context.errors() else None
+
+    def _req041_scoped_group_context(
+        self,
+        group_id: str,
+        *,
+        purpose: str = "rule_write",
+    ) -> NamespaceContext | None:
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        raw_group = _single_line(group_id, 160)
+        if synchronizer is None or not raw_group:
+            return None
+        persona_id = scoped_persona_ref(self._active_persona_scope())
+        context = NamespaceContext(
+            kind="group_shared", persona_id=persona_id, identity_id="",
+            group_id=scoped_group_ref(persona_id, raw_group), assurance="verified",
+            profile_status="active", policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        policy = AssurancePolicy()
+        decision = policy.authorize(context, purpose)
+        return context if decision.allowed and not context.errors() else None
 
     def _req041_erase_scoped_group_data(
         self,

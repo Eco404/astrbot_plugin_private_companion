@@ -9,6 +9,11 @@ import threading
 from typing import Any, Callable
 
 from identity_namespace import NamespaceContext
+from expression_scope_ownership import (
+    ExpressionScopeError,
+    bind_expression_item,
+    bind_expression_profile,
+)
 from scoped_domain_contract import build_scoped_domain_payload
 from unified_person_registry import UnifiedPersonRegistry
 
@@ -191,6 +196,8 @@ class ScopedProjectionSynchronizer:
         domain: str,
         content: Any,
         approval_state: str = "not_applicable",
+        source_revision: int = 0,
+        approved_by: str = "",
     ) -> ScopedProjectionRecord:
         return ScopedProjectionRecord(
             context=context,
@@ -198,33 +205,109 @@ class ScopedProjectionSynchronizer:
             record_id=record_id,
             payload=build_scoped_domain_payload(
                 domain=domain, source_kind=context.kind, content=_bounded(content),
-                approval_state=approval_state,
+                approval_state=approval_state, source_revision=source_revision,
+                approved_by=approved_by,
             ),
         )
+
+    @staticmethod
+    def _bound_expression_items(
+        items: Any,
+        context: NamespaceContext,
+        *,
+        approval_state: str,
+        default_approved_by: str = "",
+    ) -> list[dict[str, Any]]:
+        if not isinstance(items, list):
+            return []
+        result: list[dict[str, Any]] = []
+        for raw in items:
+            item = raw if isinstance(raw, dict) else {"legacy_value": deepcopy(raw)}
+            existing = item.get("scope_binding") if isinstance(item.get("scope_binding"), dict) else {}
+            approved_by = str(existing.get("approved_by") or default_approved_by)
+            try:
+                result.append(bind_expression_item(
+                    item, context, approval_state=approval_state, approved_by=approved_by,
+                ))
+            except (ExpressionScopeError, TypeError, ValueError):
+                # A pre-existing cross-scope or malformed binding is never repaired by guessing.
+                continue
+        return result
 
     def _learning_records(
         self, context: NamespaceContext, profile: Any, *, prefix: str
     ) -> list[ScopedProjectionRecord]:
         if not isinstance(profile, dict):
             return []
+        try:
+            bound_profile = bind_expression_profile(profile, context)
+        except (ExpressionScopeError, TypeError, ValueError):
+            return []
+        source_revision = int(bound_profile.get("scope_revision") or 1)
         result: list[ScopedProjectionRecord] = []
         approved = profile.get("learned_rules") if isinstance(profile.get("learned_rules"), list) else []
         pending = profile.get("pending_rules") if isinstance(profile.get("pending_rules"), list) else []
-        evidence = {key: deepcopy(profile[key]) for key in _RULE_EVIDENCE_FIELDS if _present(profile.get(key))}
+        rejected = profile.get("rejected_rules") if isinstance(profile.get("rejected_rules"), list) else []
+        revoked = profile.get("revoked_rules") if isinstance(profile.get("revoked_rules"), list) else []
+        approved = self._bound_expression_items(
+            approved, context, approval_state="approved", default_approved_by="legacy_migration",
+        )
+        approved_actors = {
+            str(item.get("scope_binding", {}).get("approved_by") or "")
+            for item in approved if isinstance(item.get("scope_binding"), dict)
+        }
+        envelope_approved_by = next(iter(approved_actors)) if len(approved_actors) == 1 else "multiple_approvers"
+        pending = self._bound_expression_items(pending, context, approval_state="pending")
+        rejected = self._bound_expression_items(
+            rejected, context, approval_state="rejected", default_approved_by="administrator",
+        )
+        revoked = self._bound_expression_items(
+            revoked, context, approval_state="revoked", default_approved_by="administrator",
+        )
+        evidence: dict[str, Any] = {
+            "scope_revision": source_revision,
+            "scope_ownership": deepcopy(bound_profile["scope_ownership"]),
+        }
+        for key in _RULE_EVIDENCE_FIELDS:
+            value = profile.get(key)
+            if not _present(value):
+                continue
+            if key in {"samples", "pending_samples", "expression_rules"} and isinstance(value, list):
+                state = "approved" if key == "samples" else "pending"
+                value = self._bound_expression_items(
+                    value, context, approval_state=state,
+                    default_approved_by="legacy_migration" if state == "approved" else "",
+                )
+            if _present(value):
+                evidence[key] = deepcopy(value)
         if approved:
             result.append(self._record(
                 context, record_kind="rule", record_id=f"{prefix}-rule-approved", domain="learning",
                 content={"rules": approved}, approval_state="approved",
+                source_revision=source_revision, approved_by=envelope_approved_by,
             ))
         if pending:
             result.append(self._record(
                 context, record_kind="rule", record_id=f"{prefix}-rule-pending", domain="learning",
                 content={"rules": pending}, approval_state="pending",
+                source_revision=source_revision,
+            ))
+        if rejected:
+            result.append(self._record(
+                context, record_kind="rule", record_id=f"{prefix}-rule-rejected", domain="learning",
+                content={"rules": rejected}, approval_state="rejected",
+                source_revision=source_revision, approved_by="administrator",
+            ))
+        if revoked:
+            result.append(self._record(
+                context, record_kind="rule", record_id=f"{prefix}-rule-revoked", domain="learning",
+                content={"rules": revoked}, approval_state="revoked",
+                source_revision=source_revision, approved_by="administrator",
             ))
         if evidence:
             result.append(self._record(
                 context, record_kind="evidence", record_id=f"{prefix}-rule-evidence", domain="learning",
-                content=evidence, approval_state="pending",
+                content=evidence, approval_state="pending", source_revision=source_revision,
             ))
         return result
 

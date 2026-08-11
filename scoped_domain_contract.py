@@ -10,7 +10,7 @@ from typing import Any
 SCHEMA_VERSION = "req041.scoped-domain.v1"
 DOMAINS = frozenset({"profile", "memory", "learning"})
 SOURCE_KINDS = frozenset({"private", "group_member", "group_shared", "persona_global"})
-APPROVAL_STATES = frozenset({"not_applicable", "pending", "approved", "rejected"})
+APPROVAL_STATES = frozenset({"not_applicable", "pending", "approved", "rejected", "revoked"})
 DOMAIN_RECORD_KINDS = {
     "profile": frozenset({"profile_fact"}),
     "memory": frozenset({"memory", "summary"}),
@@ -120,9 +120,11 @@ def validate_scoped_domain_payload(
     if domain != "learning" and approval != "not_applicable":
         raise ScopedDomainContractError("scoped_domain_approval_invalid")
     if domain == "learning":
-        if record_kind == "rule" and approval not in {"pending", "approved", "rejected"}:
+        if record_kind == "rule" and approval not in {"pending", "approved", "rejected", "revoked"}:
             raise ScopedDomainContractError("scoped_rule_approval_required")
-        if kind == "persona_global" and (approval != "approved" or approved_by != "administrator"):
+        if kind == "persona_global" and (
+            approval not in {"approved", "rejected", "revoked"} or approved_by != "administrator"
+        ):
             raise ScopedDomainContractError("persona_global_rule_approval_required")
 
 

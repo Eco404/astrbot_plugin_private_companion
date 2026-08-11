@@ -142,6 +142,16 @@ class LearningPageUiTests(unittest.TestCase):
         self.assertIn("支持片段", self.script)
         self.assertIn("与人格/事实边界冲突，不会自动使用", self.script)
 
+    def test_expression_mutations_carry_profile_and_item_revisions(self) -> None:
+        self.assertIn("data-expression-scope-revision", self.script)
+        self.assertIn("data-expression-item-revisions", self.script)
+        self.assertIn("expected_scope_revision", self.script)
+        self.assertIn("expected_item_revisions", self.script)
+        self.assertIn("rule?.item_revisions || {}", self.script)
+        self.assertIn('JSON.parse(button.dataset.expressionItemRevisions || "{}")', self.script)
+        self.assertIn("state.expressionImportPreview?.target_scope_revision", self.script)
+        self.assertIn("state.expressionImportPreview?.preview_signature", self.script)
+
     def test_expression_library_supports_share_and_import_workflow(self) -> None:
         learning_panel = self.html.split('id="panel-learning"', 1)[1].split('id="panel-group"', 1)[0]
         self.assertIn('data-expression-share-open', self.script)

@@ -8,6 +8,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from expression_scope_ownership import runtime_binding_is_approved
+
 
 PRIVATE_FIELDS = frozenset({
     "nickname", "style", "profile_origin", "auto_profile_created",
@@ -103,7 +105,10 @@ def scoped_approved_expression_rules(context_owner: Any) -> list[dict[str, Any]]
     rules = profile.get("learned_rules")
     if not isinstance(rules, list):
         return []
-    return [deepcopy(item) for item in rules if isinstance(item, dict)]
+    return [
+        deepcopy(item) for item in rules
+        if isinstance(item, dict) and runtime_binding_is_approved(item.get("scope_binding"))
+    ]
 
 
 __all__ = [

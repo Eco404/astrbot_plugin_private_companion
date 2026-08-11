@@ -105,6 +105,10 @@ from .dreaming import (
 )
 from .helpers import _date_key, _normalize_photo_subject_owner, _now_ts, _photo_subject_owner_prompt_label, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
 from .relationship_policy import relationship_stage_for_score
+from .expression_scope_ownership import (
+    bind_expression_item,
+    bind_expression_profile,
+)
 from .scoped_runtime_view import scoped_approved_expression_rules
 from .companion_interaction_expression import (
     build_expression_decision,
@@ -1295,6 +1299,9 @@ class UserMemoryMixin:
             return
         if self._should_skip_expression_sample(cleaned):
             return
+        managed, scope_context = self._expression_formal_scope_for_owner(user, source_kind="private")
+        if managed and scope_context is None:
+            return
         profile = user.setdefault("expression_profile", {})
         if not isinstance(profile, dict):
             profile = {}
@@ -1334,20 +1341,38 @@ class UserMemoryMixin:
         samples = [item for item in samples if _safe_float(item.get("ts"), now) >= cutoff]
         profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         sample = self._expression_sample_from_text(cleaned, now)
+        if scope_context is not None:
+            pending_review = self._expression_manual_review_enabled()
+            sample = bind_expression_item(
+                sample, scope_context,
+                approval_state="pending" if pending_review else "approved",
+                approved_by="" if pending_review else "automatic_policy",
+            )
         if self._expression_manual_review_enabled():
             profile["samples"] = samples[: self.max_learned_expression_items]
             self._queue_expression_pending_sample(profile, sample, cleaned)
             self._refresh_expression_profile_legacy_summary(profile)
+            if scope_context is not None:
+                user["expression_profile"] = self._expression_bind_profile_scope(
+                    profile, scope_context, bump_revision=True,
+                )
             return
         samples.insert(0, sample)
         profile["samples"] = samples[: self.max_learned_expression_items]
         self._refresh_expression_profile_legacy_summary(profile)
+        if scope_context is not None:
+            user["expression_profile"] = self._expression_bind_profile_scope(
+                profile, scope_context, bump_revision=True,
+            )
 
     def _update_group_expression_profile_from_message(self, group: dict[str, Any], text: str) -> None:
         if not self.enable_expression_learning:
             return
         cleaned = _single_line(_strip_internal_message_blocks(text), self._expression_sample_max_chars())
         if not cleaned or self._should_skip_expression_sample(cleaned):
+            return
+        managed, scope_context = self._expression_formal_scope_for_owner(group, source_kind="group")
+        if managed and scope_context is None:
             return
         profile = group.setdefault("expression_profile", {})
         if not isinstance(profile, dict):
@@ -1360,10 +1385,18 @@ class UserMemoryMixin:
         for key in ("text", "phrase", "ending"):
             sample.pop(key, None)
         sample["evidence_count"] = 1
+        if scope_context is not None:
+            sample = bind_expression_item(
+                sample, scope_context, approval_state="approved", approved_by="automatic_policy",
+            )
         samples.insert(0, sample)
         profile["samples"] = samples
         profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         self._normalize_group_expression_profile(profile, now=now)
+        if scope_context is not None:
+            group["expression_profile"] = self._expression_bind_profile_scope(
+                profile, scope_context, bump_revision=True,
+            )
 
     @staticmethod
     def _expression_length_bucket(length: Any) -> str:
@@ -1457,6 +1490,24 @@ class UserMemoryMixin:
             return False
         before = profile.get("samples") if isinstance(profile.get("samples"), list) else []
         patterns = self._group_expression_pattern_samples(profile, now=now)
+        previous_by_id = {
+            _single_line(item.get("id"), 40): item
+            for item in before if isinstance(item, dict) and _single_line(item.get("id"), 40)
+        }
+        for pattern in patterns:
+            previous = previous_by_id.get(_single_line(pattern.get("id"), 40))
+            binding = previous.get("scope_binding") if isinstance(previous, dict) and isinstance(previous.get("scope_binding"), dict) else None
+            if binding is None:
+                continue
+            pattern["scope_binding"] = deepcopy(binding)
+            old_content = dict(previous)
+            old_content.pop("scope_binding", None)
+            new_content = dict(pattern)
+            new_content.pop("scope_binding", None)
+            if old_content != new_content:
+                pattern["scope_binding"]["revision"] = max(
+                    1, _safe_int(pattern["scope_binding"].get("revision"), 1, 1) + 1,
+                )
         changed = before != patterns
         profile["samples"] = patterns
         profile["pattern_count"] = len(patterns)
@@ -1953,6 +2004,8 @@ class UserMemoryMixin:
         target: dict[str, Any],
         incoming: dict[str, Any],
     ) -> None:
+        scope_before = dict(target)
+        scope_before.pop("scope_binding", None)
         for field, limit in (("keywords", 8), ("tags", 8), ("evidence_examples", 3), ("source_kinds", 8)):
             left_values = target.get(field) if isinstance(target.get(field), list) else []
             right_values = incoming.get(field) if isinstance(incoming.get(field), list) else []
@@ -2040,6 +2093,11 @@ class UserMemoryMixin:
                 source_refs.append(ref)
         if source_refs:
             target["source_refs"] = source_refs[:24]
+        scope_binding = target.get("scope_binding") if isinstance(target.get("scope_binding"), dict) else None
+        scope_after = dict(target)
+        scope_after.pop("scope_binding", None)
+        if scope_binding is not None and scope_before != scope_after:
+            scope_binding["revision"] = max(1, _safe_int(scope_binding.get("revision"), 1, 1) + 1)
 
     @staticmethod
     def _expression_rule_family_priority(items: list[dict[str, Any]]) -> tuple[int, int, int, float]:
@@ -2594,6 +2652,8 @@ class UserMemoryMixin:
                 by_semantic_key[semantic_key(old)] = old
                 changed = True
                 continue
+            scope_before = dict(old)
+            scope_before.pop("scope_binding", None)
             old["last_seen_ts"] = now
             incoming_family_key = _single_line(candidate.get("family_key"), 80).lower()
             if incoming_family_key and not _single_line(old.get("family_key"), 80):
@@ -2643,6 +2703,11 @@ class UserMemoryMixin:
                     _safe_int(old.get("evidence_count"), 0, 0),
                     _safe_int(candidate.get("evidence_count"), 0, 0),
                 )
+            scope_binding = old.get("scope_binding") if isinstance(old.get("scope_binding"), dict) else None
+            scope_after = dict(old)
+            scope_after.pop("scope_binding", None)
+            if scope_binding is not None and scope_before != scope_after:
+                scope_binding["revision"] = max(1, _safe_int(scope_binding.get("revision"), 1, 1) + 1)
             changed = True
         if self._deduplicate_expression_rule_families(existing):
             changed = True
@@ -2894,6 +2959,63 @@ class UserMemoryMixin:
         if mode not in {"light", "balanced", "aggressive"}:
             return "balanced"
         return mode
+
+    def _expression_formal_scope_for_owner(
+        self,
+        owner: dict[str, Any],
+        *,
+        source_kind: str,
+    ) -> tuple[bool, Any | None]:
+        """Return (scoped-managed, formal context); managed failures are fail-closed."""
+        managed = getattr(self, "req041_scoped_projection_sync", None) is not None
+        if not managed or not isinstance(owner, dict):
+            return managed, None
+        if source_kind == "private":
+            resolver = getattr(self, "_req041_scoped_context_for_user", None)
+            context = resolver(owner, kind="private", purpose="rule_write") if callable(resolver) else None
+        elif source_kind == "group":
+            resolver = getattr(self, "_req041_scoped_group_context", None)
+            group_id = _single_line(owner.get("group_id"), 160)
+            context = resolver(group_id, purpose="rule_write") if callable(resolver) and group_id else None
+        else:
+            context = None
+        return managed, context
+
+    def _expression_bind_profile_scope(
+        self,
+        profile: dict[str, Any],
+        context: Any,
+        *,
+        bump_revision: bool,
+    ) -> dict[str, Any]:
+        """Bind durable evidence/rules without repairing a mismatched existing owner."""
+        result = bind_expression_profile(profile, context, bump_revision=bump_revision)
+        collections = (
+            ("samples", "approved", "automatic_policy"),
+            ("pending_samples", "pending", ""),
+            ("expression_rules", "pending", ""),
+            ("pending_rules", "pending", ""),
+            ("learned_rules", "approved", "legacy_migration"),
+            ("rejected_samples", "rejected", "administrator"),
+            ("revoked_samples", "revoked", "administrator"),
+            ("rejected_rules", "rejected", "administrator"),
+            ("revoked_rules", "revoked", "administrator"),
+        )
+        for key, approval_state, default_actor in collections:
+            items = result.get(key)
+            if not isinstance(items, list):
+                continue
+            bound: list[Any] = []
+            for raw in items:
+                if not isinstance(raw, dict):
+                    raw = {"legacy_value": deepcopy(raw)}
+                existing = raw.get("scope_binding") if isinstance(raw.get("scope_binding"), dict) else {}
+                actor = _single_line(existing.get("approved_by"), 80) or default_actor
+                bound.append(bind_expression_item(
+                    raw, context, approval_state=approval_state, approved_by=actor,
+                ))
+            result[key] = bound
+        return result
 
     def _expression_sample_max_chars(self) -> int:
         return 180 if self._expression_learning_mode() == "aggressive" else 120
@@ -3339,10 +3461,28 @@ class UserMemoryMixin:
         ][:2]
         if not isinstance(user, dict) or (not local_rule and not selected_semantic_rules):
             return {}
+        current_channel = _single_line((context or {}).get("channel"), 24).lower()
+        source_kind = "group" if current_channel == "group" or user.get("group_id") else "private"
+        scope_managed, scope_context = self._expression_formal_scope_for_owner(
+            user, source_kind=source_kind,
+        )
+        if scope_managed and scope_context is None:
+            return {}
         profile = user.setdefault("expression_profile", {})
         if not isinstance(profile, dict):
             profile = {}
             user["expression_profile"] = profile
+        if scope_context is not None:
+            try:
+                profile = self._expression_bind_profile_scope(
+                    profile, scope_context, bump_revision=False,
+                )
+            except (TypeError, ValueError):
+                return {}
+            user["expression_profile"] = profile
+        scoped_changed: dict[int, tuple[dict[str, Any], Any]] = {}
+        if scope_context is not None:
+            scoped_changed[id(user)] = (user, scope_context)
         usage = profile.setdefault("usage", {})
         if not isinstance(usage, dict):
             usage = {}
@@ -3422,11 +3562,35 @@ class UserMemoryMixin:
                     source_rules = source_profile.get("learned_rules") if isinstance(source_profile, dict) else None
                     if not isinstance(source_rules, list):
                         continue
+                    source_scope_context = None
+                    if scope_managed:
+                        source_managed, source_scope_context = self._expression_formal_scope_for_owner(
+                            source_owner,
+                            source_kind="group" if ref["source_kind"] == "group" else "private",
+                        )
+                        if (
+                            not source_managed
+                            or source_scope_context is None
+                            or source_scope_context.cache_scope() != scope_context.cache_scope()
+                        ):
+                            continue
+                        try:
+                            source_profile = self._expression_bind_profile_scope(
+                                source_profile, source_scope_context, bump_revision=False,
+                            )
+                        except (TypeError, ValueError):
+                            continue
+                        source_owner["expression_profile"] = source_profile
+                        source_rules = source_profile.get("learned_rules")
+                        scoped_changed[id(source_owner)] = (source_owner, source_scope_context)
                     for source_rule in source_rules:
                         if not isinstance(source_rule, dict) or _single_line(source_rule.get("id"), 40) != ref["rule_id"]:
                             continue
                         source_rule["use_count"] = _safe_int(source_rule.get("use_count"), 0, 0) + 1
                         source_rule["last_used_ts"] = now
+                        binding = source_rule.get("scope_binding") if isinstance(source_rule.get("scope_binding"), dict) else None
+                        if binding is not None:
+                            binding["revision"] = max(1, _safe_int(binding.get("revision"), 1, 1) + 1)
                         break
                 if compact_refs:
                     feedback_rules.append(
@@ -3445,6 +3609,12 @@ class UserMemoryMixin:
                     "rules": feedback_rules,
                 }
         profile["last_injected_at"] = last["at"]
+        for changed_owner, changed_context in scoped_changed.values():
+            changed_profile = changed_owner.get("expression_profile")
+            if isinstance(changed_profile, dict):
+                changed_owner["expression_profile"] = self._expression_bind_profile_scope(
+                    changed_profile, changed_context, bump_revision=True,
+                )
         return last
 
     def _record_staged_expression_rule_injection(
@@ -3511,12 +3681,34 @@ class UserMemoryMixin:
         pending = profile.get("pending_semantic_feedback") if isinstance(profile, dict) else None
         if not isinstance(pending, dict) or not pending:
             return {}
+        current_channel = _single_line(channel, 24).lower()
+        source_kind = "group" if current_channel == "group" or owner.get("group_id") else "private"
+        scope_managed, scope_context = self._expression_formal_scope_for_owner(
+            owner, source_kind=source_kind,
+        )
+        if scope_managed and scope_context is None:
+            return {}
+        if scope_context is not None:
+            try:
+                profile = self._expression_bind_profile_scope(
+                    profile, scope_context, bump_revision=False,
+                )
+            except (TypeError, ValueError):
+                return {}
+            owner["expression_profile"] = profile
+            pending = profile.get("pending_semantic_feedback")
+        scoped_changed: dict[int, tuple[dict[str, Any], Any]] = {}
+        if scope_context is not None:
+            scoped_changed[id(owner)] = (owner, scope_context)
         now = _now_ts()
         if now - _safe_float(pending.get("ts"), 0.0) > 10 * 60:
             profile.pop("pending_semantic_feedback", None)
+            if scope_context is not None:
+                owner["expression_profile"] = self._expression_bind_profile_scope(
+                    profile, scope_context, bump_revision=True,
+                )
             return {}
         pending_channel = _single_line(pending.get("channel"), 24).lower()
-        current_channel = _single_line(channel, 24).lower()
         if pending_channel == "group" and current_channel != "group":
             return {}
         if pending_channel in {"private", "proactive"} and current_channel != "private":
@@ -3528,6 +3720,10 @@ class UserMemoryMixin:
         if not signal:
             if _safe_int(pending.get("seen_after"), 0, 0) >= max_unmatched:
                 profile.pop("pending_semantic_feedback", None)
+            if scope_context is not None:
+                owner["expression_profile"] = self._expression_bind_profile_scope(
+                    profile, scope_context, bump_revision=True,
+                )
             return {}
 
         feedback_field = "positive_feedback" if signal == "positive" else "negative_feedback"
@@ -3555,6 +3751,27 @@ class UserMemoryMixin:
                 learned_rules = source_profile.get("learned_rules") if isinstance(source_profile, dict) else None
                 if not isinstance(learned_rules, list):
                     continue
+                source_scope_context = None
+                if scope_managed:
+                    source_managed, source_scope_context = self._expression_formal_scope_for_owner(
+                        source_owner,
+                        source_kind="group" if source_kind == "group" else "private",
+                    )
+                    if (
+                        not source_managed
+                        or source_scope_context is None
+                        or source_scope_context.cache_scope() != scope_context.cache_scope()
+                    ):
+                        continue
+                    try:
+                        source_profile = self._expression_bind_profile_scope(
+                            source_profile, source_scope_context, bump_revision=False,
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    source_owner["expression_profile"] = source_profile
+                    learned_rules = source_profile.get("learned_rules")
+                    scoped_changed[id(source_owner)] = (source_owner, source_scope_context)
                 for index, source_rule in enumerate(list(learned_rules)):
                     if not isinstance(source_rule, dict) or _single_line(source_rule.get("id"), 40) != rule_id:
                         continue
@@ -3572,6 +3789,11 @@ class UserMemoryMixin:
                         needs_review["review_status"] = "needs_review"
                         needs_review["review_reason"] = "连续收到 2 次明确负向表达反馈，已自动停用"
                         needs_review["reviewed_back_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        if source_scope_context is not None:
+                            needs_review = bind_expression_item(
+                                needs_review, source_scope_context,
+                                approval_state="pending", bump_revision=True,
+                            )
                         learned_rules.pop(index)
                         pending_rules = source_profile.get("pending_rules") if isinstance(source_profile.get("pending_rules"), list) else []
                         pending_rules = [
@@ -3583,6 +3805,10 @@ class UserMemoryMixin:
                         source_profile["learned_rules"] = learned_rules
                         source_profile["pending_rules"] = pending_rules[: self.max_learned_expression_items]
                         demoted += 1
+                    elif source_scope_context is not None:
+                        binding = source_rule.get("scope_binding") if isinstance(source_rule.get("scope_binding"), dict) else None
+                        if binding is not None:
+                            binding["revision"] = max(1, _safe_int(binding.get("revision"), 1, 1) + 1)
                     source_profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                     break
 
@@ -3598,6 +3824,12 @@ class UserMemoryMixin:
                 "demoted_rules": demoted,
             }
         profile.pop("pending_semantic_feedback", None)
+        for changed_owner, changed_context in scoped_changed.values():
+            changed_profile = changed_owner.get("expression_profile")
+            if isinstance(changed_profile, dict):
+                changed_owner["expression_profile"] = self._expression_bind_profile_scope(
+                    changed_profile, changed_context, bump_revision=True,
+                )
         if updated:
             self._refresh_expression_voice_profile()
         return {"signal": signal, "updated_rules": updated, "demoted_rules": demoted}
@@ -8264,10 +8496,14 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         if not raw_text or len(raw_text) < 80:
             return
         user_utterances, _ = self._expression_rule_source_parts(raw_text, source_kind="private")
+        expression_scope_managed, expression_scope_context = self._expression_formal_scope_for_owner(
+            user, source_kind="private",
+        )
         learn_expression_rules = bool(
             getattr(self, "enable_expression_learning", False)
             and len(user_utterances) >= 5
             and self._expression_private_learning_source_enabled(user, user_id)
+            and (not expression_scope_managed or expression_scope_context is not None)
         )
         expression_rule_task = ""
         expression_rule_schema = ""
@@ -8436,10 +8672,21 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                     )
                 del current_loops[:-12]
             if expression_rules:
+                current_scope_managed, current_scope_context = self._expression_formal_scope_for_owner(
+                    current, source_kind="private",
+                )
+                if current_scope_managed and current_scope_context is None:
+                    expression_rules = []
+            if expression_rules:
                 expression_profile = current.setdefault("expression_profile", {})
                 if not isinstance(expression_profile, dict):
                     expression_profile = {}
                     current["expression_profile"] = expression_profile
+                if current_scope_context is not None:
+                    expression_rules = [
+                        bind_expression_item(item, current_scope_context, approval_state="pending")
+                        for item in expression_rules
+                    ]
                 self._merge_learned_expression_rules(
                     expression_profile,
                     expression_rules,
@@ -8448,6 +8695,10 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                     pending=True,
                 )
                 expression_profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                if current_scope_context is not None:
+                    current["expression_profile"] = self._expression_bind_profile_scope(
+                        expression_profile, current_scope_context, bump_revision=True,
+                    )
                 self._refresh_expression_voice_profile()
             current["episode_message_count"] = 0
             current["last_episode_refresh_at"] = now

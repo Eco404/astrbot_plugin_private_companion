@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import unittest
 import uuid
 
+from expression_scope_ownership import bind_expression_item
 from scoped_runtime_view import (
     overlay_group_runtime_view,
     overlay_private_runtime_view,
@@ -14,6 +15,18 @@ from scoped_runtime_view import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _approved_rule(rule_id: str, evidence_count: int = 1) -> dict:
+    context = SimpleNamespace(
+        kind="private", persona_id="default", identity_id="person-a", group_id="",
+        assurance="verified", profile_status="active", policy_version="req041-v1",
+        migration_epoch="epoch-a", errors=lambda: [],
+    )
+    return bind_expression_item(
+        {"id": rule_id, "evidence_count": evidence_count}, context,
+        approval_state="approved", approved_by="administrator",
+    )
 
 
 def _method_from(path: Path, class_name: str, method_name: str, globals_map: dict):
@@ -108,11 +121,23 @@ class ScopedRuntimeViewTests(unittest.TestCase):
         rules = scoped_approved_expression_rules({
             "req041_scoped_read_generation": "new",
             "expression_profile": {
-                "learned_rules": [{"id": "private-a"}],
+                "learned_rules": [_approved_rule("private-a")],
                 "pending_rules": [{"id": "pending-must-not-enter"}],
             },
         })
-        self.assertEqual([{"id": "private-a"}], rules)
+        self.assertEqual(["private-a"], [item["id"] for item in rules])
+
+    def test_scoped_rule_missing_or_forged_binding_is_not_selected(self) -> None:
+        approved = _approved_rule("approved")
+        forged = _approved_rule("forged")
+        forged["scope_binding"]["application_namespace"] = "namespace-" + "0" * 64
+        rules = scoped_approved_expression_rules({
+            "req041_scoped_read_generation": "new",
+            "expression_profile": {"learned_rules": [
+                {"id": "legacy-unbound"}, approved, forged,
+            ]},
+        })
+        self.assertEqual(["approved"], [item["id"] for item in rules])
 
 
 class _ExpressionHarness:
@@ -165,7 +190,7 @@ class ScopedLearningSelectionTests(unittest.TestCase):
             context_owner={
                 "req041_scoped_read_generation": "new",
                 "expression_profile": {
-                    "learned_rules": [{"id": "private-a", "evidence_count": 2}],
+                    "learned_rules": [_approved_rule("private-a", 2)],
                     "pending_rules": [{"id": "pending-a", "evidence_count": 7}],
                 },
             },

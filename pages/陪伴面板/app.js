@@ -15816,6 +15816,8 @@ async function applyExpressionImport(button) {
       package: state.expressionImportPack,
       ...target,
       destination,
+      expected_scope_revision: Number(state.expressionImportPreview?.target_scope_revision || 0),
+      preview_signature: state.expressionImportPreview?.preview_signature || "",
     });
     state.expressionLibrary = result;
     state.expressionImportPack = null;
@@ -16098,6 +16100,8 @@ function renderExpressionReviewWorkspace() {
             source_type: rule?.source_type || "",
             source_id: rule?.source_id || "",
             rule_family_id: rule?.family_id || rule?.id || "",
+            expected_scope_revision: Number(rule?.scope_revision || 0),
+            expected_item_revisions: rule?.item_revisions || {},
           })),
         }),
         action === "batch_approve_rule_groups" ? `已批量通过 ${selected.length} 组表达` : `已批量拒绝 ${selected.length} 组表达`,
@@ -16246,7 +16250,7 @@ function expressionRuleGroupEditor(group, pending = false) {
   return `
     <details class="expression-rule-editor">
       <summary>编辑规则内容</summary>
-      <form data-expression-rule-editor data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" data-expression-rule-storage="${pending ? "pending" : "learned"}">
+      <form data-expression-rule-editor data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" data-expression-rule-storage="${pending ? "pending" : "learned"}" data-expression-scope-revision="${escapeHtml(group?.scope_revision || 0)}" data-expression-item-revisions="${escapeHtml(JSON.stringify(group?.item_revisions || {}))}">
         <div class="expression-rule-editor-basics">
           <label>
             <span>规则名称</span>
@@ -16285,6 +16289,7 @@ function expressionRuleGroupItem(ruleGroup, pending = false, evidenceOpen = fals
   const examples = Array.isArray(group?.evidence_examples) ? group.evidence_examples.filter(Boolean) : [];
   const signals = Array.isArray(group?.signals) ? group.signals.filter(Boolean) : [];
   const familyId = group?.family_id || group?.id || "";
+  const revisionAttrs = `data-expression-scope-revision="${escapeHtml(group?.scope_revision || 0)}" data-expression-item-revisions="${escapeHtml(JSON.stringify(group?.item_revisions || {}))}"`;
   const signalTags = signals.length ? `<div class="expression-rule-tags" aria-label="召回标签">${signals.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : "";
   const evidenceDetails = examples.length ? `
     <details class="expression-rule-evidence" ${evidenceOpen ? "open" : ""}>
@@ -16292,7 +16297,7 @@ function expressionRuleGroupItem(ruleGroup, pending = false, evidenceOpen = fals
       <div>${examples.map((item) => `<blockquote>${escapeHtml(item)}</blockquote>`).join("")}</div>
     </details>
   ` : "";
-  const deleteAction = `<div class="expression-rule-actions"><button type="button" class="danger-outline" data-expression-action="delete_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}">删除规则组</button></div>`;
+  const deleteAction = `<div class="expression-rule-actions"><button type="button" class="danger-outline" data-expression-action="delete_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" ${revisionAttrs}>删除规则组</button></div>`;
   return `
     <article class="expression-rule-item expression-rule-group-item ${pending ? "is-pending" : "is-approved"} ${needsReview ? "needs-review" : ""}">
       <div class="expression-rule-head">
@@ -16317,8 +16322,8 @@ function expressionRuleGroupItem(ruleGroup, pending = false, evidenceOpen = fals
         ${evidenceDetails}
         ${expressionRuleGroupEditor(group, true)}
         <div class="expression-rule-actions">
-          <button type="button" data-expression-action="approve_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}">${needsReview ? "重新通过整组" : "通过并启用整组"}</button>
-          <button type="button" class="danger-outline" data-expression-action="reject_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}">拒绝整组</button>
+          <button type="button" data-expression-action="approve_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" ${revisionAttrs}>${needsReview ? "重新通过整组" : "通过并启用整组"}</button>
+          <button type="button" class="danger-outline" data-expression-action="reject_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" ${revisionAttrs}>拒绝整组</button>
         </div>
       ` : `
         <details class="expression-rule-details">
@@ -16429,6 +16434,8 @@ function expressionSampleItem(item, index, pending) {
   const patternStatus = item?.source_type === "group"
     ? `<span class="badge ${item?.observation_status === "supported" ? "ok" : ""}">${item?.observation_status === "supported" ? "重复证据" : "单次观察"}</span>`
     : "";
+  const itemRevisions = item?.id ? { [item.id]: Number(item?.item_revision || 0) } : {};
+  const revisionAttrs = `data-expression-scope-revision="${escapeHtml(item?.scope_revision || 0)}" data-expression-item-revisions="${escapeHtml(JSON.stringify(itemRevisions))}"`;
   return `
     <article class="expression-observation-item ${pending ? "is-pending" : "is-archived"}">
       <div class="expression-observation-main">
@@ -16442,8 +16449,8 @@ function expressionSampleItem(item, index, pending) {
         ${expressionSourceBadge(item)}
       </div>
       <div class="expression-observation-actions">
-        ${pending ? `<button type="button" data-expression-action="approve" data-expression-source-type="${escapeHtml(item?.source_type || "private")}" data-expression-source-id="${escapeHtml(item?.source_id || "")}" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(sourceIndex)}">保留素材</button>` : ""}
-        <button type="button" class="danger-outline" data-expression-action="${pending ? "reject" : "delete_sample"}" data-expression-source-type="${escapeHtml(item?.source_type || "private")}" data-expression-source-id="${escapeHtml(item?.source_id || "")}" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(sourceIndex)}">删除</button>
+        ${pending ? `<button type="button" data-expression-action="approve" data-expression-source-type="${escapeHtml(item?.source_type || "private")}" data-expression-source-id="${escapeHtml(item?.source_id || "")}" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(sourceIndex)}" ${revisionAttrs}>保留素材</button>` : ""}
+        <button type="button" class="danger-outline" data-expression-action="${pending ? "reject" : "delete_sample"}" data-expression-source-type="${escapeHtml(item?.source_type || "private")}" data-expression-source-id="${escapeHtml(item?.source_id || "")}" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(sourceIndex)}" ${revisionAttrs}>删除</button>
       </div>
     </article>
   `;
@@ -16493,6 +16500,8 @@ function bindExpressionLibraryActions(library, root) {
           rule_id: button.dataset.expressionRuleId || "",
           rule_family_id: button.dataset.expressionRuleFamilyId || "",
           sample_index: Number(button.dataset.expressionSampleIndex || -1),
+          expected_scope_revision: Number(button.dataset.expressionScopeRevision || 0),
+          expected_item_revisions: JSON.parse(button.dataset.expressionItemRevisions || "{}"),
         },
         button,
         action === "approve" ? "已保留观察素材" : (
@@ -16528,6 +16537,8 @@ function bindExpressionLibraryActions(library, root) {
           avoid: String(data.get("avoid") || "").trim(),
           style_rule: component("style"),
           grammar_rule: component("grammar"),
+          expected_scope_revision: Number(form.dataset.expressionScopeRevision || 0),
+          expected_item_revisions: JSON.parse(form.dataset.expressionItemRevisions || "{}"),
         },
         submitButton,
         "已保存表达规则组",

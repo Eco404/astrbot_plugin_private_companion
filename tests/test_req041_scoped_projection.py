@@ -173,6 +173,25 @@ class ScopedProjectionTests(unittest.TestCase):
         self.assertNotEqual(default_records[0].context.persona_id, persona_records[0].context.persona_id)
         self.assertFalse(any(item.context.kind == "persona_global" for item in default_records + persona_records))
 
+    def test_rejected_and_revoked_rules_are_audited_but_never_projected_for_runtime(self) -> None:
+        profile = self.snapshot["users"]["10001"]["expression_profile"]
+        profile["rejected_rules"] = [{"id": "rejected", "style": "must-not-run"}]
+        profile["revoked_rules"] = [{"id": "revoked", "style": "must-not-run"}]
+        records, _ = self.sync.build_records(self.snapshot)
+        archived = [
+            item for item in records
+            if item.record_kind == "rule" and item.payload.get("approval_state") in {"rejected", "revoked"}
+        ]
+        self.assertEqual({"rejected", "revoked"}, {item.payload["approval_state"] for item in archived})
+        self.assertTrue(all(item.payload["source_revision"] >= 1 for item in archived))
+        self.assertTrue(self.sync.sync_snapshot(self.snapshot)["ok"])
+        private = next(item.context for item in records if item.context.kind == "private")
+        expression = self.sync.read_projection(private)["fields"]["expression_profile"]
+        self.assertEqual(["approved"], [item["id"] for item in expression["learned_rules"]])
+        self.assertEqual(["pending"], [item["id"] for item in expression["pending_rules"]])
+        self.assertNotIn("rejected_rules", expression)
+        self.assertNotIn("revoked_rules", expression)
+
     def test_persona_switch_reads_only_the_selected_ready_namespace(self) -> None:
         main_snapshot = deepcopy(self.snapshot)
         alt_snapshot = deepcopy(self.snapshot)
@@ -211,7 +230,14 @@ class ScopedProjectionTests(unittest.TestCase):
         private_view = self.sync.read_projection(private)
         self.assertTrue(private_view["ok"])
         self.assertEqual("private-name", private_view["fields"]["nickname"])
-        self.assertEqual("private-rule", private_view["fields"]["expression_profile"]["learned_rules"][0]["style"])
+        expression = private_view["fields"]["expression_profile"]
+        self.assertEqual("private-rule", expression["learned_rules"][0]["style"])
+        binding = expression["learned_rules"][0]["scope_binding"]
+        self.assertEqual("approved", binding["approval_state"])
+        self.assertEqual("legacy_migration", binding["approved_by"])
+        self.assertGreaterEqual(expression["scope_revision"], 1)
+        self.assertEqual("approved", expression["samples"][0]["scope_binding"]["approval_state"])
+        self.assertNotIn("10001", str(binding))
         observed = {
             context.group_id: self.sync.read_projection(context)["fields"]["recent_messages"][0]["text"]
             for context in group_contexts.values()
