@@ -12753,6 +12753,215 @@
           "enable_segmented_proactive_reply": true
         }
       },
+      "enable_segmented_proactive_chat_profiles": {
+        "description": "私聊和群聊独立配置",
+        "type": "bool",
+        "hint": "开启后，私聊和群聊分别使用各自的启用状态、作用范围、分段数量、合并发送和间隔参数；分段符、内容清理、内容替换及媒体组件位置仍共享。关闭时继续使用上方旧版会话范围和下方共享参数，升级后不会改变现有行为。",
+        "default": false,
+        "condition": {
+          "enable_segmented_proactive_reply": true
+        }
+      },
+      "segmented_proactive_private_enabled": {
+        "description": "私聊启用分段",
+        "type": "bool",
+        "default": true,
+        "condition": {
+          "enable_segmented_proactive_reply": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_private_scope": {
+        "description": "私聊分段作用范围",
+        "type": "string",
+        "options": ["proactive_only", "all_llm"],
+        "labels": ["仅插件主动", "全部纯文本回复"],
+        "default": "proactive_only",
+        "condition": {
+          "segmented_proactive_private_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_private_threshold": {
+        "description": "私聊不分段字数阈值",
+        "type": "int",
+        "slider": {"min": 20, "max": 1024, "step": 2},
+        "default": 500,
+        "condition": {
+          "segmented_proactive_private_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_private_min_segment_chars": {
+        "description": "私聊短片段合并阈值",
+        "type": "int",
+        "slider": {"min": 1, "max": 40, "step": 1},
+        "default": 8,
+        "condition": {
+          "segmented_proactive_private_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_private_max_segments": {
+        "description": "私聊最多分段数",
+        "type": "int",
+        "slider": {"min": 1, "max": 8, "step": 1},
+        "default": 3,
+        "condition": {
+          "segmented_proactive_private_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_private_send_as_forward": {
+        "description": "私聊分段后合并发送",
+        "type": "bool",
+        "default": false,
+        "condition": {
+          "segmented_proactive_private_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_private_interval_method": {
+        "description": "私聊分段间隔方式",
+        "type": "string",
+        "options": ["random", "log"],
+        "labels": ["随机", "按字数对数"],
+        "default": "log",
+        "condition": {
+          "segmented_proactive_private_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_private_interval_min": {
+        "description": "私聊最小间隔秒数",
+        "type": "float",
+        "default": 1.5,
+        "condition": {
+          "segmented_proactive_private_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true,
+          "segmented_proactive_private_interval_method": "random"
+        }
+      },
+      "segmented_proactive_private_interval_max": {
+        "description": "私聊最大间隔秒数",
+        "type": "float",
+        "default": 3.5,
+        "condition": {
+          "segmented_proactive_private_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true,
+          "segmented_proactive_private_interval_method": "random"
+        }
+      },
+      "segmented_proactive_private_log_base": {
+        "description": "私聊对数间隔底数",
+        "type": "float",
+        "default": 1.8,
+        "condition": {
+          "segmented_proactive_private_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true,
+          "segmented_proactive_private_interval_method": "log"
+        }
+      },
+      "segmented_proactive_group_enabled": {
+        "description": "群聊启用分段",
+        "type": "bool",
+        "default": true,
+        "condition": {
+          "enable_segmented_proactive_reply": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_group_scope": {
+        "description": "群聊分段作用范围",
+        "type": "string",
+        "options": ["proactive_only", "all_llm"],
+        "labels": ["仅插件主动", "全部纯文本回复"],
+        "default": "proactive_only",
+        "condition": {
+          "segmented_proactive_group_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_group_threshold": {
+        "description": "群聊不分段字数阈值",
+        "type": "int",
+        "slider": {"min": 20, "max": 1024, "step": 2},
+        "default": 500,
+        "condition": {
+          "segmented_proactive_group_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_group_min_segment_chars": {
+        "description": "群聊短片段合并阈值",
+        "type": "int",
+        "slider": {"min": 1, "max": 40, "step": 1},
+        "default": 8,
+        "condition": {
+          "segmented_proactive_group_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_group_max_segments": {
+        "description": "群聊最多分段数",
+        "type": "int",
+        "slider": {"min": 1, "max": 8, "step": 1},
+        "default": 3,
+        "condition": {
+          "segmented_proactive_group_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_group_send_as_forward": {
+        "description": "群聊分段后合并发送",
+        "type": "bool",
+        "default": false,
+        "condition": {
+          "segmented_proactive_group_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_group_interval_method": {
+        "description": "群聊分段间隔方式",
+        "type": "string",
+        "options": ["random", "log"],
+        "labels": ["随机", "按字数对数"],
+        "default": "log",
+        "condition": {
+          "segmented_proactive_group_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true
+        }
+      },
+      "segmented_proactive_group_interval_min": {
+        "description": "群聊最小间隔秒数",
+        "type": "float",
+        "default": 1.5,
+        "condition": {
+          "segmented_proactive_group_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true,
+          "segmented_proactive_group_interval_method": "random"
+        }
+      },
+      "segmented_proactive_group_interval_max": {
+        "description": "群聊最大间隔秒数",
+        "type": "float",
+        "default": 3.5,
+        "condition": {
+          "segmented_proactive_group_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true,
+          "segmented_proactive_group_interval_method": "random"
+        }
+      },
+      "segmented_proactive_group_log_base": {
+        "description": "群聊对数间隔底数",
+        "type": "float",
+        "default": 1.8,
+        "condition": {
+          "segmented_proactive_group_enabled": true,
+          "enable_segmented_proactive_chat_profiles": true,
+          "segmented_proactive_group_interval_method": "log"
+        }
+      },
       "segmented_proactive_threshold": {
         "description": "主动文本不分段字数阈值",
         "type": "int",

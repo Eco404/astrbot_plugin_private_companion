@@ -19422,7 +19422,12 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         event: Any | None = None,
         source: str = "",
     ) -> bool:
-        if not getattr(self, "segmented_proactive_send_as_forward", False):
+        send_as_forward = self._segmented_setting(
+            "send_as_forward",
+            chat_type=target_type,
+            default=False,
+        )
+        if not bool(send_as_forward):
             return False
         target_type = str(target_type or "").strip().lower()
         target_id = _single_line(target_id, 80)
@@ -19542,28 +19547,67 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         return False
 
     def _segmented_chat_scope_allows(self, chat_type: str) -> bool:
+        chat_type = str(chat_type or "").strip().lower()
+        if chat_type not in {"private", "group"}:
+            chat_type = "private"
+        if bool(getattr(self, "enable_segmented_proactive_chat_profiles", False)):
+            return bool(
+                getattr(
+                    self,
+                    f"segmented_proactive_{chat_type}_enabled",
+                    True,
+                )
+            )
         scope = str(getattr(self, "segmented_proactive_chat_scope", "all") or "all").strip().lower()
         if scope not in {"all", "private", "group"}:
             scope = "all"
-        chat_type = str(chat_type or "").strip().lower()
         return scope == "all" or scope == chat_type
 
-    def _segmented_scope_allows_umo(self, umo: str) -> bool:
+    def _segmented_chat_type_for_umo(self, umo: str) -> str:
         session = self._parse_message_session(umo)
-        if not session:
-            return self._segmented_chat_scope_allows("private")
-        chat_type = "group" if self._message_type_for_session(session) == MessageType.GROUP_MESSAGE else "private"
-        return self._segmented_chat_scope_allows(chat_type)
+        if session and self._message_type_for_session(session) == MessageType.GROUP_MESSAGE:
+            return "group"
+        return "private"
 
-    def _segmented_scope_allows_event(self, event: AstrMessageEvent) -> bool:
+    def _segmented_chat_type_for_event(self, event: AstrMessageEvent) -> str:
         try:
             if bool(getattr(event, "is_private_chat", lambda: False)()):
-                return self._segmented_chat_scope_allows("private")
+                return "private"
         except Exception:
             pass
-        if self._extract_group_id_from_event(event):
-            return self._segmented_chat_scope_allows("group")
-        return self._segmented_chat_scope_allows("private")
+        return "group" if self._extract_group_id_from_event(event) else "private"
+
+    def _segmented_setting(
+        self,
+        name: str,
+        *,
+        event: AstrMessageEvent | None = None,
+        umo: str = "",
+        chat_type: str = "",
+        default: Any = None,
+    ) -> Any:
+        normalized_name = str(name or "").strip()
+        fallback = getattr(self, f"segmented_proactive_{normalized_name}", default)
+        if not bool(getattr(self, "enable_segmented_proactive_chat_profiles", False)):
+            return fallback
+        resolved_chat_type = str(chat_type or "").strip().lower()
+        if resolved_chat_type not in {"private", "group"}:
+            resolved_chat_type = (
+                self._segmented_chat_type_for_event(event)
+                if event is not None
+                else self._segmented_chat_type_for_umo(umo)
+            )
+        return getattr(
+            self,
+            f"segmented_proactive_{resolved_chat_type}_{normalized_name}",
+            fallback,
+        )
+
+    def _segmented_scope_allows_umo(self, umo: str) -> bool:
+        return self._segmented_chat_scope_allows(self._segmented_chat_type_for_umo(umo))
+
+    def _segmented_scope_allows_event(self, event: AstrMessageEvent) -> bool:
+        return self._segmented_chat_scope_allows(self._segmented_chat_type_for_event(event))
 
     async def _onebot_messages_from_chain(self, chain: list[Any]) -> tuple[list[dict[str, Any]], str]:
         try:
@@ -19920,6 +19964,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             quote_message_id = ""
         segments = self._split_proactive_text(
             text,
+            umo=umo,
             image_path="",
             extra_components=None,
             disable_segmenting=disable_segmenting or not platform_segmented or not self._segmented_scope_allows_umo(umo),
@@ -20127,7 +20172,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 for candidate in chunks[chunk_index + 1 :]
             ):
                 await asyncio.sleep(
-                    await self._calc_segmented_proactive_interval(primary_texts[-1])
+                    await self._calc_segmented_proactive_interval(primary_texts[-1], umo=umo)
                 )
 
         primary_complete = bool(
@@ -20431,6 +20476,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             await self._maybe_send_input_status(umo, text)
         segments = self._split_proactive_text(
             text,
+            umo=umo,
             image_path="",
             extra_components=None,
             disable_segmenting=disable_segmenting or not self._segmented_scope_allows_umo(umo),
@@ -20512,7 +20558,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 complete = False
             quote_message_id = ""
             if index < len(segments) - 1:
-                await asyncio.sleep(await self._calc_segmented_proactive_interval(segment))
+                await asyncio.sleep(await self._calc_segmented_proactive_interval(segment, umo=umo))
         delivered_text = "\n".join(delivered_segments).strip()
         return _ProactiveSendOutcome(
             delivered=bool(delivered_text),

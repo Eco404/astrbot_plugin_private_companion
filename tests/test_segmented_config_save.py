@@ -32,6 +32,9 @@ class SegmentedConfigSaveTests(unittest.TestCase):
                 "expandSegmentedWidthVariantWords(parseSegmentedWordList(values.segmented_proactive_split_words))",
                 script,
             )
+            self.assertIn('enable_segmented_proactive_chat_profiles: { type: "checkbox" }', script)
+            self.assertIn('segmented_proactive_private_scope: { type: "select"', script)
+            self.assertIn('segmented_proactive_group_scope: { type: "select"', script)
 
     def test_frontend_treats_persisted_feature_settings_as_authoritative(self) -> None:
         script = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
@@ -108,6 +111,27 @@ class SegmentedConfigSaveTests(unittest.TestCase):
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         expected = {
             "enable_segmented_proactive_reply": True,
+            "enable_segmented_proactive_chat_profiles": True,
+            "segmented_proactive_private_enabled": True,
+            "segmented_proactive_private_scope": "all_llm",
+            "segmented_proactive_private_threshold": 360,
+            "segmented_proactive_private_min_segment_chars": 5,
+            "segmented_proactive_private_max_segments": 4,
+            "segmented_proactive_private_send_as_forward": False,
+            "segmented_proactive_private_interval_method": "random",
+            "segmented_proactive_private_interval_min": 1.2,
+            "segmented_proactive_private_interval_max": 2.4,
+            "segmented_proactive_private_log_base": 1.7,
+            "segmented_proactive_group_enabled": False,
+            "segmented_proactive_group_scope": "proactive_only",
+            "segmented_proactive_group_threshold": 220,
+            "segmented_proactive_group_min_segment_chars": 10,
+            "segmented_proactive_group_max_segments": 2,
+            "segmented_proactive_group_send_as_forward": True,
+            "segmented_proactive_group_interval_method": "log",
+            "segmented_proactive_group_interval_min": 2.0,
+            "segmented_proactive_group_interval_max": 4.0,
+            "segmented_proactive_group_log_base": 2.1,
             "segmented_proactive_scope": "all_llm",
             "segmented_proactive_chat_scope": "private",
             "segmented_proactive_threshold": 420,

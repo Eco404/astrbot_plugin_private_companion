@@ -1948,6 +1948,27 @@ const configLabels = {
   enable_segmented_proactive_reply: "分段发送",
   segmented_proactive_scope: "分段作用范围",
   segmented_proactive_chat_scope: "分段会话范围",
+  enable_segmented_proactive_chat_profiles: "私聊/群聊独立配置",
+  segmented_proactive_private_enabled: "私聊启用分段",
+  segmented_proactive_private_scope: "私聊分段作用范围",
+  segmented_proactive_private_threshold: "私聊不分段字数阈值",
+  segmented_proactive_private_min_segment_chars: "私聊短片段合并阈值",
+  segmented_proactive_private_max_segments: "私聊最多分段数",
+  segmented_proactive_private_send_as_forward: "私聊分段后合并发送",
+  segmented_proactive_private_interval_method: "私聊分段间隔方式",
+  segmented_proactive_private_interval_min: "私聊最小间隔秒数",
+  segmented_proactive_private_interval_max: "私聊最大间隔秒数",
+  segmented_proactive_private_log_base: "私聊对数间隔底数",
+  segmented_proactive_group_enabled: "群聊启用分段",
+  segmented_proactive_group_scope: "群聊分段作用范围",
+  segmented_proactive_group_threshold: "群聊不分段字数阈值",
+  segmented_proactive_group_min_segment_chars: "群聊短片段合并阈值",
+  segmented_proactive_group_max_segments: "群聊最多分段数",
+  segmented_proactive_group_send_as_forward: "群聊分段后合并发送",
+  segmented_proactive_group_interval_method: "群聊分段间隔方式",
+  segmented_proactive_group_interval_min: "群聊最小间隔秒数",
+  segmented_proactive_group_interval_max: "群聊最大间隔秒数",
+  segmented_proactive_group_log_base: "群聊对数间隔底数",
   segmented_proactive_threshold: "不分段字数阈值",
   segmented_proactive_min_segment_chars: "短片段合并阈值",
   segmented_proactive_max_segments: "文本最多分段数",
@@ -2721,6 +2742,27 @@ const configDescriptions = {
   segmented_proactive_threshold: "纯文本短于或等于该字数时才考虑分段；太长的内容保持一整条，避免读起来散。",
   segmented_proactive_scope: "插件主动只影响插件主动消息；全部纯文本回复还会处理普通模型回复和插件生成的非命令文本。回复引用固定跟随第一段，语音、图片、@、平台表情与附件按各自位置策略编排。",
   segmented_proactive_chat_scope: "控制分段在哪类会话生效：全部、仅私聊或仅群聊。不匹配的会话会保持整条发送。",
+  enable_segmented_proactive_chat_profiles: "开启后，私聊和群聊分别使用自己的启用状态、作用范围、分段上限、合并发送和间隔；分隔符、内容清理/替换和媒体组件位置继续共享。关闭时兼容旧版会话范围设置。",
+  segmented_proactive_private_enabled: "私聊配置的总开关。关闭后，私聊中的主动消息、普通纯文本回复和 TTS 后置文本都保持整条发送。",
+  segmented_proactive_private_scope: "私聊配置下，选择只处理插件主动消息，或连普通模型纯文本回复也一起分段。",
+  segmented_proactive_private_threshold: "私聊中，纯文本超过该字数时保持整条发送，避免长文被切碎。",
+  segmented_proactive_private_min_segment_chars: "私聊中，过短的片段会并入相邻消息，避免单独发送“嗯”“哈哈”等短句。",
+  segmented_proactive_private_max_segments: "私聊单条文本最多拆成几条消息。",
+  segmented_proactive_private_send_as_forward: "私聊切出多段时优先打包成合并转发消息；平台不支持时回退普通分段。",
+  segmented_proactive_private_interval_method: "私聊分段之间使用按字数对数间隔或随机间隔。",
+  segmented_proactive_private_interval_min: "私聊随机间隔的下限；普通回复只影响后台补发片段。",
+  segmented_proactive_private_interval_max: "私聊随机间隔的上限；普通回复只影响后台补发片段。",
+  segmented_proactive_private_log_base: "私聊按字数对数计算间隔时使用的底数。",
+  segmented_proactive_group_enabled: "群聊配置的总开关。关闭后，群聊中的主动消息、普通纯文本回复和 TTS 后置文本都保持整条发送。",
+  segmented_proactive_group_scope: "群聊配置下，选择只处理插件主动消息，或连普通模型纯文本回复也一起分段。",
+  segmented_proactive_group_threshold: "群聊中，纯文本超过该字数时保持整条发送，避免刷屏式长文拆分。",
+  segmented_proactive_group_min_segment_chars: "群聊中，过短的片段会并入相邻消息，减少刷屏。",
+  segmented_proactive_group_max_segments: "群聊单条文本最多拆成几条消息。",
+  segmented_proactive_group_send_as_forward: "群聊切出多段时优先打包成合并转发消息；平台不支持时回退普通分段。",
+  segmented_proactive_group_interval_method: "群聊分段之间使用按字数对数间隔或随机间隔。",
+  segmented_proactive_group_interval_min: "群聊随机间隔的下限；普通回复只影响后台补发片段。",
+  segmented_proactive_group_interval_max: "群聊随机间隔的上限；普通回复只影响后台补发片段。",
+  segmented_proactive_group_log_base: "群聊按字数对数计算间隔时使用的底数。",
   segmented_proactive_min_segment_chars: "分段后短于或等于该字数的片段会并入相邻消息，避免“哈哈”“我也觉得”这类附和语单独发出。",
   segmented_proactive_max_segments: "一次主动文本最多拆成几条。默认 3，过高会显得刷屏；图片、语音和附加组件不占用这个文本段数。",
   segmented_proactive_send_as_forward: "开启后，切出多段时优先打包成合并转发消息发送；平台不支持时自动回退为普通逐条分段。",
@@ -3140,7 +3182,7 @@ const featureSettingGroups = {
   enable_daily_diary: ["daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_busy_reply_gate: ["busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes"],
-  enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy", "segmented_proactive_split_mode", "segmented_proactive_match_width_variants", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
+  enable_segmented_proactive_reply: ["enable_segmented_proactive_chat_profiles", "segmented_proactive_private_enabled", "segmented_proactive_private_scope", "segmented_proactive_private_threshold", "segmented_proactive_private_min_segment_chars", "segmented_proactive_private_max_segments", "segmented_proactive_private_send_as_forward", "segmented_proactive_private_interval_method", "segmented_proactive_private_interval_min", "segmented_proactive_private_interval_max", "segmented_proactive_private_log_base", "segmented_proactive_group_enabled", "segmented_proactive_group_scope", "segmented_proactive_group_threshold", "segmented_proactive_group_min_segment_chars", "segmented_proactive_group_max_segments", "segmented_proactive_group_send_as_forward", "segmented_proactive_group_interval_method", "segmented_proactive_group_interval_min", "segmented_proactive_group_interval_max", "segmented_proactive_group_log_base", "segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy", "segmented_proactive_split_mode", "segmented_proactive_match_width_variants", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection", "enable_passive_state_continuity_anchor"],
   enable_passive_state_delta_injection: ["enable_passive_state_continuity_anchor"],
   enable_health_state: ["humanized_state_intensity"],
@@ -3833,19 +3875,24 @@ const featureSettingSections = {
   ],
   enable_segmented_proactive_reply: [
     {
+      title: "私聊与群聊独立配置",
+      note: "开启独立配置后，分别调整私聊和群聊的启用、作用范围、分段数量、合并发送和发送间隔；关闭时继续使用下方共享默认值。",
+      keys: ["enable_segmented_proactive_chat_profiles", "segmented_proactive_private_enabled", "segmented_proactive_private_scope", "segmented_proactive_private_threshold", "segmented_proactive_private_min_segment_chars", "segmented_proactive_private_max_segments", "segmented_proactive_private_send_as_forward", "segmented_proactive_private_interval_method", "segmented_proactive_private_interval_min", "segmented_proactive_private_interval_max", "segmented_proactive_private_log_base", "segmented_proactive_group_enabled", "segmented_proactive_group_scope", "segmented_proactive_group_threshold", "segmented_proactive_group_min_segment_chars", "segmented_proactive_group_max_segments", "segmented_proactive_group_send_as_forward", "segmented_proactive_group_interval_method", "segmented_proactive_group_interval_min", "segmented_proactive_group_interval_max", "segmented_proactive_group_log_base"],
+    },
+    {
       title: "组件发送位置",
       note: "嵌入会与相邻正文进入同一消息链；单独会成为独立消息。回复引用固定跟随第一段正文。",
       kind: "component-placement",
       keys: ["segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy"],
     },
     {
-      title: "切分规则",
-      note: "决定主动消息什么时候拆、按什么拆，以及短片段是否并回去。",
+      title: "共享切分规则与兼容默认值",
+      note: "分隔符与内容处理规则由两类会话共享；会话范围、长度和分段数在独立配置关闭时作为兼容默认值使用。",
       keys: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_split_mode", "segmented_proactive_match_width_variants", "segmented_proactive_regex", "segmented_proactive_split_words"],
     },
     {
-      title: "发送方式",
-      note: "切出多段后，可选打包成合并转发以减少刷屏；不支持时会回退普通分段。",
+      title: "共享默认发送方式",
+      note: "独立配置关闭时使用；开启后请分别设置私聊和群聊的合并发送。",
       keys: ["segmented_proactive_send_as_forward"],
     },
     {
@@ -3859,8 +3906,8 @@ const featureSettingSections = {
       keys: ["enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements"],
     },
     {
-      title: "发送间隔",
-      note: "控制分段之间等多久，避免像刷屏，也避免间隔太死板。",
+      title: "共享默认发送间隔",
+      note: "独立配置关闭时使用；开启后请分别设置私聊和群聊的发送间隔。",
       keys: ["segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
     },
   ],
@@ -4213,6 +4260,27 @@ const featureSettingTypes = {
   tts_group_trigger_probability: { type: "number", min: -1, max: 100, step: 1 },
   SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: { type: "provider" },
   segmented_proactive_chat_scope: { type: "select", options: [["all", "全部"], ["private", "仅私聊"], ["group", "仅群聊"]] },
+  enable_segmented_proactive_chat_profiles: { type: "checkbox" },
+  segmented_proactive_private_enabled: { type: "checkbox" },
+  segmented_proactive_private_scope: { type: "select", options: [["proactive_only", "仅插件主动"], ["all_llm", "全部纯文本回复"]] },
+  segmented_proactive_private_threshold: { type: "number", min: 20, max: 1024, step: 2 },
+  segmented_proactive_private_min_segment_chars: { type: "number", min: 1, max: 40, step: 1 },
+  segmented_proactive_private_max_segments: { type: "number", min: 1, max: 8, step: 1 },
+  segmented_proactive_private_send_as_forward: { type: "checkbox" },
+  segmented_proactive_private_interval_method: { type: "select", options: [["log", "按字数对数"], ["random", "随机"]] },
+  segmented_proactive_private_interval_min: { type: "number", min: 0.1, max: 3600, step: 0.1 },
+  segmented_proactive_private_interval_max: { type: "number", min: 0.1, max: 3600, step: 0.1 },
+  segmented_proactive_private_log_base: { type: "number", min: 1.1, max: 10, step: 0.1 },
+  segmented_proactive_group_enabled: { type: "checkbox" },
+  segmented_proactive_group_scope: { type: "select", options: [["proactive_only", "仅插件主动"], ["all_llm", "全部纯文本回复"]] },
+  segmented_proactive_group_threshold: { type: "number", min: 20, max: 1024, step: 2 },
+  segmented_proactive_group_min_segment_chars: { type: "number", min: 1, max: 40, step: 1 },
+  segmented_proactive_group_max_segments: { type: "number", min: 1, max: 8, step: 1 },
+  segmented_proactive_group_send_as_forward: { type: "checkbox" },
+  segmented_proactive_group_interval_method: { type: "select", options: [["log", "按字数对数"], ["random", "随机"]] },
+  segmented_proactive_group_interval_min: { type: "number", min: 0.1, max: 3600, step: 0.1 },
+  segmented_proactive_group_interval_max: { type: "number", min: 0.1, max: 3600, step: 0.1 },
+  segmented_proactive_group_log_base: { type: "number", min: 1.1, max: 10, step: 0.1 },
   proactive_chat_bridge_review_mode: { type: "select", options: [["local", "轻量本地（更即时）"], ["follow_proactive_review", "跟随主动终审（更稳）"]] },
   proactive_chat_bridge_collision_window_seconds: { type: "number", min: 10, max: 600, step: 10, unit: "秒" },
   photo_generation_backend: { type: "select", options: [["auto", "auto"], ["comfyui", "ComfyUI"], ["sdgen", "SDGen"], ["external", "在线图片 API"], ["tool_call", "函数工具"]] },
@@ -23500,6 +23568,7 @@ function segmentedPreviewValues(root = document) {
     "enable_segmented_proactive_reply",
     "segmented_proactive_scope",
     "segmented_proactive_chat_scope",
+    "enable_segmented_proactive_chat_profiles",
     "segmented_proactive_threshold",
     "segmented_proactive_min_segment_chars",
     "segmented_proactive_max_segments",
@@ -23531,6 +23600,7 @@ function segmentedPreviewValues(root = document) {
     values[key] = value == null ? settings[key] : value;
   });
   values.enable_segmented_proactive_reply = toBool(values.enable_segmented_proactive_reply);
+  const masterSegmentedEnabled = values.enable_segmented_proactive_reply;
   values.segmented_proactive_send_as_forward = toBool(values.segmented_proactive_send_as_forward);
   values.segmented_proactive_match_width_variants = values.segmented_proactive_match_width_variants == null
     ? true
@@ -23543,6 +23613,20 @@ function segmentedPreviewValues(root = document) {
   values.segmented_proactive_content_replacements = Array.isArray(values.segmented_proactive_content_replacements)
     ? values.segmented_proactive_content_replacements
     : String(values.segmented_proactive_content_replacements ?? "");
+  const chatType = String(root?.querySelector?.("[data-segmented-preview-chat-type]")?.value || "private");
+  values.segmented_proactive_preview_chat_type = chatType;
+  if (toBool(values.enable_segmented_proactive_chat_profiles)) {
+    const prefix = `segmented_proactive_${chatType}_`;
+    ["enabled", "scope", "threshold", "min_segment_chars", "max_segments", "send_as_forward", "interval_method", "interval_min", "interval_max", "log_base"].forEach((name) => {
+      const key = `${prefix}${name}`;
+      const value = segmentedControlValue(root, key);
+      if (value != null) values[`segmented_proactive_${name}`] = value;
+    });
+    if (values.segmented_proactive_enabled != null) {
+      values.enable_segmented_proactive_reply = masterSegmentedEnabled && toBool(values.segmented_proactive_enabled);
+      values.segmented_proactive_chat_scope = chatType;
+    }
+  }
   return values;
 }
 
@@ -23776,6 +23860,7 @@ function segmentedPreviewPanelHtml() {
           <h4>分段效果预览</h4>
         </div>
         <div class="segmented-preview-actions">
+          <label class="segmented-preview-chat-type"><span>预览会话</span><select data-segmented-preview-chat-type><option value="private">私聊</option><option value="group">群聊</option></select></label>
           <button type="button" data-segmented-example="simple">简单示例</button>
           <button type="button" data-segmented-example="complex">复杂示例</button>
         </div>
@@ -23849,7 +23934,42 @@ function updateSegmentedConfigVisibility(root = document) {
   const mode = String(values.segmented_proactive_split_mode || "regex");
   const cleanupEnabled = Boolean(values.enable_segmented_proactive_content_cleanup);
   const intervalMethod = String(values.segmented_proactive_interval_method || "log");
+  const independentProfiles = toBool(values.enable_segmented_proactive_chat_profiles);
+  const privateEnabled = toBool(segmentedControlValue(root, "segmented_proactive_private_enabled"));
+  const groupEnabled = toBool(segmentedControlValue(root, "segmented_proactive_group_enabled"));
+  const privateIntervalMethod = String(segmentedControlValue(root, "segmented_proactive_private_interval_method") || "log");
+  const groupIntervalMethod = String(segmentedControlValue(root, "segmented_proactive_group_interval_method") || "log");
   const visibility = {
+    segmented_proactive_chat_scope: !independentProfiles,
+    segmented_proactive_scope: !independentProfiles,
+    segmented_proactive_threshold: !independentProfiles,
+    segmented_proactive_min_segment_chars: !independentProfiles,
+    segmented_proactive_max_segments: !independentProfiles,
+    segmented_proactive_send_as_forward: !independentProfiles,
+    segmented_proactive_interval_method: !independentProfiles,
+    segmented_proactive_interval_min: !independentProfiles && intervalMethod === "random",
+    segmented_proactive_interval_max: !independentProfiles && intervalMethod === "random",
+    segmented_proactive_log_base: !independentProfiles && intervalMethod === "log",
+    segmented_proactive_private_enabled: independentProfiles,
+    segmented_proactive_private_scope: independentProfiles && privateEnabled,
+    segmented_proactive_private_threshold: independentProfiles && privateEnabled,
+    segmented_proactive_private_min_segment_chars: independentProfiles && privateEnabled,
+    segmented_proactive_private_max_segments: independentProfiles && privateEnabled,
+    segmented_proactive_private_send_as_forward: independentProfiles && privateEnabled,
+    segmented_proactive_private_interval_method: independentProfiles && privateEnabled,
+    segmented_proactive_private_interval_min: independentProfiles && privateEnabled && privateIntervalMethod === "random",
+    segmented_proactive_private_interval_max: independentProfiles && privateEnabled && privateIntervalMethod === "random",
+    segmented_proactive_private_log_base: independentProfiles && privateEnabled && privateIntervalMethod === "log",
+    segmented_proactive_group_enabled: independentProfiles,
+    segmented_proactive_group_scope: independentProfiles && groupEnabled,
+    segmented_proactive_group_threshold: independentProfiles && groupEnabled,
+    segmented_proactive_group_min_segment_chars: independentProfiles && groupEnabled,
+    segmented_proactive_group_max_segments: independentProfiles && groupEnabled,
+    segmented_proactive_group_send_as_forward: independentProfiles && groupEnabled,
+    segmented_proactive_group_interval_method: independentProfiles && groupEnabled,
+    segmented_proactive_group_interval_min: independentProfiles && groupEnabled && groupIntervalMethod === "random",
+    segmented_proactive_group_interval_max: independentProfiles && groupEnabled && groupIntervalMethod === "random",
+    segmented_proactive_group_log_base: independentProfiles && groupEnabled && groupIntervalMethod === "log",
     segmented_proactive_regex: mode === "regex",
     segmented_proactive_match_width_variants: mode === "words",
     segmented_proactive_split_words: mode === "words",
@@ -23857,9 +23977,6 @@ function updateSegmentedConfigVisibility(root = document) {
     segmented_proactive_content_cleanup_rule: cleanupEnabled && mode === "regex",
     segmented_proactive_content_cleanup_words: cleanupEnabled && mode === "words",
     segmented_proactive_content_replacements: Boolean(values.enable_segmented_proactive_content_replacement),
-    segmented_proactive_interval_min: intervalMethod === "random",
-    segmented_proactive_interval_max: intervalMethod === "random",
-    segmented_proactive_log_base: intervalMethod === "log",
   };
   Object.entries(visibility).forEach(([key, visible]) => {
     root.querySelectorAll(`[name="${key}"], [data-feature-param="${key}"]`).forEach((control) => {
@@ -23898,6 +24015,11 @@ function bindSegmentedPreview(root = document) {
     };
     control.addEventListener("input", handler);
     control.addEventListener("change", handler);
+  });
+  scope.querySelectorAll("[data-segmented-preview-chat-type]").forEach((control) => {
+    if (control.dataset.segmentedPreviewChatTypeBound) return;
+    control.dataset.segmentedPreviewChatTypeBound = "1";
+    control.addEventListener("change", () => renderSegmentedPreview());
   });
   scope.querySelectorAll("[data-feature-param-form]").forEach((form) => updateSegmentedConfigVisibility(form));
   renderSegmentedPreview();

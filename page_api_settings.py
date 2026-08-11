@@ -654,7 +654,12 @@ class PageSettingNormalizerMixin:
         return _SETTING_UNHANDLED
 
     def _normalize_page_delivery_setting(self, key: str, value: Any) -> Any:
-        if key in {
+        canonical_key = re.sub(
+            r"^segmented_proactive_(?:private|group)_",
+            "segmented_proactive_",
+            key,
+        )
+        if canonical_key in {
             "segmented_proactive_voice_strategy",
             "segmented_proactive_image_strategy",
             "segmented_proactive_at_strategy",
@@ -668,7 +673,7 @@ class PageSettingNormalizerMixin:
                 "segmented_proactive_face_strategy": "inline",
                 "segmented_proactive_other_strategy": "separate",
             }
-            mode = str(value or defaults[key]).strip().lower()
+            mode = str(value or defaults[canonical_key]).strip().lower()
             aliases = {
                 "embed": "inline",
                 "embedded": "inline",
@@ -687,11 +692,11 @@ class PageSettingNormalizerMixin:
                 "接下文": "next",
             }
             mode = aliases.get(mode, mode)
-            return mode if mode in {"inline", "separate", "previous", "next"} else defaults[key]
-        if key == "segmented_proactive_split_mode":
+            return mode if mode in {"inline", "separate", "previous", "next"} else defaults[canonical_key]
+        if canonical_key == "segmented_proactive_split_mode":
             mode = str(value or "regex").strip().lower()
             return mode if mode in {"regex", "words"} else "regex"
-        if key == "segmented_proactive_scope":
+        if canonical_key == "segmented_proactive_scope":
             mode = str(value or "proactive_only").strip().lower()
             aliases = {
                 "plugin": "proactive_only",
@@ -706,7 +711,7 @@ class PageSettingNormalizerMixin:
             }
             mode = aliases.get(mode, mode)
             return mode if mode in {"proactive_only", "all_llm"} else "proactive_only"
-        if key == "segmented_proactive_chat_scope":
+        if canonical_key == "segmented_proactive_chat_scope":
             mode = str(value or "all").strip().lower()
             aliases = {
                 "全部": "all",
@@ -721,10 +726,10 @@ class PageSettingNormalizerMixin:
             }
             mode = aliases.get(mode, mode)
             return mode if mode in {"all", "private", "group"} else "all"
-        if key == "segmented_proactive_interval_method":
+        if canonical_key == "segmented_proactive_interval_method":
             mode = str(value or "log").strip().lower()
             return mode if mode in {"log", "random"} else "log"
-        if key == "segmented_proactive_content_cleanup_scope":
+        if canonical_key == "segmented_proactive_content_cleanup_scope":
             mode = str(value or "all").strip().lower()
             return mode if mode in {"all", "trailing"} else "all"
         if key in {"segmented_proactive_split_words", "segmented_proactive_content_cleanup_words"}:
@@ -988,6 +993,12 @@ class PageSettingNormalizerMixin:
             "segmented_proactive_threshold",
             "segmented_proactive_min_segment_chars",
             "segmented_proactive_max_segments",
+            "segmented_proactive_private_threshold",
+            "segmented_proactive_private_min_segment_chars",
+            "segmented_proactive_private_max_segments",
+            "segmented_proactive_group_threshold",
+            "segmented_proactive_group_min_segment_chars",
+            "segmented_proactive_group_max_segments",
             "group_conversation_followup_seconds",
             "group_conversation_followup_max_turns",
             "group_interject_min_interval_minutes",
@@ -1205,14 +1216,20 @@ class PageSettingNormalizerMixin:
             "segmented_proactive_interval_min",
             "segmented_proactive_interval_max",
             "segmented_proactive_log_base",
+            "segmented_proactive_private_interval_min",
+            "segmented_proactive_private_interval_max",
+            "segmented_proactive_private_log_base",
+            "segmented_proactive_group_interval_min",
+            "segmented_proactive_group_interval_max",
+            "segmented_proactive_group_log_base",
         }:
             try:
                 raw = float(value)
-                if key == "segmented_proactive_log_base":
+                if key.endswith("_log_base"):
                     return max(1.1, min(10.0, raw))
                 return max(0.1, min(30.0, raw))
             except (TypeError, ValueError):
-                return 1.8 if key == "segmented_proactive_log_base" else 1.5
+                return 1.8 if key.endswith("_log_base") else 1.5
         if key in {
             "enable_daily_token_soft_limit",
             "enable_bilibili_integration",

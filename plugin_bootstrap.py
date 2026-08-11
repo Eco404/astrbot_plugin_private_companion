@@ -827,6 +827,66 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
     self.segmented_proactive_interval_max = self._cfg_float(c, "segmented_proactive_interval_max", 3.5, 0.1)
     self.segmented_proactive_log_base = self._cfg_float(c, "segmented_proactive_log_base", 1.8, 1.1)
     self.segmented_proactive_send_as_forward = self._cfg_bool(c, "segmented_proactive_send_as_forward", False)
+    self.enable_segmented_proactive_chat_profiles = self._cfg_bool(
+        c,
+        "enable_segmented_proactive_chat_profiles",
+        False,
+    )
+    for chat_type in ("private", "group"):
+        prefix = f"segmented_proactive_{chat_type}_"
+        setattr(self, f"{prefix}enabled", self._cfg_bool(c, f"{prefix}enabled", True))
+        profile_scope = self._cfg_str(c, f"{prefix}scope", self.segmented_proactive_scope, self.segmented_proactive_scope)
+        if profile_scope not in {"proactive_only", "all_llm"}:
+            profile_scope = self.segmented_proactive_scope
+        setattr(self, f"{prefix}scope", profile_scope)
+        setattr(
+            self,
+            f"{prefix}threshold",
+            self._cfg_int(c, f"{prefix}threshold", self.segmented_proactive_threshold, 20, 1024),
+        )
+        setattr(
+            self,
+            f"{prefix}min_segment_chars",
+            self._cfg_int(c, f"{prefix}min_segment_chars", self.segmented_proactive_min_segment_chars, 1, 40),
+        )
+        setattr(
+            self,
+            f"{prefix}max_segments",
+            self._cfg_int(c, f"{prefix}max_segments", self.segmented_proactive_max_segments, 1, 8),
+        )
+        setattr(
+            self,
+            f"{prefix}send_as_forward",
+            self._cfg_bool(c, f"{prefix}send_as_forward", self.segmented_proactive_send_as_forward),
+        )
+        interval_method = self._cfg_str(
+            c,
+            f"{prefix}interval_method",
+            self.segmented_proactive_interval_method,
+            self.segmented_proactive_interval_method,
+        )
+        if interval_method not in {"random", "log"}:
+            interval_method = self.segmented_proactive_interval_method
+        setattr(self, f"{prefix}interval_method", interval_method)
+        interval_min = self._cfg_float(
+            c,
+            f"{prefix}interval_min",
+            self.segmented_proactive_interval_min,
+            0.1,
+        )
+        interval_max = self._cfg_float(
+            c,
+            f"{prefix}interval_max",
+            self.segmented_proactive_interval_max,
+            0.1,
+        )
+        setattr(self, f"{prefix}interval_min", interval_min)
+        setattr(self, f"{prefix}interval_max", max(interval_min, interval_max))
+        setattr(
+            self,
+            f"{prefix}log_base",
+            self._cfg_float(c, f"{prefix}log_base", self.segmented_proactive_log_base, 1.1),
+        )
     self.segmented_proactive_voice_strategy = normalize_component_strategy(
         self._cfg_str(c, "segmented_proactive_voice_strategy", "separate", "separate"),
         "separate",

@@ -4609,11 +4609,28 @@ class PrivateImageMixin:
         chain = await self._private_image_reply_chain(text, event)
         if not chain:
             return ""
-        should_segment = (
-            bool(getattr(self, "enable_segmented_proactive_reply", False))
-            and str(getattr(self, "segmented_proactive_scope", "") or "") == "all_llm"
+        scope_getter = getattr(self, "_segmented_setting", None)
+        scope_value = (
+            scope_getter("scope", event=event, default="proactive_only")
+            if callable(scope_getter)
+            else getattr(self, "segmented_proactive_scope", "proactive_only")
         )
-        outbound_chains = self._private_image_split_reply_chain(chain, should_segment=should_segment)
+        scope_checker = getattr(self, "_segmented_scope_allows_event", None)
+        scope_allowed = bool(scope_checker(event)) if callable(scope_checker) else True
+        should_segment = bool(getattr(self, "enable_segmented_proactive_reply", False)) and (
+            str(scope_value or "") == "all_llm"
+        ) and scope_allowed
+        try:
+            outbound_chains = self._private_image_split_reply_chain(
+                chain,
+                should_segment=should_segment,
+                event=event,
+            )
+        except TypeError:
+            outbound_chains = self._private_image_split_reply_chain(
+                chain,
+                should_segment=should_segment,
+            )
         if not outbound_chains:
             return ""
         if len(outbound_chains) <= 1:
@@ -4719,8 +4736,14 @@ class PrivateImageMixin:
             cleaned.append(comp)
         return cleaned
 
-    def _private_image_split_reply_chain(self, chain: list[Any], *, should_segment: bool) -> list[list[Any]]:
-        split_text = self._split_proactive_text if should_segment else (
+    def _private_image_split_reply_chain(
+        self,
+        chain: list[Any],
+        *,
+        should_segment: bool,
+        event: AstrMessageEvent | None = None,
+    ) -> list[list[Any]]:
+        split_text = (lambda text: self._split_proactive_text(text, event=event)) if should_segment else (
             lambda text: [part.strip() for part in str(text or "").splitlines() if part.strip()]
         )
         chunks, _changed, _split_changed, _full_text = plan_component_chunks(
@@ -4780,7 +4803,7 @@ class PrivateImageMixin:
                 sent_index += 1
                 try:
                     wait_for = prev or self._private_image_chain_text(chain)
-                    delay = await self._calc_segmented_proactive_interval(wait_for)
+                    delay = await self._calc_segmented_proactive_interval(wait_for, event=event)
                     if delay > 0:
                         await asyncio.sleep(delay)
                     activity_checker = getattr(self, "_scope_has_new_inbound_activity", None)

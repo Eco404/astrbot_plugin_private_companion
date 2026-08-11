@@ -4725,6 +4725,9 @@ Bot 近期回复：
         image_path: str = "",
         extra_components: list[Any] | None = None,
         disable_segmenting: bool = False,
+        event: Any | None = None,
+        umo: str = "",
+        chat_type: str = "",
     ) -> list[str]:
         # Media attachments are sent by the caller as separate components/messages.
         # Segment limits only apply to text, so image_path/extra_components are
@@ -4746,6 +4749,32 @@ Bot 近期回复：
                 return [normalized]
         elif not self.enable_segmented_proactive_reply:
             return [normalized]
+        if event is not None or umo or chat_type:
+            chat_scope_checker = getattr(self, "_segmented_chat_scope_allows", None)
+            if callable(chat_scope_checker):
+                resolved_chat_type = str(chat_type or "").strip().lower()
+                if resolved_chat_type not in {"private", "group"}:
+                    if event is not None:
+                        resolver = getattr(self, "_segmented_chat_type_for_event", None)
+                        resolved_chat_type = resolver(event) if callable(resolver) else "private"
+                    else:
+                        resolver = getattr(self, "_segmented_chat_type_for_umo", None)
+                        resolved_chat_type = resolver(umo) if callable(resolver) else "private"
+                if not chat_scope_checker(resolved_chat_type):
+                    return [normalized]
+        setting_getter = getattr(self, "_segmented_setting", None)
+
+        def setting(name: str, default: Any) -> Any:
+            if not callable(setting_getter):
+                return getattr(self, f"segmented_proactive_{name}", default)
+            return setting_getter(
+                name,
+                event=event,
+                umo=umo,
+                chat_type=chat_type,
+                default=default,
+            )
+
         replaced_text, replacement_count = self._apply_segmented_content_replacements(normalized)
         if replacement_count > 0:
             candidate = replaced_text.strip()
@@ -4753,7 +4782,10 @@ Bot 近期回复：
                 normalized = candidate
             else:
                 logger.warning("[PrivateCompanion] 主动分段内容替换会清空整条文本，已保留原文")
-        if len(normalized) > self.segmented_proactive_threshold:
+        threshold = max(20, _safe_int(setting("threshold", 500), 500, 20, 1024))
+        min_segment_chars = max(1, _safe_int(setting("min_segment_chars", 8), 8, 1, 40))
+        max_segments = max(1, _safe_int(setting("max_segments", 3), 3, 1, 8))
+        if len(normalized) > threshold:
             return [normalized]
 
         cleanup_pattern: re.Pattern[str] | None = None
@@ -5040,7 +5072,7 @@ Bot 近期回复：
                 stripped.startswith("「")
                 and stripped.endswith("」")
                 and _visible_len(stripped[1:-1])
-                >= max(1, self.segmented_proactive_min_segment_chars)
+                >= min_segment_chars
             )
 
         def _expand_creative_excerpt_atoms(value: str) -> list[str]:
@@ -5067,7 +5099,7 @@ Bot 近期回复：
             if not cleaned:
                 return False
             body = re.sub(r"[。！？!?…~～,.，、\s]+$", "", cleaned)
-            if _visible_len(cleaned) <= max(1, self.segmented_proactive_min_segment_chars):
+            if _visible_len(cleaned) <= min_segment_chars:
                 return True
             if re.search(r"(?:\.{2,}|…{1,}|~{2,}|～{2,})$", cleaned):
                 return False
@@ -5110,7 +5142,7 @@ Bot 近期回复：
             segments = [str(item or "").strip() for item in raw if str(item or "").strip()]
             if len(segments) <= 1:
                 return segments
-            min_chars = max(1, _safe_int(getattr(self, "segmented_proactive_min_segment_chars", 8), 8, 1))
+            min_chars = min_segment_chars
             merged: list[str] = []
             index = 0
             while index < len(segments):
@@ -5122,7 +5154,7 @@ Bot 近期回复：
                 while index + 1 < len(segments) and (
                     _visible_len(current) < min_chars
                     or _is_soft_short_segment(current)
-                    or (len(merged) >= max(0, self.segmented_proactive_max_segments - 1))
+                    or (len(merged) >= max(0, max_segments - 1))
                 ) and not _is_atomic_creative_excerpt(segments[index + 1]):
                     current = _join_segment_pair(current, segments[index + 1])
                     index += 1
@@ -5135,7 +5167,6 @@ Bot 近期回复：
                 else:
                     merged.append(current)
                 index += 1
-            max_segments = max(1, _safe_int(getattr(self, "segmented_proactive_max_segments", 3), 3, 1))
             while len(merged) > max_segments:
                 merge_index = next(
                     (
@@ -5199,17 +5230,41 @@ Bot 近期回复：
         segments = _merge_segments(segments)
         return segments if segments and (len(segments) > 1 or self.enable_segmented_proactive_content_cleanup) else [normalized]
 
-    async def _calc_segmented_proactive_interval(self, text: str) -> float:
-        if self.segmented_proactive_interval_method == "log":
+    async def _calc_segmented_proactive_interval(
+        self,
+        text: str,
+        *,
+        event: Any | None = None,
+        umo: str = "",
+        chat_type: str = "",
+    ) -> float:
+        setting_getter = getattr(self, "_segmented_setting", None)
+
+        def setting(name: str, default: Any) -> Any:
+            if not callable(setting_getter):
+                return getattr(self, f"segmented_proactive_{name}", default)
+            return setting_getter(
+                name,
+                event=event,
+                umo=umo,
+                chat_type=chat_type,
+                default=default,
+            )
+
+        interval_method = str(setting("interval_method", "log") or "log").strip().lower()
+        if interval_method == "log":
             if all(ord(ch) < 128 for ch in text):
                 word_count = len(text.split())
             else:
                 word_count = len([ch for ch in text if ch.isalnum()])
-            interval = math.log(word_count + 1, self.segmented_proactive_log_base)
+            log_base = max(1.1, _safe_float(setting("log_base", 1.8), 1.8, 1.1))
+            interval = math.log(word_count + 1, log_base)
             return random.uniform(interval, interval + 0.5)
+        interval_min = max(0.1, _safe_float(setting("interval_min", 1.5), 1.5, 0.1))
+        interval_max = max(interval_min, _safe_float(setting("interval_max", 3.5), 3.5, 0.1))
         return random.uniform(
-            self.segmented_proactive_interval_min,
-            self.segmented_proactive_interval_max,
+            interval_min,
+            interval_max,
         )
 
     def _event_topic_signature(self, event: dict[str, Any] | None) -> str:

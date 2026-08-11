@@ -3355,9 +3355,15 @@ TTS 朗读文本：
                 if restored_chunks:
                     return restored_chunks
 
+        scope_getter = getattr(self, "_segmented_setting", None)
+        segmented_scope = (
+            scope_getter("scope", event=event, default="proactive_only")
+            if callable(scope_getter)
+            else getattr(self, "segmented_proactive_scope", "proactive_only")
+        )
         if not (
             bool(getattr(self, "enable_segmented_proactive_reply", False))
-            and str(getattr(self, "segmented_proactive_scope", "") or "") == "all_llm"
+            and str(segmented_scope or "") == "all_llm"
         ):
             return [chunk]
         scope_checker = getattr(self, "_segmented_scope_allows_event", None)
@@ -3411,7 +3417,13 @@ TTS 朗读文本：
             visible_part = self._mark_tts_visible_plain(text) if is_tts_visible_text else Plain(text)
             return [[visible_part]] if visible_part is not None else []
         try:
-            segments = [item for item in splitter(text) if str(item or "").strip()]
+            try:
+                split_result = splitter(text, event=event)
+            except TypeError:
+                # Preserve compatibility with lightweight test/plugin overrides
+                # that still expose the original one-argument splitter contract.
+                split_result = splitter(text)
+            segments = [item for item in split_result if str(item or "").strip()]
         except Exception as exc:
             logger.debug("[PrivateCompanion] TTS 后置文本分段失败,保持原样: %s", _single_line(exc, 120))
             return [chunk]
@@ -3482,7 +3494,11 @@ TTS 朗读文本：
                     calc_interval = getattr(self, "_calc_segmented_proactive_interval", None)
                     if callable(calc_interval):
                         try:
-                            delay = max(0.45, float(await calc_interval(previous_text)))
+                            try:
+                                interval_result = await calc_interval(previous_text, event=event)
+                            except TypeError:
+                                interval_result = await calc_interval(previous_text)
+                            delay = max(0.45, float(interval_result))
                         except Exception:
                             delay = 0.45
                 await asyncio.sleep(delay)

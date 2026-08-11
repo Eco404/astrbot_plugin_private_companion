@@ -6372,7 +6372,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         if not self._feature_enabled_or_temp_unlocked("enable_segmented_proactive_reply"):
             return
-        if self.segmented_proactive_scope != "all_llm" and not external_proactive:
+        segmented_scope = str(
+            self._segmented_setting("scope", event=event, default="proactive_only")
+            or "proactive_only"
+        )
+        if segmented_scope != "all_llm" and not external_proactive:
             return
         if external_proactive and bool(getattr(event, "_private_companion_external_presegmented", False)):
             return
@@ -6698,7 +6702,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         source: str = "",
     ) -> str:
         """Stop delayed passive chunks when they look like a different reply turn."""
-        if source != "decorating_result" or self.segmented_proactive_scope != "all_llm":
+        segmented_scope = self._segmented_setting(
+            "scope",
+            event=event,
+            default="proactive_only",
+        )
+        if source != "decorating_result" or segmented_scope != "all_llm":
             return ""
         prev = _single_line(previous_text, 260)
         nxt = _single_line(next_text, 260)
@@ -6880,7 +6889,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         chunks, changed, _split_changed, full_text = plan_component_chunks(
             working_chain,
             plain_type=Plain,
-            split_text=self._split_proactive_text,
+            split_text=lambda text: self._split_proactive_text(text, event=event),
             strategies=component_strategies_from_owner(self),
             classify=component_kind,
         )
@@ -6967,7 +6976,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         )
                         return
                     wait_for = prev or preview
-                    delay = await self._calc_segmented_proactive_interval(wait_for)
+                    delay = await self._calc_segmented_proactive_interval(wait_for, event=event)
                     if delay > 0:
                         await asyncio.sleep(delay)
                     new_activity = self._scope_has_new_inbound_activity(scope, started_at, ignore_self=True)
@@ -7220,7 +7229,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     )
                     return
                 wait_for = prev or segment
-                delay = await self._calc_segmented_proactive_interval(wait_for)
+                delay = await self._calc_segmented_proactive_interval(wait_for, event=event)
                 if delay > 0:
                     await asyncio.sleep(delay)
                 new_activity = self._scope_has_new_inbound_activity(scope, started_at, ignore_self=True)
