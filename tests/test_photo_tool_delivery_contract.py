@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 
@@ -255,14 +256,18 @@ class _CommandEntryPhotoHarness(_PromptAwarePhotoToolHarness):
 
 class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        handle = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        handle.write(b"test-image")
+        self.temp_dir = tempfile.TemporaryDirectory()
+        generated_dir = os.path.join(self.temp_dir.name, "generated_photos")
+        os.makedirs(generated_dir, exist_ok=True)
+        handle = tempfile.NamedTemporaryFile(suffix=".png", dir=generated_dir, delete=False)
+        handle.write(b"\x89PNG\r\n\x1a\n" + b"test-image")
         handle.close()
         self.image_path = handle.name
 
     def tearDown(self) -> None:
         if os.path.exists(self.image_path):
             os.unlink(self.image_path)
+        self.temp_dir.cleanup()
 
     async def test_ambiguous_send_error_does_not_retry_same_image(self) -> None:
         harness = _DirectPhotoDeliveryHarness()
@@ -280,6 +285,99 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("acknowledgement", delivery["message"])
         self.assertIn("不再重试", delivery["message"])
         self.assertEqual(1, len(event.send_calls))
+
+    async def test_current_media_tool_sends_fresh_image_from_allowed_root(self) -> None:
+        harness = _PhotoToolHarness()
+        harness.data_dir = self.temp_dir.name
+        event = _FakeEvent()
+
+        payload = json.loads(
+            await harness._pc_send_current_media_impl(
+                event,
+                media_path=self.image_path,
+                caption="刚生成的这张给你。",
+            )
+        )
+
+        self.assertEqual(payload["status"], "success")
+        self.assertTrue(payload["sent"])
+        self.assertEqual(harness.delivery_calls, 1)
+        self.assertEqual(harness.delivery_kwargs["image_path"], os.path.realpath(self.image_path))
+        self.assertTrue(event._private_companion_photo_tool_sent)
+        self.assertIn(PHOTO_TOOL_SILENT_SENTINEL, payload["final_response_instruction"])
+        self.assertNotIn(self.image_path, json.dumps(payload, ensure_ascii=False))
+
+    async def test_current_media_tool_does_not_repeat_confirmed_media(self) -> None:
+        harness = _PhotoToolHarness()
+        harness.data_dir = self.temp_dir.name
+        event = _FakeEvent()
+        image_component = type("Image", (), {})()
+        event._private_companion_confirmed_send_chains = [[image_component]]
+
+        payload = json.loads(
+            await harness._pc_send_current_media_impl(
+                event,
+                media_path=self.image_path,
+            )
+        )
+
+        self.assertEqual(payload["status"], "already_sent")
+        self.assertTrue(payload["sent"])
+        self.assertEqual(harness.delivery_calls, 0)
+        self.assertTrue(event._private_companion_photo_tool_sent)
+
+    async def test_current_media_tool_rejects_stale_image(self) -> None:
+        harness = _PhotoToolHarness()
+        harness.data_dir = self.temp_dir.name
+        old = time.time() - 31 * 60
+        os.utime(self.image_path, (old, old))
+
+        payload = json.loads(
+            await harness._pc_send_current_media_impl(
+                _FakeEvent(),
+                media_path=self.image_path,
+            )
+        )
+
+        self.assertEqual(payload["status"], "invalid_media")
+        self.assertFalse(payload["sent"])
+        self.assertIn("不是本轮近期生成", payload["message"])
+        self.assertEqual(harness.delivery_calls, 0)
+
+    async def test_current_media_tool_rejects_path_outside_allowed_roots(self) -> None:
+        harness = _PhotoToolHarness()
+        with tempfile.TemporaryDirectory() as allowed_root:
+            harness.data_dir = allowed_root
+            payload = json.loads(
+                await harness._pc_send_current_media_impl(
+                    _FakeEvent(),
+                    media_path=self.image_path,
+                )
+            )
+
+        self.assertEqual(payload["status"], "invalid_media")
+        self.assertFalse(payload["sent"])
+        self.assertIn("不在允许", payload["message"])
+        self.assertEqual(harness.delivery_calls, 0)
+
+    async def test_current_media_tool_rejects_renamed_non_image(self) -> None:
+        fake_path = os.path.join(self.temp_dir.name, "generated_photos", "fake.jpg")
+        with open(fake_path, "wb") as handle:
+            handle.write(b"not-an-image")
+        harness = _PhotoToolHarness()
+        harness.data_dir = self.temp_dir.name
+
+        payload = json.loads(
+            await harness._pc_send_current_media_impl(
+                _FakeEvent(),
+                media_path=fake_path,
+            )
+        )
+
+        self.assertEqual(payload["status"], "invalid_media")
+        self.assertFalse(payload["sent"])
+        self.assertIn("实际图片格式", payload["message"])
+        self.assertEqual(harness.delivery_calls, 0)
 
     async def test_delivery_failure_is_not_top_level_success(self) -> None:
         harness = _PhotoToolHarness()
@@ -1059,6 +1157,8 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不要再写承接句", instruction)
         self.assertIn("不要写 `&&shy&&`", instruction)
         self.assertIn("不要复述或翻译 Provider 的英文原文", instruction)
+        self.assertIn("pc_send_current_media", instruction)
+        self.assertIn("另一个生图工具", instruction)
         self.assertIn("画面中不出现角色本人", instruction)
         self.assertIn("背影、侧脸、环境人像", instruction)
         self.assertIn("合影、合照、双人或多人同框", instruction)

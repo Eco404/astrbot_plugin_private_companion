@@ -12,12 +12,14 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.event import MessageChain
 from astrbot.core.platform.message_session import MessageSession
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 try:
     from astrbot.api.message_components import At, Plain
 except ImportError:
@@ -95,6 +97,11 @@ _PHOTO_TOOL_HTTP_URL_RE = re.compile(
     r"https?://[^\s<>\[\]{}\"']+",
     flags=re.I,
 )
+_CURRENT_MEDIA_IMAGE_SUFFIXES = frozenset(
+    {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".jfif", ".avif"}
+)
+_CURRENT_MEDIA_MAX_BYTES = 32 * 1024 * 1024
+_CURRENT_MEDIA_MAX_AGE_SECONDS = 30 * 60
 _REACTION_LOG_STAGES = frozenset(
     {
         "gate",
@@ -875,6 +882,8 @@ class LlmToolActionsMixin:
                     '- “JK”在服装语境下请规范写成“JK 校服/JK 制服”；只有用户明确改变服装时才替换连续状态，提问、假设或用户自己换衣不算角色已换装。',
                     '- 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。',
                     '- 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。多图职责组合可传 `reference_image_paths` 数组，并在 prompt 中说明每张图承担的脸、衣服、姿势等职责。',
+                    "- `pc_generate_photo` 会自行发送成图，调用它之后绝对不要再调用 `pc_send_current_media`。只有另一个生图工具在本轮明确返回了本地图片路径、且结果没有确认图片已发送时，才可把该路径交给 `pc_send_current_media` 补充投递一次。",
+                    "- `pc_send_current_media` 只承接本轮刚生成但尚未投递的本地图片。不得猜测路径、复用历史路径、发送用户未要求的文件，或在本轮已经出现图片后再次调用。",
                 ]
             )
             prompt_format_instruction = getattr(self, "_photo_generation_prompt_format_instruction", None)
@@ -1067,6 +1076,184 @@ class LlmToolActionsMixin:
             return item
 
         return sanitize(value)
+
+    @staticmethod
+    def _current_turn_has_delivered_media(event: AstrMessageEvent) -> bool:
+        if bool(getattr(event, "_private_companion_photo_tool_sent", False)):
+            return True
+        chains = getattr(event, "_private_companion_confirmed_send_chains", None)
+        if not isinstance(chains, list):
+            return False
+        for chain in chains:
+            if not isinstance(chain, (list, tuple)):
+                continue
+            for component in chain:
+                component_name = type(component).__name__.casefold()
+                if component_name in {"image", "file", "video", "record", "audio"}:
+                    return True
+        return False
+
+    def _current_media_allowed_roots(self) -> list[Path]:
+        roots: list[Path] = []
+
+        def add(candidate: Any) -> None:
+            text = str(candidate or "").strip()
+            if not text:
+                return
+            try:
+                resolved = Path(text).expanduser().resolve()
+            except Exception:
+                return
+            if resolved not in roots:
+                roots.append(resolved)
+
+        try:
+            add(Path(get_astrbot_data_path()) / "temp")
+        except Exception:
+            pass
+        data_dir = str(getattr(self, "data_dir", "") or "").strip()
+        if data_dir:
+            add(Path(data_dir) / "generated_photos")
+        return roots
+
+    @staticmethod
+    def _current_media_image_signature_matches(path: Path) -> bool:
+        try:
+            with path.open("rb") as handle:
+                header = handle.read(16)
+        except OSError:
+            return False
+        suffix = path.suffix.casefold()
+        if suffix in {".jpg", ".jpeg", ".jfif"}:
+            return header.startswith(b"\xff\xd8\xff")
+        if suffix == ".png":
+            return header.startswith(b"\x89PNG\r\n\x1a\n")
+        if suffix == ".gif":
+            return header.startswith((b"GIF87a", b"GIF89a"))
+        if suffix == ".webp":
+            return header.startswith(b"RIFF") and header[8:12] == b"WEBP"
+        if suffix == ".bmp":
+            return header.startswith(b"BM")
+        if suffix == ".avif":
+            return len(header) >= 12 and header[4:12] in {b"ftypavif", b"ftypavis"}
+        return False
+
+    def _resolve_current_media_image(self, value: Any) -> tuple[Path | None, str]:
+        raw = str(value or "").strip().strip('"').strip("'")
+        if not raw or raw.casefold().startswith(("http://", "https://", "data:", "base64://")):
+            return None, "只支持本轮工具返回的本地图片路径"
+        try:
+            path = Path(raw).expanduser().resolve(strict=True)
+        except Exception:
+            return None, "本轮生成的图片文件不存在"
+        if not path.is_file() or path.suffix.casefold() not in _CURRENT_MEDIA_IMAGE_SUFFIXES:
+            return None, "只允许发送本轮生成的常见图片文件"
+        if not any(path.is_relative_to(root) for root in self._current_media_allowed_roots()):
+            return None, "图片不在允许的 AstrBot 临时目录或本插件成图目录内"
+        try:
+            stat = path.stat()
+        except OSError:
+            return None, "无法读取本轮生成的图片文件"
+        if stat.st_size <= 0 or stat.st_size > _CURRENT_MEDIA_MAX_BYTES:
+            return None, "图片为空或超过 32 MB 发送上限"
+        if not self._current_media_image_signature_matches(path):
+            return None, "文件扩展名与实际图片格式不一致"
+        age = time.time() - float(stat.st_mtime or 0)
+        if age < -60 or age > _CURRENT_MEDIA_MAX_AGE_SECONDS:
+            return None, "图片不是本轮近期生成的文件"
+        return path, ""
+
+    async def _pc_send_current_media_impl(
+        self,
+        event: AstrMessageEvent,
+        *,
+        media_path: str = "",
+        caption: str = "",
+        **kwargs: Any,
+    ) -> str:
+        if self._current_turn_has_delivered_media(event):
+            setattr(event, "_private_companion_photo_tool_sent", True)
+            setattr(event, "_private_companion_photo_tool_sent_caption", "")
+            return json.dumps(
+                {
+                    "status": "already_sent",
+                    "success": True,
+                    "sent": True,
+                    "message": "本轮已经发送过媒体，不再重复投递。",
+                    "same_turn_retry_allowed": False,
+                    "final_response_instruction": f"不要追加回执或正文，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。",
+                },
+                ensure_ascii=False,
+            )
+        raw_path = media_path or kwargs.get("image_path") or kwargs.get("path")
+        path, rejection = self._resolve_current_media_image(raw_path)
+        if path is None:
+            return json.dumps(
+                {
+                    "status": "invalid_media",
+                    "success": False,
+                    "sent": False,
+                    "message": rejection or "图片不可用",
+                    "must_not_claim_sent": True,
+                    "same_turn_retry_allowed": False,
+                    "final_response_instruction": "不要再次猜测或改写本地路径；如实说明这次图片没有发送。",
+                },
+                ensure_ascii=False,
+            )
+        sent_paths = getattr(event, "_private_companion_current_media_sent_paths", None)
+        if not isinstance(sent_paths, set):
+            sent_paths = set()
+            setattr(event, "_private_companion_current_media_sent_paths", sent_paths)
+        path_key = str(path).casefold()
+        if path_key in sent_paths:
+            setattr(event, "_private_companion_photo_tool_sent", True)
+            return json.dumps(
+                {
+                    "status": "already_sent",
+                    "success": True,
+                    "sent": True,
+                    "message": "这张图片本轮已经投递，不再重复发送。",
+                    "same_turn_retry_allowed": False,
+                    "final_response_instruction": f"不要追加回执或正文，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。",
+                },
+                ensure_ascii=False,
+            )
+        visible_caption = self._sanitize_photo_tool_caption(caption, limit=120)
+        try:
+            delivery = await self._deliver_generated_image_to_event(
+                event,
+                image_path=str(path),
+                caption=visible_caption,
+            )
+        except Exception as exc:
+            delivery = {
+                "sent": False,
+                "uncertain": isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)),
+                "destination": "error",
+                "message": f"图片发送失败：{_single_line(exc, 180) or '未知错误'}",
+            }
+        sent = bool(delivery.get("sent"))
+        uncertain = bool(delivery.get("uncertain"))
+        if sent:
+            sent_paths.add(path_key)
+            setattr(event, "_private_companion_photo_tool_sent", True)
+            setattr(event, "_private_companion_photo_tool_sent_caption", visible_caption)
+        payload = {
+            "status": "success" if sent else "delivery_uncertain" if uncertain else "delivery_failed",
+            "success": sent,
+            "sent": sent,
+            "delivery_uncertain": uncertain,
+            "delivery": _single_line(delivery.get("destination"), 30),
+            "message": _single_line(delivery.get("message"), 220) or ("图片已发送" if sent else "图片发送失败"),
+            "must_not_claim_sent": not sent,
+            "same_turn_retry_allowed": False,
+            "final_response_instruction": (
+                f"图片及可选 caption 已作为本轮唯一可见回复发送，只输出 {PHOTO_TOOL_SILENT_SENTINEL}。"
+                if sent
+                else "不要再次发送或重新生成；按 message 如实说明当前投递结果。"
+            ),
+        }
+        return json.dumps(payload, ensure_ascii=False)
 
     @staticmethod
     def _reaction_expression_has_visible_text(value: Any) -> bool:
@@ -1516,6 +1703,7 @@ class LlmToolActionsMixin:
             "pc_qzone_view_feed",
             "pc_qzone_publish_feed",
             "pc_generate_photo",
+            "pc_send_current_media",
             "pc_find_reaction_image",
             "pc_manage_memo",
             "pc_manage_schedule",
@@ -1946,11 +2134,15 @@ class LlmToolActionsMixin:
         reaction_evaluated: bool,
     ) -> list[str]:
         """Keep ordinary experimental replies on the single-pass intent path."""
-        if explicit_media_request or not reaction_evaluated:
+        if explicit_media_request:
             return []
-        # The authorization now enables an internal response tag, not a tool call.
-        # Removing both tools prevents AstrBot from entering a second model turn.
-        blocked = {"pc_generate_photo", "pc_find_reaction_image"}
+        # Current-media delivery is only meaningful after an explicit request
+        # caused another tool to produce a local image in this same turn.
+        blocked = {"pc_send_current_media"}
+        if reaction_evaluated:
+            # The authorization now enables an internal response tag, not a
+            # tool call. Removing both tools prevents a second model turn.
+            blocked.update({"pc_generate_photo", "pc_find_reaction_image"})
         tool_set = getattr(req, "func_tool", None)
         if tool_set is None:
             return []

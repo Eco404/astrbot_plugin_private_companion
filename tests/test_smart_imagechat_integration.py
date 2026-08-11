@@ -2479,6 +2479,7 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             func_tool=_FakeToolSet(
                 "pc_generate_photo",
                 "pc_find_reaction_image",
+                "pc_send_current_media",
                 "safe_tool",
             )
         )
@@ -2489,7 +2490,7 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             reaction_evaluated=True,
         )
         self.assertEqual(
-            ["pc_find_reaction_image", "pc_generate_photo"],
+            ["pc_find_reaction_image", "pc_generate_photo", "pc_send_current_media"],
             removed,
         )
         self.assertEqual(
@@ -2501,6 +2502,7 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             func_tool=_FakeToolSet(
                 "pc_generate_photo",
                 "pc_find_reaction_image",
+                "pc_send_current_media",
                 "safe_tool",
             )
         )
@@ -2511,7 +2513,7 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             reaction_evaluated=True,
         )
         self.assertEqual(
-            ["pc_find_reaction_image", "pc_generate_photo"],
+            ["pc_find_reaction_image", "pc_generate_photo", "pc_send_current_media"],
             removed,
         )
         self.assertEqual(
@@ -2523,6 +2525,7 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             func_tool=_FakeToolSet(
                 "pc_generate_photo",
                 "pc_find_reaction_image",
+                "pc_send_current_media",
                 "safe_tool",
             )
         )
@@ -2534,8 +2537,28 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([], removed)
         self.assertEqual(
-            ["pc_generate_photo", "pc_find_reaction_image", "safe_tool"],
+            ["pc_generate_photo", "pc_find_reaction_image", "pc_send_current_media", "safe_tool"],
             [tool.name for tool in explicit.func_tool.tools],
+        )
+
+        ordinary = SimpleNamespace(
+            func_tool=_FakeToolSet(
+                "pc_generate_photo",
+                "pc_find_reaction_image",
+                "pc_send_current_media",
+                "safe_tool",
+            )
+        )
+        removed = LlmToolActionsMixin._scope_reaction_media_tools_for_request(
+            ordinary,
+            explicit_media_request=False,
+            reaction_authorized=False,
+            reaction_evaluated=False,
+        )
+        self.assertEqual(["pc_send_current_media"], removed)
+        self.assertEqual(
+            ["pc_generate_photo", "pc_find_reaction_image", "safe_tool"],
+            [tool.name for tool in ordinary.func_tool.tools],
         )
 
     async def test_denied_authorization_cannot_fall_through_legacy_media_tools(self) -> None:

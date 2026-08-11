@@ -7598,6 +7598,30 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             **kwargs,
         )
 
+    @filter.llm_tool(name="pc_send_current_media")
+    @_multi_persona_event_context
+    async def pc_send_current_media(
+        self,
+        event: AstrMessageEvent,
+        media_path: str = "",
+        caption: str = "",
+        **kwargs,
+    ) -> str:
+        """发送本轮其他工具刚生成、但尚未投递到当前会话的本地图片。
+
+        Args:
+            media_path(string): 本轮其他工具明确返回的本地图片路径；仅支持 AstrBot 临时目录或本插件成图目录，不得猜测或复用历史路径。
+            caption(string): 可选，随图片发送的一句自然短文；不要填写发送状态回执。
+        """
+        if self is None or self._proactive_only_blocks_passive_event(event, "pc_generate_photo"):
+            return '{"status":"disabled","message":"主动消息专用模式下，普通被动回复不可使用当前媒体投递工具。"}'
+        return await self._pc_send_current_media_impl(
+            event,
+            media_path=media_path,
+            caption=caption,
+            **kwargs,
+        )
+
     @filter.llm_tool(name="pc_find_reaction_image")
     @_multi_persona_event_context
     async def pc_find_reaction_image(
@@ -12860,7 +12884,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         else:
             normalized_tool_names = set()
         media_delivery_tool_call = bool(
-            normalized_tool_names & {"pc_find_reaction_image", "pc_generate_photo"}
+            normalized_tool_names
+            & {"pc_find_reaction_image", "pc_generate_photo", "pc_send_current_media"}
         )
         if media_delivery_tool_call:
             # These tools own their visible caption/media delivery. AstrBot also
