@@ -37,7 +37,26 @@ class MigrationCoordinatorTests(unittest.TestCase):
             "reserve_bytes": 0,
         }
         values.update(changes)
+        inventory = values.get("source_inventory")
+        if isinstance(inventory, dict) and "source_schema_version" not in changes:
+            values["source_schema_version"] = inventory.get("source_schema_version", "")
         return (coordinator or self.coordinator).start_or_resume(**values)
+
+    @staticmethod
+    def _inventory(fingerprint: str = "a" * 64) -> dict:
+        return {
+            "schema": "req041.source_inventory.v1",
+            "source_schema_version": f"companion-v1-{fingerprint[:32]}",
+            "fingerprint": fingerprint,
+            "source_count": 1,
+            "formats": {"json": 1, "sqlite": 0},
+            "store_version": 1,
+            "section_schema_versions": [],
+            "all_have_unified_person": True,
+            "all_have_persona_lifecycle": True,
+            "section_count_min": 5,
+            "section_count_max": 5,
+        }
 
     def test_start_creates_verified_immutable_backup_and_restart_reuses_epoch(self) -> None:
         status = self._start()
@@ -75,6 +94,41 @@ class MigrationCoordinatorTests(unittest.TestCase):
         added.write_text("{}", encoding="utf-8")
         with self.assertRaisesRegex(MigrationStateConflict, "migration_source_set_changed"):
             self._start(other, source_files=[other_source, added])
+
+    def test_inventory_is_bound_to_manifest_and_resume_contract(self) -> None:
+        inventory = self._inventory()
+        status = self._start(source_inventory=inventory)
+        manifest = __import__("json").loads(
+            (self.data_dir / status["backup_manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual("req041.backup_manifest.v2", manifest["schema"])
+        self.assertEqual(inventory, manifest["source_inventory"])
+
+        changed = self._inventory()
+        changed["section_count_max"] = 6
+        reopened = MigrationCoordinator(self.data_dir)
+        resumed = self._start(reopened, source_inventory=changed)
+        self.assertEqual(status["migration_epoch"], resumed["migration_epoch"])
+
+        other_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(other_dir, ignore_errors=True))
+        other_source = other_dir / "companions.json"
+        other_source.write_text(self.source.read_text(encoding="utf-8"), encoding="utf-8")
+        other = MigrationCoordinator(other_dir)
+        self._start(other, source_files=[other_source], source_inventory=inventory)
+        with self.assertRaisesRegex(MigrationStateConflict, "migration_resume_contract_conflict"):
+            self._start(
+                other,
+                source_files=[other_source],
+                source_inventory=self._inventory("b" * 64),
+            )
+
+    def test_rejects_malformed_source_inventory_before_backup(self) -> None:
+        malformed = self._inventory()
+        malformed["formats"] = {"json": 0, "sqlite": 0}
+        with self.assertRaisesRegex(MigrationPreflightError, "migration_source_inventory_invalid"):
+            self._start(source_inventory=malformed)
+        self.assertEqual({}, self.coordinator.status())
 
     def test_crash_after_s0_resumes_same_epoch_and_finishes_backup(self) -> None:
         with patch.object(self.coordinator, "_create_verified_backup", side_effect=RuntimeError("crash")):

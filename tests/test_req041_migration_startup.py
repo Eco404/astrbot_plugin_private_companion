@@ -5,8 +5,10 @@ import asyncio
 import copy
 from copy import deepcopy
 import hashlib
+import json
 import math
 from pathlib import Path
+import sqlite3
 import tempfile
 import types
 import unittest
@@ -18,6 +20,7 @@ from migration_dual_write import MigrationDualWriteProducer
 from migration_outbox import MigrationOutbox
 from migration_replay import MigrationReplayWorker
 from migration_read_router import MigrationRelationshipReadRouter
+from migration_source_inspector import inspect_migration_sources
 from migration_scoped_projection import ScopedProjectionSynchronizer
 from migration_scoped_projection import scoped_group_ref, scoped_persona_ref
 from identity_namespace import NamespaceContext
@@ -27,6 +30,7 @@ from unified_person_registry import UnifiedPersonRegistry
 
 
 ROOT = Path(__file__).resolve().parents[1]
+V608_FIXTURE = ROOT / "tests" / "fixtures" / "req041" / "companion-v6.0.8-sanitized.json"
 
 
 def _load_methods(*names: str) -> dict[str, Any]:
@@ -48,6 +52,7 @@ def _load_methods(*names: str) -> dict[str, Any]:
         "MigrationDualWriteProducer": MigrationDualWriteProducer,
         "MigrationReplayWorker": MigrationReplayWorker,
         "MigrationRelationshipReadRouter": MigrationRelationshipReadRouter,
+        "inspect_migration_sources": inspect_migration_sources,
         "ScopedProjectionSynchronizer": ScopedProjectionSynchronizer,
         "NamespaceContext": NamespaceContext,
         "scoped_group_ref": scoped_group_ref,
@@ -111,7 +116,7 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         host.storage_sqlite_effective_path = str(self.data_dir / "companions.db")
         host._persona_profiles_dir = str(self.data_dir / "persona_profiles")
         if source:
-            Path(host.data_file).write_text('{"users":{"u1":{}}}', encoding="utf-8")
+            Path(host.data_file).write_bytes(V608_FIXTURE.read_bytes())
         host._data_lock = asyncio.Lock()
         host.data = {"users": {}}
         host._data_default = host.data
@@ -190,6 +195,130 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         compatibility = __import__("json").loads(status["compatibility_json"])
         self.assertNotIn("target_user_id", str(compatibility))
         self.assertTrue(compatibility["owner_policy"]["configured_target"])
+        self.assertTrue(status["source_schema_version"].startswith("companion-v1-"))
+        manifest = __import__("json").loads(
+            (self.data_dir / status["backup_manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual("req041.backup_manifest.v2", manifest["schema"])
+        self.assertEqual(status["source_schema_version"], manifest["source_inventory"]["source_schema_version"])
+
+    async def test_sanitized_v608_fixture_upgrades_without_manual_action_and_preserves_scope_isolation(self) -> None:
+        host = self._host()
+        source = Path(host.data_file)
+        source_before = source.read_bytes()
+        host.data = json.loads(source_before)
+        host._data_default = host.data
+        registry = UnifiedPersonRegistry(host.data)
+        linked = registry.create_or_link(
+            {
+                "companion_instance_id": "astrbot_plugin_private_companion",
+                "bot_account_id": "onebot:bot-fixture",
+                "adapter_instance_id": "onebot:fixture",
+                "subject_namespace": "onebot:user",
+                "platform_subject_id": "10001",
+            },
+            profile={"display_name": "Fixture Owner"},
+            operation_id="fixture-preexisting-exact-link",
+        )
+        host.data["users"]["10001"]["unified_person_id"] = linked["person_id"]
+
+        remote = _Remote()
+        host._memory_companion_read_scoped_record = lambda _bridge, context, **kwargs: remote.read(context, **kwargs)
+        host._memory_companion_list_scoped_records = lambda _bridge, context, **kwargs: remote.list_records(context, **kwargs)
+        host._memory_companion_upsert_scoped_record = lambda _bridge, context, **kwargs: remote.upsert(context, **kwargs)
+        host._memory_companion_tombstone_scoped_record = lambda _bridge, context, **kwargs: remote.tombstone(context, **kwargs)
+
+        await host._req041_initialize_automatic_migration()
+
+        self.assertEqual("S6", host.req041_migration_status["phase"])
+        self.assertEqual(1, host.req041_migration_status["s4"]["migrated"])
+        self.assertEqual(1, host.req041_migration_status["s4"]["pending"])
+        self.assertEqual(source_before, source.read_bytes())
+        status = host.req041_migration_coordinator.status()
+        backup = self.data_dir / status["backup_manifest"]
+        self.assertEqual(source_before, (backup.parent / "files" / "companions.json").read_bytes())
+
+        records, contexts = host.req041_scoped_projection_sync.build_records(host.data)
+        serialized = json.dumps([record.payload for record in records], ensure_ascii=False)
+        self.assertIn("fixture-private-sentinel", serialized)
+        self.assertIn("fixture-group-a-sentinel", serialized)
+        self.assertIn("fixture-group-b-sentinel", serialized)
+        self.assertNotIn("relationship_score", serialized)
+        self.assertNotIn("relationship_role", serialized)
+        private = next(context for context in contexts if context.kind == "private")
+        private_view = host.req041_scoped_projection_sync.read_projection(private)
+        self.assertIn("fixture-private-sentinel", json.dumps(private_view, ensure_ascii=False))
+        group_views = [
+            host.req041_scoped_projection_sync.read_projection(context)
+            for context in contexts
+            if context.kind == "group_shared"
+        ]
+        self.assertEqual(2, len(group_views))
+        self.assertTrue(any("fixture-group-a-sentinel" in json.dumps(view, ensure_ascii=False) for view in group_views))
+        self.assertTrue(any("fixture-group-b-sentinel" in json.dumps(view, ensure_ascii=False) for view in group_views))
+        self.assertTrue(all(
+            not (
+                "fixture-group-a-sentinel" in json.dumps(view, ensure_ascii=False)
+                and "fixture-group-b-sentinel" in json.dumps(view, ensure_ascii=False)
+            )
+            for view in group_views
+        ))
+
+    async def test_v608_sqlite_store_is_detected_and_backed_up_online_without_source_mutation(self) -> None:
+        host = self._host(source=False)
+        fixture = json.loads(V608_FIXTURE.read_text(encoding="utf-8"))
+        database = self.data_dir / "companions.db"
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute(
+                "CREATE TABLE store_sections (section_name TEXT PRIMARY KEY,payload_json TEXT NOT NULL,"
+                "updated_at REAL NOT NULL,checksum TEXT DEFAULT '',schema_version INTEGER DEFAULT 1)"
+            )
+            connection.executemany(
+                "INSERT INTO store_sections VALUES(?,?,0,'',1)",
+                [(key, json.dumps(value, ensure_ascii=False)) for key, value in fixture.items()],
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        source_before = database.read_bytes()
+        host.storage_backend = "sqlite"
+        host.storage_sqlite_effective_path = str(database)
+        host.data = fixture
+        host._data_default = host.data
+
+        await host._req041_initialize_automatic_migration()
+
+        status = host.req041_migration_coordinator.status()
+        self.assertEqual("S6", status["phase"])
+        self.assertEqual(source_before, database.read_bytes())
+        manifest = json.loads((self.data_dir / status["backup_manifest"]).read_text(encoding="utf-8"))
+        self.assertEqual({"json": 0, "sqlite": 1}, manifest["source_inventory"]["formats"])
+        copied = self.data_dir / status["backup_manifest"]
+        copied = copied.parent / "files" / "companions.db"
+        copied_connection = sqlite3.connect(copied)
+        try:
+            self.assertEqual("ok", copied_connection.execute("PRAGMA quick_check").fetchone()[0])
+            copied_users = copied_connection.execute(
+                "SELECT payload_json FROM store_sections WHERE section_name='users'"
+            ).fetchone()[0]
+        finally:
+            copied_connection.close()
+        self.assertEqual(fixture["users"], json.loads(copied_users))
+
+    async def test_invalid_local_store_keeps_legacy_runtime_and_creates_no_migration_epoch(self) -> None:
+        host = self._host()
+        source = Path(host.data_file)
+        source.write_text('{"version":1,"users":{}}', encoding="utf-8")
+        source_before = source.read_bytes()
+
+        await host._req041_initialize_automatic_migration()
+
+        self.assertEqual("degraded", host.req041_migration_status["state"])
+        self.assertEqual("migration_source_required_section_missing", host.req041_migration_status["code"])
+        self.assertEqual({}, host.req041_migration_coordinator.status())
+        self.assertEqual(source_before, source.read_bytes())
+        self.assertFalse((self.data_dir / "req041_backups").exists())
 
     async def test_missing_memory_degrades_only_shadow_and_restart_reuses_epoch(self) -> None:
         host = self._host(bind=False)

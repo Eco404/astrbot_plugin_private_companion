@@ -28,6 +28,11 @@ COMPATIBILITY_KEYS = frozenset({
     "auto_profile_creation", "content_policy", "owner_policy", "private_access_policy",
     "proactive_policy", "relationship_policy", "tool_policy",
 })
+SOURCE_INVENTORY_KEYS = frozenset({
+    "schema", "source_schema_version", "fingerprint", "source_count", "formats",
+    "store_version", "section_schema_versions", "all_have_unified_person",
+    "all_have_persona_lifecycle", "section_count_min", "section_count_max",
+})
 
 
 class MigrationCoordinatorError(RuntimeError):
@@ -101,6 +106,59 @@ def _safe_snapshot(value: Any, depth: int = 0) -> Any:
             result[clean] = _safe_snapshot(item, depth + 1)
         return result
     raise MigrationCoordinatorError("compatibility_snapshot_invalid")
+
+
+def _source_inventory(value: Any, *, source_schema_version: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or set(value) != SOURCE_INVENTORY_KEYS:
+        raise MigrationPreflightError("migration_source_inventory_invalid")
+    safe = _safe_snapshot(value)
+    if (
+        safe.get("schema") != "req041.source_inventory.v1"
+        or safe.get("source_schema_version") != source_schema_version
+        or not _digest(safe.get("fingerprint"))
+        or source_schema_version != (
+            f"companion-v{safe.get('store_version')}-{str(safe.get('fingerprint') or '')[:32]}"
+        )
+        or type(safe.get("source_count")) is not int
+        or safe["source_count"] <= 0
+        or type(safe.get("store_version")) is not int
+        or type(safe.get("section_count_min")) is not int
+        or type(safe.get("section_count_max")) is not int
+        or safe["section_count_min"] < 3
+        or safe["section_count_max"] < safe["section_count_min"]
+        or type(safe.get("all_have_unified_person")) is not bool
+        or type(safe.get("all_have_persona_lifecycle")) is not bool
+    ):
+        raise MigrationPreflightError("migration_source_inventory_invalid")
+    formats = safe.get("formats")
+    if (
+        not isinstance(formats, dict)
+        or set(formats) != {"json", "sqlite"}
+        or any(type(formats[kind]) is not int or formats[kind] < 0 for kind in formats)
+        or sum(formats.values()) != safe["source_count"]
+    ):
+        raise MigrationPreflightError("migration_source_inventory_invalid")
+    section_versions = safe.get("section_schema_versions")
+    if (
+        not isinstance(section_versions, list)
+        or any(type(item) is not int or item <= 0 for item in section_versions)
+        or section_versions != sorted(set(section_versions))
+    ):
+        raise MigrationPreflightError("migration_source_inventory_invalid")
+    return safe
+
+
+def _source_inventory_contract(value: dict[str, Any]) -> dict[str, Any]:
+    """Select only fields that cannot change through ordinary legacy saves."""
+    return {
+        key: value.get(key)
+        for key in (
+            "schema", "source_schema_version", "fingerprint", "source_count",
+            "formats", "store_version", "section_schema_versions",
+        )
+    }
 
 
 class MigrationCoordinator:
@@ -235,6 +293,7 @@ class MigrationCoordinator:
         target_schema_version: str,
         companion_version: str,
         memory_version: str,
+        source_inventory: dict[str, Any] | None = None,
         reserve_bytes: int = 10 * 1024 * 1024,
     ) -> dict[str, Any]:
         policy = _token(policy_version, 64)
@@ -244,6 +303,7 @@ class MigrationCoordinator:
         ]
         if not policy or not all(versions):
             raise MigrationPreflightError("migration_version_invalid")
+        inventory = _source_inventory(source_inventory, source_schema_version=versions[0])
         sources = self._source_paths(source_files)
         with self._transaction() as connection:
             row = connection.execute("SELECT * FROM migration_control WHERE singleton=1").fetchone()
@@ -261,12 +321,16 @@ class MigrationCoordinator:
                      "", "", "{}", "", now, now),
                 )
             else:
-                if row["policy_version"] != policy or row["target_schema_version"] != versions[1]:
+                if (
+                    row["policy_version"] != policy
+                    or row["source_schema_version"] != versions[0]
+                    or row["target_schema_version"] != versions[1]
+                ):
                     raise MigrationStateConflict("migration_resume_contract_conflict")
                 epoch = row["migration_epoch"]
         status = self.status()
         if status["phase"] == "S0" or not status["backup_manifest_hash"]:
-            self._create_verified_backup(epoch, sources, versions=versions)
+            self._create_verified_backup(epoch, sources, versions=versions, source_inventory=inventory)
         else:
             if not self.verify_backup():
                 self.pause("migration_backup_unverified")
@@ -278,9 +342,19 @@ class MigrationCoordinator:
             if expected_names != observed_names:
                 self.pause("migration_source_set_changed")
                 raise MigrationStateConflict("migration_source_set_changed")
+            if inventory and _source_inventory_contract(manifest.get("source_inventory") or {}) != _source_inventory_contract(inventory):
+                self.pause("migration_source_inventory_changed")
+                raise MigrationStateConflict("migration_source_inventory_changed")
         return self.status()
 
-    def _create_verified_backup(self, epoch: str, sources: Sequence[Path], *, versions: Sequence[str]) -> None:
+    def _create_verified_backup(
+        self,
+        epoch: str,
+        sources: Sequence[Path],
+        *,
+        versions: Sequence[str],
+        source_inventory: dict[str, Any],
+    ) -> None:
         destination = self.backup_root / epoch
         destination.mkdir(mode=0o700, parents=True, exist_ok=True)
         entries: list[dict[str, Any]] = []
@@ -322,10 +396,13 @@ class MigrationCoordinator:
                 "bytes": target.stat().st_size, "sha256": copied,
             })
         manifest = {
-            "schema": "req041.backup_manifest.v1", "migration_epoch": epoch,
+            "schema": "req041.backup_manifest.v2" if source_inventory else "req041.backup_manifest.v1",
+            "migration_epoch": epoch,
             "source_schema_version": versions[0], "target_schema_version": versions[1],
             "companion_version": versions[2], "memory_version": versions[3], "files": entries,
         }
+        if source_inventory:
+            manifest["source_inventory"] = source_inventory
         encoded = _canonical(manifest)
         manifest_path = destination / "manifest.json"
         temporary_manifest = destination / ".manifest.json.tmp"

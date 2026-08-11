@@ -151,6 +151,7 @@ from .migration_backfill import MigrationBackfill
 from .migration_dual_write import MigrationDualWriteProducer
 from .migration_replay import MigrationReplayWorker
 from .migration_read_router import MigrationRelationshipReadRouter
+from .migration_source_inspector import inspect_migration_sources
 from .identity_namespace import NamespaceContext
 from .migration_scoped_projection import (
     ScopedProjectionSynchronizer,
@@ -5252,14 +5253,20 @@ class PrivateCompanionPlugin(
         companion_version = _single_line((getattr(self, "plugin_identity", {}) or {}).get("version"), 32) or "unknown"
         try:
             async with self._data_lock:
+                source_inventory = await asyncio.to_thread(
+                    inspect_migration_sources,
+                    self.data_dir,
+                    sources,
+                )
                 status = await asyncio.to_thread(
                     coordinator.start_or_resume,
                     source_files=sources,
                     policy_version="req041-v1",
-                    source_schema_version="legacy-effective",
+                    source_schema_version=source_inventory["source_schema_version"],
                     target_schema_version="req041-v1",
                     companion_version=companion_version,
                     memory_version=memory_version,
+                    source_inventory=source_inventory,
                 )
             if status.get("phase") == "S1" and status.get("state") != "paused":
                 await asyncio.to_thread(coordinator.capture_compatibility, self._req041_compatibility_snapshot())
