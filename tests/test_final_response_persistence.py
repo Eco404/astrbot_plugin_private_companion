@@ -396,9 +396,6 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await plugin.capture_final_outbound_chain_for_persistence(event)
-        tracked_send = event.send
-        outbound = SimpleNamespace(chain=[Plain("适配器实际接收的回复")])
-        await tracked_send(outbound)
         # The agent finished before the platform confirmed delivery, so the
         # official assistant message is staged before the after-sent finalizer.
         await plugin._prepare_final_response_after_agent(
@@ -406,6 +403,8 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
             run_context,
             LLMResponse(role="assistant", completion_text="审核后的候选回复"),
         )
+        outbound = SimpleNamespace(chain=[Plain("适配器实际接收的回复")])
+        await event.send(outbound)
         await plugin.persist_confirmed_passive_reply(event)
 
         plugin._finalize_passive_delivered_response.assert_awaited_once()
@@ -425,13 +424,13 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await plugin.capture_final_outbound_chain_for_persistence(event)
-        with self.assertRaisesRegex(RuntimeError, "adapter send failed"):
-            await event.send(SimpleNamespace(chain=[Plain("不会送达")]))
         await plugin._prepare_final_response_after_agent(
             event,
             run_context,
             LLMResponse(role="assistant", completion_text="审核后的候选回复"),
         )
+        with self.assertRaisesRegex(RuntimeError, "adapter send failed"):
+            await event.send(SimpleNamespace(chain=[Plain("不会送达")]))
         await plugin.persist_confirmed_passive_reply(event)
 
         plugin._finalize_passive_delivered_response.assert_not_awaited()
@@ -448,12 +447,12 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await plugin.capture_final_outbound_chain_for_persistence(event)
-        result = await event.send(SimpleNamespace(chain=[Plain("平台拒绝接收")]))
         await plugin._prepare_final_response_after_agent(
             event,
             run_context,
             LLMResponse(role="assistant", completion_text="审核后的候选回复"),
         )
+        result = await event.send(SimpleNamespace(chain=[Plain("平台拒绝接收")]))
         await plugin.persist_confirmed_passive_reply(event)
 
         self.assertFalse(result)
@@ -527,7 +526,7 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
                 Message(
                     role="assistant",
                     content=[TextPart(text="好的，我先把这条记下来")],
-                )
+                ),
             ]
         )
 
@@ -542,7 +541,10 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
         plugin._finalize_passive_delivered_response.assert_not_awaited()
         self.assertFalse(event._private_companion_delivery_ledger.finalized)
 
-        # Agent finishes: on_agent_done stages the official assistant message.
+        # The runner appends the final assistant message before on_agent_done.
+        run_context.messages.append(
+            Message(role="assistant", content=[TextPart(text="已记录")])
+        )
         await plugin._prepare_final_response_after_agent(
             event,
             run_context,
@@ -555,8 +557,11 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         plugin._finalize_passive_delivered_response.assert_awaited_once()
         call = plugin._finalize_passive_delivered_response.await_args
-        self.assertIn("好的，我先把这条记下来", call.kwargs["fallback_text"])
-        self.assertIn("已记录", call.kwargs["fallback_text"])
+        self.assertEqual("已记录", call.kwargs["fallback_text"])
+        self.assertEqual(
+            run_context.messages[-1],
+            event._private_companion_official_assistant_message,
+        )
         self.assertTrue(event._private_companion_delivery_ledger.finalized)
 
     async def test_proactive_collector_replaces_candidate_with_confirmed_chain(self):
