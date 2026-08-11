@@ -175,17 +175,24 @@ class _PromptAwarePhotoToolHarness(_PhotoToolHarness, CommandHandlersMixin):
         return path, "随消息发送的图片" if path else "", bool(path)
 
 
-class _RelationshipRolePhotoToolHarness(_PhotoToolHarness):
-    def __init__(self, *, explicit_mention: bool = True) -> None:
+class _RelationshipRolePhotoToolHarness(_PromptAwarePhotoToolHarness):
+    def __init__(
+        self,
+        *,
+        explicit_mention: bool = True,
+        role_reference_path: str | None = None,
+    ) -> None:
         super().__init__()
+        self.enable_photo_reference_image = True
         self.explicit_mention = explicit_mention
+        self.role_reference_path = role_reference_path
 
     def _photo_reference_role_asset_candidates(self, *, request_text: str):
         return [
             {
                 "id": "sister-ref",
                 "kind": "relation_role",
-                "path": self.image_path,
+                "path": self.image_path if self.role_reference_path is None else self.role_reference_path,
                 "role_name": "姐姐",
                 "role_explicit_mention": self.explicit_mention,
                 "group_photo_requested": True,
@@ -607,6 +614,62 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload["status"], "need_reference")
         self.assertEqual(harness.generation_kwargs, {})
+
+    async def test_group_photo_named_role_without_managed_asset_is_rejected(self) -> None:
+        harness = _RelationshipRolePhotoToolHarness(role_reference_path="")
+        harness.image_path = self.image_path
+
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                _FakeEvent(),
+                prompt="我和姐姐在咖啡店拍一张合影",
+                kind="selfie",
+                send=False,
+            )
+        )
+
+        self.assertEqual(payload["status"], "need_reference")
+        self.assertEqual(harness.generation_kwargs, {})
+
+    async def test_group_photo_named_role_is_rejected_when_reference_feature_is_disabled(self) -> None:
+        harness = _RelationshipRolePhotoToolHarness()
+        harness.image_path = self.image_path
+        harness.enable_photo_reference_image = False
+
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                _FakeEvent(),
+                prompt="我和姐姐在咖啡店拍一张合影",
+                kind="selfie",
+                send=False,
+            )
+        )
+
+        self.assertEqual(payload["status"], "need_reference")
+        self.assertEqual(harness.generation_kwargs, {})
+
+    async def test_group_photo_current_event_image_takes_priority_over_named_role_asset(self) -> None:
+        harness = _RelationshipRolePhotoToolHarness(role_reference_path="C:/managed/sister.png")
+        harness.image_path = self.image_path
+
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                _FakeEvent(reference_path=self.image_path),
+                prompt="我和姐姐在咖啡店拍一张合影",
+                kind="selfie",
+                send=False,
+            )
+        )
+
+        self.assertEqual(payload["status"], "success")
+        self.assertEqual(
+            harness.generation_kwargs["reference_image_path"],
+            self.image_path,
+        )
+        self.assertEqual(
+            harness.generation_kwargs["reference_image_paths"],
+            [self.image_path],
+        )
 
     async def test_group_photo_with_explicit_reference_uses_multi_person_contract(self) -> None:
         harness = _PromptAwarePhotoToolHarness()

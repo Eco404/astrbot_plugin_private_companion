@@ -3224,10 +3224,8 @@ class LlmToolActionsMixin:
             add_reference_source(raw_multi_references)
 
         if group_photo_requested:
-            # A group shot may be authorized by either a current-turn user
-            # image or an explicitly named, plugin-managed relationship-role
-            # asset. Model-supplied paths remain untrusted and cannot grant
-            # this capability.
+            # 合影只能由本轮图片，或用户明确点名且已有托管参考图的关系角色授权。
+            # 模型传入的路径始终不参与授权，关系角色图片仍交给下游选图器处理。
             reference_sources.clear()
             reference_path = ""
             role_reference_candidates: list[dict[str, Any]] = []
@@ -3236,7 +3234,9 @@ class LlmToolActionsMixin:
                 "_photo_reference_role_asset_candidates",
                 None,
             )
-            if callable(role_reference_resolver):
+            if bool(getattr(self, "enable_photo_reference_image", False)) and callable(
+                role_reference_resolver
+            ):
                 try:
                     resolved_candidates = role_reference_resolver(
                         request_text=content,
