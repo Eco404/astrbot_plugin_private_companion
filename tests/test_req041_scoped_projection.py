@@ -4,6 +4,7 @@ from copy import deepcopy
 import unittest
 
 from migration_scoped_projection import ScopedProjectionSynchronizer
+from authoritative_private_memory import AuthoritativePrivateMemoryStore
 from unified_person_registry import UnifiedPersonRegistry
 
 
@@ -172,6 +173,37 @@ class ScopedProjectionTests(unittest.TestCase):
         persona_records, _ = self.sync.build_records(self.snapshot, source_scope="persona:custom")
         self.assertNotEqual(default_records[0].context.persona_id, persona_records[0].context.persona_id)
         self.assertFalse(any(item.context.kind == "persona_global" for item in default_records + persona_records))
+
+    def test_authoritative_person_private_memory_wins_over_multiple_linked_legacy_rows(self) -> None:
+        linked = UnifiedPersonRegistry(self.snapshot).link_identity(
+            self.person_id,
+            _identity("20002"),
+            operation_id="link-second-private-identity",
+        )
+        self.assertTrue(linked["ok"])
+        self.snapshot["users"]["20002"] = {
+            "user_id": "20002",
+            "identity_subject_id": "20002",
+            "unified_person_id": self.person_id,
+            "companion_memory": {"items": [{"text": "ambiguous-second-row"}]},
+        }
+        AuthoritativePrivateMemoryStore(self.snapshot).commit(
+            self.person_id,
+            {"companion_memory": {"items": [{"text": "canonical-person-memory"}]}},
+            expected_revision=0,
+            operation_id="canonical-private-memory",
+        )
+        records, _ = self.sync.build_records(self.snapshot)
+        serialized = str([record.payload for record in records])
+        self.assertIn("canonical-person-memory", serialized)
+        self.assertNotIn("private-sentinel", serialized)
+        self.assertNotIn("ambiguous-second-row", serialized)
+        memory_records = [
+            record for record in records
+            if record.context.kind == "private" and record.record_kind == "memory"
+        ]
+        self.assertTrue(memory_records)
+        self.assertTrue(all(record.payload["source_revision"] == 1 for record in memory_records))
 
     def test_rejected_and_revoked_rules_are_audited_but_never_projected_for_runtime(self) -> None:
         profile = self.snapshot["users"]["10001"]["expression_profile"]

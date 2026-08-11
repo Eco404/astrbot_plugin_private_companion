@@ -787,6 +787,13 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     _safe_int(expression_feedback.get("demoted_rules"), 0, 0),
                 )
             private_memory_write_allowed = self._req041_private_memory_write_allowed(user)
+            private_memory_managed = self._req041_private_memory_managed()
+            private_memory_revision = (
+                self._req041_prepare_authoritative_private_memory(user)
+                if private_memory_write_allowed and private_memory_managed else None
+            )
+            if private_memory_write_allowed and private_memory_managed and private_memory_revision is None:
+                private_memory_write_allowed = False
             if private_memory_write_allowed:
                 user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
             if self._expression_private_learning_source_enabled(user, user_id):
@@ -797,6 +804,14 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 self._update_open_loops_from_message(user, safe_text or text)
                 self._update_action_preferences_from_message(user, safe_text or text)
                 self._update_user_behavior_habits_from_message(user, safe_text or text)
+                if private_memory_managed:
+                    self._req041_commit_authoritative_private_memory(
+                        user,
+                        expected_revision=private_memory_revision,
+                        operation_id="req041-private-message:" + (
+                            self._event_message_id(event) or uuid.uuid4().hex
+                        ),
+                    )
             if (
                 not rest_silence_early_block
                 and (

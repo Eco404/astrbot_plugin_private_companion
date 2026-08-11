@@ -16,12 +16,17 @@ from expression_scope_ownership import (
 )
 from scoped_domain_contract import build_scoped_domain_payload
 from unified_person_registry import UnifiedPersonRegistry
+from authoritative_private_memory import (
+    AuthoritativePrivateMemoryError,
+    AuthoritativePrivateMemoryStore,
+)
 
 
 _PRIVATE_MEMORY_FIELDS = (
     "companion_memory", "intent_profile", "dialogue_episodes", "open_loops",
     "behavior_habits", "action_preferences", "action_consequences", "state_continuity",
-    "recent_reply_topics",
+    "recent_reply_topics", "birthday_profile", "birthday_curiosity_opt_out",
+    "birthday_curiosity_asked_at", "birthday_curiosity_answered_at",
 )
 _GROUP_MEMORY_FIELDS = (
     "recent_messages", "slang_terms", "slang_meanings", "topic_signatures", "topic_threads",
@@ -368,6 +373,21 @@ class ScopedProjectionSynchronizer:
             facts_result = registry.identity_profile_facts(person_id)
             facts = facts_result.get("facts") if facts_result.get("ok") else {}
             user = matched[0] if len(matched) == 1 else None
+            authoritative_content: dict[str, Any] | None = None
+            authoritative_revision = 0
+            try:
+                authoritative = AuthoritativePrivateMemoryStore(snapshot).read(person_id)
+            except AuthoritativePrivateMemoryError as exc:
+                raise ScopedProjectionError(str(exc)) from exc
+            authoritative_record = (
+                authoritative.get("record") if isinstance(authoritative, dict) else None
+            )
+            if isinstance(authoritative_record, dict):
+                raw_content = authoritative_record.get("content")
+                if not isinstance(raw_content, dict):
+                    raise ScopedProjectionError("private_memory_record_invalid")
+                authoritative_content = raw_content
+                authoritative_revision = int(authoritative_record.get("revision") or 0)
             preferred = str((facts or {}).get("preferred_address") or "").strip()
             display_name = str((facts or {}).get("display_name") or "").strip()
             canonical_name = preferred or (display_name if display_name != "unknown_person" else "")
@@ -391,10 +411,12 @@ class ScopedProjectionSynchronizer:
                     domain="profile", content=profile_content,
                 ))
             for field in _PRIVATE_MEMORY_FIELDS:
-                if isinstance(user, dict) and _present(user.get(field)):
+                memory_source = authoritative_content if authoritative_content is not None else user
+                if isinstance(memory_source, dict) and _present(memory_source.get(field)):
                     records.append(self._record(
                         context, record_kind="memory", record_id=f"req041-private-memory-{field.replace('_', '-')}",
-                        domain="memory", content={field: deepcopy(user[field])},
+                        domain="memory", content={field: deepcopy(memory_source[field])},
+                        source_revision=authoritative_revision,
                     ))
             if isinstance(user, dict):
                 records.extend(self._learning_records(

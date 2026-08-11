@@ -16059,8 +16059,24 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 loop_text = self._format_open_loops_for_prompt(user) or "暂无未完成约定。"
                 response = f"当前对话片段：\n{episode_text}\n\n未完话头：\n{loop_text}"
             elif action in {"话头删除", "删除话头", "未完话头删除", "删除未完话头"}:
-                response = self._remove_open_loop_entry(user, value)
-                self._save_data_sync()
+                memory_managed = self._req041_private_memory_managed()
+                memory_revision = (
+                    self._req041_prepare_authoritative_private_memory(user)
+                    if memory_managed else None
+                )
+                if memory_managed and memory_revision is None:
+                    response = "权威私聊记忆暂不可写，请稍后重试。"
+                else:
+                    response = self._remove_open_loop_entry(user, value)
+                    committed = not memory_managed or self._req041_commit_authoritative_private_memory(
+                        user,
+                        expected_revision=memory_revision,
+                        operation_id="req041-command-open-loop:" + uuid.uuid4().hex,
+                    )
+                    if committed:
+                        self._save_data_sync()
+                    else:
+                        response = "记忆已发生并发变更，请重试。"
             elif action in {"长期记忆", "livingmemory", "lmem", "向量记忆"}:
                 response = self._format_livingmemory_status()
             elif action in {"日记", "bot日记", "小记"}:

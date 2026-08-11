@@ -109,6 +109,12 @@ from .expression_scope_ownership import (
     bind_expression_item,
     bind_expression_profile,
 )
+from .authoritative_private_memory import (
+    AuthoritativePrivateMemoryError,
+    AuthoritativePrivateMemoryStore,
+    apply_private_memory_content,
+    private_memory_content,
+)
 from .scoped_runtime_view import scoped_approved_expression_rules
 from .companion_interaction_expression import (
     build_expression_decision,
@@ -3406,6 +3412,111 @@ class UserMemoryMixin:
         try:
             return resolver(user, kind="private", purpose="memory_write") is not None
         except Exception:
+            return False
+
+    def _req041_private_memory_managed(self) -> bool:
+        if getattr(self, "req041_scoped_projection_sync", None) is not None:
+            return True
+        status = getattr(self, "req041_migration_status", None)
+        return isinstance(status, dict) and bool(
+            status.get("required") or status.get("scoped_required")
+        )
+
+    def _req041_private_memory_unique_legacy_source(self, user: dict[str, Any]) -> bool:
+        person_id = _single_line(user.get("unified_person_id"), 80) if isinstance(user, dict) else ""
+        subject = _single_line(
+            user.get("identity_subject_id") or user.get("user_id"), 160
+        ) if isinstance(user, dict) else ""
+        if not person_id or not subject:
+            return False
+        registry_getter = getattr(self, "_active_unified_person_registry", None)
+        registry = registry_getter() if callable(registry_getter) else None
+        if registry is None or not registry.matches_person_subject(person_id, subject):
+            return False
+        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else None
+        if not isinstance(users, dict):
+            return False
+        matches = []
+        for legacy_key, candidate in users.items():
+            if not isinstance(candidate, dict) or candidate.get("unified_person_id") != person_id:
+                continue
+            candidate_subject = _single_line(
+                candidate.get("identity_subject_id") or candidate.get("user_id") or legacy_key, 160
+            )
+            if candidate_subject and registry.matches_person_subject(person_id, candidate_subject):
+                matches.append(candidate)
+        return len(matches) == 1 and matches[0] is user
+
+    def _req041_prepare_authoritative_private_memory(self, user: dict[str, Any]) -> int | None:
+        if not self._req041_private_memory_write_allowed(user):
+            return None
+        person_id = _single_line(user.get("unified_person_id"), 80)
+        if not person_id or not isinstance(getattr(self, "data", None), dict):
+            return None
+        try:
+            store = AuthoritativePrivateMemoryStore(self.data)
+            result = store.read(person_id)
+            if result.get("code") == "not_found":
+                seed = (
+                    private_memory_content(user)
+                    if self._req041_private_memory_unique_legacy_source(user)
+                    else {}
+                )
+                result = store.commit(
+                    person_id,
+                    seed,
+                    expected_revision=0,
+                    operation_id=f"req041-private-memory-bootstrap:{person_id}",
+                )
+            record = result.get("record") if isinstance(result, dict) else None
+            if result.get("ok") is not True or not isinstance(record, dict):
+                return None
+            content = record.get("content")
+            if not isinstance(content, dict):
+                return None
+            apply_private_memory_content(user, content)
+            return int(record.get("revision") or 0) or None
+        except (AuthoritativePrivateMemoryError, TypeError, ValueError) as exc:
+            logger.warning(
+                "[PrivateCompanion] REQ-041 权威私聊记忆准备失败: %s",
+                _single_line(exc, 120),
+            )
+            return None
+
+    def _req041_commit_authoritative_private_memory(
+        self,
+        user: dict[str, Any],
+        *,
+        expected_revision: int,
+        operation_id: str,
+    ) -> bool:
+        person_id = _single_line(user.get("unified_person_id"), 80) if isinstance(user, dict) else ""
+        if not person_id or not operation_id or not isinstance(getattr(self, "data", None), dict):
+            return False
+        try:
+            store = AuthoritativePrivateMemoryStore(self.data)
+            result = store.commit(
+                person_id,
+                private_memory_content(user),
+                expected_revision=expected_revision,
+                operation_id=operation_id,
+            )
+            if result.get("ok") is True:
+                return True
+            current = store.read(person_id)
+            record = current.get("record") if isinstance(current, dict) else None
+            if isinstance(record, dict) and isinstance(record.get("content"), dict):
+                apply_private_memory_content(user, record["content"])
+            logger.warning(
+                "[PrivateCompanion] REQ-041 权威私聊记忆写入拒绝: code=%s",
+                _single_line(result.get("code"), 80),
+            )
+            return False
+        except (AuthoritativePrivateMemoryError, TypeError, ValueError) as exc:
+            logger.warning(
+                "[PrivateCompanion] REQ-041 权威私聊记忆写入失败: %s",
+                _single_line(exc, 120),
+            )
             return False
 
     def _format_expression_profile_for_prompt(
@@ -8504,8 +8615,14 @@ Character-specific bottom-line baseline (reference only; empty means use the con
             return
         now = _now_ts()
         async with self._data_lock:
-            user = dict(self._get_user(user_id))
-        if not self._req041_private_memory_write_allowed(user):
+            current = self._get_user(user_id)
+            memory_managed = self._req041_private_memory_managed()
+            memory_revision = (
+                self._req041_prepare_authoritative_private_memory(current)
+                if memory_managed else None
+            )
+            user = dict(current)
+        if memory_managed and memory_revision is None:
             return
         if now < _safe_float(user.get("dialogue_episode_retry_after"), 0):
             return
@@ -8729,6 +8846,13 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             current["dialogue_episode_retry_after"] = 0
             current["dialogue_episode_last_error"] = ""
             current["dialogue_episode_running_at"] = 0
+            if memory_managed:
+                if not self._req041_commit_authoritative_private_memory(
+                    current,
+                    expected_revision=memory_revision,
+                    operation_id=f"req041-dialogue-episode:{user_id}:{expression_batch_key}",
+                ):
+                    return
             self._save_data_sync()
 
     def _build_expression_decision_for_user(
@@ -9057,8 +9181,14 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             return
         now = _now_ts()
         async with self._data_lock:
-            user = dict(self._get_user(user_id))
-        if not self._req041_private_memory_write_allowed(user):
+            current = self._get_user(user_id)
+            memory_managed = self._req041_private_memory_managed()
+            memory_revision = (
+                self._req041_prepare_authoritative_private_memory(current)
+                if memory_managed else None
+            )
+            user = dict(current)
+        if memory_managed and memory_revision is None:
             return
         if now < _safe_float(user.get("companion_memory_retry_after"), 0):
             return
@@ -9154,6 +9284,16 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             current["companion_memory_retry_after"] = 0
             current["companion_memory_last_error"] = ""
             current["companion_memory_running_at"] = 0
+            memory_fingerprint = hashlib.sha256(
+                json.dumps(normalized, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:24]
+            if memory_managed:
+                if not self._req041_commit_authoritative_private_memory(
+                    current,
+                    expected_revision=memory_revision,
+                    operation_id=f"req041-memory-profile:{user_id}:{memory_fingerprint}",
+                ):
+                    return
             self._save_data_sync()
 
     async def _try_acquire_user_background_task(

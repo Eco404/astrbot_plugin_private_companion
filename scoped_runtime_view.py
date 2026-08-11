@@ -15,7 +15,8 @@ PRIVATE_FIELDS = frozenset({
     "nickname", "style", "profile_origin", "auto_profile_created",
     "companion_memory", "intent_profile", "dialogue_episodes", "open_loops",
     "behavior_habits", "action_preferences", "action_consequences", "state_continuity",
-    "recent_reply_topics", "expression_profile",
+    "recent_reply_topics", "birthday_profile", "birthday_curiosity_opt_out",
+    "birthday_curiosity_asked_at", "birthday_curiosity_answered_at", "expression_profile",
     "profile_fact_revision",
 })
 

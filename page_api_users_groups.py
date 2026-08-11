@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
 from copy import deepcopy
 from datetime import datetime
 from typing import Any
@@ -346,6 +347,29 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             action_message = ""
             async with self.plugin._data_lock:
                 user = self.plugin._get_user(user_id)
+                private_memory_mutation = any(
+                    bool(payload.get(key))
+                    for key in (
+                        "clear_emotion_state",
+                        "clear_behavior_habits",
+                        "clear_learning",
+                        "clear_open_loops",
+                    )
+                ) or bool(self._single_line(payload.get("remove_open_loop_text"), 120))
+                private_memory_revision = None
+                memory_managed_getter = getattr(
+                    self.plugin, "_req041_private_memory_managed", None
+                )
+                private_memory_managed = bool(
+                    memory_managed_getter() if callable(memory_managed_getter) else False
+                )
+                if private_memory_mutation and private_memory_managed:
+                    preparer = getattr(
+                        self.plugin, "_req041_prepare_authoritative_private_memory", None
+                    )
+                    private_memory_revision = preparer(user) if callable(preparer) else None
+                    if private_memory_revision is None:
+                        return self._error("权威私聊记忆暂不可写，请稍后重试")
                 expression_voice_needs_refresh = False
                 previous_role = self.plugin._private_user_role(user, user_id)
                 previous_mode = normalize_relationship_mode(user.get("relationship_mode"), previous_role)
@@ -612,6 +636,16 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                             user,
                             reason_code="administrator_relationship_update",
                         )
+                if private_memory_mutation and private_memory_managed:
+                    committer = getattr(
+                        self.plugin, "_req041_commit_authoritative_private_memory", None
+                    )
+                    if not callable(committer) or not committer(
+                        user,
+                        expected_revision=private_memory_revision,
+                        operation_id=f"req041-page-memory:{user_id}:{uuid.uuid4().hex}",
+                    ):
+                        return self._error("权威私聊记忆已发生并发变更，请刷新后重试")
                 self.plugin._save_data_sync()
                 snapshot = deepcopy(user)
             result = self._user_summary(user_id, snapshot)
