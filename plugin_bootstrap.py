@@ -1816,6 +1816,15 @@ def _initialize_group_and_provider_config(self: Any, c: Any) -> None:
     self.allow_voice_action = self.enable_voice_action
 
 def initialize_plugin_runtime(self: Any) -> None:
+    # These references are process-local capabilities. Never inherit them from
+    # mixin class attributes or a previous hot-reloaded plugin instance.
+    self._bridge_cache = None
+    self._bridge_cache_ts = 0.0
+    self._bridge_last_status = {}
+    self._bridge_dependency_failure_until = 0.0
+    self._bridge_dependency_failure_module = ""
+    self._memory_companion_emotion_capability_bridge = None
+    self._memory_companion_emotion_producer_capability_cache = None
     self._patch_livingmemory_processor_compat()
     self._report_integrated_feature_conflicts()
     self._data_lock = asyncio.Lock()

@@ -174,7 +174,7 @@ class AssurancePolicy:
             return AccessDecision(False, f"profile_{context.profile_status}")
         if context.kind == "pending":
             return AccessDecision(False, "namespace_pending_denied")
-        if context.kind != "persona_global" and context.assurance not in FORMAL_ASSURANCE:
+        if context.assurance not in FORMAL_ASSURANCE:
             return AccessDecision(False, "identity_assurance_insufficient")
         if context.kind == "group_shared" and purpose in {"relationship_read", "relationship_write", "profile_read", "profile_write"}:
             return AccessDecision(False, "group_shared_subject_access_denied")

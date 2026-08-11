@@ -5899,6 +5899,15 @@ class PrivateCompanionPlugin(
         global _private_companion_plugin
         self._stop_event.set()
         await self._cancel_lifecycle_background_tasks()
+        invalidate_bridge = getattr(self, "_memory_companion_invalidate_bridge_cache", None)
+        if callable(invalidate_bridge):
+            invalidate_bridge()
+        scoped_sync = getattr(self, "req041_scoped_projection_sync", None)
+        if scoped_sync is not None:
+            mark_dirty = getattr(scoped_sync, "mark_dirty", None)
+            if callable(mark_dirty):
+                mark_dirty()
+        self.req041_scoped_projection_sync = None
 
         runtime_bridge = getattr(self, "_proactive_chat_runtime_bridge", None)
         if runtime_bridge is not None:

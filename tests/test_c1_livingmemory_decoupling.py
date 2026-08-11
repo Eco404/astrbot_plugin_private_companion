@@ -165,5 +165,37 @@ def test_missing_bridge_negative_cache_retries_quickly():
     assert plugin.calls == 2
 
 
+def test_inactive_cached_bridge_is_replaced_immediately():
+    class _LifecycleBridge(_ProbeBridge):
+        def __init__(self, active=True):
+            self.active = active
+
+        def bridge_lifecycle_status(self):
+            return {"active": self.active}
+
+    old_bridge = _LifecycleBridge(active=False)
+    new_bridge = _LifecycleBridge(active=True)
+    plugin = _Plugin(True, False, new_bridge)
+    plugin._bridge_cache = old_bridge
+    plugin._bridge_cache_ts = time.monotonic()
+    plugin._memory_companion_emotion_capability_bridge = old_bridge
+    plugin._memory_companion_emotion_producer_capability_cache = object()
+
+    assert plugin._memory_companion_bridge() is new_bridge
+    assert plugin._memory_companion_emotion_capability_bridge is None
+    assert plugin._memory_companion_emotion_producer_capability_cache is None
+
+
+def test_inactive_discovered_bridge_fails_closed():
+    class _InactiveBridge(_ProbeBridge):
+        @staticmethod
+        def bridge_lifecycle_status():
+            return {"active": False}
+
+    plugin = _Plugin(True, False, _InactiveBridge())
+    assert plugin._memory_companion_bridge() is None
+    assert plugin._memory_companion_coordination_status()["reason"] == "bridge_inactive"
+
+
 def test_legacy_livingmemory_migration_entrypoint_remains():
     assert (ROOT / "integration_status.py").exists()

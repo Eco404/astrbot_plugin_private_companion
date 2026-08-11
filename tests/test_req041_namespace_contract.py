@@ -69,6 +69,12 @@ class NamespaceContractTests(unittest.TestCase):
             "profile_quarantined",
             AssurancePolicy.authorize(_context(profile_status="quarantined"), "memory_read").code,
         )
+        self.assertEqual(
+            "identity_assurance_insufficient",
+            AssurancePolicy.authorize(
+                _context("persona_global", assurance="unverified"), "rule_read"
+            ).code,
+        )
 
     def test_scope_specific_purposes_are_enforced(self) -> None:
         self.assertTrue(AssurancePolicy.authorize(_context(), "relationship_read").allowed)
