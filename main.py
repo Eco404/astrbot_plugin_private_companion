@@ -3588,6 +3588,26 @@ class PrivateCompanionPlugin(
                 source_fingerprint,
                 operation_id=f"req036.source:{source}:{source_fingerprint[:24]}",
             )
+        portrait_namespace_getter = getattr(self, "_req041_scoped_context_for_user", None)
+        if callable(portrait_namespace_getter) and isinstance(user, dict):
+            try:
+                portrait_namespace = portrait_namespace_getter(
+                    user,
+                    kind="group_member" if group_id else "private",
+                    group_id=group_id,
+                    purpose="profile_read",
+                )
+            except Exception:
+                portrait_namespace = None
+            if isinstance(portrait_namespace, NamespaceContext) and not portrait_namespace.errors():
+                try:
+                    setattr(
+                        event,
+                        "private_companion_namespace_context",
+                        portrait_namespace.to_dict(),
+                    )
+                except Exception:
+                    pass
         dto = req036_build_profile_dto(
             person_ref=req036_build_person_ref(projection),
             identity_summary={"display_name": _single_line((user or {}).get("nickname"), 80)},
@@ -3785,6 +3805,9 @@ class PrivateCompanionPlugin(
             scope=scope,
             purpose="summarize_to_subject",
         )
+        namespace_context = getattr(event, "private_companion_namespace_context", None)
+        if isinstance(namespace_context, dict):
+            request["namespace_context"] = dict(namespace_context)
         bridge = self._memory_companion_bridge()
         reader = getattr(bridge, "read_unified_profile_portrait", None) if bridge is not None else None
         if not callable(reader):
@@ -3840,6 +3863,13 @@ class PrivateCompanionPlugin(
                 scope="private",
                 purpose="summarize_to_subject",
             )
+            namespace_getter = getattr(self, "_req041_scoped_context_for_user", None)
+            if callable(namespace_getter):
+                namespace_context = namespace_getter(
+                    source, kind="private", purpose="profile_read"
+                )
+                if isinstance(namespace_context, NamespaceContext) and not namespace_context.errors():
+                    request["namespace_context"] = namespace_context.to_dict()
             portrait = portrait_reader(request, limit=3)
             if asyncio.iscoroutine(portrait) or hasattr(portrait, "__await__"):
                 portrait = await portrait

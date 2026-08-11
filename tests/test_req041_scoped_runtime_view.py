@@ -272,6 +272,12 @@ class ConsumerWiringTests(unittest.TestCase):
         self.assertIn("legacy_profile_before", page)
         self.assertIn("user.pop(key, None)", page)
 
+    def test_portrait_bridge_carries_the_formal_scoped_namespace(self) -> None:
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn('"private_companion_namespace_context"', source)
+        self.assertIn('request["namespace_context"] = dict(namespace_context)', source)
+        self.assertIn('request["namespace_context"] = namespace_context.to_dict()', source)
+
     def test_sync_save_invalidates_scoped_projection_before_persisting(self) -> None:
         source = (ROOT / "core_store.py").read_text(encoding="utf-8")
         method = source[source.index("    def _save_data_sync(self):"):source.index("    def _save_data_now_sync", source.index("    def _save_data_sync(self):"))]
