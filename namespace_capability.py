@@ -27,7 +27,7 @@ CAPABILITY_NAME = "chat.namespace_memory.v1"
 CAPABILITY_VERSION = "1.0"
 RECORD_KINDS = ("evidence", "memory", "profile_fact", "rule", "summary")
 API_METHODS = (
-    "erase_scoped_group_scopes", "list_scoped_records", "read_scoped_record", "tombstone_scoped_namespace",
+    "erase_scoped_group_scopes", "erase_scoped_persona_scopes", "list_scoped_records", "read_scoped_record", "tombstone_scoped_namespace",
     "tombstone_scoped_identity_scopes", "tombstone_scoped_record", "upsert_scoped_record",
 )
 CAPABILITY_FIELDS = (

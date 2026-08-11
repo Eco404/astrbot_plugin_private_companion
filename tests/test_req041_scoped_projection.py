@@ -21,6 +21,7 @@ class _Remote:
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str, str], dict] = {}
         self.group_erase_calls: list[tuple[str, str]] = []
+        self.persona_erase_calls: list[tuple[str, str]] = []
 
     @staticmethod
     def _key(context, kind: str, record_id: str) -> tuple[str, str, str]:
@@ -78,6 +79,13 @@ class _Remote:
             "count": 2, "namespace_count": 2, "reason_code": reason_code,
         }
 
+    def erase_persona_scopes(self, context, *, operation_id: str, reason_code: str):
+        self.persona_erase_calls.append((context.persona_id, operation_id))
+        return {
+            "ok": True, "state": "ready", "code": "persona_scopes_erased",
+            "count": 4, "namespace_count": 4, "reason_code": reason_code,
+        }
+
 
 class ScopedProjectionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -87,6 +95,7 @@ class ScopedProjectionTests(unittest.TestCase):
             upsert=self.remote.upsert, tombstone=self.remote.tombstone,
             tombstone_identity_scopes=self.remote.tombstone_identity_scopes,
             erase_group_scopes=self.remote.erase_group_scopes,
+            erase_persona_scopes=self.remote.erase_persona_scopes,
             migration_epoch="epoch-1", policy_version="req041-v1",
         )
         self.snapshot: dict = {}
@@ -162,6 +171,25 @@ class ScopedProjectionTests(unittest.TestCase):
         self.assertNotEqual(default_records[0].context.persona_id, persona_records[0].context.persona_id)
         self.assertFalse(any(item.context.kind == "persona_global" for item in default_records + persona_records))
 
+    def test_persona_switch_reads_only_the_selected_ready_namespace(self) -> None:
+        main_snapshot = deepcopy(self.snapshot)
+        alt_snapshot = deepcopy(self.snapshot)
+        main_snapshot["users"]["10001"]["nickname"] = "main-persona-name"
+        alt_snapshot["users"]["10001"]["nickname"] = "alt-persona-name"
+        self.assertTrue(self.sync.sync_snapshot(main_snapshot, source_scope="default")["ok"])
+        self.assertTrue(self.sync.sync_snapshot(alt_snapshot, source_scope="persona:alt")["ok"])
+        main_records, _ = self.sync.build_records(main_snapshot, source_scope="default")
+        alt_records, _ = self.sync.build_records(alt_snapshot, source_scope="persona:alt")
+        main_context = next(item.context for item in main_records if item.context.kind == "private")
+        alt_context = next(item.context for item in alt_records if item.context.kind == "private")
+        self.assertNotEqual(main_context.persona_id, alt_context.persona_id)
+        self.assertEqual(
+            "main-persona-name", self.sync.read_projection(main_context)["fields"]["nickname"],
+        )
+        self.assertEqual(
+            "alt-persona-name", self.sync.read_projection(alt_context)["fields"]["nickname"],
+        )
+
     def test_read_projection_only_opens_after_reconciliation_and_preserves_group_isolation(self) -> None:
         records, _ = self.sync.build_records(self.snapshot)
         private = next(item.context for item in records if item.context.kind == "private")
@@ -224,6 +252,26 @@ class ScopedProjectionTests(unittest.TestCase):
         serialized = str([item.payload for item in pending_records])
         self.assertNotIn("group-a-sentinel", serialized)
         self.assertIn("group-b-sentinel", serialized)
+
+    def test_persona_reset_invalidates_cache_and_confirmed_saga_blocks_whole_snapshot(self) -> None:
+        records, _ = self.sync.build_records(self.snapshot)
+        private = next(item.context for item in records if item.context.kind == "private")
+        self.assertTrue(self.sync.sync_snapshot(self.snapshot)["ok"])
+        persona = self.sync._context(kind="persona_global", persona_id="default")
+        result = self.sync.erase_persona_scopes(
+            persona, operation_id="persona-reset-1", reason_code="persona_reset",
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual("scoped_projection_not_reconciled", self.sync.read_projection(private)["code"])
+        self.assertEqual([("default", "persona-reset-1")], self.remote.persona_erase_calls)
+
+        pending = deepcopy(self.snapshot)
+        pending["_req041_persona_reset_saga"] = {
+            "state": "confirmed", "persona_id": "default", "operation_id": "persona-reset-1",
+        }
+        pending_records, pending_contexts = self.sync.build_records(pending)
+        self.assertEqual([], pending_records)
+        self.assertEqual([], pending_contexts)
 
 
 if __name__ == "__main__":

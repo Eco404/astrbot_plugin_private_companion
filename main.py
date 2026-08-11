@@ -1988,8 +1988,10 @@ class PrivateCompanionPlugin(
         persona_id: Any = "",
         *,
         rebuild_today: bool = True,
+        operation_id: str = "",
+        _force_default_store: bool = False,
     ) -> dict[str, Any]:
-        multi_enabled = bool(getattr(self, "enable_multi_persona_mode", False))
+        multi_enabled = bool(getattr(self, "enable_multi_persona_mode", False)) and not _force_default_store
         requested = self._sanitize_persona_id(persona_id)
         active = self._sanitize_persona_id(self._active_persona_scope())
         pid = ""
@@ -2015,8 +2017,60 @@ class PrivateCompanionPlugin(
         generation = 1
         try:
             await self._flush_scheduled_data_save()
+            scoped_reset: dict[str, Any] = {
+                "ok": True, "state": "not_required", "code": "scoped_persona_erase_not_required",
+            }
+            synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+            migration_status = getattr(self, "req041_migration_status", None)
+            if synchronizer is None and isinstance(migration_status, dict) and migration_status.get("required"):
+                return {"ok": False, "message": "人格分域清理暂不可用", "code": "scoped_persona_erase_unavailable"}
+            if synchronizer is not None:
+                persona_ref = scoped_persona_ref(pid)
+                async with self._data_lock:
+                    group_sagas = self.data.get("_req041_group_reset_sagas")
+                    if isinstance(group_sagas, dict) and group_sagas:
+                        return {
+                            "ok": False, "message": "存在未完成的群删除事务，请等待恢复完成后再重置人格",
+                            "code": "group_reset_in_progress",
+                        }
+                    marker = self.data.get("_req041_persona_reset_saga")
+                    if marker is not None and not isinstance(marker, dict):
+                        return {"ok": False, "message": "人格重置恢复记录损坏", "code": "persona_reset_saga_invalid"}
+                    clean_operation = _single_line(operation_id, 120)
+                    if isinstance(marker, dict):
+                        marker_operation = _single_line(marker.get("operation_id"), 120)
+                        if (
+                            marker.get("state") != "confirmed"
+                            or _single_line(marker.get("persona_id"), 80) != persona_ref
+                            or (clean_operation and clean_operation != marker_operation)
+                            or not marker_operation
+                        ):
+                            return {"ok": False, "message": "人格重置恢复记录冲突", "code": "persona_reset_saga_conflict"}
+                        clean_operation = marker_operation
+                    else:
+                        clean_operation = clean_operation or "req041-persona-reset-" + uuid.uuid4().hex
+                        self.data["_req041_persona_reset_saga"] = {
+                            "operation_id": clean_operation,
+                            "persona_id": persona_ref,
+                            "source_persona_id": pid,
+                            "state": "confirmed",
+                            "created_at": _now_ts(),
+                        }
+                        self._req041_persist_archive_saga_locked()
+                scoped_reset = self._req041_erase_scoped_persona_data(
+                    pid, operation_id=clean_operation,
+                )
+                if not scoped_reset.get("ok"):
+                    return {
+                        "ok": False,
+                        "message": "人格分域清理失败，已保留本地资料并将在启动时重试",
+                        "code": str(scoped_reset.get("code") or "scoped_persona_erase_failed")[:120],
+                        "operation_id": clean_operation,
+                    }
             async with self._data_lock:
                 previous = deepcopy(self.data)
+                backup_snapshot = deepcopy(previous)
+                backup_snapshot.pop("_req041_persona_reset_saga", None)
                 lifecycle = previous.get("persona_lifecycle")
                 if not isinstance(lifecycle, dict):
                     lifecycle = {}
@@ -2028,7 +2082,7 @@ class PrivateCompanionPlugin(
                 except (TypeError, ValueError):
                     previous_generation = 1
                 generation = previous_generation + 1
-                backup_path = self._write_persona_reset_backup_sync(pid, previous)
+                backup_path = self._write_persona_reset_backup_sync(pid, backup_snapshot)
 
                 replacement = self._new_store()
                 ensure_defaults = getattr(self, "_ensure_store_defaults", None)
@@ -2099,7 +2153,10 @@ class PrivateCompanionPlugin(
                 "state": state,
                 "plan": plan,
                 "rebuild_error": rebuild_error,
-                "external_memory_preserved": True,
+                "external_memory_preserved": synchronizer is None,
+                "non_req041_external_memory_preserved": True,
+                "scoped_memory_reset": bool(synchronizer is not None and scoped_reset.get("ok")),
+                "scoped_cleanup": scoped_reset,
             }
         finally:
             if token is not None:
@@ -4458,6 +4515,32 @@ class PrivateCompanionPlugin(
             context, operation_id=clean_operation, reason_code="group_reset",
         )
 
+    def _req041_erase_scoped_persona_data(
+        self,
+        persona_id: str,
+        *,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            status = getattr(self, "req041_migration_status", None)
+            if isinstance(status, dict) and status.get("required"):
+                return {"ok": False, "state": "degraded", "code": "scoped_persona_erase_unavailable"}
+            return {"ok": True, "state": "not_required", "code": "scoped_persona_erase_not_required"}
+        persona_ref = scoped_persona_ref(persona_id)
+        context = NamespaceContext(
+            kind="persona_global", persona_id=persona_ref, identity_id="", group_id="",
+            assurance="verified", profile_status="active",
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        clean_operation = _single_line(operation_id, 120)
+        if not clean_operation or context.errors():
+            return {"ok": False, "state": "rejected", "code": "scoped_persona_erase_context_invalid"}
+        return synchronizer.erase_persona_scopes(
+            context, operation_id=clean_operation, reason_code="persona_reset",
+        )
+
     def _req041_group_reset_sagas_locked(self) -> dict[str, dict[str, Any]]:
         sagas = self.data.get("_req041_group_reset_sagas")
         if not isinstance(sagas, dict):
@@ -4528,6 +4611,9 @@ class PrivateCompanionPlugin(
 
         async with self._data_lock:
             sagas = self._req041_group_reset_sagas_locked()
+            persona_reset = self.data.get("_req041_persona_reset_saga")
+            if isinstance(persona_reset, dict) and persona_reset.get("state") == "confirmed":
+                return {"ok": False, "state": "rejected", "code": "persona_reset_in_progress"}
             clean_operation = _single_line(operation_id, 120)
             saga = sagas.get(clean_operation) if clean_operation else None
             if saga is not None and not isinstance(saga, dict):
@@ -4627,6 +4713,49 @@ class PrivateCompanionPlugin(
             "ok": not errors,
             "code": "group_reset_resume_complete" if not errors else "group_reset_resume_degraded",
             "pending": len(pending), "completed": completed,
+            "error_codes": sorted(set(errors))[:16],
+        }
+
+    async def _req041_resume_confirmed_persona_resets(self) -> dict[str, Any]:
+        pending: list[dict[str, str]] = []
+        async with self._data_lock:
+            default_data = getattr(self, "_data_default", None)
+            default_marker = (
+                default_data.get("_req041_persona_reset_saga")
+                if isinstance(default_data, dict) else None
+            )
+            if isinstance(default_marker, dict) and default_marker.get("state") == "confirmed":
+                pending.append({
+                    "persona_id": "",
+                    "operation_id": str(default_marker.get("operation_id") or ""),
+                    "force_default": "1",
+                })
+            profiles = getattr(self, "_persona_data_profiles", None)
+            if isinstance(profiles, dict):
+                for raw_persona, profile in profiles.items():
+                    marker = profile.get("_req041_persona_reset_saga") if isinstance(profile, dict) else None
+                    if isinstance(marker, dict) and marker.get("state") == "confirmed":
+                        pending.append({
+                            "persona_id": str(raw_persona or ""),
+                            "operation_id": str(marker.get("operation_id") or ""),
+                            "force_default": "0",
+                        })
+        completed = 0
+        errors: list[str] = []
+        for saga in pending[:32]:
+            result = await self._reset_current_persona_store(
+                saga["persona_id"], rebuild_today=False,
+                operation_id=saga["operation_id"],
+                _force_default_store=saga["force_default"] == "1",
+            )
+            if result.get("ok"):
+                completed += 1
+            else:
+                errors.append(str(result.get("code") or "persona_reset_resume_failed")[:120])
+        return {
+            "ok": not errors,
+            "code": "persona_reset_resume_complete" if not errors else "persona_reset_resume_degraded",
+            "pending": min(len(pending), 32), "completed": completed,
             "error_codes": sorted(set(errors))[:16],
         }
 
@@ -5287,6 +5416,10 @@ class PrivateCompanionPlugin(
                 "ok": True, "code": "group_reset_resume_not_required",
                 "pending": 0, "completed": 0, "error_codes": [],
             }
+            persona_reset_resume: dict[str, Any] = {
+                "ok": True, "code": "persona_reset_resume_not_required",
+                "pending": 0, "completed": 0, "error_codes": [],
+            }
             if remote.get("ok") and bridge is not None:
                 self.req041_scoped_projection_sync = ScopedProjectionSynchronizer(
                     read=lambda namespace, **kwargs: self._memory_companion_read_scoped_record(
@@ -5307,6 +5440,9 @@ class PrivateCompanionPlugin(
                     erase_group_scopes=lambda namespace, **kwargs: self._memory_companion_erase_scoped_group_scopes(
                         bridge, namespace, **kwargs
                     ),
+                    erase_persona_scopes=lambda namespace, **kwargs: self._memory_companion_erase_scoped_persona_scopes(
+                        bridge, namespace, **kwargs
+                    ),
                     migration_epoch=epoch,
                     policy_version=policy,
                 )
@@ -5319,7 +5455,13 @@ class PrivateCompanionPlugin(
                 group_resumer = getattr(self, "_req041_resume_confirmed_group_resets", None)
                 if archive_resume.get("ok") and purge_resume.get("ok") and callable(group_resumer):
                     group_reset_resume = await group_resumer()
-                if archive_resume.get("ok") and purge_resume.get("ok") and group_reset_resume.get("ok"):
+                persona_resumer = getattr(self, "_req041_resume_confirmed_persona_resets", None)
+                if (
+                    archive_resume.get("ok") and purge_resume.get("ok")
+                    and group_reset_resume.get("ok") and callable(persona_resumer)
+                ):
+                    persona_reset_resume = await persona_resumer()
+                if archive_resume.get("ok") and purge_resume.get("ok") and group_reset_resume.get("ok") and persona_reset_resume.get("ok"):
                     scoped_result = await self._req041_sync_scoped_now()
                 else:
                     scoped_result = {
@@ -5327,18 +5469,19 @@ class PrivateCompanionPlugin(
                     }
             self.req041_migration_status = {
                 "required": True,
-                "state": "active" if remote.get("ok") and archive_resume.get("ok") and purge_resume.get("ok") and group_reset_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok" else (
+                "state": "active" if remote.get("ok") and archive_resume.get("ok") and purge_resume.get("ok") and group_reset_resume.get("ok") and persona_reset_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok" else (
                     "paused" if status.get("state") == "paused" else "degraded"
                 ),
                 "code": (
                     "migration_shadow_active"
-                    if remote.get("ok") and archive_resume.get("ok") and purge_resume.get("ok") and group_reset_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok"
+                    if remote.get("ok") and archive_resume.get("ok") and purge_resume.get("ok") and group_reset_resume.get("ok") and persona_reset_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok"
                     else str(
                         backfill_result.get("code") if not backfill_result.get("ok")
                         else replay_result.get("error_code") if replay_result.get("status") == "paused"
                         else archive_resume.get("code") if not archive_resume.get("ok")
                         else purge_resume.get("code") if not purge_resume.get("ok")
                         else group_reset_resume.get("code") if not group_reset_resume.get("ok")
+                        else persona_reset_resume.get("code") if not persona_reset_resume.get("ok")
                         else scoped_result.get("code") if remote.get("ok") and not scoped_result.get("ok")
                         else remote.get("code") or "migration_degraded"
                     )[:120]
@@ -5353,6 +5496,7 @@ class PrivateCompanionPlugin(
                 "archive_resume": archive_resume,
                 "purge_resume": purge_resume,
                 "group_reset_resume": group_reset_resume,
+                "persona_reset_resume": persona_reset_resume,
             }
         except Exception as exc:
             status = coordinator.status()

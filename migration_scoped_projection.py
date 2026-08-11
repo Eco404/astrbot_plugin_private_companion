@@ -114,6 +114,7 @@ class ScopedProjectionSynchronizer:
         policy_version: str,
         tombstone_identity_scopes: Callable[..., dict[str, Any]] | None = None,
         erase_group_scopes: Callable[..., dict[str, Any]] | None = None,
+        erase_persona_scopes: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self._read = read
         self._list = list_records
@@ -123,6 +124,7 @@ class ScopedProjectionSynchronizer:
             tombstone_identity_scopes if callable(tombstone_identity_scopes) else None
         )
         self._erase_group_scopes = erase_group_scopes if callable(erase_group_scopes) else None
+        self._erase_persona_scopes = erase_persona_scopes if callable(erase_persona_scopes) else None
         self.migration_epoch = str(migration_epoch or "").strip()
         self.policy_version = str(policy_version or "").strip()
         if not self.migration_epoch or not self.policy_version:
@@ -241,6 +243,13 @@ class ScopedProjectionSynchronizer:
         if not isinstance(snapshot, dict):
             raise ScopedProjectionError("scoped_projection_snapshot_invalid")
         persona_id = _persona_ref(source_scope)
+        reset_saga = snapshot.get("_req041_persona_reset_saga")
+        if (
+            isinstance(reset_saga, dict)
+            and reset_saga.get("state") == "confirmed"
+            and str(reset_saga.get("persona_id") or "").strip() == persona_id
+        ):
+            return [], []
         registry = UnifiedPersonRegistry(snapshot)
         people = self._formal_people(snapshot)
         records: list[ScopedProjectionRecord] = []
@@ -525,6 +534,29 @@ class ScopedProjectionSynchronizer:
         )
         if not isinstance(result, dict):
             return {"ok": False, "state": "degraded", "code": "scoped_group_erase_response_invalid"}
+        return result
+
+    def erase_persona_scopes(
+        self,
+        context: NamespaceContext,
+        *,
+        operation_id: str,
+        reason_code: str = "persona_reset",
+    ) -> dict[str, Any]:
+        self.mark_dirty()
+        if (
+            context.kind != "persona_global" or context.identity_id or context.group_id
+            or context.migration_epoch != self.migration_epoch
+            or context.policy_version != self.policy_version or context.errors()
+        ):
+            return {"ok": False, "state": "rejected", "code": "scoped_persona_erase_context_invalid"}
+        if self._erase_persona_scopes is None:
+            return {"ok": False, "state": "degraded", "code": "scoped_persona_erase_unavailable"}
+        result = self._erase_persona_scopes(
+            context, operation_id=operation_id, reason_code=reason_code,
+        )
+        if not isinstance(result, dict):
+            return {"ok": False, "state": "degraded", "code": "scoped_persona_erase_response_invalid"}
         return result
 
 
