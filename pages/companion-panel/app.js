@@ -17429,6 +17429,10 @@ function worldbookMemberCard(item) {
   const observationOnly = Boolean(item.observation_only);
   const identityLabel = isExternal ? "外部身份" : "身份 QQ";
   const genderText = String(item.gender || "").trim();
+  const externalMemory = state.worldbookLivingMemory?.[item.user_id || ""];
+  const externalMemoryTotal = externalMemory?.available === true && Number.isFinite(Number(externalMemory.total))
+    ? Math.max(0, Number(externalMemory.total))
+    : null;
   const bindLine = item.linked_qq_user_id
     ? ` · 已绑定 QQ ${escapeHtml(item.linked_qq_user_id)}`
     : (item.linked_bili_profile_id ? ` · B站 ${escapeHtml(item.linked_bili_profile_id)}` : "");
@@ -17453,7 +17457,8 @@ function worldbookMemberCard(item) {
         <span>${escapeHtml(observed.length)} 个曾见群名片</span>
         ${genderText ? `<span>性别：${escapeHtml(genderText)}</span>` : ""}
         ${externalIds.length ? `<span>${escapeHtml(externalIds.length)} 个外部身份</span>` : ""}
-        <span>${escapeHtml((item.important_memories || []).length)} 条记忆</span>
+        <span>${escapeHtml(memories.length)} 条本地重要记忆</span>
+        <span data-worldbook-external-memory-count="${escapeHtml(item.user_id || "")}" ${externalMemoryTotal === null ? "hidden" : ""}>${escapeHtml(externalMemoryTotal ?? 0)} 条外部记忆</span>
         ${pending.length ? `<span>${escapeHtml(pending.length)} 条待确认观察</span>` : ""}
         ${sourceEntries.length ? `<span>${escapeHtml(sourceEntries.slice(0, 2).join(" / "))}</span>` : ""}
         ${observationOnly ? `<span>仅观察 · ${escapeHtml(item.observed_group_count || 0)} 个白名单群</span><span>亲密度：中性</span><span>不主动触达</span>` : ""}
@@ -17598,15 +17603,16 @@ function worldbookMemoryCard(userId, memory, index) {
 function worldbookLivingMemoryPanel(userId) {
   const result = state.worldbookLivingMemory?.[userId];
   if (!result) return "";
+  const sourceLabel = result.source_label || (result.source_type === "memory_companion" ? "我会牢牢记住你" : "外部长期记忆");
   if (result.loading) {
     return `
       <section class="worldbook-livingmemory-panel">
         <div class="worldbook-livingmemory-head">
           <div>
-            <b>LivingMemory</b>
+            <b>外部长期记忆</b>
             <span>正在检索对应记忆...</span>
           </div>
-          <button type="button" data-worldbook-living-memory-close="${escapeHtml(userId)}" aria-label="收起 LivingMemory">收起</button>
+          <button type="button" data-worldbook-living-memory-close="${escapeHtml(userId)}" aria-label="收起外部长期记忆">收起</button>
         </div>
       </section>
     `;
@@ -17616,10 +17622,10 @@ function worldbookLivingMemoryPanel(userId) {
       <section class="worldbook-livingmemory-panel error">
         <div class="worldbook-livingmemory-head">
           <div>
-            <b>LivingMemory</b>
+            <b>${escapeHtml(sourceLabel)}</b>
             <span>${escapeHtml(result.error)}</span>
           </div>
-          <button type="button" data-worldbook-living-memory-close="${escapeHtml(userId)}" aria-label="收起 LivingMemory">收起</button>
+          <button type="button" data-worldbook-living-memory-close="${escapeHtml(userId)}" aria-label="收起外部长期记忆">收起</button>
         </div>
       </section>
     `;
@@ -17631,10 +17637,10 @@ function worldbookLivingMemoryPanel(userId) {
     <section class="worldbook-livingmemory-panel">
       <div class="worldbook-livingmemory-head">
         <div>
-          <b>LivingMemory 相关记忆</b>
-          <span>${escapeHtml(result.available === false ? (result.message || "未找到 LivingMemory 数据库") : `${items.length} 条结果 · 严格匹配`)}</span>
+          <b>${escapeHtml(sourceLabel)}相关记忆</b>
+          <span>${escapeHtml(result.available === false ? (result.message || `未找到${sourceLabel}数据`) : (result.source_type === "memory_companion" ? `${result.total || 0} 条记忆 · ${items.length} 类脱敏摘要` : `${items.length} 条结果 · 严格匹配`))}</span>
         </div>
-        <button type="button" data-worldbook-living-memory-close="${escapeHtml(userId)}" aria-label="收起 LivingMemory">收起</button>
+        <button type="button" data-worldbook-living-memory-close="${escapeHtml(userId)}" aria-label="收起外部长期记忆">收起</button>
       </div>
       ${result.filter_note ? `<p class="worldbook-livingmemory-note">${escapeHtml(result.filter_note)}</p>` : ""}
       ${tokens.length ? `
@@ -17643,7 +17649,7 @@ function worldbookLivingMemoryPanel(userId) {
         </div>
       ` : ""}
       <div class="worldbook-livingmemory-list">
-        ${items.length ? items.map(worldbookLivingMemoryCard).join("") : `<div class="empty small">没有检索到对应 LivingMemory 记忆</div>`}
+        ${items.length ? items.map(worldbookLivingMemoryCard).join("") : `<div class="empty small">${escapeHtml(result.message || `没有检索到对应的${sourceLabel}记忆`)}</div>`}
       </div>
     </section>
   `;
@@ -17652,6 +17658,8 @@ function worldbookLivingMemoryPanel(userId) {
 function worldbookLivingMemoryCard(item) {
   const tags = [
     item.source_label || item.source,
+    item.category_label,
+    item.count !== undefined && item.count !== null ? `${item.count} 条` : "",
     item.persona_id,
     item.session_id,
     item.importance !== undefined && item.importance !== null ? `重要性 ${Number(item.importance).toFixed(2)}` : "",
@@ -17693,6 +17701,18 @@ function findWorldbookLivingMemoryPanel(userId) {
     .find((panel) => panel.dataset.worldbookLivingMemoryPanel === userId);
 }
 
+function updateWorldbookExternalMemoryCount(userId) {
+  const result = state.worldbookLivingMemory?.[userId];
+  const badge = Array.from(document.querySelectorAll("[data-worldbook-external-memory-count]"))
+    .find((item) => item.dataset.worldbookExternalMemoryCount === userId);
+  if (!badge) return;
+  const total = result?.available === true && Number.isFinite(Number(result.total))
+    ? Math.max(0, Number(result.total))
+    : null;
+  badge.hidden = total === null;
+  if (total !== null) badge.textContent = `${total} 条外部记忆`;
+}
+
 function closeWorldbookLivingMemory(userId) {
   if (!userId) return;
   delete state.worldbookLivingMemory[userId];
@@ -17716,11 +17736,13 @@ async function loadWorldbookLivingMemory(userId, button) {
     if (state.worldbookLivingMemory[userId]?.requestId !== requestId) return;
     state.worldbookLivingMemory[userId] = result || { items: [] };
     if (panel) panel.innerHTML = worldbookLivingMemoryPanel(userId);
+    updateWorldbookExternalMemoryCount(userId);
     showToast(result?.message || "LivingMemory 查询完成");
   } catch (error) {
     if (state.worldbookLivingMemory[userId]?.requestId !== requestId) return;
     state.worldbookLivingMemory[userId] = { error: error.message || "查询失败", items: [] };
     if (panel) panel.innerHTML = worldbookLivingMemoryPanel(userId);
+    updateWorldbookExternalMemoryCount(userId);
     showToast(`查询失败：${error.message}`, "error");
   } finally {
     setActionBusy(button, false);

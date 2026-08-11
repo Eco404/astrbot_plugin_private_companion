@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MEMORY_ROOT = ROOT.parent / "memory-official"
 if not MEMORY_ROOT.exists():
     MEMORY_ROOT = ROOT.parents[1] / "astrbot_plugin_memory_companion-main"
+if not MEMORY_ROOT.exists():
+    MEMORY_ROOT = ROOT.parent / "astrbot_plugin_remember_you"
 
 if "astrbot.api" not in sys.modules:
     astrbot = types.ModuleType("astrbot")
@@ -71,9 +73,12 @@ class _Companion(MemoryCompanionAdapterMixin):
                     "user_id": "u1",
                     "enabled": True,
                     "private_memory_enabled": True,
+                    "umo": "default:FriendMessage:u1",
+                    "identity_bot_id": "bot-1",
                 }
             }
         }
+        self.bot_self_id = "bot-1"
 
     def _memory_companion_bridge_uncached(self):
         return self.bridge
@@ -116,7 +121,19 @@ def test_chat_companion_projects_redacted_user_memory_summary():
                 ],
             }
 
-    companion = _Companion(MemoryCompanionBridge(_MemoryService()))
+    service = _MemoryService()
+    companion = _Companion(None)
+    companion.bridge = MemoryCompanionBridge(service)
+    service.context = SimpleNamespace(
+        get_all_stars=lambda: [
+            SimpleNamespace(
+                star_cls=companion,
+                root_dir_name="astrbot_plugin_private_companion",
+                name="astrbot_plugin_private_companion",
+                activated=True,
+            )
+        ]
+    )
     result = asyncio.run(companion._memory_companion_read_user_memory_summary("u1", limit=3))
 
     assert result == {
@@ -132,11 +149,64 @@ def test_chat_companion_projects_redacted_user_memory_summary():
     }
 
 
+def test_user_memory_summary_supplies_scoped_requester_context_when_supported():
+    requester_context = object()
+
+    class _ProtectedBridge:
+        @staticmethod
+        def create_user_memory_context(capability, **kwargs):
+            assert capability == "capability"
+            assert kwargs == {
+                "bot_id": "bot-1",
+                "scope": "private",
+                "platform": "default",
+                "user_id": "u1",
+                "session_id": "default:FriendMessage:u1",
+            }
+            return requester_context
+
+        @staticmethod
+        async def read_user_memory_summary(user_id, *, session_id="", limit=6, requester_context=None):
+            assert user_id == "u1"
+            assert session_id == "default:FriendMessage:u1"
+            assert requester_context is not None
+            return {
+                "contract": "memory.user_memory_summary.v1",
+                "ok": True,
+                "state": "ready",
+                "counts": {"profile": 1},
+                "summaries": [{"category": "profile", "summary": "已授权摘要"}],
+            }
+
+    class _ProtectedCompanion(_Companion):
+        def _memory_companion_bridge(self):
+            return self.bridge
+
+        @staticmethod
+        def _memory_companion_bridge_bot_id(_event=None):
+            return ""
+
+        @staticmethod
+        def _memory_companion_emotion_producer_capability(_bridge):
+            return "capability"
+
+    companion = _ProtectedCompanion(_ProtectedBridge())
+    result = asyncio.run(
+        companion._memory_companion_read_user_memory_summary(
+            "u1",
+            session_id="default:FriendMessage:u1",
+        )
+    )
+
+    assert result["available"] is True
+    assert result["summaries"]["profile"] == "已授权摘要"
+
+
 def test_chat_companion_user_summary_degrades_without_memory_reader():
     companion = _Companion(MemoryCompanionBridge(SimpleNamespace()))
     result = asyncio.run(companion._memory_companion_read_user_memory_summary("u1"))
     assert result["available"] is False
-    assert result["reason_code"] == "summary_unavailable"
+    assert result["reason_code"] == "requester_capability_unavailable"
 
 
 def test_user_memory_summary_rejects_group_and_untrusted_identities_before_bridge_access():

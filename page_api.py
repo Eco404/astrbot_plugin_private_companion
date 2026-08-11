@@ -11253,11 +11253,112 @@ class PrivateCompanionPageApi(
                 profile_copy = deepcopy(profile)
             token_bundle = self._worldbook_member_livingmemory_tokens(user_id, profile_copy)
             tokens = token_bundle.get("tokens", [])
+            memory_status = self._livingmemory_summary()
+            if memory_status.get("memory_companion_active"):
+                source_label = self._single_line(memory_status.get("memory_companion_display_name"), 80) or "我会牢牢记住你"
+                summary_reader = getattr(self.plugin, "_memory_companion_read_user_memory_summary", None)
+                if not callable(summary_reader):
+                    return self._ok(
+                        {
+                            "available": False,
+                            "source_type": "memory_companion",
+                            "source_label": source_label,
+                            "user_id": user_id,
+                            "items": [],
+                            "total": 0,
+                            "message": f"{source_label} 当前版本不支持关系页摘要",
+                        }
+                    )
+                summary_result: dict[str, Any] = {}
+                matched_identity = ""
+                for identity in token_bundle.get("primary_tokens", []):
+                    candidate = summary_reader(identity, limit=min(5, limit))
+                    if asyncio.iscoroutine(candidate) or hasattr(candidate, "__await__"):
+                        candidate = await candidate
+                    if isinstance(candidate, dict):
+                        summary_result = candidate
+                    if summary_result.get("available") is True:
+                        matched_identity = identity
+                        break
+                if summary_result.get("available") is not True:
+                    reason_messages = {
+                        "private_identity_untrusted": "该关系节点尚未绑定可信私聊身份",
+                        "group_observation_forbidden": "群聊观察节点不能读取私聊长期记忆",
+                        "private_memory_disabled": "该用户已关闭私聊长期记忆",
+                        "private_session_mismatch": "关系节点与私聊会话身份不一致",
+                        "requester_context_required": "该用户缺少可验证的 Bot 与私聊会话身份",
+                        "requester_context_method_unavailable": f"{source_label} 当前版本不支持受控摘要上下文",
+                        "requester_platform_missing": "该关系节点缺少可验证的平台身份",
+                        "requester_bot_id_missing": "该关系节点缺少可验证的 Bot 身份",
+                        "requester_capability_unavailable": f"{source_label} 未能验证当前陪伴插件实例",
+                        "requester_context_unavailable": "该关系节点未能建立受控的私聊记忆上下文",
+                        "requester_identity_mismatch": "关系节点与记忆中的用户身份不一致",
+                        "requester_session_mismatch": "关系节点与记忆中的私聊会话不一致",
+                        "summary_method_unavailable": f"{source_label} 当前版本不支持用户记忆摘要",
+                        "bridge_unavailable": f"{source_label} 桥接当前不可用",
+                    }
+                    reason_code = self._single_line(summary_result.get("reason_code"), 80)
+                    return self._ok(
+                        {
+                            "available": False,
+                            "source_type": "memory_companion",
+                            "source_label": source_label,
+                            "user_id": user_id,
+                            "items": [],
+                            "total": 0,
+                            "reason_code": reason_code,
+                            "message": f"{reason_messages.get(reason_code, f'暂时无法从 {source_label} 读取该成员的记忆摘要')}（原因：{reason_code or 'unknown'}）",
+                        }
+                    )
+                counts = summary_result.get("counts") if isinstance(summary_result.get("counts"), dict) else {}
+                summaries = summary_result.get("summaries") if isinstance(summary_result.get("summaries"), dict) else {}
+                category_labels = {
+                    "profile": "用户画像",
+                    "preference": "偏好",
+                    "relationship": "关系",
+                    "private_chat": "私聊连续性",
+                }
+                items: list[dict[str, Any]] = []
+                total = 0
+                for category, category_label in category_labels.items():
+                    count = self._clamp_int(counts.get(category), 0, 0, 1_000_000)
+                    total += count
+                    summary = self._single_line(summaries.get(category), 220)
+                    if count <= 0 and not summary:
+                        continue
+                    preview = summary or f"已记录 {count} 条；详细内容由 {source_label} 按权限保护。"
+                    items.append(
+                        {
+                            "source": "memory_companion",
+                            "source_label": source_label,
+                            "id": f"summary:{matched_identity}:{category}",
+                            "category": category,
+                            "category_label": category_label,
+                            "count": count,
+                            "preview": preview,
+                            "content": preview,
+                        }
+                    )
+                return self._ok(
+                    {
+                        "available": True,
+                        "source_type": "memory_companion",
+                        "source_label": source_label,
+                        "user_id": user_id,
+                        "matched_identity": matched_identity,
+                        "items": items,
+                        "total": total,
+                        "filter_note": f"按绑定的私聊身份读取 {source_label} 提供的脱敏分类摘要；详细记忆仍由记忆插件管理。",
+                        "message": f"已从 {source_label} 读取 {total} 条相关记忆摘要",
+                    }
+                )
             db_path = self._livingmemory_db_path()
             if not db_path:
                 return self._ok(
                     {
                         "available": False,
+                        "source_type": "livingmemory",
+                        "source_label": "LivingMemory",
                         "user_id": user_id,
                         "tokens": tokens,
                         "items": [],
@@ -11269,6 +11370,8 @@ class PrivateCompanionPageApi(
             return self._ok(
                 {
                     "available": True,
+                    "source_type": "livingmemory",
+                    "source_label": "LivingMemory",
                     "user_id": user_id,
                     "tokens": tokens,
                     "primary_tokens": token_bundle.get("primary_tokens", []),

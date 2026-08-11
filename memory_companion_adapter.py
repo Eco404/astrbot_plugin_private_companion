@@ -119,13 +119,17 @@ class MemoryCompanionAdapterMixin:
         register = getattr(bridge, "register_emotion_producer", None)
         if not callable(register):
             return None
-        try:
-            capability = register(type(self))
-        except Exception as exc:
-            if self._memory_companion_optional_dependency_failed(exc, where="register_emotion_producer"):
-                return None
-            logger.debug("[PrivateCompanion] emotion producer registration failed: %s", _single_line(exc, 120))
-            return None
+        capability = None
+        for producer in (self, type(self)):
+            try:
+                capability = register(producer)
+            except Exception as exc:
+                if self._memory_companion_optional_dependency_failed(exc, where="register_emotion_producer"):
+                    return None
+                logger.debug("[PrivateCompanion] emotion producer registration failed: %s", _single_line(exc, 120))
+                continue
+            if capability is not None:
+                break
         if capability is None:
             return None
         self._memory_companion_emotion_capability_bridge = bridge
@@ -2807,11 +2811,40 @@ class MemoryCompanionAdapterMixin:
         if not callable(reader):
             return {"available": False, "state": "unsupported", "reason_code": "summary_method_unavailable"}
         try:
-            result = reader(
-                user_id=identity,
-                session_id=stored_session or requested_session,
-                limit=max(1, min(5, int(limit or 3))),
-            )
+            effective_session = stored_session or requested_session
+            read_kwargs: dict[str, Any] = {
+                "user_id": identity,
+                "session_id": effective_session,
+                "limit": max(1, min(5, int(limit or 3))),
+            }
+            context_creator = getattr(bridge, "create_user_memory_context", None)
+            platform = effective_session.split(":", 1)[0] if ":" in effective_session else ""
+            bot_id = _single_line(user.get("identity_bot_id"), 160) or self._memory_companion_bridge_bot_id()
+            context_failure_reason = ""
+            if not callable(context_creator):
+                context_failure_reason = "requester_context_method_unavailable"
+            elif not platform:
+                context_failure_reason = "requester_platform_missing"
+            elif not bot_id:
+                context_failure_reason = "requester_bot_id_missing"
+            else:
+                capability = self._memory_companion_emotion_producer_capability(bridge)
+                if capability is None:
+                    context_failure_reason = "requester_capability_unavailable"
+                else:
+                    requester_context = context_creator(
+                        capability,
+                        bot_id=bot_id,
+                        scope="private",
+                        platform=platform,
+                        user_id=identity,
+                        session_id=effective_session,
+                    )
+                    if requester_context is not None:
+                        read_kwargs["requester_context"] = requester_context
+                    else:
+                        context_failure_reason = "requester_context_unavailable"
+            result = reader(**read_kwargs)
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                 result = await result
         except Exception as exc:
@@ -2824,7 +2857,26 @@ class MemoryCompanionAdapterMixin:
             or result.get("state") != "ready"
         ):
             state = _single_line(result.get("state"), 32) if isinstance(result, dict) else "invalid"
-            return {"available": False, "state": state or "degraded", "reason_code": "summary_unavailable"}
+            error_code = _single_line(result.get("error_code"), 80) if isinstance(result, dict) else ""
+            if error_code == "requester_context_required" and context_failure_reason:
+                error_code = context_failure_reason
+            logger.warning(
+                "[PrivateCompanion] 用户记忆摘要读取失败: state=%s reason=%s context_creator=%s "
+                "capability=%s requester_context=%s bot_id=%s platform=%s session=%s",
+                state or "degraded",
+                error_code or "summary_unavailable",
+                callable(context_creator),
+                "yes" if "capability" in locals() and capability is not None else "no",
+                "yes" if "requester_context" in read_kwargs else "no",
+                "present" if bot_id else "missing",
+                platform or "missing",
+                "present" if effective_session else "missing",
+            )
+            return {
+                "available": False,
+                "state": state or "degraded",
+                "reason_code": error_code or "summary_unavailable",
+            }
 
         raw_counts = result.get("counts") if isinstance(result.get("counts"), dict) else {}
         counts: dict[str, int] = {}
