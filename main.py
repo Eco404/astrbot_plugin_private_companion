@@ -4566,6 +4566,155 @@ class PrivateCompanionPlugin(
             "error_codes": sorted(set(errors))[:16],
         }
 
+    def _req041_purge_legacy_person_locked(
+        self, person_id: str, subjects: list[str]
+    ) -> dict[str, int]:
+        """Remove only exact identity-owned legacy nodes; never fuzzy-search text."""
+        clean_person = _single_line(person_id, 80)
+        subject_set = {_single_line(item, 160) for item in subjects if _single_line(item, 160)}
+        counts = {"mapping_entries": 0, "list_entries": 0, "records": 0}
+        identity_fields = {
+            "user_id", "identity_subject_id", "platform_subject_id", "sender_id", "member_id",
+            "linked_qq_user_id", "target_user_id", "qq_user_id",
+        }
+
+        def owned(value: Any) -> bool:
+            if not isinstance(value, dict):
+                return False
+            if str(value.get("unified_person_id") or "").strip() == clean_person:
+                return True
+            return any(
+                str(value.get(field) or "").strip() in subject_set
+                for field in identity_fields
+                if value.get(field) not in (None, "")
+            )
+
+        def scrub(value: Any, *, depth: int = 0) -> Any:
+            if depth > 10:
+                return value
+            if isinstance(value, dict):
+                for key in list(value):
+                    item = value[key]
+                    if str(key) in subject_set or owned(item):
+                        value.pop(key, None)
+                        counts["mapping_entries"] += 1
+                        counts["records"] += 1
+                        continue
+                    value[key] = scrub(item, depth=depth + 1)
+                return value
+            if isinstance(value, list):
+                kept: list[Any] = []
+                for item in value:
+                    if owned(item):
+                        counts["list_entries"] += 1
+                        counts["records"] += 1
+                    else:
+                        kept.append(scrub(item, depth=depth + 1))
+                value[:] = kept
+            return value
+
+        for key in list(self.data):
+            if key == "unified_person":
+                continue
+            self.data[key] = scrub(self.data[key])
+        return counts
+
+    async def purge_unified_person(
+        self,
+        person_id: str,
+        *,
+        operation_id: str,
+        confirmation_token: str = "",
+        dry_run: bool = True,
+        actor_id: str = "page_administrator",
+        reason_code: str = "person_delete",
+    ) -> dict[str, Any]:
+        clean_person = _single_line(person_id, 80)
+        clean_operation = _single_line(operation_id, 120)
+        if not clean_person or not clean_operation or type(dry_run) is not bool:
+            return {"ok": False, "state": "invalid", "code": "invalid_request"}
+        async with self._data_lock:
+            registry = self._active_unified_person_registry()
+            prepared = registry.prepare_person_purge(
+                clean_person, operation_id=clean_operation,
+                actor_id=actor_id, reason_code=reason_code,
+            )
+            if not prepared.get("ok"):
+                return prepared
+            self._req041_persist_archive_saga_locked()
+            if prepared.get("code") == "person_purged":
+                return prepared
+            if dry_run:
+                return prepared
+            if not confirmation_token or confirmation_token != prepared.get("confirmation_token"):
+                return {
+                    "ok": False, "state": "prepared", "code": "purge_confirmation_mismatch",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            confirmed = registry.confirm_person_purge(
+                clean_person, clean_operation, confirmation_token,
+                actor_id=actor_id, reason_code=reason_code,
+            )
+            if not confirmed.get("ok"):
+                return confirmed
+            self._req041_persist_archive_saga_locked()
+            subjects = registry.archived_identity_subjects(clean_person)
+            if int(prepared.get("detached_identity_count") or 0) > 0 and not subjects:
+                return {
+                    "ok": False, "state": "confirmed", "code": "purge_identity_subjects_invalid",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            outbox = getattr(self, "req041_migration_outbox", None)
+            synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+            if outbox is None or synchronizer is None or not callable(getattr(outbox, "purge_retired_streams", None)):
+                return {
+                    "ok": False, "state": "confirmed", "code": "purge_outbox_unavailable",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            try:
+                outbox_receipt = outbox.purge_retired_streams(
+                    [f"identity:{clean_person}", f"relationship:{clean_person}"],
+                    synchronizer.migration_epoch,
+                    operation_id=f"req041-purge-streams-{clean_operation}", reason_code=reason_code,
+                )
+            except Exception as exc:
+                return {
+                    "ok": False, "state": "confirmed",
+                    "code": _single_line(exc, 120) or "purge_outbox_failed",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            legacy_counts = self._req041_purge_legacy_person_locked(clean_person, subjects)
+            result = registry.finalize_person_purge(
+                clean_person, clean_operation, confirmation_token, outbox_receipt,
+                actor_id=actor_id, reason_code=reason_code,
+            )
+            if result.get("changed"):
+                result["legacy_removed_record_count"] = int(legacy_counts.get("records") or 0)
+                self._req041_persist_archive_saga_locked()
+            return result
+
+    async def _req041_resume_confirmed_person_purges(self) -> dict[str, Any]:
+        registry = self._active_unified_person_registry()
+        pending = registry.confirmed_person_purges(limit=32)
+        completed = 0
+        errors: list[str] = []
+        for saga in pending:
+            result = await self.purge_unified_person(
+                saga["person_id"], operation_id=saga["operation_id"],
+                confirmation_token=saga["confirmation_token"], dry_run=False,
+                actor_id=saga["actor_id"], reason_code=saga["reason_code"],
+            )
+            if result.get("ok") and result.get("code") == "person_purged":
+                completed += 1
+            else:
+                errors.append(str(result.get("code") or "person_purge_resume_failed")[:120])
+        return {
+            "ok": not errors,
+            "code": "person_purge_resume_complete" if not errors else "person_purge_resume_degraded",
+            "pending": len(pending), "completed": completed,
+            "error_codes": sorted(set(errors))[:16],
+        }
+
     def _req041_scoped_private_read_view(self, event: Any, user: dict[str, Any]) -> dict[str, Any]:
         existing = getattr(event, "req041_scoped_private_read_view", None)
         if isinstance(existing, dict):
@@ -4929,6 +5078,10 @@ class PrivateCompanionPlugin(
                 "ok": True, "code": "person_archive_resume_not_required",
                 "pending": 0, "completed": 0, "error_codes": [],
             }
+            purge_resume: dict[str, Any] = {
+                "ok": True, "code": "person_purge_resume_not_required",
+                "pending": 0, "completed": 0, "error_codes": [],
+            }
             if remote.get("ok") and bridge is not None:
                 self.req041_scoped_projection_sync = ScopedProjectionSynchronizer(
                     read=lambda namespace, **kwargs: self._memory_companion_read_scoped_record(
@@ -4952,7 +5105,10 @@ class PrivateCompanionPlugin(
                 resumer = getattr(self, "_req041_resume_confirmed_person_archives", None)
                 if callable(resumer):
                     archive_resume = await resumer()
-                if archive_resume.get("ok"):
+                purge_resumer = getattr(self, "_req041_resume_confirmed_person_purges", None)
+                if archive_resume.get("ok") and callable(purge_resumer):
+                    purge_resume = await purge_resumer()
+                if archive_resume.get("ok") and purge_resume.get("ok"):
                     scoped_result = await self._req041_sync_scoped_now()
                 else:
                     scoped_result = {
@@ -4960,16 +5116,17 @@ class PrivateCompanionPlugin(
                     }
             self.req041_migration_status = {
                 "required": True,
-                "state": "active" if remote.get("ok") and archive_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok" else (
+                "state": "active" if remote.get("ok") and archive_resume.get("ok") and purge_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok" else (
                     "paused" if status.get("state") == "paused" else "degraded"
                 ),
                 "code": (
                     "migration_shadow_active"
-                    if remote.get("ok") and archive_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok"
+                    if remote.get("ok") and archive_resume.get("ok") and purge_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok"
                     else str(
                         backfill_result.get("code") if not backfill_result.get("ok")
                         else replay_result.get("error_code") if replay_result.get("status") == "paused"
                         else archive_resume.get("code") if not archive_resume.get("ok")
+                        else purge_resume.get("code") if not purge_resume.get("ok")
                         else scoped_result.get("code") if remote.get("ok") and not scoped_result.get("ok")
                         else remote.get("code") or "migration_degraded"
                     )[:120]
@@ -4982,6 +5139,7 @@ class PrivateCompanionPlugin(
                 "dual_write": "capturing",
                 "scoped": scoped_result,
                 "archive_resume": archive_resume,
+                "purge_resume": purge_resume,
             }
         except Exception as exc:
             status = coordinator.status()

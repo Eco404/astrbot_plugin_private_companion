@@ -702,6 +702,7 @@ class PrivateCompanionPageApi(
             ("/user/identity/link", self.link_unified_identity, ["POST"], "Private Companion Page explicit unified identity link"),
             ("/user/identity/unlink", self.unlink_unified_identity, ["POST"], "Private Companion Page unified identity unlink preview/apply"),
             ("/user/identity/archive", self.archive_unified_person, ["POST"], "Private Companion Page unified person archive preview/apply"),
+            ("/user/identity/delete", self.delete_unified_person, ["POST"], "Private Companion Page archived person physical purge preview/apply"),
             ("/user/identity/merge-preview", self.preview_unified_identity_merge, ["POST"], "Private Companion Page unified person merge preview"),
             ("/groups", self.list_groups, ["GET"], "Private Companion Page groups"),
             ("/group", self.get_group, ["GET"], "Private Companion Page group detail"),

@@ -266,6 +266,27 @@ class MigrationOutboxTests(unittest.TestCase):
                 ["identity:person-a"], EPOCH,
                 operation_id="archive-streams-1", reason_code="different",
             )
+        purged = reopened.purge_retired_streams(
+            ["identity:person-a", "relationship:person-a"], EPOCH,
+            operation_id="purge-streams-1", reason_code="person_delete",
+        )
+        self.assertEqual(2, purged["event_count"])
+        self.assertEqual(purged, reopened.purge_retired_streams(
+            ["relationship:person-a", "identity:person-a"], EPOCH,
+            operation_id="purge-streams-1", reason_code="person_delete",
+        ))
+        self.assertIsNone(reopened.latest_for_stream("identity:person-a", EPOCH))
+        self.assertEqual(0, reopened.stream_revision("relationship:person-a", EPOCH))
+        self.assertTrue(reopened.retired_stream("relationship:person-a", EPOCH))
+        with self.assertRaisesRegex(OutboxConflict, "outbox_stream_retired"):
+            reopened.enqueue_next(**{
+                **identity_kwargs, "event_id": "identity-after-purge",
+            })
+        with self.assertRaisesRegex(OutboxConflict, "outbox_stream_already_purged"):
+            reopened.purge_retired_streams(
+                ["identity:person-a", "relationship:person-a"], EPOCH,
+                operation_id="purge-streams-2", reason_code="person_delete",
+            )
 
     def test_epoch_checkpoint_survives_restart(self) -> None:
         state = self.outbox.set_epoch_state(EPOCH, "replaying", checkpoint="identity:42")

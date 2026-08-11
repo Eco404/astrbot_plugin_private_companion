@@ -50,6 +50,9 @@ METHODS = _load_methods(
     "_req041_persist_archive_saga_locked",
     "archive_unified_person",
     "_req041_resume_confirmed_person_archives",
+    "_req041_purge_legacy_person_locked",
+    "purge_unified_person",
+    "_req041_resume_confirmed_person_purges",
 )
 
 
@@ -87,6 +90,32 @@ def _load_page_archive():
 PAGE_ARCHIVE, PAGE_REQUEST = _load_page_archive()
 
 
+def _load_page_delete():
+    path = ROOT / "page_api_users_groups.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    owner = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "PrivateCompanionPageApiUsersGroupsMixin"
+    )
+    method = next(
+        copy.deepcopy(node) for node in owner.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "delete_unified_person"
+    )
+    method.decorator_list = []
+    module = ast.Module(body=[method], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {
+        "Any": Any,
+        "request": _Request(),
+        "logger": types.SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+    }
+    exec(compile(module, str(path), "exec"), namespace)
+    return namespace["delete_unified_person"], namespace["request"]
+
+
+PAGE_DELETE, DELETE_REQUEST = _load_page_delete()
+
+
 def _identity(subject: str = "10001") -> dict[str, str]:
     return {
         "companion_instance_id": "astrbot_plugin_private_companion",
@@ -119,6 +148,9 @@ class _Host:
     _req041_persist_archive_saga_locked = METHODS["_req041_persist_archive_saga_locked"]
     archive_unified_person = METHODS["archive_unified_person"]
     _req041_resume_confirmed_person_archives = METHODS["_req041_resume_confirmed_person_archives"]
+    _req041_purge_legacy_person_locked = METHODS["_req041_purge_legacy_person_locked"]
+    purge_unified_person = METHODS["purge_unified_person"]
+    _req041_resume_confirmed_person_purges = METHODS["_req041_resume_confirmed_person_purges"]
 
     def __init__(self, relationship_path: Path) -> None:
         self.data: dict[str, Any] = {}
@@ -239,6 +271,75 @@ class PersonArchiveSagaTests(unittest.TestCase):
         self.assertEqual(1, resumed["completed"])
         self.assertEqual("deleted", self.host.registry.read_projection(self.host.person_id)["profile_status"])
 
+    def test_purge_removes_exact_legacy_records_after_retention_and_keeps_other_users(self) -> None:
+        preview = asyncio.run(self.host.archive_unified_person(
+            self.host.person_id, operation_id="archive-for-purge", dry_run=True,
+        ))
+        asyncio.run(self.host.archive_unified_person(
+            self.host.person_id, operation_id="archive-for-purge",
+            confirmation_token=preview["confirmation_token"], dry_run=False,
+        ))
+        root = self.host.data["unified_person"]
+        root["person_tombstones"][self.host.person_id]["created_at"] = "2020-01-01T00:00:00+00:00"
+        self.host.data.update({
+            "users": {
+                "10001": {"user_id": "10001", "unified_person_id": self.host.person_id, "secret": "private"},
+                "20002": {"user_id": "20002", "secret": "other"},
+            },
+            "groups": {
+                "group-a": {
+                    "members": {"10001": {"user_id": "10001"}, "20002": {"user_id": "20002"}},
+                    "recent_messages": [
+                        {"sender_id": "10001", "text": "remove-me"},
+                        {"sender_id": "20002", "text": "keep-me"},
+                    ],
+                }
+            },
+            "worldbook_member_profiles": {
+                "10001": {"user_id": "10001", "content": "remove-profile"},
+                "20002": {"user_id": "20002", "content": "keep-profile"},
+            },
+        })
+        purge_preview = asyncio.run(self.host.purge_unified_person(
+            self.host.person_id, operation_id="purge-1", dry_run=True,
+        ))
+        self.assertEqual("person_purge_prepared", purge_preview["code"])
+        purged = asyncio.run(self.host.purge_unified_person(
+            self.host.person_id, operation_id="purge-1",
+            confirmation_token=purge_preview["confirmation_token"], dry_run=False,
+        ))
+        self.assertEqual("person_purged", purged["code"])
+        self.assertNotIn("10001", self.host.data["users"])
+        self.assertIn("20002", self.host.data["users"])
+        self.assertNotIn("10001", self.host.data["groups"]["group-a"]["members"])
+        self.assertEqual(["keep-me"], [item["text"] for item in self.host.data["groups"]["group-a"]["recent_messages"]])
+        self.assertNotIn("10001", self.host.data["worldbook_member_profiles"])
+        self.assertIsNone(self.host.registry.read_projection(self.host.person_id))
+        self.assertIn(self.host.person_id, root["person_tombstones"])
+
+    def test_confirmed_purge_resumes_without_page_reconfirmation(self) -> None:
+        preview = asyncio.run(self.host.archive_unified_person(
+            self.host.person_id, operation_id="archive-before-resume-purge", dry_run=True,
+        ))
+        asyncio.run(self.host.archive_unified_person(
+            self.host.person_id, operation_id="archive-before-resume-purge",
+            confirmation_token=preview["confirmation_token"], dry_run=False,
+        ))
+        root = self.host.data["unified_person"]
+        root["person_tombstones"][self.host.person_id]["created_at"] = "2020-01-01T00:00:00+00:00"
+        purge = self.host.registry.prepare_person_purge(
+            self.host.person_id, operation_id="purge-resume", actor_id="page_administrator",
+        )
+        self.assertEqual([], self.host.registry.confirmed_person_purges())
+        self.host.registry.confirm_person_purge(
+            self.host.person_id, "purge-resume", purge["confirmation_token"],
+            actor_id="page_administrator",
+        )
+        resumed = asyncio.run(self.host._req041_resume_confirmed_person_purges())
+        self.assertTrue(resumed["ok"])
+        self.assertEqual(1, resumed["completed"])
+        self.assertIsNone(self.host.registry.read_projection(self.host.person_id))
+
 
 class _PageHost:
     archive_unified_person = PAGE_ARCHIVE
@@ -293,6 +394,39 @@ class PersonArchivePageTests(unittest.TestCase):
         rejected = asyncio.run(host.call_page())
         self.assertFalse(rejected["ok"])
         self.assertEqual(1, len(host.calls))
+
+    def test_delete_page_forwards_only_fixed_admin_purge_contract(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        class Service:
+            async def purge_unified_person(self, person_id: str, **kwargs):
+                calls.append({"person_id": person_id, **kwargs})
+                return {"ok": True, "code": "person_purge_prepared", "confirmation_token": "b" * 64}
+
+        class Page:
+            plugin = Service()
+            delete_unified_person = PAGE_DELETE
+
+            @staticmethod
+            def _single_line(value: Any, limit: int) -> str:
+                return " ".join(str(value or "").split())[:limit]
+
+            @staticmethod
+            def _ok(value: dict[str, Any]) -> dict[str, Any]:
+                return {"ok": True, "data": value}
+
+            @staticmethod
+            def _error(message: str) -> dict[str, Any]:
+                return {"ok": False, "error": message}
+
+        DELETE_REQUEST.payload = {"person_id": "person_a", "operation_id": "purge-1", "dry_run": True}
+        result = asyncio.run(Page().delete_unified_person())
+        self.assertTrue(result["ok"])
+        self.assertEqual("page_administrator", calls[0]["actor_id"])
+        self.assertEqual("person_delete", calls[0]["reason_code"])
+        DELETE_REQUEST.payload = {"person_id": "person_a", "operation_id": "purge-2", "dry_run": False}
+        self.assertFalse(asyncio.run(Page().delete_unified_person())["ok"])
+        self.assertEqual(1, len(calls))
 
 
 if __name__ == "__main__":

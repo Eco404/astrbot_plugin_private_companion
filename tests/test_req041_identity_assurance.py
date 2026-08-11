@@ -118,6 +118,9 @@ class IdentityAssuranceNamespaceTests(unittest.TestCase):
         )
         self.assertTrue(linked["ok"])
         self.assertTrue(detached["ok"])
+        automatic = self.registry.create_or_link(secondary, operation_id="automatic-recreate")
+        self.assertEqual("identity_relink_required", automatic["code"])
+        self.assertEqual(created["person_id"], automatic["person_id"])
         relinked = self.registry.link_identity(created["person_id"], secondary, operation_id="relink-1")
         self.assertEqual("identity_relinked", relinked["code"])
         self.assertNotIn(linked["identity_key"], self.store["unified_person"]["detached_identity_links"])
@@ -184,6 +187,16 @@ class IdentityAssuranceNamespaceTests(unittest.TestCase):
         root = self.store["unified_person"]
         self.assertEqual({}, root["identity_links"])
         self.assertEqual({created["identity_key"], linked["identity_key"]}, set(root["detached_identity_links"]))
+        self.assertEqual(
+            {created["identity_key"], linked["identity_key"]}, set(root["identity_tombstones"]),
+        )
+        self.assertTrue(all("identity" not in tombstone for tombstone in root["identity_tombstones"].values()))
+        self.assertEqual("identity_archived", self.registry.create_or_link(
+            _identity("10001"), operation_id="recreate-primary",
+        )["code"])
+        self.assertEqual("identity_archived", self.registry.create_or_link(
+            _identity("10002"), operation_id="recreate-secondary",
+        )["code"])
         self.assertEqual([], self.registry.confirmed_person_archives())
         self.assertEqual(archived, self.registry.finalize_person_archive(
             created["person_id"], "archive-1", prepared["confirmation_token"],
@@ -198,6 +211,42 @@ class IdentityAssuranceNamespaceTests(unittest.TestCase):
         self.store["unified_person"]["profiles"][created["person_id"]]["identity_keys"].append("orphan")
         corrupt = self.registry.prepare_person_archive(created["person_id"], operation_id="archive-corrupt")
         self.assertEqual("identity_exact_link_invalid", corrupt["code"])
+
+    def test_archived_person_purge_respects_retention_and_preserves_hash_tombstones(self) -> None:
+        created = self.registry.create_or_link(_identity("10001"), operation_id="create-1")
+        prepared = self.registry.prepare_person_archive(created["person_id"], operation_id="archive-1")
+        self.registry.confirm_person_archive(
+            created["person_id"], "archive-1", prepared["confirmation_token"],
+        )
+        archived = self.registry.finalize_person_archive(
+            created["person_id"], "archive-1", prepared["confirmation_token"],
+            {"ok": True, "code": "identity_scopes_already_empty", "count": 0, "namespace_count": 0},
+            {"code": "relationship_account_already_empty", "last_revision": 0},
+            {"code": "outbox_streams_retired", "stream_count": 2, "revisions": {}},
+        )
+        self.assertTrue(archived["ok"])
+        waiting = self.registry.prepare_person_purge(created["person_id"], operation_id="purge-wait")
+        self.assertEqual("archive_retention_active", waiting["code"])
+        root = self.store["unified_person"]
+        root["person_tombstones"][created["person_id"]]["created_at"] = "2020-01-01T00:00:00+00:00"
+        purge = self.registry.prepare_person_purge(created["person_id"], operation_id="purge-1")
+        self.assertEqual("person_purge_prepared", purge["code"])
+        self.assertEqual(["10001"], self.registry.archived_identity_subjects(created["person_id"]))
+        self.registry.confirm_person_purge(
+            created["person_id"], "purge-1", purge["confirmation_token"],
+        )
+        completed = self.registry.finalize_person_purge(
+            created["person_id"], "purge-1", purge["confirmation_token"],
+            {"code": "outbox_retired_streams_purged", "stream_count": 2},
+        )
+        self.assertEqual("person_purged", completed["code"])
+        self.assertIsNone(self.registry.read_projection(created["person_id"]))
+        self.assertNotIn(created["identity_key"], root["detached_identity_links"])
+        self.assertIn(created["identity_key"], root["identity_tombstones"])
+        self.assertIn(created["person_id"], root["person_tombstones"])
+        self.assertEqual("identity_archived", self.registry.create_or_link(
+            _identity("10001"), operation_id="recreate-after-purge",
+        )["code"])
 
 
 if __name__ == "__main__":

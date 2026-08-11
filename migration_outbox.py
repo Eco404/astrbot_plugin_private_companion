@@ -110,7 +110,12 @@ class MigrationOutbox:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=FULL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA secure_delete=ON")
         return conn
+
+    def _truncate_wal(self) -> None:
+        with self._connection() as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -200,6 +205,23 @@ class MigrationOutbox:
                     retired_revision INTEGER NOT NULL,
                     reason_code TEXT NOT NULL,
                     created_at REAL NOT NULL,
+                    PRIMARY KEY(stream_key,migration_epoch),
+                    FOREIGN KEY (migration_epoch) REFERENCES migration_epochs(migration_epoch)
+                );
+                CREATE TABLE IF NOT EXISTS stream_purge_operations (
+                    operation_id TEXT NOT NULL,
+                    migration_epoch TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(operation_id,migration_epoch),
+                    FOREIGN KEY (migration_epoch) REFERENCES migration_epochs(migration_epoch)
+                );
+                CREATE TABLE IF NOT EXISTS purged_streams (
+                    stream_key TEXT NOT NULL,
+                    migration_epoch TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    purged_at REAL NOT NULL,
                     PRIMARY KEY(stream_key,migration_epoch),
                     FOREIGN KEY (migration_epoch) REFERENCES migration_epochs(migration_epoch)
                 );
@@ -588,6 +610,98 @@ class MigrationOutbox:
                 (stream, epoch),
             ).fetchone()
         return dict(row) if row is not None else {}
+
+    def purge_retired_streams(
+        self,
+        stream_keys: list[str] | tuple[str, ...],
+        migration_epoch: str,
+        *,
+        operation_id: str,
+        reason_code: str = "person_delete",
+    ) -> dict[str, Any]:
+        """Physically erase payload-bearing rows for already retired streams."""
+        epoch = _token(migration_epoch)
+        operation = _token(operation_id)
+        reason = _token(reason_code, limit=80)
+        streams = sorted({_token(item) for item in stream_keys if _token(item)})
+        if not epoch or not operation or not reason or not 1 <= len(streams) <= 16:
+            raise OutboxError("outbox_stream_purge_invalid")
+        request_hash = hashlib.sha256(_canonical({
+            "streams": streams, "reason_code": reason,
+        }).encode("utf-8")).hexdigest()
+        now = float(self._clock())
+        with self._transaction() as conn:
+            prior_operation = conn.execute(
+                "SELECT request_hash,result_json FROM stream_purge_operations WHERE operation_id=? AND migration_epoch=?",
+                (operation, epoch),
+            ).fetchone()
+            if prior_operation is not None:
+                if prior_operation["request_hash"] != request_hash:
+                    raise OutboxConflict("outbox_stream_purge_conflict")
+                return json.loads(prior_operation["result_json"])
+            identity_tombstone_keys: set[str] = set()
+            event_count = 0
+            for stream in streams:
+                retired = conn.execute(
+                    "SELECT 1 FROM retired_streams WHERE stream_key=? AND migration_epoch=?",
+                    (stream, epoch),
+                ).fetchone()
+                if retired is None:
+                    raise OutboxConflict("outbox_stream_not_retired")
+                purged = conn.execute(
+                    "SELECT operation_id FROM purged_streams WHERE stream_key=? AND migration_epoch=?",
+                    (stream, epoch),
+                ).fetchone()
+                if purged is not None:
+                    raise OutboxConflict("outbox_stream_already_purged")
+                rows = conn.execute(
+                    "SELECT payload_json FROM outbox WHERE stream_key=? AND migration_epoch=?",
+                    (stream, epoch),
+                ).fetchall()
+                event_count += len(rows)
+                if stream.startswith("identity:"):
+                    for row in rows:
+                        try:
+                            payload = json.loads(row["payload_json"])
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            continue
+                        identity_key = _token(payload.get("identity_key_ref"), limit=160) if isinstance(payload, dict) else ""
+                        if identity_key:
+                            identity_tombstone_keys.add(f"identity-link:{identity_key}")
+            placeholders = ",".join("?" for _ in streams)
+            conn.execute(
+                f"DELETE FROM outbox WHERE migration_epoch=? AND stream_key IN ({placeholders})",
+                (epoch, *streams),
+            )
+            conn.execute(
+                f"DELETE FROM revisions WHERE migration_epoch=? AND stream_key IN ({placeholders})",
+                (epoch, *streams),
+            )
+            tombstone_count = 0
+            for key in identity_tombstone_keys:
+                tombstone_count += conn.execute(
+                    "DELETE FROM tombstones WHERE object_key=? AND migration_epoch=?", (key, epoch)
+                ).rowcount
+            for stream in streams:
+                conn.execute(
+                    "INSERT INTO purged_streams(stream_key,migration_epoch,operation_id,purged_at) VALUES(?,?,?,?)",
+                    (stream, epoch, operation, now),
+                )
+            result = {
+                "code": "outbox_retired_streams_purged",
+                "stream_count": len(streams),
+                "event_count": event_count,
+                "tombstone_count": tombstone_count,
+                "reason_code": reason,
+            }
+            conn.execute(
+                """INSERT INTO stream_purge_operations(
+                       operation_id,migration_epoch,request_hash,result_json,created_at
+                   ) VALUES(?,?,?,?,?)""",
+                (operation, epoch, request_hash, _canonical(result), now),
+            )
+        self._truncate_wal()
+        return result
 
     @staticmethod
     def _item(row: sqlite3.Row) -> OutboxItem:
