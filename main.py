@@ -158,6 +158,7 @@ from .migration_scoped_projection import (
     scoped_group_ref,
     scoped_persona_ref,
 )
+from .scoped_runtime_view import overlay_group_runtime_view, overlay_private_runtime_view
 from .unified_profile_contract import (
     build_person_ref as req036_build_person_ref,
     build_profile_dto as req036_build_profile_dto,
@@ -5094,17 +5095,9 @@ class PrivateCompanionPlugin(
         if synchronizer is None or context is None:
             return view
         projection = synchronizer.read_projection(context)
-        if projection.get("ok") is not True:
+        view = overlay_private_runtime_view(view, projection)
+        if not isinstance(view, dict) or view.get("req041_scoped_read_generation") != "new":
             return view
-        for key, value in projection.get("fields", {}).items():
-            if key in {
-                "nickname", "style", "profile_origin", "auto_profile_created",
-                "companion_memory", "intent_profile", "dialogue_episodes", "open_loops",
-                "behavior_habits", "action_preferences", "action_consequences", "state_continuity",
-                "recent_reply_topics", "expression_profile",
-            }:
-                view[key] = deepcopy(value)
-        view["req041_scoped_read_generation"] = "new"
         try:
             setattr(event, "req041_scoped_private_read_view", view)
         except Exception:
@@ -5135,33 +5128,16 @@ class PrivateCompanionPlugin(
             migration_epoch=synchronizer.migration_epoch,
         )
         shared_projection = synchronizer.read_projection(shared)
-        applied = False
-        if shared_projection.get("ok") is True:
-            applied = True
-            for key, value in shared_projection.get("fields", {}).items():
-                if key in {
-                    "recent_messages", "slang_terms", "slang_meanings", "topic_signatures", "topic_threads",
-                    "group_episodes", "relationship_edges", "atmosphere", "interjection_feedback", "expression_profile",
-                }:
-                    view[key] = deepcopy(value)
+        member_projection = None
         member_context = self._req041_scoped_context_for_user(
             relationship_user or {}, kind="group_member", group_id=group_id, purpose="profile_read"
         )
         if member_context is not None:
             member_projection = synchronizer.read_projection(member_context)
-            if member_projection.get("ok") is True:
-                applied = True
-                members = view.setdefault("members", {})
-                if isinstance(members, dict):
-                    member = dict(members.get(sender_id) or {})
-                    for key, value in member_projection.get("fields", {}).items():
-                        if key in {
-                            "name", "identity_name", "group_role", "group_role_label", "count", "last_seen",
-                            "display_name_events", "recent_phrases",
-                        }:
-                            member[key] = deepcopy(value)
-                    members[sender_id] = member
-        if not applied:
+        view = overlay_group_runtime_view(
+            view, shared_projection, sender_id=sender_id, member_projection=member_projection,
+        )
+        if not isinstance(view, dict) or view.get("req041_scoped_read_generation") != "new":
             return view
         view["req041_scoped_read_generation"] = "new"
         try:
@@ -5215,25 +5191,32 @@ class PrivateCompanionPlugin(
         source: str,
     ) -> dict[str, Any]:
         """Take one short-lived private relationship view for background decisions."""
-        if not isinstance(user, dict) or user.get("req041_read_generation") == "new":
+        if not isinstance(user, dict):
             return user
+        relationship_view = user
         router = getattr(self, "req041_relationship_read_router", None)
-        if router is None:
-            return user
-        result = router.begin(
-            user,
-            event_ref=f"snapshot:{_single_line(source, 60) or 'relationship'}:{uuid.uuid4().hex}",
-            kind="private",
+        if router is not None and user.get("req041_read_generation") != "new":
+            result = router.begin(
+                user,
+                event_ref=f"snapshot:{_single_line(source, 60) or 'relationship'}:{uuid.uuid4().hex}",
+                kind="private",
+            )
+            chain_id = str(result.get("chain_id") or "")
+            try:
+                relationship_view = (
+                    result.get("user") if isinstance(result.get("user"), dict) else user
+                )
+            finally:
+                if chain_id:
+                    try:
+                        router.finish(chain_id)
+                    except Exception:
+                        pass
+        scoped_getter = getattr(self, "_req041_scoped_private_read_view", None)
+        return (
+            scoped_getter(None, relationship_view)
+            if callable(scoped_getter) else relationship_view
         )
-        chain_id = str(result.get("chain_id") or "")
-        try:
-            return result.get("user") if isinstance(result.get("user"), dict) else user
-        finally:
-            if chain_id:
-                try:
-                    router.finish(chain_id)
-                except Exception:
-                    pass
 
     @filter.after_message_sent(priority=-110000)
     async def finish_req041_read_chain(self, event: AstrMessageEvent, *args, **kwargs) -> None:

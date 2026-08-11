@@ -105,6 +105,7 @@ from .dreaming import (
 )
 from .helpers import _date_key, _normalize_photo_subject_owner, _now_ts, _photo_subject_owner_prompt_label, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
 from .relationship_policy import relationship_stage_for_score
+from .scoped_runtime_view import scoped_approved_expression_rules
 from .companion_interaction_expression import (
     build_expression_decision,
     current_interaction_projection,
@@ -1215,7 +1216,8 @@ class UserMemoryMixin:
             return {"prompt": "", "rules": [], "context": {}}
         if scope == "group" and not self._expression_group_application_enabled(target_id):
             return {"prompt": "", "rules": [], "context": {}}
-        profile = self._expression_voice_profile()
+        scoped_rules = scoped_approved_expression_rules(context_owner)
+        profile = self._expression_voice_profile() if scoped_rules is None else {}
         context = self._expression_companion_context(
             scope=scope,
             target_id=target_id,
@@ -1223,7 +1225,7 @@ class UserMemoryMixin:
             context_owner=context_owner,
         )
         learned_rules = self._select_learned_expression_rules(
-            profile.get("learned_rules"),
+            profile.get("learned_rules") if scoped_rules is None else scoped_rules,
             hint=inbound_text,
             limit=2,
             context=context,
@@ -1239,9 +1241,13 @@ class UserMemoryMixin:
             return {"prompt": "", "rules": [], "context": context}
         scope_label = {"private": "私聊回复", "proactive": "私聊主动消息", "group": "群聊回复"}.get(scope, "当前回复")
         evidence_count = sum(_safe_int(item.get("evidence_count"), 0, 0) for item in learned_rules)
+        source_label = (
+            "当前私聊/群聊命名空间内"
+            if scoped_rules is not None else "已允许的私聊/群聊来源"
+        )
         prompt = (
             "【已审核的表达学习规则】\n"
-            f"这些规则只来自已允许的私聊/群聊来源，共 {evidence_count} 条支持证据。当前用于{scope_label}：\n"
+            f"这些规则只来自{source_label}，共 {evidence_count} 条支持证据。当前用于{scope_label}：\n"
             + "\n".join(guidance[:4])
             + "\n执行优先级：工具与事实结果 > 安全及能力边界 > AstrBot 人格 > 当前关系与情绪 > 已审核表达规则 > 装饰性口癖/标点。"
             + "任何冲突都舍弃较低优先级；工具失败时绝不能声称已发送、已完成或已成功。"
@@ -1249,7 +1255,12 @@ class UserMemoryMixin:
             + "句尾括号或颜文字后缀必须与所属句保持同一行；规则要求括号前无标点时，不得补逗号或其他标点。"
             + "不得带出来源身份、称呼、账号、关系、事实、秘密或支持片段。"
         )
-        return {"prompt": prompt, "rules": [dict(item) for item in learned_rules], "context": context}
+        return {
+            "prompt": prompt,
+            "rules": [dict(item) for item in learned_rules],
+            "context": context,
+            "selection_scope": "current_namespace" if scoped_rules is not None else "legacy_aggregate",
+        }
 
     def _format_expression_voice_for_prompt(
         self,

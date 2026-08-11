@@ -27,6 +27,7 @@ from identity_namespace import NamespaceContext
 from tests.test_req041_scoped_projection import _Remote
 from relationship_ledger import normalize_relationship_positive_stage_cap_key
 from unified_person_registry import UnifiedPersonRegistry
+from scoped_runtime_view import overlay_group_runtime_view, overlay_private_runtime_view
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +60,8 @@ def _load_methods(*names: str) -> dict[str, Any]:
         "scoped_group_ref": scoped_group_ref,
         "scoped_persona_ref": scoped_persona_ref,
         "UnifiedPersonRegistry": UnifiedPersonRegistry,
+        "overlay_group_runtime_view": overlay_group_runtime_view,
+        "overlay_private_runtime_view": overlay_private_runtime_view,
         "normalize_relationship_positive_stage_cap_key": normalize_relationship_positive_stage_cap_key,
         "_single_line": lambda value, limit=240: " ".join(str(value or "").split())[:limit],
         "_now_ts": lambda: 1_786_291_200.0,
