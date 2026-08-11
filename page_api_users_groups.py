@@ -417,10 +417,45 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                             self.plugin._ensure_private_user_umo(user_id, user)
                         else:
                             self.plugin._clear_pending_proactive_plan(user)
+                legacy_profile_before = {
+                    key: (key in user, user.get(key))
+                    for key in ("nickname", "style")
+                    if key in payload
+                }
                 if "nickname" in payload:
                     user["nickname"] = self._single_line(payload.get("nickname"), 24)
                 if "style" in payload:
                     user["style"] = self._single_line(payload.get("style"), 24)
+                profile_fact_changes = {}
+                if "nickname" in payload:
+                    profile_fact_changes["preferred_address"] = user["nickname"]
+                    if user["nickname"]:
+                        profile_fact_changes["display_name"] = user["nickname"]
+                if "style" in payload:
+                    profile_fact_changes["style"] = user["style"]
+                if profile_fact_changes:
+                    profile_updater = getattr(
+                        self.plugin, "_req041_update_unified_profile_facts", None
+                    )
+                    if callable(profile_updater):
+                        profile_result = profile_updater(
+                            user,
+                            profile_fact_changes,
+                            actor_id="page_administrator",
+                            schedule_save=False,
+                        )
+                        if (
+                            profile_result.get("state") != "skipped"
+                            and profile_result.get("ok") is not True
+                        ):
+                            for key, (was_present, previous_value) in legacy_profile_before.items():
+                                if was_present:
+                                    user[key] = previous_value
+                                else:
+                                    user.pop(key, None)
+                            return self._error(
+                                str(profile_result.get("code") or "统一身份档案更新失败")
+                            )
                 if "relationship_role" in payload:
                     user["relationship_role"] = role
                     expression_voice_needs_refresh = role != previous_role

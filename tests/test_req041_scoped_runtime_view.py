@@ -245,6 +245,14 @@ class ConsumerWiringTests(unittest.TestCase):
         self.assertIn("existing_scoped_group = getattr(event, \"req041_scoped_group_read_view\", None)", passive)
         self.assertIn("snapshot_getter(user, source=\"proactive_chat_bridge\")", proactive)
 
+    def test_admin_nickname_and_style_write_person_facts(self) -> None:
+        page = (ROOT / "page_api_users_groups.py").read_text(encoding="utf-8")
+        self.assertIn("_req041_update_unified_profile_facts", page)
+        self.assertIn('profile_fact_changes["preferred_address"] = user["nickname"]', page)
+        self.assertIn('profile_fact_changes["style"] = user["style"]', page)
+        self.assertIn("legacy_profile_before", page)
+        self.assertIn("user.pop(key, None)", page)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1889,6 +1889,33 @@ class PrivateCompanionPlugin(
             result.insert(0, primary)
         return result
 
+    def _req041_update_unified_profile_facts(
+        self,
+        user: dict[str, Any],
+        changes: dict[str, Any],
+        *,
+        operation_id: str = "",
+        actor_id: str = "companion",
+        schedule_save: bool = False,
+    ) -> dict[str, Any]:
+        if not isinstance(user, dict) or not isinstance(changes, dict) or not changes:
+            return {"ok": False, "state": "skipped", "code": "profile_fact_update_skipped"}
+        person_id = _single_line(user.get("unified_person_id"), 80)
+        if not person_id:
+            return {"ok": False, "state": "skipped", "code": "profile_identity_pending"}
+        result = self._active_unified_person_registry().update_identity_profile_facts(
+            person_id,
+            changes,
+            operation_id=(
+                _single_line(operation_id, 120)
+                or f"req041-profile-{uuid.uuid4().hex}"
+            ),
+            actor_id=actor_id,
+        )
+        if result.get("ok") and result.get("changed") and schedule_save:
+            self._schedule_data_save()
+        return result
+
     def _persona_profile_path(self, persona_id: str) -> Path:
         return Path(self._persona_profiles_dir) / self._persona_profile_filename(persona_id)
 
@@ -3488,7 +3515,15 @@ class PrivateCompanionPlugin(
                 event,
                 operation_id=f"req036.{source}:{str(resolution.get('identity_key') or '')[-24:]}",
                 profile={
-                    "display_name": _single_line(profile.get("nickname"), 80),
+                    "display_name": (
+                        _single_line(profile.get("nickname"), 80) if not group_id else ""
+                    ),
+                    "preferred_address": (
+                        _single_line(profile.get("nickname"), 40) if not group_id else ""
+                    ),
+                    "style": _single_line(profile.get("style"), 40) if not group_id else "",
+                    "profile_origin": _single_line(profile.get("profile_origin"), 60),
+                    "auto_profile_created": bool(profile.get("auto_profile_created", False)),
                     "affinity_score": _safe_int(profile.get("relationship_score"), 0, -1200, 1200),
                     "owner_mode": "owner" if _single_line(profile.get("relationship_role"), 40) == "owner" else "not_owner",
                     "relation_policy_id": _single_line(profile.get("relationship_mode"), 40) or "default_friend",
@@ -3504,6 +3539,26 @@ class PrivateCompanionPlugin(
         if isinstance(user, dict) and person_id:
             user["unified_person_id"] = person_id
             user["unified_profile_projection_revision"] = int(projection.get("projection_revision") or 1)
+            if not group_id:
+                private_facts = {
+                    "style": _single_line(user.get("style"), 40),
+                    "profile_origin": _single_line(user.get("profile_origin"), 60),
+                    "auto_profile_created": bool(user.get("auto_profile_created", False)),
+                }
+                private_name = _single_line(user.get("nickname"), 80)
+                if private_name:
+                    private_facts["display_name"] = private_name
+                    private_facts["preferred_address"] = private_name[:40]
+                fact_signature = hashlib.sha256(
+                    json.dumps(private_facts, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest()[:32]
+                self._req041_update_unified_profile_facts(
+                    user,
+                    private_facts,
+                    operation_id=f"req041-private-profile-observation-{person_id[-16:]}-{fact_signature}",
+                    actor_id="private_observation",
+                    schedule_save=True,
+                )
         group_scope = ""
         if group_id and person_id:
             platform = _single_line(identity.get("subject_namespace"), 80).split(":", 1)[0]

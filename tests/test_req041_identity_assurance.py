@@ -73,6 +73,67 @@ class IdentityAssuranceNamespaceTests(unittest.TestCase):
         self.assertEqual("pending", unresolved["context"]["kind"])
         self.assertNotEqual(created["person_id"], unresolved["person_id"])
 
+    def test_person_wide_profile_facts_are_revisioned_idempotent_and_cas_guarded(self) -> None:
+        created = self.registry.create_or_link(
+            _identity("10001"),
+            profile={"display_name": "Initial", "preferred_address": "I"},
+            operation_id="create-profile",
+        )
+        person_id = created["person_id"]
+        initial = self.registry.identity_profile_facts(person_id)
+        self.assertEqual(1, initial["profile_fact_revision"])
+        updated = self.registry.update_identity_profile_facts(
+            person_id,
+            {"display_name": "Alice", "preferred_address": "A", "style": "direct"},
+            operation_id="profile-update-1",
+            actor_id="page_administrator",
+            expected_revision=1,
+        )
+        self.assertTrue(updated["ok"])
+        self.assertEqual(2, updated["profile_fact_revision"])
+        self.assertEqual(updated, self.registry.update_identity_profile_facts(
+            person_id,
+            {"display_name": "Alice", "preferred_address": "A", "style": "direct"},
+            operation_id="profile-update-1",
+            actor_id="page_administrator",
+            expected_revision=1,
+        ))
+        self.assertEqual("operation_id_conflict", self.registry.update_identity_profile_facts(
+            person_id,
+            {"preferred_address": "Other"},
+            operation_id="profile-update-1",
+            actor_id="page_administrator",
+        )["code"])
+        self.assertEqual("profile_fact_revision_conflict", self.registry.update_identity_profile_facts(
+            person_id,
+            {"preferred_address": "Stale"},
+            operation_id="profile-update-stale",
+            expected_revision=1,
+        )["code"])
+        self.assertEqual("profile_fact_fields_invalid", self.registry.update_identity_profile_facts(
+            person_id,
+            {"relationship_score": 999},
+            operation_id="profile-update-privilege",
+        )["code"])
+        serialized = repr(self.registry.identity_profile_facts(person_id))
+        self.assertNotIn("relationship_score", serialized)
+        self.assertNotIn("capabilities", serialized)
+
+    def test_secondary_identity_reads_same_person_profile_facts(self) -> None:
+        created = self.registry.create_or_link(
+            _identity("10001"), profile={"display_name": "Alice"}, operation_id="create-1",
+        )
+        self.registry.link_identity(created["person_id"], _identity("10002"), operation_id="link-2")
+        self.registry.update_identity_profile_facts(
+            created["person_id"], {"preferred_address": "SharedName"},
+            operation_id="profile-shared",
+        )
+        self.assertEqual(
+            "SharedName",
+            self.registry.identity_profile_facts(created["person_id"])["facts"]["preferred_address"],
+        )
+        self.assertEqual(created["person_id"], self._namespace(_identity("10002"))["person_id"])
+
     def test_formal_namespace_for_person_revalidates_primary_exact_link(self) -> None:
         created = self.registry.create_or_link(_identity("10001"), operation_id="create-1")
         resolved = self.registry.formal_namespace_for_person(

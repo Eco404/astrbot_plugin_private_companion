@@ -100,7 +100,9 @@ class ScopedProjectionTests(unittest.TestCase):
         )
         self.snapshot: dict = {}
         created = UnifiedPersonRegistry(self.snapshot).create_or_link(
-            _identity(), profile={"display_name": "A"}, operation_id="create-a"
+            _identity(),
+            profile={"display_name": "private-name", "preferred_address": "private-name"},
+            operation_id="create-a",
         )
         self.person_id = created["person_id"]
         self.snapshot["users"] = {
@@ -176,6 +178,14 @@ class ScopedProjectionTests(unittest.TestCase):
         alt_snapshot = deepcopy(self.snapshot)
         main_snapshot["users"]["10001"]["nickname"] = "main-persona-name"
         alt_snapshot["users"]["10001"]["nickname"] = "alt-persona-name"
+        UnifiedPersonRegistry(main_snapshot).update_identity_profile_facts(
+            self.person_id, {"preferred_address": "main-persona-name"},
+            operation_id="main-persona-profile",
+        )
+        UnifiedPersonRegistry(alt_snapshot).update_identity_profile_facts(
+            self.person_id, {"preferred_address": "alt-persona-name"},
+            operation_id="alt-persona-profile",
+        )
         self.assertTrue(self.sync.sync_snapshot(main_snapshot, source_scope="default")["ok"])
         self.assertTrue(self.sync.sync_snapshot(alt_snapshot, source_scope="persona:alt")["ok"])
         main_records, _ = self.sync.build_records(main_snapshot, source_scope="default")
@@ -210,14 +220,38 @@ class ScopedProjectionTests(unittest.TestCase):
         self.sync.mark_dirty()
         self.assertEqual("scoped_projection_not_reconciled", self.sync.read_projection(private)["code"])
 
-    def test_unlinked_user_and_ambiguous_subject_are_not_projected(self) -> None:
+    def test_unlinked_user_is_denied_and_ambiguous_rows_only_project_canonical_facts(self) -> None:
         unlinked = {"users": {"10001": deepcopy(self.snapshot["users"]["10001"])}}
         records, _ = self.sync.build_records(unlinked)
         self.assertEqual([], records)
         duplicated = deepcopy(self.snapshot)
         duplicated["users"]["duplicate"] = deepcopy(duplicated["users"]["10001"])
         records, _ = self.sync.build_records(duplicated)
-        self.assertFalse(any(item.context.kind == "private" for item in records))
+        private = [item for item in records if item.context.kind == "private"]
+        self.assertEqual(["profile_fact"], [item.record_kind for item in private])
+        serialized = str([item.payload for item in private])
+        self.assertIn("private-name", serialized)
+        self.assertNotIn("private-sentinel", serialized)
+        self.assertNotIn("private-rule", serialized)
+
+    def test_person_profile_fact_overrides_legacy_name_without_copying_privilege(self) -> None:
+        registry = UnifiedPersonRegistry(self.snapshot)
+        updated = registry.update_identity_profile_facts(
+            self.person_id,
+            {"preferred_address": "canonical-name", "style": "canonical-style"},
+            operation_id="canonical-profile",
+        )
+        self.assertTrue(updated["ok"])
+        records, _ = self.sync.build_records(self.snapshot)
+        profile = next(
+            item for item in records
+            if item.context.kind == "private" and item.record_kind == "profile_fact"
+        )
+        self.assertEqual("canonical-name", profile.payload["content"]["nickname"])
+        self.assertEqual("canonical-style", profile.payload["content"]["style"])
+        self.assertEqual(2, profile.payload["content"]["profile_fact_revision"])
+        self.assertNotIn("relationship_role", repr(profile.payload))
+        self.assertNotIn("relationship_score", repr(profile.payload))
 
     def test_archive_invalidates_ready_cache_before_remote_delete(self) -> None:
         records, _ = self.sync.build_records(self.snapshot)

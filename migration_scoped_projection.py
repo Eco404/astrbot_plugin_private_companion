@@ -270,8 +270,6 @@ class ScopedProjectionSynchronizer:
 
         for person_id in people:
             matched = by_person.get(person_id, [])
-            if len(matched) != 1:
-                continue
             resolution = registry.formal_namespace_for_person(
                 person_id, kind="private", policy_version=self.policy_version,
                 migration_epoch=self.migration_epoch, purpose="profile_read",
@@ -284,23 +282,41 @@ class ScopedProjectionSynchronizer:
                 assurance=str(raw_context.get("assurance") or "verified"),
             )
             remember(context)
-            user = matched[0]
-            profile_content = {
-                key: deepcopy(user[key]) for key in ("nickname", "style", "profile_origin", "auto_profile_created")
-                if _present(user.get(key))
-            }
+            facts_result = registry.identity_profile_facts(person_id)
+            facts = facts_result.get("facts") if facts_result.get("ok") else {}
+            user = matched[0] if len(matched) == 1 else None
+            preferred = str((facts or {}).get("preferred_address") or "").strip()
+            display_name = str((facts or {}).get("display_name") or "").strip()
+            canonical_name = preferred or (display_name if display_name != "unknown_person" else "")
+            profile_content: dict[str, Any] = {}
+            if canonical_name:
+                profile_content["nickname"] = canonical_name
+            elif isinstance(user, dict) and _present(user.get("nickname")):
+                profile_content["nickname"] = deepcopy(user["nickname"])
+            for source_key in ("style", "profile_origin", "auto_profile_created"):
+                if _present((facts or {}).get(source_key)):
+                    profile_content[source_key] = deepcopy(facts[source_key])
+                elif isinstance(user, dict) and _present(user.get(source_key)):
+                    profile_content[source_key] = deepcopy(user[source_key])
+            if facts_result.get("ok"):
+                profile_content["profile_fact_revision"] = int(
+                    facts_result.get("profile_fact_revision") or 1
+                )
             if profile_content:
                 records.append(self._record(
                     context, record_kind="profile_fact", record_id="req041-private-profile",
                     domain="profile", content=profile_content,
                 ))
             for field in _PRIVATE_MEMORY_FIELDS:
-                if _present(user.get(field)):
+                if isinstance(user, dict) and _present(user.get(field)):
                     records.append(self._record(
                         context, record_kind="memory", record_id=f"req041-private-memory-{field.replace('_', '-')}",
                         domain="memory", content={field: deepcopy(user[field])},
                     ))
-            records.extend(self._learning_records(context, user.get("expression_profile"), prefix="req041-private"))
+            if isinstance(user, dict):
+                records.extend(self._learning_records(
+                    context, user.get("expression_profile"), prefix="req041-private"
+                ))
 
         root = snapshot.get("unified_person") if isinstance(snapshot.get("unified_person"), dict) else {}
         links = root.get("identity_links") if isinstance(root.get("identity_links"), dict) else {}

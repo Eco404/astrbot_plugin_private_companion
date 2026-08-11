@@ -14,6 +14,7 @@ PRIVATE_FIELDS = frozenset({
     "companion_memory", "intent_profile", "dialogue_episodes", "open_loops",
     "behavior_habits", "action_preferences", "action_consequences", "state_continuity",
     "recent_reply_topics", "expression_profile",
+    "profile_fact_revision",
 })
 
 GROUP_SHARED_FIELDS = frozenset({
