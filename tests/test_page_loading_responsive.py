@@ -83,6 +83,18 @@ def test_responsive_tail_contains_narrow_screen_safety_rules() -> None:
     assert "width: 1px;" in tail
 
 
+def test_world_workspace_collapses_after_polish_overrides() -> None:
+    css = _text("css/polish.css")
+    tail = css.split("/* Responsive containment and sticky-stack safety. Keep this layer last. */", 1)[1]
+
+    assert "container-name: world-page;" in css
+    assert "@container world-page (max-width: 900px)" in tail
+    assert "grid-template-columns: minmax(0, 1fr);" in tail
+    assert "position: static;" in tail
+    assert "flex: 1 0 128px;" in tail
+    assert "world=20260811-responsive-v2" in _text("index.html")
+
+
 def test_ascii_and_utf8_page_mirrors_match_after_optimization() -> None:
     ascii_root = ROOT / "pages" / "companion-panel"
     utf8_root = ROOT / "pages" / "陪伴面板"

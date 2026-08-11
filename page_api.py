@@ -19907,6 +19907,11 @@ class PrivateCompanionPageApi(
             "photo_generation_prompt_format",
             "photo_generation_style",
             "photo_generation_style_custom_prompt",
+            "photo_generation_negative_prompt_mode",
+            "photo_generation_negative_prompt",
+            "photo_generation_text2img_negative_prompt",
+            "photo_generation_selfie_negative_prompt",
+            "photo_generation_edit_negative_prompt",
             "photo_generation_fixed_prompt",
             "photo_generation_text2img_fixed_prompt",
             "photo_generation_selfie_fixed_prompt",
@@ -22340,6 +22345,11 @@ class PrivateCompanionPageApi(
             "photo_generation_prompt_format": "photo_generation_prompt_format",
             "photo_generation_style": "photo_generation_style",
             "photo_generation_style_custom_prompt": "photo_generation_style_custom_prompt",
+            "photo_generation_negative_prompt_mode": "photo_generation_negative_prompt_mode",
+            "photo_generation_negative_prompt": "photo_generation_negative_prompt",
+            "photo_generation_text2img_negative_prompt": "photo_generation_text2img_negative_prompt",
+            "photo_generation_selfie_negative_prompt": "photo_generation_selfie_negative_prompt",
+            "photo_generation_edit_negative_prompt": "photo_generation_edit_negative_prompt",
             "photo_generation_fixed_prompt": "photo_generation_fixed_prompt",
             "photo_generation_text2img_fixed_prompt": "photo_generation_text2img_fixed_prompt",
             "photo_generation_selfie_fixed_prompt": "photo_generation_selfie_fixed_prompt",
@@ -22390,6 +22400,11 @@ class PrivateCompanionPageApi(
                     text = normalizer(text) if callable(normalizer) else text.lower()
                     if text not in {"traditional", "natural_language", "nai"}:
                         text = "traditional"
+                elif key == "photo_generation_negative_prompt_mode":
+                    normalizer = getattr(self.plugin, "_normalize_photo_generation_negative_prompt_mode", None)
+                    text = normalizer(text) if callable(normalizer) else text.lower()
+                    if text not in {"safe_default", "merge", "replace"}:
+                        text = "safe_default"
                 elif key in {"external_image_api_platform", "backup_external_image_api_platform"}:
                     normalizer = getattr(self.plugin, "_normalize_external_image_api_platform", None)
                     text = normalizer(text) if callable(normalizer) else text.lower()
@@ -23014,6 +23029,11 @@ class PrivateCompanionPageApi(
             "photo_generation_prompt_format",
             "photo_generation_style",
             "photo_generation_style_custom_prompt",
+            "photo_generation_negative_prompt_mode",
+            "photo_generation_negative_prompt",
+            "photo_generation_text2img_negative_prompt",
+            "photo_generation_selfie_negative_prompt",
+            "photo_generation_edit_negative_prompt",
             "photo_generation_fixed_prompt",
             "photo_generation_text2img_fixed_prompt",
             "photo_generation_selfie_fixed_prompt",

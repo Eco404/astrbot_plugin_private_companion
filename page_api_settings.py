@@ -434,6 +434,10 @@ class PageSettingNormalizerMixin:
             "photo_generation_text2img_fixed_prompt",
             "photo_generation_selfie_fixed_prompt",
             "photo_generation_edit_fixed_prompt",
+            "photo_generation_negative_prompt",
+            "photo_generation_text2img_negative_prompt",
+            "photo_generation_selfie_negative_prompt",
+            "photo_generation_edit_negative_prompt",
             "photo_generation_scene_presets",
         }:
             return str(value or "").strip()[:5000]
@@ -445,6 +449,19 @@ class PageSettingNormalizerMixin:
             if mode in {"nai", "novelai", "nai4", "nai_4", "nai45", "nai_diffusion", "naidiffusion"}:
                 return "nai"
             return "natural_language" if mode in {"natural", "natural_language", "description", "prose", "自然语言", "自然语言描述"} else "traditional"
+        if key == "photo_generation_negative_prompt_mode":
+            normalizer = getattr(self.plugin, "_normalize_photo_generation_negative_prompt_mode", None)
+            if callable(normalizer):
+                return normalizer(value)
+            mode = str(value or "safe_default").strip().lower().replace("-", "_")
+            aliases = {
+                "合并": "merge",
+                "合并自定义": "merge",
+                "替换": "replace",
+                "完全替换": "replace",
+            }
+            mode = aliases.get(mode, mode)
+            return mode if mode in {"safe_default", "merge", "replace"} else "safe_default"
         if key == "natural_language_photo_generation_mode":
             mode = str(value or "tool_first").strip().lower()
             aliases = {

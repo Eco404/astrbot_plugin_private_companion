@@ -121,6 +121,51 @@ class ImageSecurityTests(unittest.TestCase):
                 ),
             )
 
+    def test_exact_current_event_temp_image_is_copied_without_broad_temp_access(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data_dir = root / "plugin-data"
+            data_dir.mkdir()
+            event_image = root / "astrbot-temp" / "media_image_current.png"
+            event_image.parent.mkdir()
+            event_image.write_bytes(b"current-event-image")
+            unrelated = root / "astrbot-temp" / "unrelated.png"
+            unrelated.write_bytes(b"unrelated-image")
+            host = _Host(data_dir)
+            event = types.SimpleNamespace()
+
+            async def current_sources(_event, _user_id):
+                return [str(event_image)]
+
+            async def reply_sources(_event):
+                return []
+
+            host._photo_reference_sources_from_current_event = current_sources
+            host._photo_reference_sources_from_reply_cache = lambda _event: []
+            host._photo_reference_sources_from_reply_event = reply_sources
+
+            stable = asyncio.run(
+                host._photo_reference_event_bound_stable_path(
+                    event,
+                    "10001",
+                    str(event_image),
+                    stem="verified_event",
+                )
+            )
+            rejected = asyncio.run(
+                host._photo_reference_event_bound_stable_path(
+                    event,
+                    "10001",
+                    str(unrelated),
+                    stem="unrelated",
+                )
+            )
+
+            self.assertTrue(stable)
+            self.assertTrue(Path(stable).is_relative_to(data_dir.resolve()))
+            self.assertEqual(event_image.read_bytes(), Path(stable).read_bytes())
+            self.assertEqual("", rejected)
+
     def test_private_image_source_guard_does_not_encode_arbitrary_local_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -21,8 +21,9 @@ from astrbot_plugin_private_companion.private_image import PrivateImageMixin
 class _FakeEvent:
     unified_msg_origin = "default:FriendMessage:10001"
 
-    def __init__(self, reference_path: str = "") -> None:
+    def __init__(self, reference_path: str = "", message_str: str = "") -> None:
         self.reference_path = reference_path
+        self.message_str = message_str
         self.stopped = False
 
     def get_sender_id(self) -> str:
@@ -52,6 +53,7 @@ class _PhotoToolHarness(LlmToolActionsMixin):
         self.memory_calls: list[dict] = []
         self.delivery_kwargs: dict = {}
         self.delivery_calls = 0
+        self.private_delivery_kwargs: dict = {}
 
     def _photo_text_available(self) -> bool:
         return True
@@ -67,6 +69,14 @@ class _PhotoToolHarness(LlmToolActionsMixin):
         self.delivery_calls += 1
         self.delivery_kwargs = dict(kwargs)
         return dict(self.delivery)
+
+    @staticmethod
+    def _build_outbound_chain(text, image_path, **_kwargs):
+        return [("plain", text), ("image", image_path)]
+
+    async def _send_atrelay_chain_to_target(self, _event, **kwargs):
+        self.private_delivery_kwargs = dict(kwargs)
+        return True, "", "default:FriendMessage:10001"
 
     async def _memory_companion_record_photo_generation(self, _event, **kwargs):
         self.memory_calls.append(dict(kwargs))
@@ -332,6 +342,66 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(PHOTO_TOOL_SILENT_SENTINEL, payload["final_response_instruction"])
         self.assertNotIn(self.image_path, json.dumps(payload, ensure_ascii=False))
 
+    async def test_current_media_tool_sends_to_explicit_requester_private_chat(self) -> None:
+        harness = _PhotoToolHarness()
+        harness.data_dir = self.temp_dir.name
+        event = _FakeEvent(message_str="私聊发我")
+        event.unified_msg_origin = "default:GroupMessage:20001"
+
+        payload = json.loads(
+            await harness._pc_send_current_media_impl(
+                event,
+                media_path=self.image_path,
+                caption="月亮染红好啦",
+                destination="requester_private",
+            )
+        )
+
+        self.assertEqual("success", payload["status"])
+        self.assertTrue(payload["sent"])
+        self.assertEqual("requester_private", payload["delivery"])
+        self.assertEqual("private", harness.private_delivery_kwargs["message_type"])
+        self.assertEqual("10001", harness.private_delivery_kwargs["target_id"])
+        self.assertEqual(
+            [("plain", "月亮染红好啦"), ("image", os.path.realpath(self.image_path))],
+            harness.private_delivery_kwargs["chain"],
+        )
+        self.assertEqual(0, harness.delivery_calls)
+
+    async def test_current_media_tool_rejects_unrequested_private_delivery(self) -> None:
+        harness = _PhotoToolHarness()
+        harness.data_dir = self.temp_dir.name
+
+        payload = json.loads(
+            await harness._pc_send_current_media_impl(
+                _FakeEvent(message_str="发出来看看"),
+                media_path=self.image_path,
+                destination="requester_private",
+            )
+        )
+
+        self.assertEqual("destination_not_confirmed", payload["status"])
+        self.assertFalse(payload["sent"])
+        self.assertEqual({}, harness.private_delivery_kwargs)
+
+    def test_natural_media_followups_are_recognized(self) -> None:
+        harness = _PhotoToolHarness()
+
+        self.assertTrue(harness._referenced_media_edit_instruction_matches("帮我把这个月亮改成红的"))
+        self.assertTrue(harness._current_media_delivery_instruction_matches("私聊发我"))
+        self.assertTrue(harness._current_media_delivery_instruction_matches("把改好的图发出来"))
+        self.assertTrue(
+            harness._current_media_delivery_instruction_matches(
+                "我重启了，你再试试发过来，不要生成新图，把你刚刚生成的没发出来的发给我就可以了"
+            )
+        )
+        self.assertTrue(
+            harness._current_media_delivery_instruction_matches(
+                "不要重新画，把刚刚没发出来的那张发给我"
+            )
+        )
+        self.assertFalse(harness._current_media_private_delivery_instruction_matches("发出来看看"))
+
     async def test_current_media_tool_does_not_repeat_confirmed_media(self) -> None:
         harness = _PhotoToolHarness()
         harness.data_dir = self.temp_dir.name
@@ -404,6 +474,32 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("实际图片格式", payload["message"])
         self.assertEqual(harness.delivery_calls, 0)
 
+    async def test_current_media_tool_normalizes_valid_image_with_wrong_suffix(self) -> None:
+        mismatched_path = os.path.join(
+            self.temp_dir.name,
+            "generated_photos",
+            "generated-as-jpg.jpg",
+        )
+        with open(mismatched_path, "wb") as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n" + b"generated-image")
+        harness = _PhotoToolHarness()
+        harness.data_dir = self.temp_dir.name
+
+        payload = json.loads(
+            await harness._pc_send_current_media_impl(
+                _FakeEvent(),
+                media_path=mismatched_path,
+            )
+        )
+
+        delivered_path = harness.delivery_kwargs["image_path"]
+        self.assertEqual("success", payload["status"])
+        self.assertTrue(payload["sent"])
+        self.assertTrue(delivered_path.endswith(".png"))
+        self.assertNotEqual(os.path.realpath(mismatched_path), delivered_path)
+        with open(delivered_path, "rb") as handle:
+            self.assertTrue(handle.read(8).startswith(b"\x89PNG"))
+
     async def test_delivery_failure_is_not_top_level_success(self) -> None:
         harness = _PhotoToolHarness()
         harness.image_path = self.image_path
@@ -454,6 +550,31 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["retryable"])
         self.assertFalse(payload["same_turn_retry_allowed"])
         self.assertIn("不要再次调用 pc_generate_photo", payload["final_response_instruction"])
+
+    async def test_gateway_failure_is_unconfirmed_and_never_auto_retryable(self) -> None:
+        harness = _StructuredPhotoToolHarness(
+            reference_used=False,
+            note=(
+                "参考图接口失败：参考图接口端点 https://images.example/v1/images/edits "
+                "HTTP 504：上游生图服务临时失败或网关中断。"
+            ),
+        )
+
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                _FakeEvent(),
+                prompt="把月亮改成红色",
+                kind="selfie",
+                send=True,
+            )
+        )
+
+        self.assertEqual("submission_unconfirmed", payload["status"])
+        self.assertEqual("upstream_response", payload["failure_stage"])
+        self.assertFalse(payload["retryable"])
+        self.assertFalse(payload["same_turn_retry_allowed"])
+        self.assertTrue(payload["possible_upstream_execution"])
+        self.assertIn("不要自动重试", payload["final_response_instruction"])
 
     async def test_provider_policy_refusal_is_not_exposed_to_the_reply_model(self) -> None:
         provider_error = (
@@ -1026,6 +1147,69 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reference_image_path", payload)
         self.assertNotIn("prompt_path", payload)
         self.assertIsNone(harness.memory_calls[0]["reference_used"])
+
+    async def test_model_temp_reference_recovers_only_through_current_event_verification(self) -> None:
+        harness = _PhotoToolHarness()
+        harness.image_path = self.image_path
+        event_temp_path = os.path.join(self.temp_dir.name, "astrbot-temp", "media_image_current.png")
+        stable_path = os.path.join(self.temp_dir.name, "photo_reference_images", "verified.png")
+        event = _FakeEvent(reference_path=event_temp_path)
+        calls: list[tuple[str, str]] = []
+
+        async def reject_untrusted(source, **_kwargs):
+            calls.append(("untrusted", source))
+            return ""
+
+        async def verify_event(_event, _user_id, source, **_kwargs):
+            calls.append(("event", source))
+            return stable_path if source == event.reference_path else ""
+
+        harness._photo_reference_source_to_stable_path = reject_untrusted
+        harness._photo_reference_event_bound_stable_path = verify_event
+
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                event,
+                prompt="只把背景换成蓝色",
+                kind="edit",
+                reference_image_path=event_temp_path,
+                send=False,
+            )
+        )
+
+        self.assertEqual("success", payload["status"])
+        self.assertEqual(stable_path, harness.generation_kwargs["reference_image_path"])
+        self.assertEqual(
+            [("untrusted", event_temp_path), ("event", event_temp_path)],
+            calls,
+        )
+
+    async def test_unrelated_model_temp_reference_remains_rejected(self) -> None:
+        harness = _PhotoToolHarness()
+        source = "/AstrBot/data/temp/unrelated.png"
+
+        async def reject_untrusted(_source, **_kwargs):
+            return ""
+
+        async def reject_event(_event, _user_id, _source, **_kwargs):
+            return ""
+
+        harness._photo_reference_source_to_stable_path = reject_untrusted
+        harness._photo_reference_event_bound_stable_path = reject_event
+
+        payload = json.loads(
+            await harness._pc_generate_photo_impl(
+                _FakeEvent(),
+                prompt="修改图片",
+                kind="edit",
+                reference_image_path=source,
+                send=False,
+            )
+        )
+
+        self.assertEqual("invalid_reference", payload["status"])
+        self.assertFalse(payload["generated"])
+        self.assertNotIn(source, json.dumps(payload, ensure_ascii=False))
 
     async def test_explicit_tool_reference_preserves_double_spaces(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

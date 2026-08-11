@@ -135,19 +135,20 @@ class ImageApiEndpointManagementTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(secret, note)
         self.assertIn("[密钥已隐藏]", note)
 
-    def test_transient_upstream_status_has_retryable_diagnostic(self) -> None:
+    def test_transient_upstream_status_warns_without_billable_retry(self) -> None:
         harness = ImageDiagnosticHarness()
 
         self.assertTrue(harness._external_image_api_is_transient_status(500))
         self.assertTrue(harness._external_image_api_is_transient_status("502"))
         self.assertFalse(harness._external_image_api_is_transient_status(400))
-        self.assertGreater(harness._external_image_api_transient_retry_delay(503), 0)
+        self.assertEqual(0.0, harness._external_image_api_transient_retry_delay(503))
         self.assertEqual(0.0, harness._external_image_api_transient_retry_delay(401))
 
         note = harness._external_image_api_error_note(502, "image generation failed")
 
         self.assertIn("上游生图服务临时失败", note)
-        self.assertIn("自动短暂重试一次", note)
+        self.assertIn("可能产生费用", note)
+        self.assertIn("不会自动重新提交", note)
 
     def test_download_retry_classifier_skips_deterministic_failures(self) -> None:
         harness = ImageDiagnosticHarness()
@@ -389,7 +390,6 @@ class ImageApiEndpointManagementTests(unittest.IsolatedAsyncioTestCase):
         generated = base64.b64encode(b"\x89PNG\r\n\x1a\nbackup-image").decode("ascii")
         responses = [
             SequenceResponse(502, "primary unavailable"),
-            SequenceResponse(502, "primary unavailable"),
             SequenceResponse(200, {"data": [{"b64_json": generated}]}),
         ]
         endpoints = [
@@ -435,11 +435,10 @@ class ImageApiEndpointManagementTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(path, "C:/temp/private-companion-result.png")
         self.assertIn("备用", note)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 2)
         self.assertEqual(
             [call["endpoint"] for call in calls],
             [
-                "https://primary.example.test/v1/images/generations",
                 "https://primary.example.test/v1/images/generations",
                 "https://backup.example.test/v1/images/generations",
             ],
@@ -463,74 +462,56 @@ class ImageApiEndpointManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path, "")
         self.assertIn("数据过大", note)
 
-    async def test_generation_retries_transient_upstream_error_then_succeeds(self) -> None:
+    async def test_generation_does_not_resubmit_after_transient_upstream_error(self) -> None:
         harness = ImageDiagnosticHarness()
         calls: list[dict[str, object]] = []
-        generated = base64.b64encode(b"\x89PNG\r\n\x1a\ngenerated-image").decode("ascii")
         responses = [
             SequenceResponse(502, "image generation failed"),
-            SequenceResponse(200, {"data": [{"b64_json": generated}]}),
         ]
 
         def session_factory(**kwargs):
             return SequenceSession(responses, calls, **kwargs)
 
-        async def no_sleep(_delay: float) -> None:
-            return None
-
-        with patch("aiohttp.ClientSession", new=session_factory), patch(
-            "astrbot_plugin_private_companion.proactive_message.asyncio.sleep",
-            new=no_sleep,
-        ):
+        with patch("aiohttp.ClientSession", new=session_factory):
             path, note = await harness._run_external_photo_generation_once(
                 "a short test prompt",
                 session_key="retry-generation",
             )
 
-        self.assertEqual(path, "C:/temp/private-companion-result.png")
-        self.assertIn("重试成功", note)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(path, "")
+        self.assertIn("HTTP 502", note)
+        self.assertIn("不会自动重新提交", note)
+        self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["endpoint"], "https://example.test/v1/images/generations")
-        self.assertEqual(calls[1]["endpoint"], calls[0]["endpoint"])
-        self.assertEqual(calls[1]["json"]["model"], "gpt-image-2")
 
-    async def test_reference_edit_retries_transient_upstream_error_and_keeps_image(self) -> None:
+    async def test_reference_edit_does_not_resubmit_after_gateway_error(self) -> None:
         harness = ImageDiagnosticHarness()
         calls: list[dict[str, object]] = []
-        generated = base64.b64encode(b"\x89PNG\r\n\x1a\nedited-image").decode("ascii")
         responses = [
             SequenceResponse(500, "do request failed"),
-            SequenceResponse(200, {"data": [{"b64_json": generated}]}),
         ]
 
         def session_factory(**kwargs):
             return SequenceSession(responses, calls, **kwargs)
 
-        async def no_sleep(_delay: float) -> None:
-            return None
-
         with tempfile.TemporaryDirectory() as temp_dir:
             reference = Path(temp_dir) / "reference.png"
             reference.write_bytes(b"reference-image")
-            with patch("aiohttp.ClientSession", new=session_factory), patch(
-                "astrbot_plugin_private_companion.proactive_message.asyncio.sleep",
-                new=no_sleep,
-            ):
+            with patch("aiohttp.ClientSession", new=session_factory):
                 path, note = await harness._run_external_photo_generation_once(
                     "keep the same person",
                     session_key="retry-edit",
                     reference_image_path=str(reference),
                 )
 
-        self.assertEqual(path, "C:/temp/private-companion-result.png")
-        self.assertIn("已使用本地人设参考图", note)
-        self.assertIn("重试成功", note)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(path, "")
+        self.assertIn("HTTP 500", note)
+        self.assertIn("可能产生费用", note)
+        self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0]["endpoint"].endswith("/images/edits"))
-        self.assertTrue(calls[1]["endpoint"].endswith("/images/edits"))
-        second_form = calls[1]["data"]
-        self.assertIsNotNone(second_form)
-        self.assertEqual(len(getattr(second_form, "_fields", [])), 4)
+        first_form = calls[0]["data"]
+        self.assertIsNotNone(first_form)
+        self.assertEqual(len(getattr(first_form, "_fields", [])), 4)
 
     async def test_queue_wait_and_endpoint_execution_have_separate_budgets(self) -> None:
         events: list[str] = []

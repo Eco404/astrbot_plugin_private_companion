@@ -94,6 +94,21 @@ class RealityTouchUiTests(unittest.TestCase):
         self.assertIn("普通私聊、目标用户名单与主动权限均不会授予摄像头访问", self.primary)
         self.assertGreaterEqual(self.main.count("_reality_touch_camera_user_eligible(user_id)"), 3)
 
+    def test_camera_proactive_runtime_values_are_declared_in_runtime_scope(self) -> None:
+        settings_body, runtime_and_after = self.primary.split(
+            "function renderRealityTouchRuntime()",
+            1,
+        )
+        runtime_body = runtime_and_after.split("function featureModelConfigShortcutHtml", 1)[0]
+
+        self.assertNotIn("const cameraProactiveStatus", settings_body.rsplit("function renderRealityTouchSettings()", 1)[-1])
+        self.assertIn("const cameraProactive = cameraState.proactive || {};", runtime_body)
+        self.assertIn("const cameraProactiveStatus =", runtime_body)
+        self.assertLess(
+            runtime_body.index("const cameraProactiveStatus ="),
+            runtime_body.index("escapeHtml(cameraProactiveStatus)"),
+        )
+
     def test_page_api_can_read_save_and_normalize_switch(self) -> None:
         self.assertGreaterEqual(self.api.count(f'"{KEY}"'), 3)
         self.assertIn(f'if key == "{KEY}":', self.settings)

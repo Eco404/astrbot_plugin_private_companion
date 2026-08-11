@@ -9225,9 +9225,13 @@ Output:
                 positive=", ".join(
                     _single_line(part, 220) for part in positive if _single_line(part, 220)
                 ),
-                negative=", ".join(negative),
                 protected=True,
-            )
+            ),
+            PhotoPromptSection(
+                name="daily_outfit_contract",
+                source="composition",
+                negative=", ".join(negative),
+            ),
         ]
         if visual_memory:
             sections.append(
@@ -10476,6 +10480,118 @@ Output:
         return self._normalize_photo_generation_prompt_format(
             getattr(self, "photo_generation_prompt_format", "traditional")
         )
+
+    @staticmethod
+    def _normalize_photo_generation_negative_prompt_mode(value: Any) -> str:
+        normalized = str(value or "safe_default").strip().lower().replace("-", "_")
+        if normalized in {"merge", "append", "custom_merge", "合并", "合并自定义"}:
+            return "merge"
+        if normalized in {"replace", "override", "custom_replace", "替换", "完全替换"}:
+            return "replace"
+        return "safe_default"
+
+    def _photo_generation_negative_prompt_mode(self) -> str:
+        return self._normalize_photo_generation_negative_prompt_mode(
+            getattr(self, "photo_generation_negative_prompt_mode", "safe_default")
+        )
+
+    @classmethod
+    def _sanitize_photo_generation_negative_prompt_config(
+        cls,
+        value: Any,
+        *,
+        limit: int = 3000,
+    ) -> str:
+        raw = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+        text = cls._sanitize_photo_generation_fixed_prompt_config(
+            raw.replace("\n", ", "),
+            limit=limit,
+        )
+        if not text:
+            return ""
+        negative_match = re.search(r"negative\s+prompt\s*:\s*(.*)$", text, flags=re.I | re.S)
+        if negative_match:
+            text = negative_match.group(1)
+        else:
+            text = re.sub(r"^(?:avoid|negative|负面提示词)\s*[：:]?\s*", "", text, flags=re.I)
+        values: list[str] = []
+        seen: set[str] = set()
+        for raw_part in re.split(r"(?:\r?\n+|[,，;；]+)", text):
+            part = re.sub(r"\s+", " ", raw_part).strip(" .。")
+            if not part:
+                continue
+            _is_negative, content = cls._photo_generation_negative_clause_content(part)
+            content = content or part
+            key = content.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(content)
+        return _single_line(", ".join(values), limit)
+
+    def _photo_generation_custom_negative_prompt(self, workflow_kind: str) -> str:
+        raw_kind = str(workflow_kind or "").strip().lower()
+        if raw_kind in {"edit", "改图", "修图", "重绘", "p图"}:
+            normalized = "edit"
+        elif raw_kind in {"selfie", "portrait", "自拍", "人像", "sticker", "emoji", "meme", "表情包", "贴纸"}:
+            normalized = "selfie"
+        else:
+            normalized = "text2img"
+        scoped_key = {
+            "text2img": "photo_generation_text2img_negative_prompt",
+            "selfie": "photo_generation_selfie_negative_prompt",
+            "edit": "photo_generation_edit_negative_prompt",
+        }[normalized]
+        values = (
+            getattr(self, "photo_generation_negative_prompt", ""),
+            getattr(self, scoped_key, ""),
+        )
+        combined: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            sanitized = self._sanitize_photo_generation_negative_prompt_config(value)
+            for part in (item.strip() for item in sanitized.split(",")):
+                key = part.casefold()
+                if not part or key in seen:
+                    continue
+                seen.add(key)
+                combined.append(part)
+        return _single_line(", ".join(combined), 5000)
+
+    def _apply_photo_generation_negative_prompt_policy(
+        self,
+        sections: tuple[PhotoPromptSection, ...],
+        workflow_kind: str,
+    ) -> tuple[PhotoPromptSection, ...]:
+        mode = self._photo_generation_negative_prompt_mode()
+        adjusted = list(sections)
+        if mode == "replace":
+            replaceable_names = {
+                "natural_language_contract",
+                "daily_outfit_contract",
+                "edit_contract",
+                "composition",
+                "subject_count",
+            }
+            adjusted = [
+                replace(section, negative="")
+                if section.name in replaceable_names and section.negative
+                else section
+                for section in adjusted
+            ]
+        if mode in {"merge", "replace"}:
+            custom_negative = self._photo_generation_custom_negative_prompt(workflow_kind)
+            if custom_negative:
+                adjusted.append(
+                    PhotoPromptSection(
+                        name="custom_negative_prompt",
+                        source="fixed_prompt",
+                        negative=custom_negative,
+                        protected=True,
+                        sanitize_conflicts=True,
+                    )
+                )
+        return tuple(adjusted)
 
     def _photo_generation_prompt_format_instruction(self) -> str:
         mode = self._photo_generation_prompt_format_mode()
@@ -11835,7 +11951,10 @@ Output:
                 positive=continuity_section,
             ),
         )
-        context_before = tuple((*initial_sections, *generated_sections))
+        context_before = self._apply_photo_generation_negative_prompt_policy(
+            tuple((*initial_sections, *generated_sections)),
+            workflow_kind,
+        )
         resolved_context = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=context_before,
@@ -16367,8 +16486,9 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         if self._external_image_api_is_transient_status(status):
             return (
                 f"{prefix}{endpoint_note}HTTP {status}：上游生图服务临时失败或网关中断。"
-                "这通常不是 Key、模型名或提示词的确定性错误；插件会自动短暂重试一次，"
-                "若仍失败请稍后重试或配置备用图片 API。"
+                "这通常不是 Key、模型名或提示词的确定性错误；上游可能已收到请求并继续执行，"
+                "即使本端没有拿到图片也可能产生费用。为避免重复扣费，插件不会自动重新提交同一生图请求；"
+                "请先检查服务端任务或账单，之后再由用户明确重试，或配置超时时间更长的备用图片 API。"
                 f"返回：{diagnostic_text(raw, 140)}"
             )
         if platform == "agnes" and int(status) in {400, 422}:
@@ -16389,7 +16509,10 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
 
     @staticmethod
     def _external_image_api_transient_retry_delay(status: Any) -> float:
-        return 1.5 if ProactiveMessageMixin._external_image_api_is_transient_status(status) else 0.0
+        # A billable image job may keep running after an intermediary returns
+        # 5xx. Re-submitting that POST can charge twice for one user action.
+        # Result-download retries are handled separately and remain safe.
+        return 0.0
 
     def _url_same_origin(self, left: str, right: str) -> bool:
         try:
@@ -16463,7 +16586,13 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             target = "在线图片 API 参考图接口"
         else:
             target = "在线图片 API"
-        return f"{target}超时（{timeout_seconds}秒内没有返回），可调高在线生图超时秒数或切换/回退本地生图后端"
+        if download:
+            return f"{target}超时（{timeout_seconds}秒内没有返回），可稍后重新下载图片结果"
+        return (
+            f"{target}超时（{timeout_seconds}秒内没有返回）。上游任务可能仍在执行并产生费用；"
+            "为避免重复扣费，插件不会自动重新提交。请先检查服务端任务或账单，"
+            "并调高网关与在线生图超时秒数，或切换/回退本地生图后端"
+        )
 
     def _external_generated_image_output_path(self, *, session_key: str, ext: str = ".png") -> Path:
         safe_ext = ext if ext.startswith(".") else f".{ext}"
@@ -17983,11 +18112,10 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             headers.update(self._external_image_custom_headers())
             timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
             last_note = ""
-            retried = False
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                for attempt in range(2):
+                for attempt in range(1):
                     logger.info(
-                        "[PrivateCompanion] MiniMax 图片提交: endpoint=%s model=%s reference=%s dimensions=%s attempt=%s/2 prompt_chars=%s prompt_preview=%s",
+                        "[PrivateCompanion] MiniMax 图片提交: endpoint=%s model=%s reference=%s dimensions=%s attempt=%s/1 prompt_chars=%s prompt_preview=%s",
                         self._external_image_diagnostic_text(endpoint, 160),
                         _single_line(self.external_image_api_model, 80),
                         bool(reference_image_path),
@@ -18022,23 +18150,12 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                                 reference=bool(reference_image_path),
                                 endpoint=endpoint,
                             )
-                            retry_delay = self._external_image_api_transient_retry_delay(response.status)
-                            if attempt == 0 and retry_delay > 0:
-                                retried = True
-                                await asyncio.sleep(retry_delay)
-                                continue
                             return "", last_note
                     data = self._extract_json_payload(text) if text else {}
                     if not isinstance(data, dict):
                         return "", "MiniMax 图片接口返回格式无效"
                     last_note = self._minimax_api_error_note(data)
                     if last_note:
-                        base_resp = data.get("base_resp")
-                        raw_code = base_resp.get("status_code") if isinstance(base_resp, dict) else 0
-                        if attempt == 0 and str(raw_code) == "1002":
-                            retried = True
-                            await asyncio.sleep(1.0)
-                            continue
                         return "", last_note
 
                     result_data = data.get("data")
@@ -18079,11 +18196,6 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                         )
                         last_materialized = materialized
                         if materialized.image_path:
-                            if retried:
-                                materialized = replace(
-                                    materialized,
-                                    note=f"{materialized.note}；上游短暂错误后重试成功",
-                                )
                             return materialized
                         last_note = materialized.note
                     if last_materialized is not None:
@@ -18298,13 +18410,12 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             endpoints = self._external_image_endpoint_candidates("generations") or [endpoint]
             last_error_note = ""
             data: dict[str, Any] | None = None
-            retried_after_upstream_error = False
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 for index, candidate_endpoint in enumerate(endpoints):
                     text = ""
-                    for attempt in range(2):
+                    for attempt in range(1):
                         logger.info(
-                            "[PrivateCompanion] 在线图片 API 生图提交: endpoint=%s model=%s size=%s prompt_chars=%s attempt=%s/2 prompt_preview_chars=%s prompt_preview=%s",
+                            "[PrivateCompanion] 在线图片 API 生图提交: endpoint=%s model=%s size=%s prompt_chars=%s attempt=%s/1 prompt_preview_chars=%s prompt_preview=%s",
                             self._external_image_diagnostic_text(candidate_endpoint, 160),
                             _single_line(self.external_image_api_model, 80),
                             payload["size"],
@@ -18324,17 +18435,6 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                             )
                             if response.status >= 400:
                                 last_error_note = self._external_image_api_error_note(response.status, text, endpoint=candidate_endpoint)
-                                retry_delay = self._external_image_api_transient_retry_delay(response.status)
-                                if attempt == 0 and retry_delay > 0:
-                                    retried_after_upstream_error = True
-                                    logger.info(
-                                        "[PrivateCompanion] 在线图片 API 上游短暂失败,稍后重试同一端点: status=%s delay=%.1fs endpoint=%s",
-                                        response.status,
-                                        retry_delay,
-                                        self._external_image_diagnostic_text(candidate_endpoint, 160),
-                                    )
-                                    await asyncio.sleep(retry_delay)
-                                    continue
                                 if response.status == 404 and index + 1 < len(endpoints):
                                     logger.info(
                                         "[PrivateCompanion] 在线图片 API 生图端点 404,尝试候选端点: failed=%s next=%s",
@@ -18369,11 +18469,6 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     session_key=session_key,
                     success_note="ok",
                 )
-                if retried_after_upstream_error:
-                    materialized = replace(
-                        materialized,
-                        note=f"{materialized.note}；上游短暂错误后重试成功",
-                    )
                 return materialized
             return "", "在线图片 API 未返回 url 或 b64_json"
         except asyncio.TimeoutError:
@@ -18494,13 +18589,12 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             endpoints = self._external_image_endpoint_candidates("edits") or [endpoint]
             last_error_note = ""
             data: dict[str, Any] | None = None
-            retried_after_upstream_error = False
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 for index, candidate_endpoint in enumerate(endpoints):
                     text = ""
-                    for attempt in range(2):
+                    for attempt in range(1):
                         logger.info(
-                            "[PrivateCompanion] 在线图片 API 参考图提交: endpoint=%s model=%s size=%s reference_count=%s bytes=%s attempt=%s/2 prompt_preview=%s",
+                            "[PrivateCompanion] 在线图片 API 参考图提交: endpoint=%s model=%s size=%s reference_count=%s bytes=%s attempt=%s/1 prompt_preview=%s",
                             self._external_image_diagnostic_text(candidate_endpoint, 160),
                             _single_line(self.external_image_api_model, 80),
                             self._sanitize_external_image_size(image_size),
@@ -18525,17 +18619,6 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                             )
                             if response.status >= 400:
                                 last_error_note = self._external_image_api_error_note(response.status, text, reference=True, endpoint=candidate_endpoint)
-                                retry_delay = self._external_image_api_transient_retry_delay(response.status)
-                                if attempt == 0 and retry_delay > 0:
-                                    retried_after_upstream_error = True
-                                    logger.info(
-                                        "[PrivateCompanion] 在线图片 API 参考图上游短暂失败,稍后重试同一端点: status=%s delay=%.1fs endpoint=%s",
-                                        response.status,
-                                        retry_delay,
-                                        self._external_image_diagnostic_text(candidate_endpoint, 160),
-                                    )
-                                    await asyncio.sleep(retry_delay)
-                                    continue
                                 if response.status == 404 and index + 1 < len(endpoints):
                                     logger.info(
                                         "[PrivateCompanion] 在线图片 API 参考图端点 404,尝试候选端点: failed=%s next=%s",
@@ -18574,11 +18657,6 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                         else f"ok；已使用 {len(image_payloads)} 张参考图"
                     ),
                 )
-                if retried_after_upstream_error:
-                    materialized = replace(
-                        materialized,
-                        note=f"{materialized.note}；上游短暂错误后重试成功",
-                    )
                 if len(image_payloads) < planned_reference_count:
                     materialized = replace(
                         materialized,

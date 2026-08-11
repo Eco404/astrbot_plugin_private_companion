@@ -3478,6 +3478,42 @@
     "default": 8,
     "invisible": true
   },
+  "group_nsfw_image_review_mode": {
+    "description": "Legacy flat config: 群聊成图审核模式",
+    "type": "string",
+    "default": "single",
+    "invisible": true
+  },
+  "group_nsfw_image_review_sensitivity": {
+    "description": "Legacy flat config: 群聊成图审核严格度",
+    "type": "string",
+    "default": "balanced",
+    "invisible": true
+  },
+  "group_nsfw_image_review_min_confidence": {
+    "description": "Legacy flat config: 群聊成图审核最低置信度",
+    "type": "float",
+    "default": 0.7,
+    "invisible": true
+  },
+  "group_nsfw_image_review_max_dimension": {
+    "description": "Legacy flat config: 群聊成图审核最长边像素",
+    "type": "int",
+    "default": 1280,
+    "invisible": true
+  },
+  "group_nsfw_image_review_failure_action": {
+    "description": "Legacy flat config: 群聊成图审核失败处理",
+    "type": "string",
+    "default": "private",
+    "invisible": true
+  },
+  "group_nsfw_image_review_custom_prompt": {
+    "description": "Legacy flat config: 群聊成图审核补充规则",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
   "COMFYUI_TEXT2IMG_WORKFLOW_NAME": {
     "description": "Legacy flat config: 主动拍照文生图工作流名",
     "type": "string",
@@ -3726,6 +3762,37 @@
   },
   "photo_generation_style_custom_prompt": {
     "description": "Legacy flat config: 主动生图自定义风格说明",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "photo_generation_negative_prompt_mode": {
+    "description": "Legacy flat config: 生图负面提示词策略",
+    "type": "string",
+    "options": ["safe_default", "merge", "replace"],
+    "default": "safe_default",
+    "invisible": true
+  },
+  "photo_generation_negative_prompt": {
+    "description": "Legacy flat config: 全局自定义负面提示词",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "photo_generation_text2img_negative_prompt": {
+    "description": "Legacy flat config: 文生图自定义负面提示词",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "photo_generation_selfie_negative_prompt": {
+    "description": "Legacy flat config: 自拍/人像自定义负面提示词",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "photo_generation_edit_negative_prompt": {
+    "description": "Legacy flat config: 改图自定义负面提示词",
     "type": "string",
     "default": "",
     "invisible": true
@@ -10140,6 +10207,82 @@
           "enable_group_nsfw_private_fallback": true
         }
       },
+      "group_nsfw_image_review_mode": {
+        "description": "群聊成图审核模式",
+        "type": "string",
+        "options": ["single", "dual"],
+        "labels": ["单模型审核", "双模型交叉审核"],
+        "hint": "单模型按视觉 Provider 优先级取首个可信结论；双模型会调用两个不同的可用视觉 Provider，任一判定不安全即不发群。只有一个模型可用时按审核失败处理。",
+        "default": "single",
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_group_nsfw_private_fallback": true
+        }
+      },
+      "group_nsfw_image_review_sensitivity": {
+        "description": "群聊成图审核严格度",
+        "type": "string",
+        "options": ["relaxed", "balanced", "strict"],
+        "labels": ["宽松", "均衡", "严格"],
+        "hint": "宽松只拦截明确成人裸露或非法内容；均衡会谨慎处理明显性化内容；严格会把内衣、强性暗示和年龄难确认的性化画面也视为不适合群发。",
+        "default": "balanced",
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_group_nsfw_private_fallback": true
+        }
+      },
+      "group_nsfw_image_review_min_confidence": {
+        "description": "群聊成图审核最低置信度",
+        "type": "float",
+        "hint": "模型结论低于此置信度时视为无法确认，不会直接发群。建议保持 0.7；视觉模型经常低报置信度时可适当降低。",
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
+        "default": 0.7,
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_group_nsfw_private_fallback": true
+        }
+      },
+      "group_nsfw_image_review_max_dimension": {
+        "description": "审核图片最长边像素",
+        "type": "int",
+        "hint": "审核前将过大的图片等比缩小，降低视觉模型请求体和延迟；0 表示保持原图。仅生成临时审核副本，不修改最终发送图片。",
+        "slider": {
+          "min": 0,
+          "max": 4096,
+          "step": 128
+        },
+        "default": 1280,
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_group_nsfw_private_fallback": true
+        }
+      },
+      "group_nsfw_image_review_failure_action": {
+        "description": "审核失败处理",
+        "type": "string",
+        "options": ["private", "block"],
+        "labels": ["改为私聊请求者", "阻止发送"],
+        "hint": "只影响超时、模型不可用、低置信度或双模型不足等无法完成审核的情况；明确成人或违规内容仍按现有规则仅尝试私聊请求者。",
+        "default": "private",
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_group_nsfw_private_fallback": true
+        }
+      },
+      "group_nsfw_image_review_custom_prompt": {
+        "description": "审核补充规则",
+        "type": "string",
+        "hint": "可选。追加本群场景需要关注的可见内容标准，例如血腥、恐怖或特定敏感元素。补充规则不能改变固定 JSON 输出格式，也不能把非法内容放行为安全。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_group_nsfw_private_fallback": true
+        }
+      },
       "photo_reference_catalog": {
         "description": "规范参考图目录",
         "type": "list",
@@ -10593,6 +10736,61 @@
         "description": "主动生图自定义风格说明",
         "type": "string",
         "hint": "当主动生图风格设为“其他”时，会把这里的内容作为额外风格要求注入提示词，例如：胶片感、像素风、轻复古插画。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_negative_prompt_mode": {
+        "description": "负面提示词策略",
+        "type": "string",
+        "options": [
+          "safe_default",
+          "merge",
+          "replace"
+        ],
+        "option_labels": [
+          "安全默认",
+          "合并自定义",
+          "完全替换"
+        ],
+        "hint": "安全默认保持现有内置负面词；合并自定义会在内置词后追加全局及当前生图类型的词；完全替换会移除系统基础负面词，仅使用自定义词。用户明确说不要的内容、衣着裁决和参考图一致性约束始终保留。供应商自身的内容安全策略不受此项影响。",
+        "default": "safe_default",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_negative_prompt": {
+        "description": "全局自定义负面提示词",
+        "type": "string",
+        "hint": "在合并自定义或完全替换模式下作用于所有生图。填写逗号或换行分隔的词条，也可粘贴 Negative prompt: 开头的内容。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_text2img_negative_prompt": {
+        "description": "文生图负面提示词",
+        "type": "string",
+        "hint": "只作用于 text2img，包括普通场景、主动生活场景、QQ 空间非自拍配图和创作封面；会与全局负面词去重合并。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_selfie_negative_prompt": {
+        "description": "自拍/人像负面提示词",
+        "type": "string",
+        "hint": "只作用于 selfie/portrait、主动自拍、每日穿搭与角色表情包；会与全局负面词去重合并。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_edit_negative_prompt": {
+        "description": "改图负面提示词",
+        "type": "string",
+        "hint": "只作用于 edit/改图/重绘；会与全局负面词去重合并。完全替换时请自行保留不希望改动的画面特征。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true

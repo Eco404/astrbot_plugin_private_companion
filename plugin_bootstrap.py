@@ -951,6 +951,21 @@ def _initialize_photo_and_expression_config(self: Any, c: Any) -> None:
     )
     self.photo_generation_style = self._cfg_str(c, "photo_generation_style", "真实", "真实")
     self.photo_generation_style_custom_prompt = self._cfg_str(c, "photo_generation_style_custom_prompt", "")
+    self.photo_generation_negative_prompt_mode = self._normalize_photo_generation_negative_prompt_mode(
+        self._cfg_str(c, "photo_generation_negative_prompt_mode", "safe_default", "safe_default")
+    )
+    self.photo_generation_negative_prompt = self._cfg_str(
+        c, "photo_generation_negative_prompt", ""
+    )
+    self.photo_generation_text2img_negative_prompt = self._cfg_str(
+        c, "photo_generation_text2img_negative_prompt", ""
+    )
+    self.photo_generation_selfie_negative_prompt = self._cfg_str(
+        c, "photo_generation_selfie_negative_prompt", ""
+    )
+    self.photo_generation_edit_negative_prompt = self._cfg_str(
+        c, "photo_generation_edit_negative_prompt", ""
+    )
     self.photo_generation_fixed_prompt = self._cfg_str(c, "photo_generation_fixed_prompt", "")
     self.photo_generation_text2img_fixed_prompt = self._cfg_str(
         c, "photo_generation_text2img_fixed_prompt", ""
@@ -1116,10 +1131,30 @@ def _initialize_photo_and_expression_config(self: Any, c: Any) -> None:
         self.photo_generation_allowed_scopes[scope] = limit
     self.enable_photo_reference_image = self._cfg_bool(c, "enable_photo_reference_image", False)
     self.enable_group_nsfw_private_fallback = self._cfg_bool(c, "enable_group_nsfw_private_fallback", False)
+    review_mode = self._cfg_str(c, "group_nsfw_image_review_mode", "single").strip().lower()
+    self.group_nsfw_image_review_mode = review_mode if review_mode in {"single", "dual"} else "single"
+    review_sensitivity = self._cfg_str(c, "group_nsfw_image_review_sensitivity", "balanced").strip().lower()
+    self.group_nsfw_image_review_sensitivity = (
+        review_sensitivity if review_sensitivity in {"relaxed", "balanced", "strict"} else "balanced"
+    )
+    self.group_nsfw_image_review_min_confidence = min(
+        1.0,
+        self._cfg_float(c, "group_nsfw_image_review_min_confidence", 0.7, 0.0),
+    )
     self.group_nsfw_image_review_timeout_seconds = min(
         30.0,
         self._cfg_float(c, "group_nsfw_image_review_timeout_seconds", 8.0, 3.0),
     )
+    self.group_nsfw_image_review_max_dimension = self._cfg_int(
+        c, "group_nsfw_image_review_max_dimension", 1280, 0, 4096
+    )
+    review_failure_action = self._cfg_str(c, "group_nsfw_image_review_failure_action", "private").strip().lower()
+    self.group_nsfw_image_review_failure_action = (
+        review_failure_action if review_failure_action in {"private", "block"} else "private"
+    )
+    self.group_nsfw_image_review_custom_prompt = self._cfg_str(
+        c, "group_nsfw_image_review_custom_prompt", ""
+    )[:1200]
     self.enable_screen_glance_action = self._cfg_bool(
         c, "enable_screen_glance_action", bool(self._cfg_raw(c, "allow_screen_peek_action", legacy_screen_enabled))
     )

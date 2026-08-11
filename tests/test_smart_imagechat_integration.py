@@ -2561,6 +2561,34 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             [tool.name for tool in ordinary.func_tool.tools],
         )
 
+    def test_failed_media_followup_keeps_current_media_tool_available(self) -> None:
+        message = (
+            "我重启了，你再试试发过来，不要生成新图，"
+            "把你刚刚生成的没发出来的发给我就可以了"
+        )
+        request = SimpleNamespace(
+            func_tool=_FakeToolSet(
+                "pc_generate_photo",
+                "pc_find_reaction_image",
+                "pc_send_current_media",
+                "safe_tool",
+            )
+        )
+
+        explicit_media_request = (
+            LlmToolActionsMixin._current_media_delivery_instruction_matches(message)
+        )
+        removed = LlmToolActionsMixin._scope_reaction_media_tools_for_request(
+            request,
+            explicit_media_request=explicit_media_request,
+            reaction_authorized=False,
+            reaction_evaluated=False,
+        )
+
+        self.assertTrue(explicit_media_request)
+        self.assertEqual([], removed)
+        self.assertIsNotNone(request.func_tool.get_tool("pc_send_current_media"))
+
     async def test_denied_authorization_cannot_fall_through_legacy_media_tools(self) -> None:
         api = _FakeSmartImageAPI(self.image_path)
         harness = _ReactionHarness(api)

@@ -65,6 +65,7 @@ class _FakeSession:
         return False
 
     def post(self, endpoint, **kwargs):
+        self.capture["post_count"] = self.capture.get("post_count", 0) + 1
         self.capture.update({"endpoint": endpoint, **kwargs})
         return _FakeResponse(self.response_payload)
 
@@ -288,6 +289,26 @@ class MiniMaxImageApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path, "")
         self.assertIn("1004", note)
         self.assertIn("invalid api key", note)
+
+    async def test_rate_limit_response_is_not_resubmitted(self) -> None:
+        capture = {}
+        response_payload = {
+            "base_resp": {"status_code": 1002, "status_msg": "rate limited"},
+            "data": {"image_urls": []},
+        }
+
+        def session_factory(**kwargs):
+            return _FakeSession(capture, response_payload, **kwargs)
+
+        with patch("aiohttp.ClientSession", new=session_factory):
+            path, note = await self.harness._run_external_photo_generation_once(
+                "a small desk lamp",
+                session_key="minimax-rate-limit",
+            )
+
+        self.assertEqual(path, "")
+        self.assertIn("1002", note)
+        self.assertEqual(capture["post_count"], 1)
 
     async def test_business_error_falls_through_to_next_online_endpoint(self) -> None:
         captures = []

@@ -128,6 +128,11 @@ class _PhotoGenerationHarness(ProactiveMessageMixin):
         self.data: dict = {}
         self.photo_generation_backend = "comfyui"
         self.photo_generation_prompt_format = "traditional"
+        self.photo_generation_negative_prompt_mode = "safe_default"
+        self.photo_generation_negative_prompt = ""
+        self.photo_generation_text2img_negative_prompt = ""
+        self.photo_generation_selfie_negative_prompt = ""
+        self.photo_generation_edit_negative_prompt = ""
         self.photo_generation_fixed_prompt = "fine film grain"
         self.photo_generation_text2img_fixed_prompt = ""
         self.photo_generation_selfie_fixed_prompt = ""
@@ -231,6 +236,46 @@ class _PhotoGenerationHarness(ProactiveMessageMixin):
 
 
 class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replace_negative_prompt_reaches_backend_without_dropping_user_exclusion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "generated.png"
+            output.write_bytes(b"generated")
+            harness = _PhotoGenerationHarness(str(output))
+            harness.photo_generation_negative_prompt_mode = "replace"
+            harness.photo_generation_negative_prompt = "lowres, text"
+            harness.photo_generation_selfie_negative_prompt = "bad hands, lowres"
+            sections = (
+                PhotoPromptSection(
+                    "user_request",
+                    "user_request",
+                    positive="user request: a portrait beside a window",
+                    negative="rain",
+                    protected=True,
+                ),
+                PhotoPromptSection(
+                    "natural_language_contract",
+                    "composition",
+                    positive="single character portrait",
+                    negative="nsfw, watermark",
+                ),
+            )
+
+            await harness._generate_photo_image(
+                workflow_kind="selfie",
+                prompt_text="a portrait beside a window, no rain",
+                request_text="a portrait beside a window, no rain",
+                session_key="negative-policy-replace",
+                prompt_sections=sections,
+            )
+
+            submitted = harness.backend_calls[-1]["prompt"].lower()
+            self.assertNotIn("nsfw", submitted)
+            self.assertNotIn("watermark", submitted)
+            self.assertIn("rain", submitted)
+            self.assertIn("lowres", submitted)
+            self.assertIn("bad hands", submitted)
+            self.assertEqual(submitted.count("lowres"), 1)
+
     async def test_workflow_fixed_prompts_are_scoped_and_global_prompt_still_stacks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "generated.png"

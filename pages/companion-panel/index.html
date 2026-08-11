@@ -163,7 +163,7 @@
   </style>
   <link rel="stylesheet" href="./css/header-tools.css?v=20260713-font-options" />
   <link rel="stylesheet" href="./css/qzone-mobile.css?v=20260711-qzone-image-preview" />
-  <link rel="stylesheet" href="./css/polish.css?v=20260810-responsive-containment-v1" />
+  <link rel="stylesheet" href="./css/polish.css?v=20260810-responsive-containment-v1&amp;world=20260811-responsive-v2&amp;config=config-lifecycle-v1" />
   <script>
     (function () {
       try {
@@ -1389,6 +1389,18 @@ QQ空间 = 公开札记
       </section>
 
       <section class="panel" id="panel-config">
+        <header class="config-page-intro">
+          <div>
+            <span class="config-page-kicker">配置中心</span>
+            <h2>配置工作台</h2>
+            <p>基础维护、运行节奏与功能生命周期集中管理。</p>
+          </div>
+          <nav class="config-section-nav" aria-label="配置区域">
+            <button type="button" data-config-section-target="config-common-settings">基础与维护</button>
+            <button type="button" data-config-section-target="config-runtime-settings">运行节奏</button>
+            <button type="button" data-config-section-target="config-feature-settings">功能开关</button>
+          </nav>
+        </header>
         <div class="config-grid">
           <details class="config-fold-panel config-common-settings" id="config-common-settings">
             <summary class="config-fold-summary">
@@ -1629,7 +1641,7 @@ QQ空间 = 公开札记
             </div>
           </details>
 
-          <details class="config-fold-panel config-runtime-details">
+          <details class="config-fold-panel config-runtime-details" id="config-runtime-settings">
             <summary class="config-fold-summary">
               <div class="config-fold-heading">
                 <span class="config-fold-kicker">运行节奏</span>
@@ -1674,14 +1686,45 @@ QQ空间 = 公开札记
               </form>
             </div>
           </details>
-          <article class="wide feature-config-article">
-            <h2>功能开关</h2>
-            <p class="feature-config-hint">点击功能名称或卡片空白处查看详细配置；左侧开关用于快速启停。</p>
+          <article class="wide feature-config-article" id="config-feature-settings">
+            <header class="feature-config-head">
+              <div>
+                <span class="config-fold-kicker">功能生命周期</span>
+                <h2>功能开关</h2>
+              </div>
+              <div id="featureFilterResult" class="feature-filter-result" aria-live="polite"></div>
+            </header>
             <div id="proactiveOnlyModeCard"></div>
             <div id="featureSwitchSummary" class="feature-switch-summary"></div>
-            <div class="feature-switch-toolbar">
-              <input id="featureFilter" type="search" placeholder="筛选功能名 / 配置键" />
-              <button id="enableSafeFeaturesBtn" type="button">启用基础安全项</button>
+            <div class="feature-filter-workspace" id="featureFilterWorkspace">
+              <div class="feature-filter-topline">
+                <label class="feature-search-field">
+                  <span>搜索配置</span>
+                  <input id="featureFilter" type="search" placeholder="功能名、配置键或用途" />
+                </label>
+                <button id="enableSafeFeaturesBtn" type="button">启用基础安全项</button>
+              </div>
+              <section class="feature-filter-row" aria-labelledby="featureDomainLabel">
+                <div class="feature-filter-label">
+                  <b id="featureDomainLabel">功能领域</b>
+                  <small>一级分类</small>
+                </div>
+                <div id="featureDomainFilters" class="feature-filter-options feature-domain-filters" role="tablist" aria-label="功能领域"></div>
+              </section>
+              <section class="feature-filter-row" aria-labelledby="featureStageLabel">
+                <div class="feature-filter-label">
+                  <b id="featureStageLabel">作用阶段</b>
+                  <small>二级分类</small>
+                </div>
+                <div id="featureStageFilters" class="feature-filter-options" role="group" aria-label="作用阶段"></div>
+              </section>
+              <section class="feature-filter-row feature-status-filter-row" aria-labelledby="featureStatusLabel">
+                <div class="feature-filter-label">
+                  <b id="featureStatusLabel">当前状态</b>
+                  <small>快速核对</small>
+                </div>
+                <div id="featureStatusFilters" class="feature-filter-options" role="group" aria-label="当前状态"></div>
+              </section>
             </div>
             <div class="feature-switch-board" id="featureFlags"></div>
           </article>
@@ -1872,6 +1915,6 @@ QQ空间 = 公开札记
   <!-- Loaded on demand by app.js through AstrBot's relative dynamic-import rewriting:
        ./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1&amp;manual=provider-input-v2
        ./js/panels/qzone-panel.js?v=20260810-qzone-classic-loader-v1 -->
-  <script src="./app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2&amp;page=lazy-classic-loader-v1&amp;scope=photo-scope-quota-v1&amp;touch=reality-official-reminder-v3&amp;memory-source=memory-companion-v2"></script>
+  <script src="./app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2&amp;page=lazy-classic-loader-v1&amp;scope=photo-scope-quota-v1&amp;touch=reality-official-reminder-v3&amp;memory-source=memory-companion-v2&amp;user-create=profile-v1&amp;relationship-role-photo=pr125-v1&amp;camera-runtime-scope=v1&amp;config=config-lifecycle-v1"></script>
 </body>
 </html>

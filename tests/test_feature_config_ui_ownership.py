@@ -369,6 +369,16 @@ class FeatureConfigUiOwnershipTests(unittest.TestCase):
         self.assertIn("enable_proactive_message_review", self.advanced_group_keys["private"])
         self.assertNotIn("enable_proactive_message_review", self.advanced_group_keys["proactive"])
 
+    def test_feature_cards_do_not_expose_internal_snake_case_as_titles(self) -> None:
+        self.assertIn(
+            'enable_llm_proactive_persona_judge: ["主动人格判定",',
+            self.script,
+        )
+        self.assertIn(
+            'featureMeta[key]?.[0] || configLabels[key] || key.replace(/^enable_/, "").replaceAll("_", " ")',
+            self.script,
+        )
+
     def test_expression_learning_is_a_common_cross_channel_capability(self) -> None:
         common_keys = self.feature_group_keys["通用能力"]
         private_keys = self.feature_group_keys["私聊陪伴"]

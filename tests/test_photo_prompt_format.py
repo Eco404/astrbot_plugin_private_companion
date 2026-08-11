@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
+from astrbot_plugin_private_companion.photo_prompt_context import PhotoPromptSection
 from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
 
 
@@ -15,6 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class _PromptFormatHarness(ProactiveMessageMixin):
     photo_generation_prompt_format = "traditional"
+    photo_generation_negative_prompt_mode = "safe_default"
+    photo_generation_negative_prompt = ""
+    photo_generation_text2img_negative_prompt = ""
+    photo_generation_selfie_negative_prompt = ""
+    photo_generation_edit_negative_prompt = ""
     photo_generation_text2img_fixed_prompt = "text fixed"
     photo_generation_selfie_fixed_prompt = "selfie fixed"
     photo_generation_edit_fixed_prompt = "edit fixed"
@@ -101,6 +107,58 @@ class PhotoPromptFormatTests(unittest.TestCase):
         preset_index = source.index("_apply_photo_generation_scene_presets")
         self.assertLess(format_index, preset_index)
 
+    def test_negative_prompt_safe_default_preserves_existing_sections(self) -> None:
+        self.harness.photo_generation_negative_prompt_mode = "safe_default"
+        self.harness.photo_generation_negative_prompt = "custom global"
+        sections = (
+            PhotoPromptSection("user_request", "user_request", negative="no rain", protected=True),
+            PhotoPromptSection("natural_language_contract", "composition", negative="nsfw, watermark"),
+        )
+
+        resolved = self.harness._apply_photo_generation_negative_prompt_policy(sections, "selfie")
+
+        self.assertEqual(resolved, sections)
+
+    def test_negative_prompt_merge_combines_global_and_scoped_terms_once(self) -> None:
+        self.harness.photo_generation_negative_prompt_mode = "merge"
+        self.harness.photo_generation_negative_prompt = "Negative prompt: lowres, watermark"
+        self.harness.photo_generation_selfie_negative_prompt = "bad hands\nLOWRES"
+        sections = (
+            PhotoPromptSection("natural_language_contract", "composition", negative="nsfw"),
+        )
+
+        resolved = self.harness._apply_photo_generation_negative_prompt_policy(sections, "portrait")
+
+        self.assertEqual(resolved[0].negative, "nsfw")
+        self.assertEqual(resolved[-1].name, "custom_negative_prompt")
+        self.assertEqual(resolved[-1].negative, "lowres, watermark, bad hands")
+        self.assertTrue(resolved[-1].protected)
+
+    def test_negative_prompt_replace_only_removes_system_base_sections(self) -> None:
+        self.harness.photo_generation_negative_prompt_mode = "replace"
+        self.harness.photo_generation_negative_prompt = "custom global"
+        self.harness.photo_generation_selfie_negative_prompt = "portrait artifact"
+        sections = (
+            PhotoPromptSection("user_request", "user_request", negative="no rain", protected=True),
+            PhotoPromptSection("wardrobe_decision", "wardrobe_decision", negative="pajamas"),
+            PhotoPromptSection("natural_language_contract", "composition", negative="nsfw, watermark"),
+            PhotoPromptSection("composition", "composition", negative="duplicate character"),
+            PhotoPromptSection("subject_count", "composition", negative="multiple people"),
+        )
+
+        resolved = self.harness._apply_photo_generation_negative_prompt_policy(sections, "selfie")
+        by_name = {section.name: section for section in resolved}
+
+        self.assertEqual(by_name["user_request"].negative, "no rain")
+        self.assertEqual(by_name["wardrobe_decision"].negative, "pajamas")
+        self.assertEqual(by_name["natural_language_contract"].negative, "")
+        self.assertEqual(by_name["composition"].negative, "")
+        self.assertEqual(by_name["subject_count"].negative, "")
+        self.assertEqual(
+            by_name["custom_negative_prompt"].negative,
+            "custom global, portrait artifact",
+        )
+
     def test_config_schema_page_and_save_normalization_expose_all_modes(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         item = schema["photo_action_config"]["items"]["photo_generation_prompt_format"]
@@ -135,6 +193,50 @@ class PhotoPromptFormatTests(unittest.TestCase):
         self.assertIn('addButton.disabled = cards.length >= RELATIONSHIP_CARD_MAX', script)
         self.assertIn('const seenNames = new Set()', script)
         self.assertIn('maxlength="200" data-relationship-card-field="name"', script)
+
+    def test_negative_prompt_policy_config_is_exposed(self) -> None:
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        items = schema["photo_action_config"]["items"]
+        mode = items["photo_generation_negative_prompt_mode"]
+        self.assertEqual(mode["default"], "safe_default")
+        self.assertEqual(mode["options"], ["safe_default", "merge", "replace"])
+        self.assertEqual(
+            self.harness._normalize_photo_generation_negative_prompt_mode("完全替换"),
+            "replace",
+        )
+
+        keys = (
+            "photo_generation_negative_prompt",
+            "photo_generation_text2img_negative_prompt",
+            "photo_generation_selfie_negative_prompt",
+            "photo_generation_edit_negative_prompt",
+        )
+        api = PrivateCompanionPageApi.__new__(PrivateCompanionPageApi)
+        api.plugin = self.harness
+        api._schema_key_index_cache = None
+        allowed = api._allowed_setting_keys()
+        self.assertEqual(
+            api._normalize_setting_value("photo_generation_negative_prompt_mode", "合并自定义"),
+            "merge",
+        )
+        self.assertEqual(
+            api._normalize_setting_value("photo_generation_negative_prompt_mode", "invalid"),
+            "safe_default",
+        )
+        for key in keys:
+            self.assertEqual(items[key]["default"], "")
+            self.assertIn(key, allowed)
+            self.assertEqual(
+                api._normalize_setting_value(key, "  lowres, watermark  "),
+                "lowres, watermark",
+            )
+
+        script = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('key: "photo_generation_negative_prompt_mode", type: "select"', script)
+        self.assertIn('["safe_default", "安全默认"]', script)
+        self.assertIn('["merge", "合并自定义"]', script)
+        self.assertIn('["replace", "完全替换"]', script)
+        self.assertIn('values.photo_generation_negative_prompt_mode || "safe_default"', script)
 
     def test_workflow_fixed_prompt_config_is_exposed_and_normalized(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))

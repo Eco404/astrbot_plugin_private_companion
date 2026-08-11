@@ -87,6 +87,9 @@ const state = {
   featureDetailBaseline: null,
   featureDetailParamDraft: {},
   featureDetailSubpage: "",
+  featureDomainFilter: "all",
+  featureStageFilter: "all",
+  featureStatusFilter: "all",
   photoReferenceManagerDraft: null,
   photoReferenceEditingIndex: -1,
   photoReferenceLibraryStatus: null,
@@ -1196,6 +1199,7 @@ const featureMeta = {
   enable_relationship_content_tiers: ["关系内容尺度", "把日常、含蓄暧昧和成人私密内容纳入同一表达决策；关系阶段只是必要条件，不会自动授权。"],
   enable_auto_user_profile_creation: ["用户档案", "首次收到符合范围的真实消息时自动建立统一用户档案；不会自动授予私聊陪伴或主动联系权限。"],
   enable_mai_style_integration: ["私聊互动策略", "把相处分寸、偏好和本轮接话方式注入回复。"],
+  enable_llm_proactive_persona_judge: ["主动人格判定", "主动计划到点后，判断这个念头是否符合角色、世界观、关系和当前打扰边界，再决定放行、改写、延后或取消。"],
   enable_companion_memory: ["本地陪伴画像", "在插件内整理当前私聊的偏好、边界和关系线索；跨会话长期记忆依赖外部记忆插件。"],
   enable_expression_learning: ["表达方式学习", "从选定私聊或群聊提取抽象表达特征，并按范围用于私聊被动、私聊主动和群聊回复。"],
   enable_expression_manual_review: ["观察素材审核", "原始观察素材先进入待整理区；模型归纳的表达规则始终必须审核后使用。"],
@@ -1458,6 +1462,114 @@ const featureGroups = [
     ],
   },
 ];
+
+const featureStageDefinitions = [
+  { id: "before", label: "接收与准备", compact: "发送前" },
+  { id: "during", label: "生成与发送", compact: "发送时" },
+  { id: "after", label: "发送后沉淀", compact: "发送后" },
+  { id: "background", label: "后台运行", compact: "后台" },
+];
+
+const featureStageKeySets = {
+  before: new Set([
+    "inject_passive_states",
+    "enable_message_debounce",
+    "enable_recall_enhancement",
+    "enable_private_image_self_recognition",
+    "enable_forward_message_adaptation",
+    "enable_mai_style_integration",
+    "enable_intent_emotion_analysis",
+    "enable_passive_topic_suppression",
+    "enable_relationship_state_machine",
+    "enable_food_menu_recommendation",
+    "enable_relationship_content_tiers",
+    "enable_group_companion",
+    "enable_group_member_safety",
+    "enable_group_conversation_followup",
+    "enable_group_high_intensity_mode",
+    "enable_group_context_injection",
+    "enable_group_image_understanding",
+    "enable_group_injection_guard",
+    "enable_group_wakeup_enhancement",
+    "enable_cross_user_memory_bridge",
+    "enable_environment_perception",
+    "enable_livingmemory_integration",
+    "enable_private_reading_preference_influence",
+  ]),
+  during: new Set([
+    "enable_segmented_proactive_reply",
+    "inject_passive_states",
+    "enable_passive_response_review",
+    "enable_framework_error_leak_guard",
+    "enable_smart_silence",
+    "enable_proactive_quote_trigger_message",
+    "enable_tts_enhancement",
+    "enable_mai_style_integration",
+    "enable_llm_proactive_persona_judge",
+    "enable_proactive_message_review",
+    "enable_relationship_content_tiers",
+    "enable_group_companion",
+    "enable_group_conversation_followup",
+    "enable_group_air_reply_guard",
+    "enable_group_wakeup_enhancement",
+    "enable_atrelay_tools",
+    "enable_qzone_integration",
+    "enable_photo_text_action",
+    "enable_screen_glance_action",
+    "enable_poke_action",
+    "enable_voice_action",
+    "enable_reply_interception_forward",
+  ]),
+  after: new Set([
+    "enable_expression_learning",
+    "enable_companion_memory",
+    "enable_custom_relationship_stage_policy",
+    "enable_auto_user_profile_creation",
+    "enable_relationship_analysis",
+    "enable_relationship_state_machine",
+    "enable_dialogue_episode_memory",
+    "enable_open_loop_tracking",
+    "enable_user_habit_learning",
+    "enable_group_member_profiles",
+    "enable_group_repeat_follow",
+    "enable_cross_user_memory_bridge",
+    "enable_livingmemory_integration",
+    "enable_qzone_integration",
+  ]),
+  background: new Set([
+    "enable_humanized_states",
+    "enable_cycle_state",
+    "enable_skill_growth_simulation",
+    "enable_personal_goals",
+    "enable_environment_perception",
+    "enable_bilibili_integration",
+    "enable_news_integration",
+    "enable_body_monitor_integration",
+    "enable_web_exploration",
+    "enable_qzone_integration",
+    "enable_photo_text_action",
+    "enable_private_reading_integration",
+    "enable_reply_interception_forward",
+    "enable_creative_writing",
+    "enable_screen_glance_action",
+    "enable_poke_action",
+    "enable_voice_action",
+  ]),
+};
+
+function featureStagesForKey(key) {
+  const parentKey = topLevelFeatureKey(key);
+  const stages = featureStageDefinitions
+    .filter((stage) => featureStageKeySets[stage.id]?.has(parentKey))
+    .map((stage) => stage.id);
+  return stages.length ? stages : ["background"];
+}
+
+function featureStageLabel(stageId, compact = false) {
+  const stage = featureStageDefinitions.find((item) => item.id === stageId);
+  if (!stage) return "后台";
+  return compact ? stage.compact : stage.label;
+}
 
 const embeddedFeatureParentByKey = {
   inject_passive_states: "enable_humanized_states",
@@ -2190,6 +2302,11 @@ const configLabels = {
   photo_generation_prompt_format: "生图提示词表达方式",
   photo_generation_style: "主动生图风格",
   photo_generation_style_custom_prompt: "自定义风格说明",
+  photo_generation_negative_prompt_mode: "负面提示词策略",
+  photo_generation_negative_prompt: "全局负面提示词",
+  photo_generation_text2img_negative_prompt: "文生图负面提示词",
+  photo_generation_selfie_negative_prompt: "自拍/人像负面提示词",
+  photo_generation_edit_negative_prompt: "改图负面提示词",
   photo_generation_fixed_prompt: "全局固定附加提示词（兼容）",
   photo_generation_text2img_fixed_prompt: "文生图固定提示词",
   photo_generation_selfie_fixed_prompt: "自拍/人像固定提示词",
@@ -2808,6 +2925,11 @@ const configDescriptions = {
   photo_generation_prompt_format: "控制所有生图最终提交给后端的提示词形式。传统文生图提示词使用 Positive/Negative prompt 和逗号分隔短语；自然语言描述使用连贯英文句子；NAI 联动模式按 NovelAI 4/4.5 标签语法（{}/[] 加降权、权重::标签::、负向权重、多角色块、Text: 文字）书写并原样提交给在线 API。若 NAI 联动模式生图效果不理想，请切换回自然语言描述模式。只改变提示词组织，不改变后端、参考图或画面风格。",
   photo_generation_style: "影响主动生图提示词的整体风格倾向，可填 真实、二次元 或 其他。",
   photo_generation_style_custom_prompt: "当风格为“其他”时，把这里作为额外风格要求注入生图提示词。",
+  photo_generation_negative_prompt_mode: "控制系统基础负面词与自定义词的关系。用户明确排除、衣着裁决和参考图一致性要求不会被替换。",
+  photo_generation_negative_prompt: "合并或替换模式下作用于所有生图；支持逗号、换行或 Negative prompt: 格式。",
+  photo_generation_text2img_negative_prompt: "只用于普通文生图、主动生活场景、QQ 空间非自拍配图和创作封面。",
+  photo_generation_selfie_negative_prompt: "只用于自拍、人像、每日穿搭和角色表情包。",
+  photo_generation_edit_negative_prompt: "只用于改图与重绘；完全替换时需自行写明需要避免的非目标改动。",
   photo_generation_fixed_prompt: "兼容旧配置。非空时仍叠加到所有生图类型；想完全按文生图、自拍/人像、改图区分时请留空。全局词在类型词之前拼接，也会经过服装冲突清洗。",
   photo_generation_text2img_fixed_prompt: "只追加到 text2img 文生图，包括 QQ 空间非自拍配图、主动生活场景、普通场景/静物和创作封面。会清理控制字符和内部结构标记、拆分正负面语义并执行服装冲突保护。",
   photo_generation_selfie_fixed_prompt: "只追加到 selfie/portrait，包括 QQ 空间自拍、主动自拍和每日穿搭。会清理控制字符和内部结构标记、拆分正负面语义并执行服装冲突保护。",
@@ -3083,7 +3205,7 @@ const featureSettingGroups = {
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_intra_day_gap_minutes", "qzone_life_publish_probability", "qzone_life_publish_max_daily", "qzone_life_publish_window_mode", "qzone_life_publish_windows", "qzone_life_publish_allow_insomnia_night", "qzone_life_publish_similarity_threshold", "qzone_publish_style_prompt"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability", "qzone_publish_image_style_prompt"],
   enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
-  enable_photo_text_action: ["photo_generation_private_owner_max_daily", "photo_generation_private_friend_max_daily", "photo_generation_group_max_daily", "photo_generation_proactive_max_daily", "photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_reference_catalog", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "photo_generation_trace_max_size_kb", "photo_generation_trace_backup_count", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_text2img_fixed_prompt", "photo_generation_selfie_fixed_prompt", "photo_generation_edit_fixed_prompt", "photo_generation_scene_presets", "enable_bot_relationship_network", "bot_relationship_cards"],
+  enable_photo_text_action: ["photo_generation_private_owner_max_daily", "photo_generation_private_friend_max_daily", "photo_generation_group_max_daily", "photo_generation_proactive_max_daily", "photo_generation_backend", "photo_action_max_daily", "proactive_photo_text_probability", "custom_photo_tool_name", "custom_photo_tool_prompt_param", "custom_photo_tool_kind_param", "custom_photo_tool_reference_param", "custom_photo_tool_extra_params", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "external_image_download_proxy", "external_image_download_use_environment_proxy", "enable_photo_reference_image", "photo_reference_catalog", "enable_group_nsfw_private_fallback", "group_nsfw_image_review_mode", "group_nsfw_image_review_sensitivity", "group_nsfw_image_review_min_confidence", "group_nsfw_image_review_timeout_seconds", "group_nsfw_image_review_max_dimension", "group_nsfw_image_review_failure_action", "group_nsfw_image_review_custom_prompt", "enable_daily_outfit_photo", "enable_creative_cover_generation", "daily_outfit_photo_prompt", "daily_outfit_rotation_days", "natural_language_photo_generation_mode", "command_photo_generation_max_daily", "photo_generation_trace_max_size_kb", "photo_generation_trace_backup_count", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "natural_language_photo_extra_prompt", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_negative_prompt_mode", "photo_generation_negative_prompt", "photo_generation_text2img_negative_prompt", "photo_generation_selfie_negative_prompt", "photo_generation_edit_negative_prompt", "photo_generation_fixed_prompt", "photo_generation_text2img_fixed_prompt", "photo_generation_selfie_fixed_prompt", "photo_generation_edit_fixed_prompt", "photo_generation_scene_presets", "enable_bot_relationship_network", "bot_relationship_cards"],
   enable_screen_glance_action: ["screen_peek_max_daily", "screen_peek_cooldown_minutes", "enable_goodnight_screen_check", "goodnight_screen_check_delay_minutes", "enable_unanswered_screen_peek_followup", "unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_poke_action: ["poke_action_max_times", "poke_action_cooldown_minutes"],
   enable_voice_action: ["voice_action_max_chars"],
@@ -3791,7 +3913,7 @@ const featureSettingSections = {
     {
       title: "群聊安全投递",
       note: "默认关闭。开启后，审核为安全的图发群；任何不适合群内发送或审核失败的图都仅尝试私聊原请求者。",
-      keys: ["enable_group_nsfw_private_fallback", "group_nsfw_image_review_timeout_seconds"],
+      keys: ["enable_group_nsfw_private_fallback", "group_nsfw_image_review_mode", "group_nsfw_image_review_sensitivity", "group_nsfw_image_review_min_confidence", "group_nsfw_image_review_timeout_seconds", "group_nsfw_image_review_max_dimension", "group_nsfw_image_review_failure_action", "group_nsfw_image_review_custom_prompt"],
     },
     {
       title: "派生图片能力",
@@ -3801,11 +3923,11 @@ const featureSettingSections = {
     {
       title: "画面风格",
       note: "只影响提示词组织，不改变后端配置。",
-      keys: ["photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_text2img_fixed_prompt", "photo_generation_selfie_fixed_prompt", "photo_generation_edit_fixed_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
+      keys: ["photo_generation_prompt_format", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_negative_prompt_mode", "photo_generation_negative_prompt", "photo_generation_text2img_negative_prompt", "photo_generation_selfie_negative_prompt", "photo_generation_edit_negative_prompt", "photo_generation_text2img_fixed_prompt", "photo_generation_selfie_fixed_prompt", "photo_generation_edit_fixed_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
     },
     {
       title: "Bot 关系网",
-      note: "勾选后可配置角色卡；主动拍照/生图只用它理解关系情境，不会在没有其他人物参考图时生成合影。",
+      note: "勾选后可配置角色卡；绑定角色参考图后，明确点名该角色即可让其入镜或与 Bot 合影。纯文字角色卡不会生成该角色。",
       keys: ["enable_bot_relationship_network", "bot_relationship_cards"],
     },
   ],
@@ -4143,6 +4265,10 @@ const featureSettingTypes = {
   private_image_self_recognition_hint: { type: "textarea" },
   daily_outfit_photo_prompt: { type: "textarea" },
   photo_generation_style_custom_prompt: { type: "textarea" },
+  photo_generation_negative_prompt: { type: "textarea" },
+  photo_generation_text2img_negative_prompt: { type: "textarea" },
+  photo_generation_selfie_negative_prompt: { type: "textarea" },
+  photo_generation_edit_negative_prompt: { type: "textarea" },
   photo_generation_fixed_prompt: { type: "textarea" },
   photo_generation_text2img_fixed_prompt: { type: "textarea" },
   photo_generation_selfie_fixed_prompt: { type: "textarea" },
@@ -7547,7 +7673,13 @@ const setupGuideAdvancedItems = {
         { key: "external_image_download_use_environment_proxy", type: "bool", label: "图片网络使用系统代理", description: "结果 URL 下载和 Gemini 生图请求读取系统代理环境变量。", showWhen: (draft) => photoSettingVisibleForValues("external_image_download_use_environment_proxy", draft) },
         { key: "enable_photo_reference_image", type: "bool", kind: "feature", label: "启用参考图一致性", description: "可选。开启后自拍/头像/角色表情包会自动使用人设参考图或今日穿搭图保持外观；不需要稳定外观时可以关闭。", showWhen: (draft) => photoSettingVisibleForValues("enable_photo_reference_image", draft) },
         { key: "enable_group_nsfw_private_fallback", type: "bool", kind: "setting", label: "群聊成图安全审核与私聊回退", description: "可选。安全图正常发群；任何不适合群内发送、无法确认或审核不可用的图都只尝试私聊原请求者。没有可用识图模型时不会群发。" },
+        { key: "group_nsfw_image_review_mode", type: "select", label: "审核模式", options: [["single", "单模型审核"], ["dual", "双模型交叉审核"]], description: "双模型模式要求两个不同视觉 Provider 完成审核，任一不安全即不发群。", showWhen: (draft) => photoSettingVisibleForValues("group_nsfw_image_review_mode", draft) },
+        { key: "group_nsfw_image_review_sensitivity", type: "select", label: "审核严格度", options: [["relaxed", "宽松"], ["balanced", "均衡"], ["strict", "严格"]], description: "控制泳装、内衣、性暗示和年龄不明确画面的群发标准。", showWhen: (draft) => photoSettingVisibleForValues("group_nsfw_image_review_sensitivity", draft) },
+        { key: "group_nsfw_image_review_min_confidence", type: "number", label: "最低置信度", placeholder: "0.7", min: 0, max: 1, step: 0.05, description: "低于阈值的结论按无法确认处理。", showWhen: (draft) => photoSettingVisibleForValues("group_nsfw_image_review_min_confidence", draft) },
         { key: "group_nsfw_image_review_timeout_seconds", type: "number", label: "群聊成图审核超时秒", placeholder: "8", min: 3, max: 30, showWhen: (draft) => photoSettingVisibleForValues("group_nsfw_image_review_timeout_seconds", draft) },
+        { key: "group_nsfw_image_review_max_dimension", type: "number", label: "审核图最长边", placeholder: "1280", min: 0, max: 4096, step: 128, description: "过大图片先生成缩放审核副本；0 表示原图。", showWhen: (draft) => photoSettingVisibleForValues("group_nsfw_image_review_max_dimension", draft) },
+        { key: "group_nsfw_image_review_failure_action", type: "select", label: "审核失败处理", options: [["private", "改为私聊请求者"], ["block", "阻止发送"]], description: "用于超时、模型不可用、低置信度或双模型不足；明确不安全内容仍仅尝试私聊。", showWhen: (draft) => photoSettingVisibleForValues("group_nsfw_image_review_failure_action", draft) },
+        { key: "group_nsfw_image_review_custom_prompt", type: "textarea", label: "审核补充规则", placeholder: "例如：血腥、恐怖或特定敏感元素不得发群", description: "追加本群需要关注的可见内容标准。", showWhen: (draft) => photoSettingVisibleForValues("group_nsfw_image_review_custom_prompt", draft) },
         { key: "enable_daily_outfit_photo", type: "bool", kind: "setting", label: "每日穿搭照片", description: "日程生成后额外生成一张角色当天穿搭照。" },
         { key: "enable_creative_cover_generation", type: "bool", kind: "setting", label: "为创作内容生成封面", description: "可选。作品已有正文后自动生成一次封面，并按内容自动匹配画风；失败最多重试 3 次。" },
         { key: "daily_outfit_photo_prompt", type: "textarea", label: "每日穿搭提示词", placeholder: "可选：季节、配色、固定饰品", showWhen: (draft) => photoSettingVisibleForValues("daily_outfit_photo_prompt", draft) },
@@ -7555,6 +7687,11 @@ const setupGuideAdvancedItems = {
         { key: "photo_generation_prompt_format", type: "select", label: "提示词表达方式", options: [["traditional", "传统文生图提示词（标签/短语）"], ["natural_language", "自然语言描述"], ["nai", "NAI 联动模式（NovelAI 标签语法）"]], description: "全局作用于主动拍照、每日穿搭、创作封面、自然语言生图及函数工具生图。" },
         { key: "photo_generation_style", type: "select", label: "生图风格", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
         { key: "photo_generation_style_custom_prompt", type: "textarea", label: "自定义风格说明", placeholder: "例如：胶片感、浅景深、室内自然光", description: "只有风格选“其他”时重点使用。", showWhen: (draft) => photoSettingVisibleForValues("photo_generation_style_custom_prompt", draft) },
+        { key: "photo_generation_negative_prompt_mode", type: "select", label: "负面提示词策略", options: [["safe_default", "安全默认"], ["merge", "合并自定义"], ["replace", "完全替换"]], description: "替换只影响系统基础负面词；用户明确排除、衣着与参考图一致性约束仍保留。" },
+        { key: "photo_generation_negative_prompt", type: "textarea", label: "全局负面提示词", placeholder: "例如：lowres, bad anatomy, text, watermark", description: "作用于全部类型，并与当前类型词去重合并。", showWhen: (draft) => photoSettingVisibleForValues("photo_generation_negative_prompt", draft) },
+        { key: "photo_generation_text2img_negative_prompt", type: "textarea", label: "文生图负面提示词", placeholder: "场景、静物与封面专用负面词", showWhen: (draft) => photoSettingVisibleForValues("photo_generation_text2img_negative_prompt", draft) },
+        { key: "photo_generation_selfie_negative_prompt", type: "textarea", label: "自拍/人像负面提示词", placeholder: "自拍、人像、每日穿搭专用负面词", showWhen: (draft) => photoSettingVisibleForValues("photo_generation_selfie_negative_prompt", draft) },
+        { key: "photo_generation_edit_negative_prompt", type: "textarea", label: "改图负面提示词", placeholder: "例如：unrequested redesign, identity change", showWhen: (draft) => photoSettingVisibleForValues("photo_generation_edit_negative_prompt", draft) },
         { key: "photo_generation_text2img_fixed_prompt", type: "textarea", label: "文生图固定提示词", placeholder: "例如：clean composition, environmental storytelling, no watermark", description: "只用于 text2img；覆盖 QQ 空间非自拍配图、主动生活场景、普通文生图和创作封面。正负面内容会拆分并经过冲突清洗。" },
         { key: "photo_generation_selfie_fixed_prompt", type: "textarea", label: "自拍/人像固定提示词", placeholder: "例如：stable facial features, natural selfie framing, no watermark", description: "只用于 selfie/portrait；覆盖 QQ 空间自拍、主动自拍和每日穿搭。正负面内容会拆分并经过冲突清洗。" },
         { key: "photo_generation_edit_fixed_prompt", type: "textarea", label: "改图固定提示词", placeholder: "例如：preserve unedited pixels, no unrelated redesign", description: "只用于 edit/改图/重绘。正负面内容会拆分并经过冲突清洗。" },
@@ -23892,6 +24029,90 @@ function renderListCoverage(group, draft = null) {
   $("#listCoverage").innerHTML = rows.length ? rows.join("") : `<div class="empty small">暂无群聊记录</div>`;
 }
 
+function featureEnabledForFilter(key) {
+  return toBool(state.featureDraft?.[key]) || featureTemporarilyUnlockedByProactiveOnly(key);
+}
+
+function featureMatchesStatusFilter(key, status = state.featureStatusFilter) {
+  if (status === "enabled") return featureEnabledForFilter(key);
+  if (status === "disabled") return !featureEnabledForFilter(key);
+  return true;
+}
+
+function featureMatchesQueryFilter(key, query) {
+  if (!query) return true;
+  const stageText = featureStagesForKey(key)
+    .flatMap((stage) => [featureStageLabel(stage), featureStageLabel(stage, true)])
+    .join(" ");
+  return `${featureSearchText(key)} ${featureGroupForKey(key)} ${stageText}`.toLowerCase().includes(query);
+}
+
+function featureMatchesCurrentFilters(key, { ignore = "" } = {}) {
+  const query = ($("#featureFilter")?.value || "").trim().toLowerCase();
+  if (ignore !== "query" && !featureMatchesQueryFilter(key, query)) return false;
+  if (ignore !== "domain" && state.featureDomainFilter !== "all" && featureGroupForKey(key) !== state.featureDomainFilter) return false;
+  if (ignore !== "stage" && state.featureStageFilter !== "all" && !featureStagesForKey(key).includes(state.featureStageFilter)) return false;
+  if (ignore !== "status" && !featureMatchesStatusFilter(key)) return false;
+  return true;
+}
+
+function renderFeatureFilterControls(groups, allKeys, visibleCount) {
+  const domainOptions = [{ title: "all", label: "全部领域" }, ...groups.map((group) => ({ title: group.title, label: group.title }))];
+  $("#featureDomainFilters").innerHTML = domainOptions.map((option) => {
+    const count = allKeys.filter((key) => (
+      (option.title === "all" || featureGroupForKey(key) === option.title)
+      && featureMatchesCurrentFilters(key, { ignore: "domain" })
+    )).length;
+    const active = state.featureDomainFilter === option.title;
+    return `<button type="button" data-feature-domain-filter="${escapeHtml(option.title)}" class="${active ? "is-active" : ""}" role="tab" aria-selected="${active ? "true" : "false"}"><span>${escapeHtml(option.label)}</span><small>${count}</small></button>`;
+  }).join("");
+
+  const stageOptions = [{ id: "all", label: "全部阶段" }, ...featureStageDefinitions];
+  $("#featureStageFilters").innerHTML = stageOptions.map((option) => {
+    const count = allKeys.filter((key) => (
+      (option.id === "all" || featureStagesForKey(key).includes(option.id))
+      && featureMatchesCurrentFilters(key, { ignore: "stage" })
+    )).length;
+    const active = state.featureStageFilter === option.id;
+    return `<button type="button" data-feature-stage-filter="${escapeHtml(option.id)}" class="${active ? "is-active" : ""}" aria-pressed="${active ? "true" : "false"}"><span>${escapeHtml(option.label)}</span><small>${count}</small></button>`;
+  }).join("");
+
+  const statusOptions = [
+    { id: "all", label: "全部状态" },
+    { id: "enabled", label: "已开启" },
+    { id: "disabled", label: "已关闭" },
+  ];
+  $("#featureStatusFilters").innerHTML = statusOptions.map((option) => {
+    const count = allKeys.filter((key) => featureMatchesStatusFilter(key, option.id) && featureMatchesCurrentFilters(key, { ignore: "status" })).length;
+    const active = state.featureStatusFilter === option.id;
+    return `<button type="button" data-feature-status-filter="${escapeHtml(option.id)}" class="${active ? "is-active" : ""}" aria-pressed="${active ? "true" : "false"}"><span>${escapeHtml(option.label)}</span><small>${count}</small></button>`;
+  }).join("");
+
+  const result = $("#featureFilterResult");
+  if (result) result.innerHTML = `<b>${visibleCount}</b><span>/ ${allKeys.length} 项</span>`;
+}
+
+function bindFeatureFilterControls() {
+  document.querySelectorAll("[data-feature-domain-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.featureDomainFilter = button.dataset.featureDomainFilter || "all";
+      renderFeatureSwitches();
+    });
+  });
+  document.querySelectorAll("[data-feature-stage-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.featureStageFilter = button.dataset.featureStageFilter || "all";
+      renderFeatureSwitches();
+    });
+  });
+  document.querySelectorAll("[data-feature-status-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.featureStatusFilter = button.dataset.featureStatusFilter || "all";
+      renderFeatureSwitches();
+    });
+  });
+}
+
 function renderFeatureSwitches() {
   if (
     state.featureDetailSubpage === "photo_reference_library"
@@ -23908,7 +24129,6 @@ function renderFeatureSwitches() {
   const overviewSettings = state.overview?.settings || {};
   const intensity = state.overview?.proactive_intensity || {};
   const intensitySearchText = "主动强度预设 主动触达 proactive_intensity_preset 私聊主动 群聊唤醒 群主动插话";
-  const intensityVisible = !filter || intensitySearchText.toLowerCase().includes(filter);
   const visibleDraftKeys = visibleTopLevelFeatureKeys(state.featureDraft || {});
   const total = visibleDraftKeys.length;
   const enabled = visibleDraftKeys.filter((key) => toBool(state.featureDraft[key])).length;
@@ -23948,8 +24168,13 @@ function renderFeatureSwitches() {
   if (state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, state.selectedFeatureKey)) {
     beginFeatureDetailSession(state.selectedFeatureKey);
   }
+  const inFeatureDetail = Boolean(state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, state.selectedFeatureKey));
+  const filterWorkspace = $("#featureFilterWorkspace");
+  if (filterWorkspace) filterWorkspace.hidden = inFeatureDetail;
   syncFeatureFooterAction();
-  if (state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft, state.selectedFeatureKey)) {
+  if (inFeatureDetail) {
+    const result = $("#featureFilterResult");
+    if (result) result.innerHTML = `<span>${escapeHtml(featureGroupForKey(state.selectedFeatureKey))}</span><b>${escapeHtml(featureStageLabel(featureStagesForKey(state.selectedFeatureKey)[0], true))}</b>`;
     $("#featureFlags").innerHTML = featureDetailPage(state.selectedFeatureKey);
     captureFeatureDetailBaselineFromDom($("#featureFlags"));
     bindFeatureDetailActions();
@@ -23957,11 +24182,22 @@ function renderFeatureSwitches() {
     return;
   }
 
+  const filteredKeys = visibleDraftKeys.filter((key) => featureMatchesCurrentFilters(key));
+  renderFeatureFilterControls(groups, visibleDraftKeys, filteredKeys.length);
+  bindFeatureFilterControls();
+
+  const intensityVisible = (
+    (!filter || intensitySearchText.toLowerCase().includes(filter))
+    && ["all", "通用能力"].includes(state.featureDomainFilter)
+    && ["all", "background"].includes(state.featureStageFilter)
+    && (state.featureStatusFilter === "all" || (state.featureStatusFilter === "enabled") === Boolean(intensity?.enabled))
+  );
+
   const board = groups.map((group) => {
+    if (state.featureDomainFilter !== "all" && state.featureDomainFilter !== group.title) return "";
     const visibleKeys = group.keys.filter((key) => {
       if (!visibleFeatureSwitchKey(key)) return false;
-      if (!filter) return true;
-      return featureSearchText(key).includes(filter);
+      return featureMatchesCurrentFilters(key);
     });
     const hasIntensityCard = group.title === "通用能力" && intensityVisible;
     if (!visibleKeys.length && !hasIntensityCard) return "";
@@ -23975,6 +24211,7 @@ function renderFeatureSwitches() {
         <header>
           <div>
             <b>${escapeHtml(group.title)}</b>
+            <span>${escapeHtml(group.note || "")}</span>
           </div>
           <small>${escapeHtml(groupMeta)}</small>
         </header>
@@ -23985,7 +24222,7 @@ function renderFeatureSwitches() {
       </section>
     `;
   }).filter(Boolean).join("");
-  $("#featureFlags").innerHTML = board || `<div class="empty small">没有匹配的功能开关</div>`;
+  $("#featureFlags").innerHTML = board || `<div class="feature-filter-empty"><b>没有匹配的功能开关</b><span>可以调整领域、作用阶段、状态或搜索词。</span><button type="button" data-feature-filter-reset>清除筛选</button></div>`;
   document.querySelectorAll("[data-feature-key]").forEach((input) => {
     input.addEventListener("change", () => {
       state.featureDraft[input.dataset.featureKey] = input.checked;
@@ -24007,6 +24244,13 @@ function renderFeatureSwitches() {
       if (event.target.closest("button, input, label, select, textarea, a")) return;
       openDetail();
     });
+  });
+  document.querySelector("[data-feature-filter-reset]")?.addEventListener("click", () => {
+    state.featureDomainFilter = "all";
+    state.featureStageFilter = "all";
+    state.featureStatusFilter = "all";
+    if ($("#featureFilter")) $("#featureFilter").value = "";
+    renderFeatureSwitches();
   });
   bindProactiveOnlyTempUnlockActions($("#featureFlags"));
   bindProactiveIntensityCommonSetting();
@@ -24467,6 +24711,9 @@ function featureSwitchItem(key) {
   }
   const lockNote = tempUnlocked ? "已临时放行，关闭仅保留主动能力后清空" : "仅保留主动能力中，原配置保留";
   const relatedText = related.length ? `建议同步：${related.map((item) => item.label || item.key).join("、")}` : "";
+  const stageTags = featureStagesForKey(key)
+    .map((stage) => `<span data-feature-stage="${escapeHtml(stage)}">${escapeHtml(featureStageLabel(stage, true))}</span>`)
+    .join("");
   return `
     <section class="feature-switch-item has-feature-detail ${displayOn ? "on" : "off"} ${locked ? "locked" : ""}" data-feature-card-open="${escapeHtml(key)}" title="${escapeHtml(locked ? "仅保留主动能力开启时，本功能在本插件普通被动链路中被跳过，原配置会保留。" : featureDescription(key))}">
       <label class="feature-toggle-hit" aria-label="${escapeHtml(featureLabel(key))}">
@@ -24479,6 +24726,7 @@ function featureSwitchItem(key) {
           <small>${escapeHtml(featurePublicKey(key))}</small>
           <span class="feature-open-hint">查看配置 <span aria-hidden="true">›</span></span>
         </button>
+        <div class="feature-stage-tags" aria-label="作用阶段">${stageTags}</div>
         <div class="feature-switch-meta">
           <span class="feature-state-text">${escapeHtml(stateText)}</span>
           ${locked ? `<span class="feature-lock-note">${escapeHtml(lockNote)}</span>` : ""}
@@ -24709,7 +24957,7 @@ function photoSettingVisibleForValues(settingKey, values = {}) {
   if (settingKey === "photo_reference_catalog") {
     return backend !== "sdgen" && enabled("enable_photo_reference_image");
   }
-  if (settingKey === "group_nsfw_image_review_timeout_seconds") {
+  if (["group_nsfw_image_review_mode", "group_nsfw_image_review_sensitivity", "group_nsfw_image_review_min_confidence", "group_nsfw_image_review_timeout_seconds", "group_nsfw_image_review_max_dimension", "group_nsfw_image_review_failure_action", "group_nsfw_image_review_custom_prompt"].includes(settingKey)) {
     return enabled("enable_group_nsfw_private_fallback");
   }
   if (["daily_outfit_photo_prompt", "daily_outfit_rotation_days"].includes(settingKey)) {
@@ -24724,6 +24972,9 @@ function photoSettingVisibleForValues(settingKey, values = {}) {
   }
   if (settingKey === "photo_generation_style_custom_prompt") {
     return String(values.photo_generation_style || "") === "其他";
+  }
+  if (["photo_generation_negative_prompt", "photo_generation_text2img_negative_prompt", "photo_generation_selfie_negative_prompt", "photo_generation_edit_negative_prompt"].includes(settingKey)) {
+    return ["merge", "replace"].includes(String(values.photo_generation_negative_prompt_mode || "safe_default"));
   }
   if (settingKey === "bot_relationship_cards") {
     return enabled("enable_bot_relationship_network");
@@ -27671,6 +27922,9 @@ function featureDetailPage(key) {
   const personaMigrationCardHtml = key === "enable_multi_persona_mode" ? multiPersonaMigrationDetailCard() : "";
   const managerCardHtml = key === "enable_group_member_safety" ? groupMemberSafetyManagerCardHtml() : "";
   const referenceManagerOpen = key === "enable_photo_text_action" && state.featureDetailSubpage === "photo_reference_library";
+  const stageTags = featureStagesForKey(key)
+    .map((stage) => `<span data-feature-stage="${escapeHtml(stage)}">${escapeHtml(featureStageLabel(stage, true))}</span>`)
+    .join("");
   return `
     <section class="feature-detail-page ${displayEnabled ? "on" : "off"} ${locked ? "locked" : ""}">
       <div data-feature-detail-overview ${referenceManagerOpen ? "hidden" : ""}>
@@ -27684,7 +27938,10 @@ function featureDetailPage(key) {
       </div>
       <header class="feature-detail-head">
         <div>
-          <span class="module-badge">${escapeHtml(featureGroupForKey(key))}</span>
+          <div class="feature-detail-taxonomy">
+            <span class="module-badge">${escapeHtml(featureGroupForKey(key))}</span>
+            <span class="feature-stage-tags" aria-label="作用阶段">${stageTags}</span>
+          </div>
           <h2>${escapeHtml(featureLabel(key))}</h2>
           <p>${escapeHtml(featureDetailExplanation(key))}</p>
         </div>
@@ -27713,6 +27970,7 @@ function featureDetailPage(key) {
             <div><dt>${escapeHtml(featurePublicKey(key) === key ? "配置键" : "界面标识")}</dt><dd>${escapeHtml(featurePublicKey(key))}</dd></div>
             ${featurePublicKey(key) === key ? "" : `<div><dt>兼容配置键</dt><dd>${escapeHtml(key)}（仅为兼容旧配置保留）</dd></div>`}
             <div><dt>所属模块</dt><dd>${escapeHtml(featureGroupForKey(key))}</dd></div>
+            <div><dt>作用阶段</dt><dd>${escapeHtml(featureStagesForKey(key).map((stage) => featureStageLabel(stage)).join("、"))}</dd></div>
             <div><dt>当前状态</dt><dd>${escapeHtml(enabled ? "开启" : "关闭")}</dd></div>
           </dl>
         </article>
@@ -29732,7 +29990,7 @@ function renderDl(selector, data) {
 }
 
 function featureLabel(key) {
-  return featureMeta[key]?.[0] || key.replace(/^enable_/, "");
+  return featureMeta[key]?.[0] || configLabels[key] || key.replace(/^enable_/, "").replaceAll("_", " ");
 }
 
 function featurePublicKey(key) {
@@ -33233,21 +33491,6 @@ function renderRealityTouchSettings() {
   const confirmed = toBool(consent.confirmed);
   const command = String(data.confirmation_command || "");
   const cameraState = user.camera || {};
-  const cameraProactive = cameraState.proactive || {};
-  const cameraProactiveModeLabels = {
-    off: "已关闭",
-    ask: "先询问",
-    auto: "可主动单帧",
-  };
-  const cameraProactiveMode = String(cameraProactive.effective_mode || cameraState.proactive_mode || "off");
-  const cameraProactiveStatus = cameraProactive.direct_allowed
-    ? "可主动单帧"
-    : cameraProactive.ask_allowed
-      ? "先询问"
-      : cameraProactiveModeLabels[cameraProactiveMode] || "已关闭";
-  const cameraProactiveReason = cameraProactive.direct_allowed
-    ? ""
-    : String(cameraProactive.direct_reason || cameraProactive.reason || "");
   const cameraEligible = toBool(cameraState.eligible);
   const cameraConfirmed = toBool(cameraState.consented);
   const cameraCommand = String(data.camera?.confirmation_command || "");
@@ -33432,6 +33675,21 @@ function renderRealityTouchRuntime() {
   const contact = alarm.contact_session || {};
   const playback = data.audio_output?.last_playback || {};
   const cameraState = user?.camera || {};
+  const cameraProactive = cameraState.proactive || {};
+  const cameraProactiveModeLabels = {
+    off: "已关闭",
+    ask: "先询问",
+    auto: "可主动单帧",
+  };
+  const cameraProactiveMode = String(cameraProactive.effective_mode || cameraState.proactive_mode || "off");
+  const cameraProactiveStatus = cameraProactive.direct_allowed
+    ? "可主动单帧"
+    : cameraProactive.ask_allowed
+      ? "先询问"
+      : cameraProactiveModeLabels[cameraProactiveMode] || "已关闭";
+  const cameraProactiveReason = cameraProactive.direct_allowed
+    ? ""
+    : String(cameraProactive.direct_reason || cameraProactive.reason || "");
   const cameraObservation = cameraState.last_observation || {};
   const contactStatusText = ({ pending: "等待确认", playing: "正在播放", snoozed: "稍后再叫", acknowledged: "已确认醒来", cancelled: "本轮已取消", exhausted: "已到最大次数" })[String(contact.status || "")] || String(contact.status || "");
   const dayLabels = ["一", "二", "三", "四", "五", "六", "日"];
@@ -36048,6 +36306,14 @@ bindExpressionTransferDialogs();
 $("#groupFilter").addEventListener("input", renderGroups);
 $("#worldbookMemberFilter").addEventListener("input", renderWorldbook);
 $("#featureFilter").addEventListener("input", renderFeatureSwitches);
+document.querySelectorAll("[data-config-section-target]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const target = document.getElementById(button.dataset.configSectionTarget || "");
+    if (!target) return;
+    if (target.tagName === "DETAILS") target.open = true;
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+});
 $("#worldbookMembers").addEventListener("click", async (event) => {
   const button = event.target instanceof Element ? event.target.closest("[data-worldbook-living-memory], [data-worldbook-living-memory-close], [data-worldbook-edit], [data-worldbook-member], [data-worldbook-save], [data-worldbook-reference-upload], [data-worldbook-reference-delete], [data-worldbook-memory-toggle], [data-worldbook-memory-delete], [data-worldbook-observation-accept], [data-worldbook-observation-reject], [data-worldbook-delete]") : null;
   if (!button) return;
@@ -36346,9 +36612,8 @@ $("#addUserForm").addEventListener("submit", async (event) => {
   state.selectedUserId = userId;
   const saved = await runAction(() => postJson("/user/update", {
     user_id: userId,
-    enabled: true,
     nickname: form.get("nickname") || "",
-  }), "已添加私聊对象", event.submitter);
+  }), "已添加用户档案", event.submitter);
   if (saved) {
     event.currentTarget.reset();
     $("#addUserDialog")?.close();

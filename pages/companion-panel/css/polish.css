@@ -3114,6 +3114,415 @@ small {
   }
 }
 
+/* Configuration information architecture and lifecycle filters */
+#panel-config {
+  gap: 18px;
+}
+
+#panel-config .config-page-intro {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 4px 2px 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+#panel-config .config-page-intro h2,
+#panel-config .config-page-intro p {
+  margin: 0;
+}
+
+#panel-config .config-page-intro h2 {
+  margin-top: 3px;
+  font-size: 24px;
+}
+
+#panel-config .config-page-intro p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+#panel-config .config-page-kicker {
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+#panel-config .config-section-nav {
+  display: inline-grid;
+  grid-template-columns: repeat(3, minmax(104px, auto));
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+#panel-config .config-section-nav button {
+  min-height: 36px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+#panel-config .config-section-nav button:hover,
+#panel-config .config-section-nav button:focus-visible {
+  background: var(--panel);
+  color: var(--accent-strong);
+}
+
+#panel-config .config-section-nav button:focus-visible,
+#panel-config .feature-filter-options button:focus-visible,
+#panel-config .feature-filter-topline button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 52%, transparent);
+  outline-offset: 2px;
+}
+
+#panel-config #config-common-settings,
+#panel-config #config-runtime-settings,
+#panel-config #config-feature-settings {
+  scroll-margin-top: 18px;
+}
+
+#panel-config .feature-config-article {
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+#panel-config .feature-config-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+#panel-config .feature-config-head h2 {
+  margin: 3px 0 0;
+}
+
+#panel-config .feature-filter-result {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: baseline;
+  gap: 5px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  padding: 6px 10px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+#panel-config .feature-filter-result b {
+  color: var(--ink);
+  font-size: 17px;
+}
+
+#panel-config .feature-filter-workspace {
+  display: grid;
+  gap: 0;
+  margin-top: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 76%, var(--panel));
+  overflow: hidden;
+}
+
+#panel-config .feature-filter-workspace[hidden] {
+  display: none;
+}
+
+#panel-config .feature-filter-topline {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--panel);
+}
+
+#panel-config .feature-search-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+#panel-config .feature-search-field input {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+}
+
+#panel-config .feature-filter-topline > button {
+  min-height: 38px;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  padding: 0 14px;
+  background: var(--panel);
+  color: var(--accent-strong);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+#panel-config .feature-filter-row {
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+#panel-config .feature-filter-row:last-child {
+  border-bottom: 0;
+}
+
+#panel-config .feature-filter-label {
+  display: grid;
+  gap: 2px;
+  padding-top: 7px;
+}
+
+#panel-config .feature-filter-label b {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+#panel-config .feature-filter-label small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+#panel-config .feature-filter-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+#panel-config .feature-filter-options button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  padding: 0 10px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+#panel-config .feature-filter-options button small {
+  display: inline-grid;
+  min-width: 20px;
+  min-height: 20px;
+  place-items: center;
+  border-radius: 5px;
+  padding: 0 4px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+#panel-config .feature-filter-options button:hover {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line-soft));
+  color: var(--ink);
+}
+
+#panel-config .feature-filter-options button.is-active {
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--line-soft));
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+#panel-config .feature-filter-options button.is-active small {
+  background: var(--panel);
+  color: var(--accent-strong);
+}
+
+#panel-config .feature-switch-group > header {
+  align-items: start;
+  padding: 12px 14px;
+}
+
+#panel-config .feature-switch-group > header > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+#panel-config .feature-switch-group > header span {
+  max-width: 760px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+#panel-config .feature-stage-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+#panel-config .feature-stage-tags > span {
+  display: inline-flex;
+  min-height: 20px;
+  align-items: center;
+  border: 1px solid rgba(86, 109, 134, .2);
+  border-radius: 5px;
+  padding: 1px 6px;
+  background: rgba(233, 238, 244, .72);
+  color: #516274;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+#panel-config .feature-stage-tags > [data-feature-stage="before"] {
+  border-color: rgba(34, 129, 117, .23);
+  background: rgba(222, 243, 238, .82);
+  color: #256c62;
+}
+
+#panel-config .feature-stage-tags > [data-feature-stage="during"] {
+  border-color: rgba(45, 101, 169, .23);
+  background: rgba(225, 237, 250, .86);
+  color: #315f96;
+}
+
+#panel-config .feature-stage-tags > [data-feature-stage="after"] {
+  border-color: rgba(166, 113, 29, .24);
+  background: rgba(249, 239, 216, .88);
+  color: #875f1f;
+}
+
+#panel-config .feature-detail-taxonomy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+#panel-config .feature-detail-taxonomy .feature-stage-tags {
+  margin-top: 0;
+}
+
+#panel-config .feature-filter-empty {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  min-height: 180px;
+  place-content: center;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 28px;
+  color: var(--muted);
+  text-align: center;
+}
+
+#panel-config .feature-filter-empty b {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+#panel-config .feature-filter-empty button {
+  min-height: 34px;
+  margin-top: 4px;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  padding: 0 12px;
+  background: var(--panel);
+  color: var(--accent-strong);
+  cursor: pointer;
+}
+
+@media (max-width: 900px) {
+  #panel-config .config-page-intro {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  #panel-config .config-section-nav {
+    width: 100%;
+  }
+
+  #panel-config .feature-filter-row {
+    grid-template-columns: 1fr;
+    gap: 7px;
+  }
+
+  #panel-config .feature-filter-label {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    padding-top: 0;
+  }
+}
+
+@media (max-width: 620px) {
+  #panel-config .config-page-intro h2 {
+    font-size: 21px;
+  }
+
+  #panel-config .config-section-nav {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  #panel-config .config-section-nav button {
+    min-width: 0;
+    padding: 0 7px;
+    white-space: normal;
+  }
+
+  #panel-config .feature-config-head {
+    align-items: center;
+  }
+
+  #panel-config .feature-filter-topline {
+    grid-template-columns: 1fr;
+  }
+
+  #panel-config .feature-filter-topline > button {
+    width: 100%;
+  }
+
+  #panel-config .feature-filter-options {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 1px 1px 6px;
+    scrollbar-width: thin;
+  }
+
+  #panel-config .feature-filter-options button {
+    flex: 0 0 auto;
+  }
+
+  #panel-config .feature-switch-group > header span {
+    display: none;
+  }
+}
+
 /* Keep unified-timeline overrides after the base life-desk component rules. */
 .life-timeline-preview {
   padding-right: 5px;
@@ -3333,6 +3742,11 @@ small {
   --ortto-blue: var(--accent);
   --ortto-blue-soft: var(--accent-soft);
   --ortto-coral: var(--red);
+}
+
+#panel-roleplay {
+  container-name: world-page;
+  container-type: inline-size;
 }
 
 .world-workspace,
@@ -3922,8 +4336,104 @@ code,
 }
 
 @media (max-width: 1080px) {
+  .world-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    padding: 0 16px 18px;
+  }
+
+  .world-workspace > .module-card-head,
+  .world-workspace > .roleplay-mode-switch,
+  .world-workspace > .world-editor {
+    grid-column: 1;
+  }
+
+  .world-editor {
+    width: 100%;
+  }
+
   .world-outline {
-    top: var(--panel-nav-height);
+    position: static;
+    top: auto;
+    z-index: auto;
+    grid-column: 1;
+    grid-row: auto;
+    display: flex;
+    gap: 6px;
+    min-height: 0;
+    margin-inline: -16px;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--ortto-line);
+    border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
+    padding: 10px 16px;
+    background: color-mix(in srgb, var(--surface) 84%, var(--panel));
+  }
+
+  .world-outline-label {
+    display: none;
+  }
+
+  .world-outline-item {
+    flex: 1 0 128px;
+    min-width: 128px;
+    width: auto;
+    white-space: nowrap;
+  }
+
+  .world-outline-item:hover {
+    transform: translateY(-1px);
+  }
+}
+
+@container world-page (max-width: 900px) {
+  .world-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    padding: 0 16px 18px;
+  }
+
+  .world-workspace > .module-card-head,
+  .world-workspace > .roleplay-mode-switch,
+  .world-workspace > .world-editor {
+    grid-column: 1;
+  }
+
+  .world-editor {
+    width: 100%;
+  }
+
+  .world-outline {
+    position: static;
+    top: auto;
+    z-index: auto;
+    grid-column: 1;
+    grid-row: auto;
+    display: flex;
+    gap: 6px;
+    min-height: 0;
+    margin-inline: -16px;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--ortto-line);
+    border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
+    padding: 10px 16px;
+    background: color-mix(in srgb, var(--surface) 84%, var(--panel));
+  }
+
+  .world-outline-label {
+    display: none;
+  }
+
+  .world-outline-item {
+    flex: 1 0 128px;
+    min-width: 128px;
+    width: auto;
+    white-space: nowrap;
+  }
+
+  .world-outline-item:hover {
+    transform: translateY(-1px);
   }
 }
 

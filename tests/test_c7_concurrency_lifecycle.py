@@ -45,7 +45,7 @@ class CompanionConcurrencyStaticTests(unittest.TestCase):
         # Official v6.0.4b moves passive handlers into message_pipeline.py.
         self.assertGreaterEqual(pipeline_source.count("async with self._temporarily_release_data_lock()"), 7)
         self.assertIn('label="refresh_group_episode"', pipeline_source)
-        self.assertIn('label="refresh_persona_relationship_inbound"', pipeline_source)
+        self.assertNotIn('label="refresh_persona_relationship_inbound"', pipeline_source)
 
     def test_untracked_main_background_tasks_are_not_left_in_message_paths(self):
         source = "\n".join(

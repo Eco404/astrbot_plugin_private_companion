@@ -9,6 +9,7 @@ import json
 import os
 import random
 import re
+import shutil
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -881,9 +882,10 @@ class LlmToolActionsMixin:
                     '- 如果前几轮文字剧情已经明确让角色换装，而本轮只说“继续、再拍一张、保持刚才的穿搭”等，不要把它理解成恢复今日穿搭。必须把仍有效的具体服装展开写进 prompt，例如“角色当前仍穿 JK 校服，保持本轮地点和人物连续性”；当前对话已发生的换装高于日程、人格默认衣着、每日穿搭参考图和旧图片。',
                     '- “JK”在服装语境下请规范写成“JK 校服/JK 制服”；只有用户明确改变服装时才替换连续状态，提问、假设或用户自己换衣不算角色已换装。',
                     '- 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。',
-                    '- 改图/重绘：传 `{"prompt":"修改要求","kind":"edit","reference_image_path":"本地图片路径或图片URL"}`；没有参考图时不要调用改图。多图职责组合可传 `reference_image_paths` 数组，并在 prompt 中说明每张图承担的脸、衣服、姿势等职责。',
-                    "- `pc_generate_photo` 会自行发送成图，调用它之后绝对不要再调用 `pc_send_current_media`。只有另一个生图工具在本轮明确返回了本地图片路径、且结果没有确认图片已发送时，才可把该路径交给 `pc_send_current_media` 补充投递一次。",
-                    "- `pc_send_current_media` 只承接本轮刚生成但尚未投递的本地图片。不得猜测路径、复用历史路径、发送用户未要求的文件，或在本轮已经出现图片后再次调用。",
+                    '- 改图/重绘：当前消息或引用消息已经带图时，传 `{"prompt":"修改要求","kind":"edit"}`，不要猜测、抄写或回传本地临时路径，插件会从当前事件安全取图。只有明确使用公网图片 URL 或插件已管理的参考图时才传 `reference_image_path`；多图职责组合可传 `reference_image_paths` 数组，并在 prompt 中说明每张图承担的脸、衣服、姿势等职责。没有任何当前/引用/已管理参考图时不要调用改图。',
+                    "- `pc_generate_photo` 会自行发送成图，调用它之后绝对不要再调用 `pc_send_current_media`。如果另一个生图工具或图像编辑工具已经生成或编辑图片并明确返回了本地图片路径、且结果没有确认图片已发送，必须立即把该路径交给 `pc_send_current_media` 投递一次；不得回答“没法直接发”“图片存好了以后再看”。",
+                    "- `pc_send_current_media` 只承接本轮或紧邻上一轮刚生成但尚未投递的本地图片。默认用 `destination=current` 发到当前会话；当前请求者明确说“私聊发我/私信发我”等要求时，用 `destination=requester_private` 只私聊发给请求者本人。把生成工具返回的原始路径直接传入，不要自行改名、移动文件、检查插件状态或建议用户重启；工具会安全兼容已验证的图片内容与扩展名差异。不得猜测路径、指定第三方、复用陈旧路径、发送用户未要求的文件，或在本轮已经出现图片后再次调用。",
+                    "- 图片投递失败时，只依据工具返回结果简短说明没有送达；不要向用户暴露工具名、本地路径、插件注册、发送通道或内部排障过程，也不要编造工具消失、配置异常等原因。",
                 ]
             )
             prompt_format_instruction = getattr(self, "_photo_generation_prompt_format_instruction", None)
@@ -1093,6 +1095,78 @@ class LlmToolActionsMixin:
                     return True
         return False
 
+    @staticmethod
+    def _referenced_media_edit_instruction_matches(text: Any) -> bool:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if not compact:
+            return False
+        return bool(
+            re.search(
+                r"(?:把|将|给|帮我|替我).{0,18}"
+                r"(?:改成|变成|换成|调成|染成|改为|变为|换为|调为)"
+                r"|(?:改|换|调|染).{0,10}(?:颜色|色调|背景|尺寸|大小|亮度|对比度|饱和度)",
+                compact,
+                flags=re.I,
+            )
+        )
+
+    @staticmethod
+    def _current_media_private_delivery_instruction_matches(text: Any) -> bool:
+        compact = re.sub(r"\s+", "", str(text or "")).casefold()
+        if not compact:
+            return False
+        return bool(
+            re.search(
+                r"(?:私聊|私信|私发|dm).{0,8}(?:发|给|传|丢|送)?(?:给)?我"
+                r"|(?:发|给|传|丢|送).{0,8}(?:到|去)?(?:我)?(?:私聊|私信|dm)",
+                compact,
+                flags=re.I,
+            )
+        )
+
+    @classmethod
+    def _current_media_delivery_instruction_matches(cls, text: Any) -> bool:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if not compact:
+            return False
+        if cls._current_media_private_delivery_instruction_matches(compact):
+            return True
+        if re.search(
+            r"(?:把|将|给|帮我|麻烦)?(?:这张|那张|刚才的|上面的|改好的)?"
+            r"(?:图|图片|照片|成图).{0,8}(?:发|传|给|贴|丢)(?:出来|过来|给我|我)?"
+            r"|(?:发|传|给|贴|丢).{0,8}(?:这张|那张|刚才的|上面的|改好的)?"
+            r"(?:图|图片|照片|成图)",
+            compact,
+            flags=re.I,
+        ):
+            return True
+        # Follow-up requests often refer to the failed result indirectly, for
+        # example "不要生成新图，把刚刚没发出来的发给我". Keep the
+        # delivery tool available when the same sentence still contains an
+        # image anchor, a recent-result anchor, and an actual send instruction.
+        has_media_anchor = bool(
+            re.search(
+                r"(?:图|图片|照片|成图|图像|画面|这张|那张|这一张|那一张)",
+                compact,
+                flags=re.I,
+            )
+        )
+        has_recent_anchor = bool(
+            re.search(
+                r"(?:刚才|刚刚|之前|上次|前面|上面|原来|已有|现成|生成|画好|做好|改好|没发|未发|没送|未送)",
+                compact,
+                flags=re.I,
+            )
+        )
+        has_delivery_action = bool(
+            re.search(
+                r"(?:发|传|贴|丢|送)(?:出来|过来|给我|我|一下|一次)?",
+                compact,
+                flags=re.I,
+            )
+        )
+        return has_media_anchor and has_recent_anchor and has_delivery_action
+
     def _current_media_allowed_roots(self) -> list[Path]:
         roots: list[Path] = []
 
@@ -1117,26 +1191,65 @@ class LlmToolActionsMixin:
         return roots
 
     @staticmethod
-    def _current_media_image_signature_matches(path: Path) -> bool:
+    def _current_media_image_signature_suffix(path: Path) -> str:
         try:
             with path.open("rb") as handle:
                 header = handle.read(16)
         except OSError:
-            return False
-        suffix = path.suffix.casefold()
-        if suffix in {".jpg", ".jpeg", ".jfif"}:
-            return header.startswith(b"\xff\xd8\xff")
-        if suffix == ".png":
-            return header.startswith(b"\x89PNG\r\n\x1a\n")
-        if suffix == ".gif":
-            return header.startswith((b"GIF87a", b"GIF89a"))
-        if suffix == ".webp":
-            return header.startswith(b"RIFF") and header[8:12] == b"WEBP"
-        if suffix == ".bmp":
-            return header.startswith(b"BM")
-        if suffix == ".avif":
-            return len(header) >= 12 and header[4:12] in {b"ftypavif", b"ftypavis"}
-        return False
+            return ""
+        if header.startswith(b"\xff\xd8\xff"):
+            return ".jpg"
+        if header.startswith(b"\x89PNG\r\n\x1a\n"):
+            return ".png"
+        if header.startswith((b"GIF87a", b"GIF89a")):
+            return ".gif"
+        if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+            return ".webp"
+        if header.startswith(b"BM"):
+            return ".bmp"
+        if len(header) >= 12 and header[4:12] in {b"ftypavif", b"ftypavis"}:
+            return ".avif"
+        return ""
+
+    @classmethod
+    def _normalize_current_media_image_suffix(cls, path: Path) -> Path | None:
+        actual_suffix = cls._current_media_image_signature_suffix(path)
+        if not actual_suffix:
+            return None
+        current_suffix = path.suffix.casefold()
+        if current_suffix == actual_suffix or {
+            current_suffix,
+            actual_suffix,
+        } <= {".jpg", ".jpeg", ".jfif"}:
+            return path
+
+        temporary: Path | None = None
+        try:
+            stat = path.stat()
+            fingerprint = hashlib.sha256(
+                f"{path}:{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8")
+            ).hexdigest()[:12]
+            normalized = path.with_name(
+                f"{path.stem}.pc-media-{fingerprint}{actual_suffix}"
+            )
+            temporary = normalized.with_name(
+                f"{normalized.name}.{uuid.uuid4().hex}.tmp"
+            )
+            shutil.copyfile(path, temporary)
+            os.replace(temporary, normalized)
+            return normalized.resolve(strict=True)
+        except Exception as exc:
+            try:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+            except Exception:
+                pass
+            logger.warning(
+                "[PrivateCompanion] 当前媒体扩展名规范化失败: file=%s error=%s",
+                path.name,
+                _single_line(exc, 160),
+            )
+            return None
 
     def _resolve_current_media_image(self, value: Any) -> tuple[Path | None, str]:
         raw = str(value or "").strip().strip('"').strip("'")
@@ -1156,12 +1269,13 @@ class LlmToolActionsMixin:
             return None, "无法读取本轮生成的图片文件"
         if stat.st_size <= 0 or stat.st_size > _CURRENT_MEDIA_MAX_BYTES:
             return None, "图片为空或超过 32 MB 发送上限"
-        if not self._current_media_image_signature_matches(path):
-            return None, "文件扩展名与实际图片格式不一致"
         age = time.time() - float(stat.st_mtime or 0)
         if age < -60 or age > _CURRENT_MEDIA_MAX_AGE_SECONDS:
             return None, "图片不是本轮近期生成的文件"
-        return path, ""
+        normalized_path = self._normalize_current_media_image_suffix(path)
+        if normalized_path is None:
+            return None, "文件内容不是支持的实际图片格式"
+        return normalized_path, ""
 
     async def _pc_send_current_media_impl(
         self,
@@ -1169,6 +1283,7 @@ class LlmToolActionsMixin:
         *,
         media_path: str = "",
         caption: str = "",
+        destination: str = "current",
         **kwargs: Any,
     ) -> str:
         if self._current_turn_has_delivered_media(event):
@@ -1200,11 +1315,40 @@ class LlmToolActionsMixin:
                 },
                 ensure_ascii=False,
             )
+        destination_raw = _single_line(
+            destination or kwargs.get("target_scope") or kwargs.get("scope") or "current",
+            40,
+        ).casefold()
+        requester_private = destination_raw in {
+            "requester_private",
+            "requester-private",
+            "private",
+            "private_requester",
+            "dm",
+            "私聊",
+            "私信",
+        }
+        if requester_private and not self._current_media_private_delivery_instruction_matches(
+            getattr(event, "message_str", "")
+        ):
+            return json.dumps(
+                {
+                    "status": "destination_not_confirmed",
+                    "success": False,
+                    "sent": False,
+                    "message": "当前消息没有明确要求把图片私聊发给请求者",
+                    "must_not_claim_sent": True,
+                    "same_turn_retry_allowed": False,
+                    "final_response_instruction": "不要私聊发送，也不要声称已经发送；按当前会话自然回复。",
+                },
+                ensure_ascii=False,
+            )
         sent_paths = getattr(event, "_private_companion_current_media_sent_paths", None)
         if not isinstance(sent_paths, set):
             sent_paths = set()
             setattr(event, "_private_companion_current_media_sent_paths", sent_paths)
-        path_key = str(path).casefold()
+        destination_key = "requester_private" if requester_private else "current"
+        path_key = f"{destination_key}:{path}".casefold()
         if path_key in sent_paths:
             setattr(event, "_private_companion_photo_tool_sent", True)
             return json.dumps(
@@ -1220,16 +1364,54 @@ class LlmToolActionsMixin:
             )
         visible_caption = self._sanitize_photo_tool_caption(caption, limit=120)
         try:
-            delivery = await self._deliver_generated_image_to_event(
-                event,
-                image_path=str(path),
-                caption=visible_caption,
-            )
+            if requester_private:
+                try:
+                    target_user = _single_line(event.get_sender_id(), 128)
+                except Exception:
+                    target_user = ""
+                sender = getattr(self, "_send_atrelay_chain_to_target", None)
+                chain_builder = getattr(self, "_build_outbound_chain", None)
+                if not target_user:
+                    delivery = {
+                        "sent": False,
+                        "destination": "requester_private",
+                        "message": "无法识别当前请求者，图片没有私聊发送",
+                    }
+                elif not callable(sender) or not callable(chain_builder):
+                    delivery = {
+                        "sent": False,
+                        "destination": "requester_private",
+                        "message": "当前平台没有可用的私聊图片投递链路",
+                    }
+                else:
+                    chain = chain_builder(visible_caption, str(path))
+                    ok, error, used_umo = await sender(
+                        event,
+                        message_type="private",
+                        target_id=target_user,
+                        chain=chain,
+                    )
+                    delivery = {
+                        "sent": bool(ok),
+                        "destination": "requester_private",
+                        "message": (
+                            "图片已私聊发送给当前请求者"
+                            if ok
+                            else f"图片私聊发送失败：{_single_line(error, 180) or '没有可用私聊会话'}"
+                        ),
+                        "target_umo": _single_line(used_umo, 160),
+                    }
+            else:
+                delivery = await self._deliver_generated_image_to_event(
+                    event,
+                    image_path=str(path),
+                    caption=visible_caption,
+                )
         except Exception as exc:
             delivery = {
                 "sent": False,
                 "uncertain": isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)),
-                "destination": "error",
+                "destination": destination_key,
                 "message": f"图片发送失败：{_single_line(exc, 180) or '未知错误'}",
             }
         sent = bool(delivery.get("sent"))
@@ -3303,6 +3485,7 @@ class LlmToolActionsMixin:
                 add_reference_source(reference_path)
 
         resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
+        event_bound_resolver = getattr(self, "_photo_reference_event_bound_stable_path", None)
         resolved_reference_paths: list[str] = []
         for index, source in enumerate(reference_sources):
             # Keep the mixin compatible with lightweight/legacy hosts that do
@@ -3318,6 +3501,25 @@ class LlmToolActionsMixin:
                         "[PrivateCompanion] tool reference %s rejected: %s",
                         index + 1,
                         _single_line(exc, 160),
+                    )
+            if not stable and callable(event_bound_resolver):
+                try:
+                    stable = await event_bound_resolver(
+                        event,
+                        requester_id,
+                        source,
+                        stem=f"tool_event_{index + 1}",
+                    )
+                except Exception as exc:
+                    logger.info(
+                        "[PrivateCompanion] current-event reference %s could not be persisted: %s",
+                        index + 1,
+                        _single_line(exc, 160),
+                    )
+                if stable:
+                    logger.info(
+                        "[PrivateCompanion] accepted model reference after exact current-event source verification: index=%s",
+                        index + 1,
                     )
             if not stable:
                 logger.warning(
@@ -3859,6 +4061,12 @@ class LlmToolActionsMixin:
         elif not ok:
             note_text = _single_line(note, 360) or "生图失败"
             lowered_note = note_text.lower()
+            upstream_submission_unconfirmed = bool(
+                re.search(r"HTTP\s*(?:500|502|503|504)\b", note_text, flags=re.I)
+                or "上游生图服务临时失败" in note_text
+                or "网关中断" in note_text
+                or ("在线图片 API" in note_text and "超时" in note_text)
+            )
             hint = "请按 actual_error 里的真实原因回复用户，不要改写成未出现的超时、排队或权限问题。"
             policy_refusal = self._photo_generation_policy_refusal(note_text)
             if policy_refusal:
@@ -3896,6 +4104,24 @@ class LlmToolActionsMixin:
                         "actionable_hint": hint,
                         "do_not_claim_timeout": "超时" not in note_text and "timeout" not in lowered_note,
                         "must_not_claim_sent": True,
+                    }
+                )
+            if upstream_submission_unconfirmed:
+                result_payload.update(
+                    {
+                        "status": "submission_unconfirmed",
+                        "failure_stage": "upstream_response",
+                        "retryable": False,
+                        "same_turn_retry_allowed": False,
+                        "possible_upstream_execution": True,
+                        "actionable_hint": (
+                            "网关失败不代表上游任务没有执行，且可能已经计费。"
+                            "本轮绝对不要重新调用任何生图工具；请用户先检查服务端任务或账单，稍后再明确决定是否重试。"
+                        ),
+                        "final_response_instruction": (
+                            "简短说明本次没有取回图片，但上游可能仍在执行；不要声称确定失败，"
+                            "不要自动重试，也不要建议用户立刻重复提交。"
+                        ),
                     }
                 )
             if generation_completed and failure_stage == "result_materialization":

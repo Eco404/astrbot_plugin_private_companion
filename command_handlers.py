@@ -888,7 +888,6 @@ class CommandHandlersMixin:
             "WEB_EXPLORATION_API_MODEL": {"label": "主动搜索接口模型", "location": "拓展页 -> 功能开关 -> 长线主动 -> 主动搜索详情 -> 自定义搜索接口"},
             "max_daily_messages": {"label": "主动消息每日上限", "location": "拓展页 -> 功能开关 -> 长线主动/私聊陪伴 -> 主动消息相关参数"},
             "min_interval_minutes": {"label": "主动消息最小间隔", "location": "拓展页 -> 功能开关 -> 长线主动/私聊陪伴 -> 主动消息相关参数"},
-            "proactive_review_strength": {"label": "主动发送前复核强度", "location": "拓展页 -> 功能开关 -> 私聊陪伴 -> 回复/主动复核详情"},
             "quiet_hours": {"label": "主动免打扰时间", "location": "拓展页 -> 功能开关 -> 长线主动/私聊陪伴 -> 主动消息相关参数"},
             "target_user_ids": {"label": "目标用户 ID 列表", "location": "拓展页 -> 模块 -> 快速启动 -> 部署与目标 -> 私聊服务对象 ID"},
             "REST_WAKEUP_PROVIDER_ID": {"label": "休息醒来判断模型", "location": "拓展页 -> 模型/Provider -> REST_WAKEUP_PROVIDER_ID"},
@@ -3815,6 +3814,73 @@ class CommandHandlersMixin:
         except Exception:
             pass
         return sources
+
+    async def _photo_reference_event_bound_stable_path(
+        self,
+        event: AstrMessageEvent,
+        user_id: str,
+        source: str,
+        *,
+        stem: str = "event_reference",
+    ) -> str:
+        """Persist a model-supplied source only when the active event owns it."""
+        requested = str(source or "").strip()
+        if not requested:
+            return ""
+
+        cache_name = "_private_companion_event_bound_reference_sources"
+        cached = getattr(event, cache_name, None)
+        if isinstance(cached, tuple):
+            candidates = list(cached)
+        else:
+            candidates: list[str] = []
+
+            def add(values: Any) -> None:
+                for value in values if isinstance(values, (list, tuple, set)) else ():
+                    text = str(value or "").strip()
+                    if text and text not in candidates:
+                        candidates.append(text)
+
+            add(await self._photo_reference_sources_from_current_event(event, user_id))
+            add(self._photo_reference_sources_from_reply_cache(event))
+            add(await self._photo_reference_sources_from_reply_event(event))
+            try:
+                setattr(event, cache_name, tuple(candidates))
+            except Exception:
+                pass
+
+        def local_identity(value: str) -> str:
+            text = str(value or "").strip()
+            if not text or re.match(r"^https?://", text, flags=re.I):
+                return ""
+            if text.startswith("file://"):
+                text = text[len("file://"):]
+            try:
+                return os.path.normcase(str(Path(text).expanduser().resolve()))
+            except (OSError, ValueError):
+                return ""
+
+        requested_local = local_identity(requested)
+        matched = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate == requested
+                or (
+                    requested_local
+                    and local_identity(candidate) == requested_local
+                )
+            ),
+            "",
+        )
+        if not matched:
+            return ""
+        return await self._photo_reference_source_to_stable_path(
+            matched,
+            stem=stem,
+            event=event,
+            trusted=True,
+        )
 
     async def _photo_reference_image_from_command_context(
         self,
