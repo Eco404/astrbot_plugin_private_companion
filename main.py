@@ -4429,6 +4429,207 @@ class PrivateCompanionPlugin(
         )
         return context if not context.errors() else None
 
+    def _req041_erase_scoped_group_data(
+        self,
+        group_id: str,
+        *,
+        operation_id: str = "",
+        persona_id: str = "",
+    ) -> dict[str, Any]:
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            status = getattr(self, "req041_migration_status", None)
+            if isinstance(status, dict) and status.get("required"):
+                return {"ok": False, "state": "degraded", "code": "scoped_group_erase_unavailable"}
+            return {"ok": True, "state": "not_required", "code": "scoped_group_erase_not_required", "count": 0}
+        raw_group = _single_line(group_id, 160)
+        safe_persona = _single_line(persona_id, 80) or scoped_persona_ref(self._active_persona_scope())
+        group_ref = scoped_group_ref(safe_persona, raw_group)
+        context = NamespaceContext(
+            kind="group_shared", persona_id=safe_persona, identity_id="", group_id=group_ref,
+            assurance="verified", profile_status="active",
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        if not raw_group or context.errors():
+            return {"ok": False, "state": "rejected", "code": "scoped_group_erase_context_invalid"}
+        clean_operation = _single_line(operation_id, 120) or "req041-group-reset-" + uuid.uuid4().hex
+        return synchronizer.erase_group_scopes(
+            context, operation_id=clean_operation, reason_code="group_reset",
+        )
+
+    def _req041_group_reset_sagas_locked(self) -> dict[str, dict[str, Any]]:
+        sagas = self.data.get("_req041_group_reset_sagas")
+        if not isinstance(sagas, dict):
+            sagas = {}
+            self.data["_req041_group_reset_sagas"] = sagas
+        return sagas
+
+    def _req041_finalize_group_reset_locked(self, group_id: str) -> dict[str, Any]:
+        normalize = getattr(self, "_normalize_group_identity_id", None)
+
+        def normalized(value: Any) -> str:
+            if callable(normalize):
+                return _single_line(normalize(value), 160)
+            return _single_line(value, 160)
+
+        clean_group = normalized(group_id)
+        groups = self.data.get("groups")
+        if not isinstance(groups, dict):
+            groups = {}
+            self.data["groups"] = groups
+        matching_keys = [key for key in groups if normalized(key) == clean_group]
+        for key in matching_keys:
+            groups.pop(key, None)
+
+        changed: dict[str, list[str]] = {}
+        for key in (
+            "group_whitelist_ids", "group_blacklist_ids",
+            "expression_group_learning_source_ids", "expression_group_application_ids",
+        ):
+            old_values = list(getattr(self, key, []) or [])
+            new_values = [
+                str(item).strip() for item in old_values
+                if str(item).strip() and normalized(item) != clean_group
+            ]
+            setattr(self, key, new_values)
+            _set_into_config(self.config, key, new_values)
+            if new_values != old_values:
+                changed[key] = new_values
+        refresher = getattr(self, "_refresh_expression_voice_profile", None)
+        if callable(refresher):
+            refresher()
+        return {
+            "removed_group": bool(matching_keys),
+            "removed_whitelist": "group_whitelist_ids" in changed,
+            "removed_blacklist": "group_blacklist_ids" in changed,
+            "removed_expression_scope": bool(
+                {"expression_group_learning_source_ids", "expression_group_application_ids"} & changed.keys()
+            ),
+        }
+
+    async def reset_group_scoped_data(
+        self,
+        group_id: str,
+        *,
+        operation_id: str = "",
+    ) -> dict[str, Any]:
+        """Durably reset a group remotely before removing its legacy/config sources."""
+        normalize = getattr(self, "_normalize_group_identity_id", None)
+        clean_group = _single_line(normalize(group_id) if callable(normalize) else group_id, 160)
+        if not clean_group:
+            return {"ok": False, "state": "invalid", "code": "scoped_group_erase_context_invalid"}
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            status = getattr(self, "req041_migration_status", None)
+            if isinstance(status, dict) and status.get("required"):
+                return {"ok": False, "state": "degraded", "code": "scoped_group_erase_unavailable"}
+            return {"ok": True, "state": "not_required", "code": "scoped_group_erase_not_required"}
+
+        async with self._data_lock:
+            sagas = self._req041_group_reset_sagas_locked()
+            clean_operation = _single_line(operation_id, 120)
+            saga = sagas.get(clean_operation) if clean_operation else None
+            if saga is not None and not isinstance(saga, dict):
+                return {"ok": False, "state": "rejected", "code": "group_reset_saga_invalid"}
+            current_persona = scoped_persona_ref(self._active_persona_scope())
+            if saga is None:
+                matches = [
+                    item for item in sagas.values()
+                    if isinstance(item, dict)
+                    and item.get("state") in {"confirmed", "config_pending"}
+                    and _single_line(item.get("group_id"), 160) == clean_group
+                    and _single_line(item.get("persona_id"), 80) == current_persona
+                ]
+                if len(matches) > 1:
+                    return {"ok": False, "state": "rejected", "code": "group_reset_saga_conflict"}
+                saga = matches[0] if matches else None
+            if saga is None:
+                clean_operation = clean_operation or "req041-group-reset-" + uuid.uuid4().hex
+                saga = {
+                    "operation_id": clean_operation,
+                    "group_id": clean_group,
+                    "persona_id": current_persona,
+                    "state": "confirmed",
+                    "created_at": _now_ts(),
+                }
+                sagas[clean_operation] = saga
+                self._req041_persist_archive_saga_locked()
+            else:
+                clean_operation = _single_line(saga.get("operation_id"), 120)
+                if (
+                    not clean_operation or sagas.get(clean_operation) is not saga
+                    or _single_line(saga.get("group_id"), 160) != clean_group
+                    or saga.get("state") not in {"confirmed", "config_pending"}
+                ):
+                    return {"ok": False, "state": "rejected", "code": "group_reset_saga_invalid"}
+            safe_persona = _single_line(saga.get("persona_id"), 80)
+
+        remote = self._req041_erase_scoped_group_data(
+            clean_group, operation_id=clean_operation, persona_id=safe_persona,
+        )
+        if not remote.get("ok"):
+            return {
+                "ok": False, "state": "confirmed",
+                "code": str(remote.get("code") or "scoped_group_erase_failed")[:120],
+                "operation_id": clean_operation,
+            }
+
+        async with self._data_lock:
+            saga = self._req041_group_reset_sagas_locked().get(clean_operation)
+            if not isinstance(saga, dict):
+                return {"ok": False, "state": "rejected", "code": "group_reset_saga_missing"}
+            local = self._req041_finalize_group_reset_locked(clean_group)
+            saga["state"] = "config_pending"
+            saga["remote_receipt"] = {
+                "code": str(remote.get("code") or "")[:120],
+                "count": int(remote.get("count") or 0),
+                "namespace_count": int(remote.get("namespace_count") or 0),
+            }
+            saga["local_result"] = deepcopy(local)
+            self._req041_persist_archive_saga_locked()
+
+        config_saved = await self._save_config_if_possible()
+        if not config_saved:
+            return {
+                "ok": False, "state": "config_pending", "code": "group_reset_config_save_failed",
+                "operation_id": clean_operation, **local, "scoped_cleanup": remote,
+            }
+        async with self._data_lock:
+            self._req041_group_reset_sagas_locked().pop(clean_operation, None)
+            if not self.data.get("_req041_group_reset_sagas"):
+                self.data.pop("_req041_group_reset_sagas", None)
+            self._req041_persist_archive_saga_locked()
+        return {
+            "ok": True, "state": "completed", "code": "group_reset_completed",
+            "operation_id": clean_operation, "config_saved": True,
+            **local, "scoped_cleanup": remote,
+        }
+
+    async def _req041_resume_confirmed_group_resets(self) -> dict[str, Any]:
+        async with self._data_lock:
+            pending = [
+                deepcopy(saga) for saga in self._req041_group_reset_sagas_locked().values()
+                if isinstance(saga, dict) and saga.get("state") in {"confirmed", "config_pending"}
+            ][:32]
+        completed = 0
+        errors: list[str] = []
+        for saga in pending:
+            result = await self.reset_group_scoped_data(
+                str(saga.get("group_id") or ""),
+                operation_id=str(saga.get("operation_id") or ""),
+            )
+            if result.get("ok") and result.get("state") == "completed":
+                completed += 1
+            else:
+                errors.append(str(result.get("code") or "group_reset_resume_failed")[:120])
+        return {
+            "ok": not errors,
+            "code": "group_reset_resume_complete" if not errors else "group_reset_resume_degraded",
+            "pending": len(pending), "completed": completed,
+            "error_codes": sorted(set(errors))[:16],
+        }
+
     def _req041_persist_archive_saga_locked(self) -> None:
         """Durably persist a destructive saga before any cross-store write."""
         active_persona = str(self._active_persona_scope() or "")
@@ -5082,6 +5283,10 @@ class PrivateCompanionPlugin(
                 "ok": True, "code": "person_purge_resume_not_required",
                 "pending": 0, "completed": 0, "error_codes": [],
             }
+            group_reset_resume: dict[str, Any] = {
+                "ok": True, "code": "group_reset_resume_not_required",
+                "pending": 0, "completed": 0, "error_codes": [],
+            }
             if remote.get("ok") and bridge is not None:
                 self.req041_scoped_projection_sync = ScopedProjectionSynchronizer(
                     read=lambda namespace, **kwargs: self._memory_companion_read_scoped_record(
@@ -5099,6 +5304,9 @@ class PrivateCompanionPlugin(
                     tombstone_identity_scopes=lambda namespace, **kwargs: self._memory_companion_tombstone_scoped_identity_scopes(
                         bridge, namespace, **kwargs
                     ),
+                    erase_group_scopes=lambda namespace, **kwargs: self._memory_companion_erase_scoped_group_scopes(
+                        bridge, namespace, **kwargs
+                    ),
                     migration_epoch=epoch,
                     policy_version=policy,
                 )
@@ -5108,25 +5316,29 @@ class PrivateCompanionPlugin(
                 purge_resumer = getattr(self, "_req041_resume_confirmed_person_purges", None)
                 if archive_resume.get("ok") and callable(purge_resumer):
                     purge_resume = await purge_resumer()
-                if archive_resume.get("ok") and purge_resume.get("ok"):
+                group_resumer = getattr(self, "_req041_resume_confirmed_group_resets", None)
+                if archive_resume.get("ok") and purge_resume.get("ok") and callable(group_resumer):
+                    group_reset_resume = await group_resumer()
+                if archive_resume.get("ok") and purge_resume.get("ok") and group_reset_resume.get("ok"):
                     scoped_result = await self._req041_sync_scoped_now()
                 else:
                     scoped_result = {
-                        "ok": False, "code": "person_archive_resume_degraded", "scopes": [],
+                        "ok": False, "code": "lifecycle_resume_degraded", "scopes": [],
                     }
             self.req041_migration_status = {
                 "required": True,
-                "state": "active" if remote.get("ok") and archive_resume.get("ok") and purge_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok" else (
+                "state": "active" if remote.get("ok") and archive_resume.get("ok") and purge_resume.get("ok") and group_reset_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok" else (
                     "paused" if status.get("state") == "paused" else "degraded"
                 ),
                 "code": (
                     "migration_shadow_active"
-                    if remote.get("ok") and archive_resume.get("ok") and purge_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok"
+                    if remote.get("ok") and archive_resume.get("ok") and purge_resume.get("ok") and group_reset_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok"
                     else str(
                         backfill_result.get("code") if not backfill_result.get("ok")
                         else replay_result.get("error_code") if replay_result.get("status") == "paused"
                         else archive_resume.get("code") if not archive_resume.get("ok")
                         else purge_resume.get("code") if not purge_resume.get("ok")
+                        else group_reset_resume.get("code") if not group_reset_resume.get("ok")
                         else scoped_result.get("code") if remote.get("ok") and not scoped_result.get("ok")
                         else remote.get("code") or "migration_degraded"
                     )[:120]
@@ -5140,6 +5352,7 @@ class PrivateCompanionPlugin(
                 "scoped": scoped_result,
                 "archive_resume": archive_resume,
                 "purge_resume": purge_resume,
+                "group_reset_resume": group_reset_resume,
             }
         except Exception as exc:
             status = coordinator.status()

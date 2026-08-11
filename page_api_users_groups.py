@@ -1273,6 +1273,30 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         if not group_id:
             return self._error("缺少 group_id")
         try:
+            resetter = getattr(self.plugin, "reset_group_scoped_data", None)
+            if callable(resetter):
+                reset_result = await resetter(group_id)
+                if not reset_result.get("ok"):
+                    return self._error(str(reset_result.get("code") or "群聊分域清理失败"))
+                if reset_result.get("state") != "not_required":
+                    message_parts = []
+                    if reset_result.get("removed_group"):
+                        message_parts.append("已删除群聊观测")
+                    if reset_result.get("removed_whitelist") or reset_result.get("removed_blacklist"):
+                        message_parts.append("已移出群聊名单")
+                    if reset_result.get("removed_expression_scope"):
+                        message_parts.append("已清理表达学习范围")
+                    return self._ok({
+                        "group_id": group_id,
+                        "removed_group": bool(reset_result.get("removed_group")),
+                        "removed_whitelist": bool(reset_result.get("removed_whitelist")),
+                        "removed_blacklist": bool(reset_result.get("removed_blacklist")),
+                        "removed_expression_scope": bool(reset_result.get("removed_expression_scope")),
+                        "config_saved": bool(reset_result.get("config_saved")),
+                        "scoped_cleanup": reset_result.get("scoped_cleanup") or {},
+                        "operation_id": str(reset_result.get("operation_id") or ""),
+                        "message": "，".join(message_parts) if message_parts else "没有找到可删除的群聊记录",
+                    })
             async with self.plugin._data_lock:
                 groups = self.plugin.data.get("groups")
                 if not isinstance(groups, dict):
@@ -1343,6 +1367,9 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     "removed_blacklist": removed_blacklist,
                     "removed_expression_scope": removed_expression_scope,
                     "config_saved": config_saved,
+                    "scoped_cleanup": {
+                        "ok": True, "code": "scoped_group_erase_not_required", "count": 0,
+                    },
                     "message": message,
                 }
             )

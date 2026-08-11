@@ -883,6 +883,13 @@ class MemoryCompanionAdapterMixin:
             bridge, "tombstone_scoped_identity_scopes", namespace, **kwargs
         )
 
+    def _memory_companion_erase_scoped_group_scopes(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "erase_scoped_group_scopes", namespace, **kwargs
+        )
+
     async def _memory_companion_read_profile(
         self,
         profile: str,

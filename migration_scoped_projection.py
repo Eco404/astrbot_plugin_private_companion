@@ -113,6 +113,7 @@ class ScopedProjectionSynchronizer:
         migration_epoch: str,
         policy_version: str,
         tombstone_identity_scopes: Callable[..., dict[str, Any]] | None = None,
+        erase_group_scopes: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self._read = read
         self._list = list_records
@@ -121,6 +122,7 @@ class ScopedProjectionSynchronizer:
         self._tombstone_identity_scopes = (
             tombstone_identity_scopes if callable(tombstone_identity_scopes) else None
         )
+        self._erase_group_scopes = erase_group_scopes if callable(erase_group_scopes) else None
         self.migration_epoch = str(migration_epoch or "").strip()
         self.policy_version = str(policy_version or "").strip()
         if not self.migration_epoch or not self.policy_version:
@@ -304,10 +306,25 @@ class ScopedProjectionSynchronizer:
                 subject_people.setdefault(subject, set()).add(person_id)
 
         groups = snapshot.get("groups") if isinstance(snapshot.get("groups"), dict) else {}
+        reset_sagas = (
+            snapshot.get("_req041_group_reset_sagas")
+            if isinstance(snapshot.get("_req041_group_reset_sagas"), dict)
+            else {}
+        )
+        resetting_groups = {
+            str(saga.get("group_id") or "").strip()
+            for saga in reset_sagas.values()
+            if isinstance(saga, dict)
+            and saga.get("state") in {"confirmed", "config_pending"}
+            and str(saga.get("persona_id") or "").strip() == persona_id
+        }
         for legacy_group_key, raw_group in groups.items():
             if not isinstance(raw_group, dict):
                 continue
-            group_id = _group_ref(persona_id, raw_group.get("group_id") or legacy_group_key)
+            raw_group_id = str(raw_group.get("group_id") or legacy_group_key or "").strip()
+            if raw_group_id in resetting_groups:
+                continue
+            group_id = _group_ref(persona_id, raw_group_id)
             if not group_id:
                 continue
             shared = self._context(kind="group_shared", persona_id=persona_id, group_id=group_id)
@@ -485,6 +502,29 @@ class ScopedProjectionSynchronizer:
         )
         if not isinstance(result, dict):
             return {"ok": False, "state": "degraded", "code": "scoped_identity_archive_response_invalid"}
+        return result
+
+    def erase_group_scopes(
+        self,
+        context: NamespaceContext,
+        *,
+        operation_id: str,
+        reason_code: str = "group_reset",
+    ) -> dict[str, Any]:
+        self.mark_dirty()
+        if (
+            context.kind != "group_shared" or context.identity_id or not context.group_id
+            or context.migration_epoch != self.migration_epoch
+            or context.policy_version != self.policy_version or context.errors()
+        ):
+            return {"ok": False, "state": "rejected", "code": "scoped_group_erase_context_invalid"}
+        if self._erase_group_scopes is None:
+            return {"ok": False, "state": "degraded", "code": "scoped_group_erase_unavailable"}
+        result = self._erase_group_scopes(
+            context, operation_id=operation_id, reason_code=reason_code,
+        )
+        if not isinstance(result, dict):
+            return {"ok": False, "state": "degraded", "code": "scoped_group_erase_response_invalid"}
         return result
 
 

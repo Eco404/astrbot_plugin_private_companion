@@ -20,6 +20,7 @@ def _identity(subject: str = "10001") -> dict[str, str]:
 class _Remote:
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str, str], dict] = {}
+        self.group_erase_calls: list[tuple[str, str]] = []
 
     @staticmethod
     def _key(context, kind: str, record_id: str) -> tuple[str, str, str]:
@@ -70,6 +71,13 @@ class _Remote:
             "count": removed, "namespace_count": len(scopes), "reason_code": reason_code,
         }
 
+    def erase_group_scopes(self, context, *, operation_id: str, reason_code: str):
+        self.group_erase_calls.append((context.cache_scope(), operation_id))
+        return {
+            "ok": True, "state": "ready", "code": "group_scopes_erased",
+            "count": 2, "namespace_count": 2, "reason_code": reason_code,
+        }
+
 
 class ScopedProjectionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -78,6 +86,7 @@ class ScopedProjectionTests(unittest.TestCase):
             read=self.remote.read, list_records=self.remote.list_records,
             upsert=self.remote.upsert, tombstone=self.remote.tombstone,
             tombstone_identity_scopes=self.remote.tombstone_identity_scopes,
+            erase_group_scopes=self.remote.erase_group_scopes,
             migration_epoch="epoch-1", policy_version="req041-v1",
         )
         self.snapshot: dict = {}
@@ -192,6 +201,29 @@ class ScopedProjectionTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertEqual("scoped_projection_not_reconciled", self.sync.read_projection(private)["code"])
+
+    def test_group_reset_invalidates_cache_and_pending_saga_blocks_reprojection(self) -> None:
+        records, _ = self.sync.build_records(self.snapshot)
+        shared = next(item.context for item in records if item.context.kind == "group_shared")
+        self.assertTrue(self.sync.sync_snapshot(self.snapshot)["ok"])
+        self.assertTrue(self.sync.read_projection(shared)["ok"])
+        result = self.sync.erase_group_scopes(
+            shared, operation_id="group-reset-1", reason_code="group_reset",
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual("scoped_projection_not_reconciled", self.sync.read_projection(shared)["code"])
+        self.assertEqual(1, len(self.remote.group_erase_calls))
+
+        pending = deepcopy(self.snapshot)
+        pending["_req041_group_reset_sagas"] = {
+            "group-reset-1": {
+                "state": "confirmed", "group_id": "group-a", "persona_id": "default",
+            }
+        }
+        pending_records, _ = self.sync.build_records(pending)
+        serialized = str([item.payload for item in pending_records])
+        self.assertNotIn("group-a-sentinel", serialized)
+        self.assertIn("group-b-sentinel", serialized)
 
 
 if __name__ == "__main__":
