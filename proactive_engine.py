@@ -4092,6 +4092,18 @@ class ProactiveEngineMixin:
             self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=now, delay_hours=(1.5, 4.5))
             return False, social_relay_note
+        if (
+            not is_troubleshooting
+            and not due_timer_active
+            and planned_source != "timer"
+            and self._is_greeting_reason(planned_reason)
+            and self._recent_activity_satisfies_greeting(user, planned_reason, now=now)
+        ):
+            self._mark_greeting_satisfied_by_inbound(user, planned_reason)
+            self._mark_planned_candidate_status(user, "blocked", "用户在该问候窗口附近已经自然聊过")
+            self._clear_pending_proactive_plan(user)
+            self._schedule_next_proactive(user, now=now, delay_hours=(2, 5))
+            return False, "用户在该问候窗口附近已经自然聊过"
         suppressed_raw = user.get("greetings_suppressed_by_inbound", [])
         suppressed_greetings: set[str] = set()
         if isinstance(suppressed_raw, list):
@@ -4100,7 +4112,6 @@ class ProactiveEngineMixin:
             not is_troubleshooting
             and planned_reason in suppressed_greetings
             and self._is_greeting_reason(planned_reason)
-            and not self._is_initial_wakeup_greeting(user)
             and planned_source != "timer"
             and not due_timer_active
         ):
@@ -4133,7 +4144,6 @@ class ProactiveEngineMixin:
         if (
             not is_troubleshooting
             and not due_timer_active
-            and not self._is_initial_wakeup_greeting(user)
             and not self._post_goodnight_group_activity_is_fresh(user, now=now)
             and now - recent_activity_at < idle_minutes * 60
         ):
@@ -6548,23 +6558,6 @@ class ProactiveEngineMixin:
             return 7 * 60 + 45, 10 * 60 + 20
         return start, end
 
-    def _is_initial_wakeup_greeting(
-        self,
-        user: dict[str, Any] | None,
-        *,
-        reason: str = "",
-        source: str = "",
-    ) -> bool:
-        if not isinstance(user, dict):
-            return False
-        normalized_reason = self._normalize_legacy_proactive_text(
-            reason or user.get("planned_proactive_reason"), limit=40
-        )
-        normalized_source = self._normalize_legacy_proactive_text(
-            source or user.get("planned_proactive_source"), limit=40
-        )
-        return normalized_reason == "morning_greeting" and normalized_source == "daily_greeting"
-
     def _pick_daily_greeting_event(
         self, user: dict[str, Any], now: float | None = None
     ) -> dict[str, Any] | None:
@@ -6579,11 +6572,8 @@ class ProactiveEngineMixin:
         if not isinstance(suppressed, list):
             suppressed = []
             user["greetings_suppressed_by_inbound"] = suppressed
-        elif "morning_greeting" in suppressed:
-            suppressed[:] = [reason for reason in suppressed if reason != "morning_greeting"]
         now_dt = self._environment_fromtimestamp(now or _now_ts())
         minute = now_dt.hour * 60 + now_dt.minute
-        recent_activity_at = self._latest_private_user_activity_ts(user)
         morning_start, morning_end = self._morning_greeting_window()
         anchors = [
             (
@@ -6598,7 +6588,7 @@ class ProactiveEngineMixin:
         today = now_dt.date()
         candidates = []
         for reason, window, why, topic in anchors:
-            if self._greeting_was_sent_today(user, reason) or (reason != "morning_greeting" and reason in suppressed):
+            if self._greeting_was_sent_today(user, reason) or reason in suppressed:
                 continue
             start, end = self._parse_window_minutes(window)
             if start is None or end is None:
@@ -6607,11 +6597,7 @@ class ProactiveEngineMixin:
                 bucket = self._proactive_daypart_bucket_for_minute(start)
                 if _safe_int(self._today_proactive_daypart_counts(user).get(bucket), 0, 0) >= 1:
                     continue
-            if (
-                reason != "morning_greeting"
-                and recent_activity_at > 0
-                and self._inbound_satisfies_greeting(reason, now=recent_activity_at)
-            ):
+            if self._recent_activity_satisfies_greeting(user, reason, now=now_dt.timestamp()):
                 if reason not in suppressed:
                     suppressed.append(reason)
                 continue
@@ -7368,6 +7354,33 @@ class ProactiveEngineMixin:
                 return True
         return False
 
+    def _recent_activity_satisfies_greeting(
+        self,
+        user: dict[str, Any],
+        reason: str,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        if not self._is_greeting_reason(reason):
+            return False
+        check_now = _now_ts() if now is None else now
+        recent_at = self._latest_private_user_activity_ts(user)
+        if recent_at <= 0:
+            return False
+        check_dt = self._environment_fromtimestamp(check_now)
+        recent_dt = self._environment_fromtimestamp(recent_at)
+        if check_dt.date() != recent_dt.date():
+            return False
+        if self._inbound_satisfies_greeting(reason, now=recent_at):
+            return True
+        idle_seconds = self._effective_user_greeting_idle_minutes(user) * 60
+        elapsed = check_now - recent_at
+        return (
+            idle_seconds > 0
+            and 0 <= elapsed < idle_seconds
+            and self._is_now_in_reason_window(reason, now=check_now)
+        )
+
     def _proactive_text_greeting_reason(self, text: str, *, now: float | None = None) -> str:
         cleaned = _single_line(text, 260)
         if not cleaned:
@@ -7478,7 +7491,7 @@ class ProactiveEngineMixin:
         if not isinstance(user, dict) or activity_ts <= 0:
             return False
         changed = False
-        for reason in ("noon_greeting", "evening_greeting"):
+        for reason in ("morning_greeting", "noon_greeting", "evening_greeting"):
             if self._inbound_satisfies_greeting(reason, now=activity_ts):
                 changed = self._mark_greeting_satisfied_by_inbound(user, reason) or changed
         return changed
@@ -8191,7 +8204,7 @@ class ProactiveEngineMixin:
             if not (comfyui_available or sdgen_available or self._external_photo_available()):
                 return False
         photo_limit = self._effective_user_photo_daily_limit(user)
-        if user and photo_limit <= 0:
+        if user and photo_limit == 0:
             return False
         if user and photo_limit > 0:
             today = _today_key()

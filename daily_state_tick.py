@@ -366,7 +366,6 @@ class DailyStateTickMixin:
                 not is_troubleshooting_for_send
                 and not due_timer_id
                 and self._is_greeting_reason(current_reason)
-                and not self._is_initial_wakeup_greeting(current_for_mark)
             ):
                 suppressed_greetings = current_for_mark.get("greetings_suppressed_by_inbound", [])
                 if isinstance(suppressed_greetings, list) and current_reason in suppressed_greetings:
@@ -378,7 +377,11 @@ class DailyStateTickMixin:
                 recent_user_at = self._latest_user_activity_ts(current_for_mark)
                 idle_limit = self._effective_user_greeting_idle_minutes(current_for_mark) * 60
                 if recent_user_at > 0 and _now_ts() - recent_user_at < idle_limit:
-                    if self._inbound_satisfies_greeting(current_reason, now=recent_user_at):
+                    if self._recent_activity_satisfies_greeting(
+                        current_for_mark,
+                        current_reason,
+                        now=_now_ts(),
+                    ):
                         self._mark_greeting_satisfied_by_inbound(current_for_mark, current_reason)
                         self._clear_pending_proactive_plan(current_for_mark)
                     else:

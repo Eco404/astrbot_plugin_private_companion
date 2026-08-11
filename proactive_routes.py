@@ -341,7 +341,17 @@ class RitualRoute(ProactiveRoute):
         return f"{self.key}:{date_key}:{slot}"
 
     def render_directive(self, *, quota_tier: int) -> str:
-        return "严格贴合今天和当前时段，像熟悉的人顺手出现；一句仪式表达只完成一个目的，不扩写成查岗或连续盘问。"
+        return (
+            "严格贴合今天、当前时段和最近对话，像熟悉的人顺手出现；"
+            "近期已经聊过时必须承接现有语境，不得声称还没问候过，也不得重新举行早安、午安或晚安仪式；"
+            "一句仪式表达只完成一个目的，不扩写成查岗或连续盘问。"
+        )
+
+    def review_directive(self) -> str:
+        return (
+            "检查仪式是否仍符合当前时段和会话进度；若用户已经在该时段自然出现，"
+            "正文不得以‘还没说早安/午安/晚安’另起话题，无法自然承接当前对话时应丢弃。"
+        )
 
     def settlement(self, plan: dict[str, Any]) -> dict[str, Any]:
         reason = _text(plan.get("reason"), 40)

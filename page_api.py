@@ -9741,6 +9741,13 @@ class PrivateCompanionPageApi(
 
         photo_enabled = bool(getattr(self.plugin, "enable_photo_text_action", False))
         photo_available = bool(getattr(self.plugin, "_photo_text_available", lambda *args, **kwargs: False)())
+        proactive_scope_limit_getter = getattr(self.plugin, "_photo_generation_scope_daily_limit", None)
+        proactive_scope_limit = (
+            self._int(proactive_scope_limit_getter("proactive"), -1, -1, 100)
+            if callable(proactive_scope_limit_getter)
+            else self._int(getattr(self.plugin, "photo_generation_proactive_max_daily", -1), -1, -1, 100)
+        )
+        proactive_scope_unlimited = proactive_scope_limit < 0
         photo_blocked = [
             item for item in proactive_candidates.get("items", [])
             if "photo_text" in str(item.get("action") or "") and str(item.get("status") or "") == "blocked"
@@ -9752,7 +9759,26 @@ class PrivateCompanionPageApi(
         if not photo_enabled:
             add("warn", "主动带图功能未开启", "enable_photo_text_action 关闭时不会生成主动图片。", "到功能开关打开主动拍照/生图", "config", "image.proactive_disabled")
         elif not photo_available:
-            add("warn", "主动带图后端或额度不可用", "生图后端不可用、每日生图额度用完，或当前对象不允许 photo_text。", "检查生图后端、每日生图上限和用户关系角色", "modules", "image.proactive_backend_unavailable")
+            if proactive_scope_unlimited:
+                add(
+                    "warn",
+                    "主动带图当前不可用",
+                    "Bot 主动生图范围额度为不限量（-1）；当前阻塞不是该范围额度耗尽，"
+                    "请继续检查生图后端、Token 软限额、每用户主动带图上限或用户关系角色。",
+                    "检查生图后端、Token 预算和“每日主动带图上限”",
+                    "modules",
+                    "image.proactive_backend_unavailable",
+                )
+            else:
+                add(
+                    "warn",
+                    "主动带图当前不可用",
+                    f"Bot 主动生图范围额度为 {proactive_scope_limit}；可能是范围额度已用完、生图后端不可用，"
+                    "Token 软限额暂缓，或当前对象不允许 photo_text。",
+                    "检查生图后端、每日生图上限和用户关系角色",
+                    "modules",
+                    "image.proactive_backend_unavailable",
+                )
         elif photo_blocked_abnormal:
             add("warn", "近期带图候选被拦截", self._single_line(photo_blocked_abnormal[0].get("note"), 160) or "最近 photo_text 候选没有进入发送。", "到主动页筛选 photo_text", "proactive", "image.proactive_candidate_blocked")
         else:

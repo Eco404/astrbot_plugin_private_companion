@@ -134,7 +134,7 @@ class MorningGreetingScheduleTests(unittest.TestCase):
         self.assertIsNone(self.harness._daily_plan_morning_wake_minutes())
         self.assertEqual(self.harness._morning_greeting_window(), (7 * 60 + 45, 10 * 60 + 20))
 
-    def test_activity_does_not_suppress_morning_but_still_suppresses_noon(self) -> None:
+    def test_activity_suppresses_matching_morning_and_noon_windows(self) -> None:
         user = {}
 
         changed_morning = self.harness._mark_greetings_satisfied_by_recent_activity(
@@ -144,17 +144,32 @@ class MorningGreetingScheduleTests(unittest.TestCase):
             user, activity_ts=self._timestamp(12, 15)
         )
 
-        self.assertFalse(changed_morning)
+        self.assertTrue(changed_morning)
         self.assertTrue(changed_noon)
-        self.assertNotIn("morning_greeting", user["greetings_suppressed_by_inbound"])
+        self.assertIn("morning_greeting", user["greetings_suppressed_by_inbound"])
         self.assertIn("noon_greeting", user["greetings_suppressed_by_inbound"])
 
-    def test_recent_activity_does_not_remove_daily_wakeup_candidate(self) -> None:
+    def test_recent_activity_removes_daily_wakeup_candidate(self) -> None:
+        now = self._timestamp(7, 55)
+        user = {
+            "last_activity_at": self._timestamp(7, 30),
+            "greetings_sent": ["noon_greeting", "evening_greeting"],
+            "greetings_suppressed_by_inbound": [],
+            "sent_today": 0,
+        }
+
+        with patch("astrbot_plugin_private_companion.proactive_engine.random.uniform", side_effect=lambda low, _high: low):
+            event = self.harness._pick_daily_greeting_event(user, now=now)
+
+        self.assertIsNone(event)
+        self.assertIn("morning_greeting", user["greetings_suppressed_by_inbound"])
+
+    def test_activity_before_wakeup_window_keeps_daily_wakeup_candidate(self) -> None:
         now = self._timestamp(7, 36)
         user = {
-            "last_activity_at": now,
+            "last_activity_at": self._timestamp(6, 0),
             "greetings_sent": [],
-            "greetings_suppressed_by_inbound": ["morning_greeting"],
+            "greetings_suppressed_by_inbound": [],
             "sent_today": 0,
         }
 
@@ -163,8 +178,23 @@ class MorningGreetingScheduleTests(unittest.TestCase):
 
         self.assertIsNotNone(event)
         self.assertEqual(event["reason"], "morning_greeting")
-        self.assertEqual(event["window"], "07:38-08:25")
-        self.assertNotIn("morning_greeting", user["greetings_suppressed_by_inbound"])
+
+    def test_same_clock_time_from_previous_day_does_not_suppress_greeting(self) -> None:
+        now = self._timestamp(7, 55)
+        user = {
+            "last_activity_at": now - 24 * 3600,
+            "greetings_sent": [],
+            "greetings_suppressed_by_inbound": [],
+            "sent_today": 0,
+        }
+
+        self.assertFalse(
+            self.harness._recent_activity_satisfies_greeting(
+                user,
+                "morning_greeting",
+                now=now,
+            )
+        )
 
     def test_other_proactive_messages_do_not_consume_morning_greeting(self) -> None:
         now = self._timestamp(7, 36)
@@ -287,7 +317,7 @@ class MorningGreetingScheduleTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(user["morning_greeting_sent_at"], sent_at)
 
-    def test_inbound_cancellation_preserves_only_initial_wakeup_greeting(self) -> None:
+    def test_inbound_cancellation_removes_all_conflicting_greetings(self) -> None:
         now = self._timestamp(7, 50)
         wakeup = {
             "planned_proactive_reason": "morning_greeting",
@@ -300,21 +330,21 @@ class MorningGreetingScheduleTests(unittest.TestCase):
             "next_proactive_at": now + 300,
         }
 
-        self.assertFalse(self.harness._cancel_inbound_conflicting_greeting(wakeup, now=now))
-        self.assertGreater(wakeup["next_proactive_at"], 0)
+        self.assertTrue(self.harness._cancel_inbound_conflicting_greeting(wakeup, now=now))
+        self.assertEqual(wakeup["next_proactive_at"], 0)
         self.assertTrue(self.harness._cancel_inbound_conflicting_greeting(followup, now=now))
         self.assertEqual(followup["next_proactive_at"], 0)
 
-    def test_final_recent_chat_guard_allows_initial_wakeup_only(self) -> None:
+    def test_final_recent_chat_guard_blocks_wakeup_and_followup_greetings(self) -> None:
         now = self._timestamp(7, 50)
         wakeup = {
             "planned_proactive_reason": "morning_greeting",
             "planned_proactive_source": "daily_greeting",
-            "last_activity_at": now - 60,
+            "last_activity_at": now - 27 * 60,
         }
         followup = dict(wakeup, planned_proactive_source="pending_followup")
 
-        self.assertEqual(self.harness._recent_chat_proactive_guard_reason(wakeup, now=now), "")
+        self.assertTrue(self.harness._recent_chat_proactive_guard_reason(wakeup, now=now))
         self.assertTrue(self.harness._recent_chat_proactive_guard_reason(followup, now=now))
 
     def test_promoted_wakeup_candidate_keeps_daily_greeting_source(self) -> None:
@@ -335,7 +365,6 @@ class MorningGreetingScheduleTests(unittest.TestCase):
         self.assertEqual(user["planned_proactive_reason"], "morning_greeting")
         self.assertEqual(user["planned_proactive_source"], "daily_greeting")
         self.assertEqual(user["planned_candidate_id"], "")
-        self.assertTrue(self.harness._is_initial_wakeup_greeting(user))
 
     def test_quiet_hours_covering_wakeup_window_prevent_direct_promotion(self) -> None:
         self.harness.quiet_hours = "23:00-10:30"

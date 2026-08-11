@@ -16555,8 +16555,6 @@ class DailyStateMixin(DailyStateTickMixin):
             return ""
         check_now = _now_ts() if now is None else now
         reason = normalize_legacy_tag_text(planned_reason or user.get("planned_proactive_reason"))
-        if self._is_initial_wakeup_greeting(user, reason=reason, source=source):
-            return ""
         idle_minutes = (
             self._effective_user_greeting_idle_minutes(user)
             if self._is_greeting_reason(reason)

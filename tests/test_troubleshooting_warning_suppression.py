@@ -145,6 +145,33 @@ class TroubleshootingWarningSuppressionTests(unittest.TestCase):
         self.assertEqual(tts_check["warning_type"], diagnostics[0]["warning_type"])
         self.assertEqual(sqlite_check["warning_type"], self.api._troubleshooting_semantic_warning_type("sqlite.wal"))
 
+    def test_unlimited_photo_scope_is_not_reported_as_unavailable_quota(self) -> None:
+        self.api.plugin = SimpleNamespace(
+            max_daily_messages=2,
+            enable_photo_text_action=True,
+            photo_generation_proactive_max_daily=-1,
+            _photo_generation_scope_daily_limit=lambda _scope: -1,
+            _photo_text_available=lambda *args, **kwargs: False,
+        )
+
+        checks = self.api._troubleshooting_checks(
+            data={},
+            users={"1": {"enabled": True}},
+            groups={},
+            diagnostics=[],
+            proactive_tasks={"runtime": {"healthy": True, "last_tick_started": "刚刚"}},
+            proactive_candidates={"items": []},
+            token_stats={"budget": {}, "recent": []},
+            cache={"private_image_vision": {"enabled": False}},
+            tts={"enhancement_enabled": False},
+            sqlite_status={"items": []},
+        )
+
+        photo_check = next(item for item in checks if item["warning_code"] == "image.proactive_backend_unavailable")
+        self.assertEqual("主动带图当前不可用", photo_check["title"])
+        self.assertIn("不限量（-1）", photo_check["text"])
+        self.assertIn("不是该范围额度耗尽", photo_check["text"])
+
 
 class TroubleshootingWarningSuppressionEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:

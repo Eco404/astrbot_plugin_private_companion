@@ -8331,9 +8331,8 @@ Character-specific bottom-line baseline (reference only; empty means use the con
             and self._habit_topic_is_greeting_like(planned_topic)
             and self._recent_activity_suppresses_habit_greeting(user, now=now, topic=planned_topic)
         )
-        preserve_wakeup_greeting = self._is_initial_wakeup_greeting(user)
         if (
-            (self._inbound_satisfies_greeting(planned_reason, now=now) and not preserve_wakeup_greeting)
+            self._inbound_satisfies_greeting(planned_reason, now=now)
             or planned_is_greeting_habit
         ):
             next_at = _safe_float(user.get("next_proactive_at"), 0)

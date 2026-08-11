@@ -187,6 +187,13 @@ class ProactivePhotoAvailabilityTests(unittest.TestCase):
         self.harness.scope_used = 2
         self.assertFalse(self.harness._photo_text_available(self.user))
 
+    def test_negative_effective_user_limit_is_unlimited(self) -> None:
+        self.harness.scope_limit = -1
+        self.harness.legacy_limit = -1
+
+        self.assertTrue(self.harness._photo_text_available(self.user))
+        self.assertTrue(self.harness._photo_text_planning_available(self.user))
+
 
 class ProactivePhotoAttemptTests(unittest.IsolatedAsyncioTestCase):
     user = {"user_id": "owner", "umo": "default:FriendMessage:owner"}
