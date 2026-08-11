@@ -20,7 +20,7 @@ import time
 from typing import Any, Iterator, Sequence
 
 
-PHASES = ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")
+PHASES = ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9")
 STATES = frozenset({"active", "degraded", "paused", "replaying", "verified"})
 IDENTITY_STATES = frozenset({"pending", "backfilling", "reconciling", "new_read", "legacy_read", "error"})
 FORMAL_ASSURANCE = frozenset({"verified", "explicit_linked"})
@@ -283,6 +283,50 @@ class MigrationCoordinator:
     def _new_epoch(self) -> str:
         stamp = datetime.fromtimestamp(float(self._clock()), timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         return f"req041-{stamp}-{secrets.token_hex(6)}"
+
+    def initialize_fresh_runtime(
+        self,
+        *,
+        policy_version: str,
+        target_schema_version: str,
+        companion_version: str,
+        memory_version: str,
+    ) -> dict[str, Any]:
+        """Create the durable scoped control plane for an install with no legacy source."""
+        policy = _token(policy_version, 64)
+        versions = [
+            _token(target_schema_version, 64),
+            _token(companion_version, 32),
+            _token(memory_version, 32),
+        ]
+        if not policy or not all(versions):
+            raise MigrationPreflightError("fresh_runtime_version_invalid")
+        source_schema = "req041-fresh-v1"
+        now = float(self._clock())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM migration_control WHERE singleton=1"
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    """INSERT INTO migration_control(
+                       singleton,migration_epoch,policy_version,phase,state,checkpoint,
+                       source_schema_version,target_schema_version,companion_version,memory_version,
+                       backup_manifest,backup_manifest_hash,compatibility_json,error_code,created_at,updated_at)
+                       VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        self._new_epoch(), policy, "S9", "active", "fresh_runtime_initialized",
+                        source_schema, versions[0], versions[1], versions[2],
+                        "", "", "{}", "", now, now,
+                    ),
+                )
+            elif (
+                row["source_schema_version"] != source_schema
+                or row["policy_version"] != policy
+                or row["target_schema_version"] != versions[0]
+            ):
+                raise MigrationStateConflict("fresh_runtime_contract_conflict")
+        return self.status()
 
     def start_or_resume(
         self,

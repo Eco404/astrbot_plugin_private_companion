@@ -152,6 +152,7 @@ from .migration_dual_write import MigrationDualWriteProducer
 from .migration_replay import MigrationReplayWorker
 from .migration_read_router import MigrationRelationshipReadRouter
 from .migration_source_inspector import inspect_migration_sources
+from .relationship_account_store import RelationshipAccountStore
 from .identity_namespace import AssurancePolicy, NamespaceContext
 from .migration_scoped_projection import (
     ScopedProjectionSynchronizer,
@@ -2051,7 +2052,9 @@ class PrivateCompanionPlugin(
             }
             synchronizer = getattr(self, "req041_scoped_projection_sync", None)
             migration_status = getattr(self, "req041_migration_status", None)
-            if synchronizer is None and isinstance(migration_status, dict) and migration_status.get("required"):
+            if synchronizer is None and isinstance(migration_status, dict) and (
+                migration_status.get("required") or migration_status.get("scoped_required")
+            ):
                 return {"ok": False, "message": "人格分域清理暂不可用", "code": "scoped_persona_erase_unavailable"}
             if synchronizer is not None:
                 persona_ref = scoped_persona_ref(pid)
@@ -4642,7 +4645,7 @@ class PrivateCompanionPlugin(
         synchronizer = getattr(self, "req041_scoped_projection_sync", None)
         if synchronizer is None:
             status = getattr(self, "req041_migration_status", None)
-            if isinstance(status, dict) and status.get("required"):
+            if isinstance(status, dict) and (status.get("required") or status.get("scoped_required")):
                 return {"ok": False, "state": "degraded", "code": "scoped_group_erase_unavailable"}
             return {"ok": True, "state": "not_required", "code": "scoped_group_erase_not_required", "count": 0}
         raw_group = _single_line(group_id, 160)
@@ -4670,7 +4673,7 @@ class PrivateCompanionPlugin(
         synchronizer = getattr(self, "req041_scoped_projection_sync", None)
         if synchronizer is None:
             status = getattr(self, "req041_migration_status", None)
-            if isinstance(status, dict) and status.get("required"):
+            if isinstance(status, dict) and (status.get("required") or status.get("scoped_required")):
                 return {"ok": False, "state": "degraded", "code": "scoped_persona_erase_unavailable"}
             return {"ok": True, "state": "not_required", "code": "scoped_persona_erase_not_required"}
         persona_ref = scoped_persona_ref(persona_id)
@@ -4751,7 +4754,7 @@ class PrivateCompanionPlugin(
         synchronizer = getattr(self, "req041_scoped_projection_sync", None)
         if synchronizer is None:
             status = getattr(self, "req041_migration_status", None)
-            if isinstance(status, dict) and status.get("required"):
+            if isinstance(status, dict) and (status.get("required") or status.get("scoped_required")):
                 return {"ok": False, "state": "degraded", "code": "scoped_group_erase_unavailable"}
             return {"ok": True, "state": "not_required", "code": "scoped_group_erase_not_required"}
 
@@ -5381,11 +5384,6 @@ class PrivateCompanionPlugin(
             }
             return
         sources = self._req041_migration_source_files()
-        if not sources and not coordinator.status():
-            self.req041_migration_status = {
-                "required": False, "state": "not_required", "code": "new_install_no_legacy_source"
-            }
-            return
         presence_getter = getattr(self, "_memory_companion_presence", None)
         try:
             presence = presence_getter() if callable(presence_getter) else {}
@@ -5394,6 +5392,20 @@ class PrivateCompanionPlugin(
         memory_version = _single_line((presence or {}).get("version"), 32) or "not-detected"
         companion_version = _single_line((getattr(self, "plugin_identity", {}) or {}).get("version"), 32) or "unknown"
         try:
+            current_status = coordinator.status()
+            is_fresh_runtime = current_status.get("source_schema_version") == "req041-fresh-v1"
+            if not sources and not current_status:
+                current_status = await asyncio.to_thread(
+                    coordinator.initialize_fresh_runtime,
+                    policy_version="req041-v1",
+                    target_schema_version="req041-v1",
+                    companion_version=companion_version,
+                    memory_version=memory_version,
+                )
+                is_fresh_runtime = True
+            if is_fresh_runtime:
+                await self._req041_initialize_fresh_scoped_runtime(current_status)
+                return
             async with self._data_lock:
                 source_inventory = await asyncio.to_thread(
                     inspect_migration_sources,
@@ -5660,6 +5672,117 @@ class PrivateCompanionPlugin(
                 "[PrivateCompanion] REQ-041 自动迁移启动失败，继续使用官方 legacy 路径: %s",
                 _single_line(exc, 160),
             )
+
+    async def _req041_initialize_fresh_scoped_runtime(
+        self,
+        status: dict[str, Any],
+    ) -> None:
+        """Bring a source-free install directly into the normal scoped runtime."""
+        coordinator = self.req041_migration_coordinator
+        outbox = self.req041_migration_outbox
+        epoch = _single_line(status.get("migration_epoch"), 128)
+        policy = _single_line(status.get("policy_version"), 64)
+        if not epoch or not policy:
+            raise RuntimeError("fresh_runtime_contract_invalid")
+        await asyncio.to_thread(outbox.begin_epoch, epoch, policy_version=policy)
+        relationship_store = RelationshipAccountStore(
+            Path(self.data_dir) / "req041_relationship.db",
+            active_migration_epoch=epoch,
+        )
+        self.req041_relationship_store = relationship_store
+        self.req041_dual_write_producer = MigrationDualWriteProducer(
+            outbox=outbox,
+            coordinator=coordinator,
+            migration_epoch=epoch,
+            policy_version=policy,
+            on_enqueued=self._req041_schedule_replay,
+        )
+        replay_worker = MigrationReplayWorker(
+            outbox=outbox,
+            coordinator=coordinator,
+            relationship_store=relationship_store,
+            registry=self._active_unified_person_registry(),
+            registry_resolver=self._req041_registry_for_person,
+            legacy_relationship_resolver=self._req041_legacy_relationship_state,
+            legacy_pending_resolver=self._req041_resolve_legacy_pending_for_person,
+            enable_gap_recovery=True,
+            migration_epoch=epoch,
+            policy_version=policy,
+        )
+        self.req041_migration_replay = replay_worker
+        await asyncio.to_thread(outbox.set_epoch_state, epoch, "active", checkpoint="fresh_runtime_active")
+        replay_result = await asyncio.to_thread(replay_worker.run_batch)
+        self.req041_relationship_read_router = MigrationRelationshipReadRouter(
+            coordinator=coordinator,
+            relationship_store=relationship_store,
+            registry_resolver=self._req041_registry_for_person,
+            migration_epoch=epoch,
+            policy_version=policy,
+        )
+
+        remote = {"ok": False, "state": "degraded", "code": "memory_bridge_unavailable"}
+        bridge_getter = getattr(self, "_memory_companion_bridge", None)
+        bridge = bridge_getter() if callable(bridge_getter) else None
+        binder = getattr(self, "_memory_companion_bind_namespace_epoch", None)
+        if bridge is not None and callable(binder):
+            remote = binder(
+                bridge,
+                operation_id=f"req041-bind-{epoch}",
+                migration_epoch=epoch,
+                policy_version=policy,
+            )
+        scoped_result: dict[str, Any] = {
+            "ok": False, "code": "namespace_scoped_api_not_bound", "scopes": []
+        }
+        if remote.get("ok") and bridge is not None:
+            self.req041_scoped_projection_sync = ScopedProjectionSynchronizer(
+                read=lambda namespace, **kwargs: self._memory_companion_read_scoped_record(
+                    bridge, namespace, **kwargs
+                ),
+                list_records=lambda namespace, **kwargs: self._memory_companion_list_scoped_records(
+                    bridge, namespace, **kwargs
+                ),
+                upsert=lambda namespace, **kwargs: self._memory_companion_upsert_scoped_record(
+                    bridge, namespace, **kwargs
+                ),
+                tombstone=lambda namespace, **kwargs: self._memory_companion_tombstone_scoped_record(
+                    bridge, namespace, **kwargs
+                ),
+                tombstone_identity_scopes=lambda namespace, **kwargs: self._memory_companion_tombstone_scoped_identity_scopes(
+                    bridge, namespace, **kwargs
+                ),
+                erase_group_scopes=lambda namespace, **kwargs: self._memory_companion_erase_scoped_group_scopes(
+                    bridge, namespace, **kwargs
+                ),
+                erase_persona_scopes=lambda namespace, **kwargs: self._memory_companion_erase_scoped_persona_scopes(
+                    bridge, namespace, **kwargs
+                ),
+                migration_epoch=epoch,
+                policy_version=policy,
+            )
+            scoped_result = await self._req041_sync_scoped_now()
+        ready = bool(
+            remote.get("ok")
+            and scoped_result.get("ok")
+            and replay_result.get("status") == "ok"
+        )
+        self.req041_migration_status = {
+            "required": False,
+            "scoped_required": True,
+            "state": "active" if ready else "degraded",
+            "code": "fresh_scoped_runtime_active" if ready else str(
+                replay_result.get("error_code")
+                if replay_result.get("status") != "ok"
+                else scoped_result.get("code") if remote.get("ok")
+                else remote.get("code") or "fresh_scoped_runtime_degraded"
+            )[:120],
+            "phase": "S9",
+            "memory_bound": bool(remote.get("ok")),
+            "checkpoint": status.get("checkpoint", "fresh_runtime_initialized"),
+            "dual_write": "capturing",
+            "s5": replay_result,
+            "scoped": scoped_result,
+        }
 
     async def initialize(self):
         self._repair_private_companion_handler_bindings()

@@ -3389,6 +3389,25 @@ class UserMemoryMixin:
         memory["items"] = deduped[: self.max_companion_memory_items]
         memory["updated_at"] = item["created_at"]
 
+    def _req041_private_memory_write_allowed(self, user: dict[str, Any]) -> bool:
+        """Fail closed for managed installs unless this user resolves to a formal private scope."""
+        if not isinstance(user, dict):
+            return False
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        status = getattr(self, "req041_migration_status", None)
+        scoped_required = isinstance(status, dict) and bool(
+            status.get("required") or status.get("scoped_required")
+        )
+        if synchronizer is None:
+            return not scoped_required
+        resolver = getattr(self, "_req041_scoped_context_for_user", None)
+        if not callable(resolver):
+            return False
+        try:
+            return resolver(user, kind="private", purpose="memory_write") is not None
+        except Exception:
+            return False
+
     def _format_expression_profile_for_prompt(
         self,
         user: dict[str, Any],
@@ -8486,6 +8505,8 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         now = _now_ts()
         async with self._data_lock:
             user = dict(self._get_user(user_id))
+        if not self._req041_private_memory_write_allowed(user):
+            return
         if now < _safe_float(user.get("dialogue_episode_retry_after"), 0):
             return
         count = _safe_int(user.get("episode_message_count"), 0, 0)
@@ -8643,6 +8664,9 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         expression_batch_key = hashlib.sha1(raw_text.encode("utf-8")).hexdigest()[:20]
         async with self._data_lock:
             current = self._get_user(user_id)
+            if not self._req041_private_memory_write_allowed(current):
+                current["dialogue_episode_running_at"] = 0
+                return
             episodes = current.setdefault("dialogue_episodes", [])
             if not isinstance(episodes, list):
                 episodes = []
@@ -9034,6 +9058,8 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         now = _now_ts()
         async with self._data_lock:
             user = dict(self._get_user(user_id))
+        if not self._req041_private_memory_write_allowed(user):
+            return
         if now < _safe_float(user.get("companion_memory_retry_after"), 0):
             return
         last_at = _safe_float(user.get("last_memory_refresh_at"), 0)
@@ -9117,6 +9143,9 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                 normalized[key] = []
         async with self._data_lock:
             current = self._get_user(user_id)
+            if not self._req041_private_memory_write_allowed(current):
+                current["companion_memory_running_at"] = 0
+                return
             current_memory = current.setdefault("companion_memory", {})
             if isinstance(current_memory, dict):
                 current_memory["profile"] = normalized

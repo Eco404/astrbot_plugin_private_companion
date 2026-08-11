@@ -786,14 +786,17 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     _safe_int(expression_feedback.get("updated_rules"), 0, 0),
                     _safe_int(expression_feedback.get("demoted_rules"), 0, 0),
                 )
-            user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
+            private_memory_write_allowed = self._req041_private_memory_write_allowed(user)
+            if private_memory_write_allowed:
+                user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
             if self._expression_private_learning_source_enabled(user, user_id):
                 self._update_expression_profile_from_message(user, safe_text or text)
                 self._refresh_expression_voice_profile()
-            self._update_companion_memory_from_message(user, safe_text or text)
-            self._update_open_loops_from_message(user, safe_text or text)
-            self._update_action_preferences_from_message(user, safe_text or text)
-            self._update_user_behavior_habits_from_message(user, safe_text or text)
+            if private_memory_write_allowed:
+                self._update_companion_memory_from_message(user, safe_text or text)
+                self._update_open_loops_from_message(user, safe_text or text)
+                self._update_action_preferences_from_message(user, safe_text or text)
+                self._update_user_behavior_habits_from_message(user, safe_text or text)
             if (
                 not rest_silence_early_block
                 and (

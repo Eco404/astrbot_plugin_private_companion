@@ -23,6 +23,7 @@ from migration_read_router import MigrationRelationshipReadRouter
 from migration_source_inspector import inspect_migration_sources
 from migration_scoped_projection import ScopedProjectionSynchronizer
 from migration_scoped_projection import scoped_group_ref, scoped_persona_ref
+from relationship_account_store import RelationshipAccountStore
 from identity_namespace import NamespaceContext
 from tests.test_req041_scoped_projection import _Remote
 from relationship_ledger import normalize_relationship_positive_stage_cap_key
@@ -56,6 +57,7 @@ def _load_methods(*names: str) -> dict[str, Any]:
         "MigrationRelationshipReadRouter": MigrationRelationshipReadRouter,
         "inspect_migration_sources": inspect_migration_sources,
         "ScopedProjectionSynchronizer": ScopedProjectionSynchronizer,
+        "RelationshipAccountStore": RelationshipAccountStore,
         "NamespaceContext": NamespaceContext,
         "scoped_group_ref": scoped_group_ref,
         "scoped_persona_ref": scoped_persona_ref,
@@ -85,6 +87,7 @@ METHODS = _load_methods(
     "_req041_scoped_group_read_view",
     "_req041_replay_finished",
     "_req041_run_replay_batch",
+    "_req041_initialize_fresh_scoped_runtime",
     "_req041_initialize_automatic_migration",
 )
 
@@ -103,6 +106,7 @@ class Harness:
     _req041_scoped_group_read_view = METHODS["_req041_scoped_group_read_view"]
     _req041_replay_finished = METHODS["_req041_replay_finished"]
     _req041_run_replay_batch = METHODS["_req041_run_replay_batch"]
+    _req041_initialize_fresh_scoped_runtime = METHODS["_req041_initialize_fresh_scoped_runtime"]
     _req041_initialize_automatic_migration = METHODS["_req041_initialize_automatic_migration"]
 
 
@@ -178,12 +182,77 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         )
         return remote
 
-    async def test_new_install_without_source_requires_no_action(self) -> None:
+    async def test_new_install_without_source_initializes_stable_scoped_runtime(self) -> None:
         host = self._host(source=False)
         await host._req041_initialize_automatic_migration()
-        self.assertEqual("not_required", host.req041_migration_status["state"])
+        first = host.req041_migration_coordinator.status()
+        self.assertEqual("active", host.req041_migration_status["state"])
         self.assertFalse(host.req041_migration_status["required"])
-        self.assertEqual({}, host.req041_migration_coordinator.status())
+        self.assertTrue(host.req041_migration_status["scoped_required"])
+        self.assertEqual("S9", first["phase"])
+        self.assertEqual("req041-fresh-v1", first["source_schema_version"])
+        self.assertEqual("fresh_scoped_runtime_active", host.req041_migration_status["code"])
+        self.assertFalse((self.data_dir / "req041_backups").exists())
+        self.assertIsInstance(host.req041_relationship_store, RelationshipAccountStore)
+        self.assertIsInstance(host.req041_dual_write_producer, MigrationDualWriteProducer)
+        self.assertIsInstance(host.req041_migration_replay, MigrationReplayWorker)
+        self.assertIsInstance(host.req041_relationship_read_router, MigrationRelationshipReadRouter)
+        self.assertIsInstance(host.req041_scoped_projection_sync, ScopedProjectionSynchronizer)
+
+        Path(host.data_file).write_text('{"users":{}}', encoding="utf-8")
+        restarted = self._host(source=True)
+        await restarted._req041_initialize_automatic_migration()
+        second = restarted.req041_migration_coordinator.status()
+        self.assertEqual(first["migration_epoch"], second["migration_epoch"])
+        self.assertEqual("S9", second["phase"])
+        self.assertFalse((self.data_dir / "req041_backups").exists())
+
+    async def test_new_install_without_memory_is_explicitly_scoped_degraded(self) -> None:
+        host = self._host(source=False, bind=False)
+        await host._req041_initialize_automatic_migration()
+        self.assertEqual("degraded", host.req041_migration_status["state"])
+        self.assertEqual("memory_bridge_unavailable", host.req041_migration_status["code"])
+        self.assertTrue(host.req041_migration_status["scoped_required"])
+        self.assertIsNone(getattr(host, "req041_scoped_projection_sync", None))
+        self.assertFalse((self.data_dir / "req041_backups").exists())
+
+    async def test_new_install_first_exact_identity_reaches_new_read_through_outbox(self) -> None:
+        host = self._host(source=False)
+        await host._req041_initialize_automatic_migration()
+        registry = UnifiedPersonRegistry(host.data)
+        created = registry.create_or_link(
+            {
+                "companion_instance_id": "astrbot_plugin_private_companion",
+                "bot_account_id": "onebot:bot-1",
+                "adapter_instance_id": "onebot:default",
+                "subject_namespace": "onebot:user",
+                "platform_subject_id": "10001",
+            },
+            profile={"display_name": "Fresh User"},
+            operation_id="fresh-first-exact-event",
+        )
+        host.data["users"]["10001"] = {
+            "user_id": "10001",
+            "identity_subject_id": "10001",
+            "unified_person_id": created["person_id"],
+            "relationship_role": "friend",
+            "relationship_mode": "normal",
+            "relationship_score": 0,
+        }
+        emitted = host.req041_dual_write_producer.emit_identity_change(
+            registry=registry,
+            result=created,
+            action="create",
+            operation_id="fresh-first-exact-event",
+        )
+        self.assertEqual("enqueued", emitted["status"])
+        await asyncio.wait_for(host._req041_replay_task, timeout=2.0)
+        identity_status = host.req041_migration_coordinator.identity_status(created["person_id"])
+        self.assertEqual("new", identity_status["read_generation"])
+        self.assertEqual("new_read", identity_status["state"])
+        self.assertEqual([], host.req041_migration_outbox.pending(
+            host.req041_migration_coordinator.status()["migration_epoch"]
+        ))
 
     async def test_existing_install_auto_backs_up_captures_policy_starts_outbox_and_binds_memory(self) -> None:
         host = self._host()

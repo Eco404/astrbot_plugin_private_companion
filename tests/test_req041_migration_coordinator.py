@@ -73,6 +73,37 @@ class MigrationCoordinatorTests(unittest.TestCase):
         self.assertEqual(epoch, resumed["migration_epoch"])
         self.assertTrue(reopened.verify_backup())
 
+    def test_fresh_runtime_is_durable_without_creating_a_migration_backup(self) -> None:
+        self.source.unlink()
+        status = self.coordinator.initialize_fresh_runtime(
+            policy_version="req041-v1",
+            target_schema_version="req041-v1",
+            companion_version="6.1.2",
+            memory_version="1.7.2",
+        )
+        self.assertEqual("S9", status["phase"])
+        self.assertEqual("active", status["state"])
+        self.assertEqual("req041-fresh-v1", status["source_schema_version"])
+        self.assertEqual("", status["backup_manifest"])
+        self.assertFalse(self.coordinator.verify_backup())
+        self.assertFalse((self.data_dir / "req041_backups").exists())
+
+        reopened = MigrationCoordinator(self.data_dir, clock=lambda: self.clock[0] + 60)
+        resumed = reopened.initialize_fresh_runtime(
+            policy_version="req041-v1",
+            target_schema_version="req041-v1",
+            companion_version="6.1.2",
+            memory_version="1.7.2",
+        )
+        self.assertEqual(status["migration_epoch"], resumed["migration_epoch"])
+        with self.assertRaisesRegex(MigrationStateConflict, "fresh_runtime_contract_conflict"):
+            reopened.initialize_fresh_runtime(
+                policy_version="req041-v2",
+                target_schema_version="req041-v1",
+                companion_version="6.1.2",
+                memory_version="1.7.2",
+            )
+
     def test_resume_rejects_tampered_backup_and_changed_source_set(self) -> None:
         status = self._start()
         manifest = self.data_dir / status["backup_manifest"]
