@@ -239,6 +239,26 @@ class FinalResponsePersistenceCoordinator:
         async with ledger.finalize_lock:
             if ledger.finalized:
                 return True
+            # A tool-calling turn streams intermediate assistant text before
+            # the agent finishes. That intermediate send must not be treated
+            # as the final reply: on_agent_done has not run yet, so there is
+            # no official assistant message to stage, and finalising here
+            # would lock the ledger before the real reply arrives. The real
+            # reply's _no_save flag would then never be cleared and the core
+            # would drop it from history. Wait for the final reply's own
+            # after_message_sent instead. A stopped event is the exception:
+            # no final reply is coming, so this send IS the reply (the
+            # direct-send-and-stop path).
+            if (
+                getattr(event, "_private_companion_official_assistant_message", None)
+                is None
+            ):
+                try:
+                    stopped = bool(event.is_stopped())
+                except Exception:
+                    stopped = False
+                if not stopped:
+                    return False
             current = asyncio.current_task()
             pending = [
                 task
