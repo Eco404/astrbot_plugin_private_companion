@@ -54,6 +54,22 @@ class _Remote:
         self.rows.pop(key)
         return {"ok": True, "code": "tombstoned"}
 
+    def tombstone_identity_scopes(self, context, *, operation_id: str, reason_code: str):
+        removed = 0
+        scopes: set[str] = set()
+        for key in list(self.rows):
+            scope, _kind, _record_id = key
+            if scope == context.cache_scope() or (
+                context.identity_id and context.identity_id in str(self.rows[key].get("identity_id") or "")
+            ):
+                self.rows.pop(key)
+                removed += 1
+                scopes.add(scope)
+        return {
+            "ok": True, "state": "ready", "code": "identity_scopes_tombstoned",
+            "count": removed, "namespace_count": len(scopes), "reason_code": reason_code,
+        }
+
 
 class ScopedProjectionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -61,6 +77,7 @@ class ScopedProjectionTests(unittest.TestCase):
         self.sync = ScopedProjectionSynchronizer(
             read=self.remote.read, list_records=self.remote.list_records,
             upsert=self.remote.upsert, tombstone=self.remote.tombstone,
+            tombstone_identity_scopes=self.remote.tombstone_identity_scopes,
             migration_epoch="epoch-1", policy_version="req041-v1",
         )
         self.snapshot: dict = {}
@@ -164,6 +181,17 @@ class ScopedProjectionTests(unittest.TestCase):
         duplicated["users"]["duplicate"] = deepcopy(duplicated["users"]["10001"])
         records, _ = self.sync.build_records(duplicated)
         self.assertFalse(any(item.context.kind == "private" for item in records))
+
+    def test_archive_invalidates_ready_cache_before_remote_delete(self) -> None:
+        records, _ = self.sync.build_records(self.snapshot)
+        private = next(item.context for item in records if item.context.kind == "private")
+        self.assertTrue(self.sync.sync_snapshot(self.snapshot)["ok"])
+        self.assertTrue(self.sync.read_projection(private)["ok"])
+        result = self.sync.archive_identity_scopes(
+            private, operation_id="archive-1", reason_code="person_archive",
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual("scoped_projection_not_reconciled", self.sync.read_projection(private)["code"])
 
 
 if __name__ == "__main__":

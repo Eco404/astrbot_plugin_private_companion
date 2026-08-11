@@ -28,7 +28,7 @@ CAPABILITY_VERSION = "1.0"
 RECORD_KINDS = ("evidence", "memory", "profile_fact", "rule", "summary")
 API_METHODS = (
     "list_scoped_records", "read_scoped_record", "tombstone_scoped_namespace",
-    "tombstone_scoped_record", "upsert_scoped_record",
+    "tombstone_scoped_identity_scopes", "tombstone_scoped_record", "upsert_scoped_record",
 )
 CAPABILITY_FIELDS = (
     "capability_name", "capability_version", "namespace_contract_name", "namespace_contract_version",

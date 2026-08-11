@@ -232,6 +232,32 @@ class RelationshipAccountStoreTests(unittest.TestCase):
                 relationship_mode="owner_exclusive",
             )
 
+    def test_person_archive_purges_relationship_account_and_prevents_resurrection(self) -> None:
+        self._create(score=100)
+        self.store.apply_event(
+            _context(), event_id="before-archive", actor="private_pipeline",
+            reason_code="support", delta=2,
+        )
+        result = self.store.tombstone_account(
+            _context(), operation_id="archive-account-1", reason_code="person_archive",
+        )
+        self.assertEqual("relationship_account_tombstoned", result["code"])
+        self.assertEqual(1, result["event_count"])
+        self.assertGreaterEqual(result["change_count"], 1)
+        self.assertEqual(result, self.store.tombstone_account(
+            _context(), operation_id="archive-account-1", reason_code="person_archive",
+        ))
+        with self.assertRaisesRegex(Exception, "relationship_account_missing"):
+            self.store.account(_context())
+        with self.assertRaisesRegex(RelationshipConflict, "relationship_account_tombstoned"):
+            self.store.create_account(
+                _context(), operation_id="recreate-after-archive", actor="administrator", score=100,
+            )
+        with self.assertRaisesRegex(RelationshipConflict, "relationship_account_tombstoned"):
+            self.store.tombstone_account(
+                _context(), operation_id="archive-account-2", reason_code="person_archive",
+            )
+
     def test_concurrent_distinct_events_are_settled_atomically(self) -> None:
         self._create()
 

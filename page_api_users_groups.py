@@ -212,6 +212,36 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             logger.warning("[PrivateCompanionPage] 统一身份解绑失败: %s", exc)
             return self._error("统一身份解绑失败")
 
+    async def archive_unified_person(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return self._error("请求体必须是 JSON 对象")
+        person_id = self._single_line(payload.get("person_id"), 80)
+        operation_id = self._single_line(payload.get("operation_id"), 120)
+        confirmation_token = self._single_line(payload.get("confirmation_token"), 80)
+        if "dry_run" in payload and type(payload.get("dry_run")) is not bool:
+            return self._error("dry_run 必须是 JSON 布尔值")
+        dry_run = payload.get("dry_run", True)
+        if not person_id or not operation_id:
+            return self._error("person_id 和 operation_id 均为必填项")
+        if not dry_run and not confirmation_token:
+            return self._error("执行归档必须提交预览返回的 confirmation_token")
+        archive = getattr(self.plugin, "archive_unified_person", None)
+        if not callable(archive):
+            return self._error("人物归档服务不可用")
+        try:
+            result = await archive(
+                person_id, operation_id=operation_id,
+                confirmation_token=confirmation_token, dry_run=dry_run,
+                actor_id="page_administrator", reason_code="person_archive",
+            )
+            if not result.get("ok"):
+                return self._error(str(result.get("code") or "人物归档失败"))
+            return self._ok({"result": result})
+        except Exception as exc:
+            logger.warning("[PrivateCompanionPage] 人物归档失败: %s", exc)
+            return self._error("人物归档失败")
+
     async def preview_unified_identity_merge(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True)
         if not isinstance(payload, dict):

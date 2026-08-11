@@ -4398,6 +4398,174 @@ class PrivateCompanionPlugin(
         )
         return context if not context.errors() else None
 
+    def _req041_scoped_private_context_for_person(
+        self,
+        person_id: str,
+        *,
+        purpose: str = "memory_write",
+    ) -> NamespaceContext | None:
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            return None
+        clean_person = _single_line(person_id, 80)
+        if not clean_person:
+            return None
+        registry = self._active_unified_person_registry()
+        resolution = registry.formal_namespace_for_person(
+            clean_person, kind="private",
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+            purpose=purpose,
+        )
+        raw = resolution.get("context") if isinstance(resolution, dict) else None
+        if not resolution.get("ok") or not isinstance(raw, dict):
+            return None
+        context = NamespaceContext(
+            kind="private", persona_id=scoped_persona_ref(self._active_persona_scope()),
+            identity_id=clean_person, group_id="",
+            assurance=str(raw.get("assurance") or "verified"), profile_status="active",
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        return context if not context.errors() else None
+
+    def _req041_persist_archive_saga_locked(self) -> None:
+        """Durably persist a destructive saga before any cross-store write."""
+        active_persona = str(self._active_persona_scope() or "")
+        if bool(getattr(self, "enable_multi_persona_mode", False)) and active_persona:
+            self._write_persona_data_snapshot_sync(active_persona, deepcopy(self.data))
+            return
+        self._save_data_now_sync()
+
+    async def archive_unified_person(
+        self,
+        person_id: str,
+        *,
+        operation_id: str,
+        confirmation_token: str = "",
+        dry_run: bool = True,
+        actor_id: str = "page_administrator",
+        reason_code: str = "person_archive",
+    ) -> dict[str, Any]:
+        """Run the request-bound, resumable person archive saga."""
+        clean_person = _single_line(person_id, 80)
+        clean_operation = _single_line(operation_id, 120)
+        if not clean_person or not clean_operation or type(dry_run) is not bool:
+            return {"ok": False, "state": "invalid", "code": "invalid_request"}
+        async with self._data_lock:
+            registry = self._active_unified_person_registry()
+            prepared = registry.prepare_person_archive(
+                clean_person, operation_id=clean_operation,
+                actor_id=actor_id, reason_code=reason_code,
+            )
+            if not prepared.get("ok"):
+                return prepared
+            self._req041_persist_archive_saga_locked()
+            if prepared.get("code") == "person_archived":
+                return prepared
+            if dry_run:
+                return prepared
+            if not confirmation_token or confirmation_token != prepared.get("confirmation_token"):
+                return {
+                    "ok": False, "state": "prepared", "code": "archive_confirmation_mismatch",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            confirmed = registry.confirm_person_archive(
+                clean_person, clean_operation, confirmation_token,
+                actor_id=actor_id, reason_code=reason_code,
+            )
+            if not confirmed.get("ok"):
+                return confirmed
+            self._req041_persist_archive_saga_locked()
+            context = self._req041_scoped_private_context_for_person(clean_person)
+            synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+            relationship_store = getattr(self, "req041_relationship_store", None)
+            outbox = getattr(self, "req041_migration_outbox", None)
+            if context is None or synchronizer is None:
+                return {
+                    "ok": False, "state": "prepared", "code": "scoped_identity_archive_unavailable",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            if relationship_store is None or not callable(getattr(relationship_store, "tombstone_account", None)):
+                synchronizer.mark_dirty()
+                return {
+                    "ok": False, "state": "prepared", "code": "relationship_archive_unavailable",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            if outbox is None or not callable(getattr(outbox, "retire_streams", None)):
+                synchronizer.mark_dirty()
+                return {
+                    "ok": False, "state": "prepared", "code": "archive_outbox_unavailable",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            try:
+                stream_receipt = outbox.retire_streams(
+                    [f"identity:{clean_person}", f"relationship:{clean_person}"],
+                    synchronizer.migration_epoch,
+                    operation_id=f"req041-streams-{clean_operation}", reason_code=reason_code,
+                )
+            except Exception as exc:
+                synchronizer.mark_dirty()
+                return {
+                    "ok": False, "state": "prepared",
+                    "code": _single_line(exc, 120) or "archive_stream_retirement_failed",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            scoped_receipt = synchronizer.archive_identity_scopes(
+                context, operation_id=f"req041-scoped-{clean_operation}", reason_code=reason_code,
+            )
+            if not scoped_receipt.get("ok"):
+                return {
+                    "ok": False, "state": "prepared",
+                    "code": str(scoped_receipt.get("code") or "scoped_identity_archive_failed")[:120],
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            try:
+                relationship_receipt = relationship_store.tombstone_account(
+                    context, operation_id=f"req041-relationship-{clean_operation}",
+                    reason_code=reason_code, actor="administrator",
+                )
+            except Exception as exc:
+                return {
+                    "ok": False, "state": "prepared",
+                    "code": _single_line(exc, 120) or "relationship_archive_failed",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            result = registry.finalize_person_archive(
+                clean_person, clean_operation, confirmation_token,
+                scoped_receipt, relationship_receipt, stream_receipt,
+                actor_id=actor_id, reason_code=reason_code,
+            )
+            if result.get("changed"):
+                coordinator = getattr(self, "req041_migration_coordinator", None)
+                rollback = getattr(coordinator, "rollback_identity", None)
+                if callable(rollback):
+                    rollback(clean_person, reason_code="person_archived")
+                self._req041_persist_archive_saga_locked()
+            return result
+
+    async def _req041_resume_confirmed_person_archives(self) -> dict[str, Any]:
+        registry = self._active_unified_person_registry()
+        pending = registry.confirmed_person_archives(limit=32)
+        completed = 0
+        errors: list[str] = []
+        for saga in pending:
+            result = await self.archive_unified_person(
+                saga["person_id"], operation_id=saga["operation_id"],
+                confirmation_token=saga["confirmation_token"], dry_run=False,
+                actor_id=saga["actor_id"], reason_code=saga["reason_code"],
+            )
+            if result.get("ok") and result.get("code") == "person_archived":
+                completed += 1
+            else:
+                errors.append(str(result.get("code") or "person_archive_resume_failed")[:120])
+        return {
+            "ok": not errors,
+            "code": "person_archive_resume_complete" if not errors else "person_archive_resume_degraded",
+            "pending": len(pending), "completed": completed,
+            "error_codes": sorted(set(errors))[:16],
+        }
+
     def _req041_scoped_private_read_view(self, event: Any, user: dict[str, Any]) -> dict[str, Any]:
         existing = getattr(event, "req041_scoped_private_read_view", None)
         if isinstance(existing, dict):
@@ -4757,6 +4925,10 @@ class PrivateCompanionPlugin(
             scoped_result: dict[str, Any] = {
                 "ok": False, "code": "namespace_scoped_api_not_bound", "scopes": []
             }
+            archive_resume: dict[str, Any] = {
+                "ok": True, "code": "person_archive_resume_not_required",
+                "pending": 0, "completed": 0, "error_codes": [],
+            }
             if remote.get("ok") and bridge is not None:
                 self.req041_scoped_projection_sync = ScopedProjectionSynchronizer(
                     read=lambda namespace, **kwargs: self._memory_companion_read_scoped_record(
@@ -4771,21 +4943,33 @@ class PrivateCompanionPlugin(
                     tombstone=lambda namespace, **kwargs: self._memory_companion_tombstone_scoped_record(
                         bridge, namespace, **kwargs
                     ),
+                    tombstone_identity_scopes=lambda namespace, **kwargs: self._memory_companion_tombstone_scoped_identity_scopes(
+                        bridge, namespace, **kwargs
+                    ),
                     migration_epoch=epoch,
                     policy_version=policy,
                 )
-                scoped_result = await self._req041_sync_scoped_now()
+                resumer = getattr(self, "_req041_resume_confirmed_person_archives", None)
+                if callable(resumer):
+                    archive_resume = await resumer()
+                if archive_resume.get("ok"):
+                    scoped_result = await self._req041_sync_scoped_now()
+                else:
+                    scoped_result = {
+                        "ok": False, "code": "person_archive_resume_degraded", "scopes": [],
+                    }
             self.req041_migration_status = {
                 "required": True,
-                "state": "active" if remote.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok" else (
+                "state": "active" if remote.get("ok") and archive_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok" else (
                     "paused" if status.get("state") == "paused" else "degraded"
                 ),
                 "code": (
                     "migration_shadow_active"
-                    if remote.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok"
+                    if remote.get("ok") and archive_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok"
                     else str(
                         backfill_result.get("code") if not backfill_result.get("ok")
                         else replay_result.get("error_code") if replay_result.get("status") == "paused"
+                        else archive_resume.get("code") if not archive_resume.get("ok")
                         else scoped_result.get("code") if remote.get("ok") and not scoped_result.get("ok")
                         else remote.get("code") or "migration_degraded"
                     )[:120]
@@ -4797,6 +4981,7 @@ class PrivateCompanionPlugin(
                 "s5": replay_result,
                 "dual_write": "capturing",
                 "scoped": scoped_result,
+                "archive_resume": archive_resume,
             }
         except Exception as exc:
             status = coordinator.status()

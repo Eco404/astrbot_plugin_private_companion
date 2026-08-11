@@ -230,6 +230,18 @@ class RelationshipAccountStore:
                     PRIMARY KEY(operation_id, migration_epoch),
                     FOREIGN KEY(identity_id) REFERENCES relationship_accounts(identity_id)
                 );
+                CREATE TABLE IF NOT EXISTS relationship_account_tombstones (
+                    identity_id TEXT NOT NULL,
+                    migration_epoch TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    reason_code TEXT NOT NULL,
+                    last_revision INTEGER NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(identity_id,migration_epoch),
+                    UNIQUE(operation_id,migration_epoch)
+                );
                 """
             )
             connection.execute(
@@ -327,6 +339,12 @@ class RelationshipAccountStore:
         now = float(self._clock())
         stage = relationship_stage_for_score(numeric_score)["phase"]["key"]
         with self._transaction() as connection:
+            tombstone = connection.execute(
+                "SELECT operation_id FROM relationship_account_tombstones WHERE identity_id=? AND migration_epoch=?",
+                (context.identity_id, context.migration_epoch),
+            ).fetchone()
+            if tombstone is not None:
+                raise RelationshipConflict("relationship_account_tombstoned")
             previous_change = connection.execute(
                 "SELECT request_hash FROM relationship_account_changes WHERE operation_id=? AND migration_epoch=?",
                 (operation, context.migration_epoch),
@@ -361,6 +379,79 @@ class RelationshipAccountStore:
                 ),
             )
             return self._account_from_row(self._load_row(connection, context.identity_id))
+
+    def tombstone_account(
+        self,
+        context: NamespaceContext,
+        *,
+        operation_id: str,
+        reason_code: str = "person_archive",
+        actor: str = "administrator",
+    ) -> dict[str, Any]:
+        """Purge one unified relationship account and prevent resurrection."""
+        context = self._authorize(context, "relationship_write")
+        operation = _token(operation_id)
+        reason = _token(reason_code, limit=80)
+        clean_actor = _token(actor, limit=40)
+        if context.kind != "private" or not operation or not reason or clean_actor != "administrator":
+            raise RelationshipAccessDenied("relationship_account_archive_denied")
+        request_hash = hashlib.sha256(_canonical({
+            "operation": "tombstone_account",
+            "identity_id": context.identity_id,
+            "reason_code": reason,
+            "actor": clean_actor,
+            "policy_version": context.policy_version,
+        }).encode("utf-8")).hexdigest()
+        now = float(self._clock())
+        with self._transaction() as connection:
+            by_operation = connection.execute(
+                "SELECT identity_id,request_hash,result_json FROM relationship_account_tombstones WHERE operation_id=? AND migration_epoch=?",
+                (operation, context.migration_epoch),
+            ).fetchone()
+            if by_operation is not None:
+                if by_operation["identity_id"] != context.identity_id or by_operation["request_hash"] != request_hash:
+                    raise RelationshipConflict("relationship_operation_conflict")
+                return json.loads(by_operation["result_json"])
+            prior = connection.execute(
+                "SELECT operation_id,request_hash,result_json FROM relationship_account_tombstones WHERE identity_id=? AND migration_epoch=?",
+                (context.identity_id, context.migration_epoch),
+            ).fetchone()
+            if prior is not None:
+                if prior["operation_id"] != operation or prior["request_hash"] != request_hash:
+                    raise RelationshipConflict("relationship_account_tombstoned")
+                return json.loads(prior["result_json"])
+            row = connection.execute(
+                "SELECT revision FROM relationship_accounts WHERE identity_id=?", (context.identity_id,)
+            ).fetchone()
+            last_revision = int(row["revision"]) if row is not None else 0
+            event_count = int(connection.execute(
+                "SELECT COUNT(*) AS count FROM relationship_events WHERE identity_id=?",
+                (context.identity_id,),
+            ).fetchone()["count"])
+            change_count = int(connection.execute(
+                "SELECT COUNT(*) AS count FROM relationship_account_changes WHERE identity_id=?",
+                (context.identity_id,),
+            ).fetchone()["count"])
+            connection.execute("DELETE FROM relationship_events WHERE identity_id=?", (context.identity_id,))
+            connection.execute("DELETE FROM relationship_account_changes WHERE identity_id=?", (context.identity_id,))
+            connection.execute("DELETE FROM relationship_accounts WHERE identity_id=?", (context.identity_id,))
+            result = {
+                "code": "relationship_account_tombstoned" if row is not None else "relationship_account_already_empty",
+                "event_count": event_count,
+                "change_count": change_count,
+                "last_revision": last_revision,
+                "reason_code": reason,
+            }
+            connection.execute(
+                """INSERT INTO relationship_account_tombstones(
+                       identity_id,migration_epoch,operation_id,request_hash,reason_code,last_revision,result_json,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    context.identity_id, context.migration_epoch, operation, request_hash,
+                    reason, last_revision, _canonical(result), now,
+                ),
+            )
+            return result
 
     def configure_account(
         self,

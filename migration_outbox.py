@@ -184,6 +184,25 @@ class MigrationOutbox:
                     PRIMARY KEY (object_key, migration_epoch),
                     FOREIGN KEY (migration_epoch) REFERENCES migration_epochs(migration_epoch)
                 );
+                CREATE TABLE IF NOT EXISTS stream_retirement_operations (
+                    operation_id TEXT NOT NULL,
+                    migration_epoch TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(operation_id,migration_epoch),
+                    FOREIGN KEY (migration_epoch) REFERENCES migration_epochs(migration_epoch)
+                );
+                CREATE TABLE IF NOT EXISTS retired_streams (
+                    stream_key TEXT NOT NULL,
+                    migration_epoch TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    retired_revision INTEGER NOT NULL,
+                    reason_code TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(stream_key,migration_epoch),
+                    FOREIGN KEY (migration_epoch) REFERENCES migration_epochs(migration_epoch)
+                );
                 """
             )
             columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(outbox)").fetchall()}
@@ -249,6 +268,15 @@ class MigrationOutbox:
             raise StaleMigrationEpoch("migration_policy_stale")
         if row["state"] == "verified":
             raise StaleMigrationEpoch("migration_epoch_closed")
+
+    @staticmethod
+    def _ensure_stream_active(conn: sqlite3.Connection, stream: str, epoch: str) -> None:
+        retired = conn.execute(
+            "SELECT 1 FROM retired_streams WHERE stream_key=? AND migration_epoch=?",
+            (stream, epoch),
+        ).fetchone()
+        if retired is not None:
+            raise OutboxConflict("outbox_stream_retired")
 
     def enqueue(
         self,
@@ -353,6 +381,7 @@ class MigrationOutbox:
                         f"revision_gap:{existing['source_revision']}:{expected_source_revision}:{existing['source_revision']}"
                     )
                 return {"status": "duplicate", "source_revision": int(existing["source_revision"])}
+            self._ensure_stream_active(conn, stream, epoch)
             revision_row = conn.execute(
                 "SELECT revision FROM revisions WHERE stream_key=? AND migration_epoch=?",
                 (stream, epoch),
@@ -439,6 +468,7 @@ class MigrationOutbox:
                 ):
                     raise OutboxConflict("outbox_tombstone_event_conflict")
                 return {"status": "duplicate", "source_revision": int(existing["source_revision"])}
+            self._ensure_stream_active(conn, stream, epoch)
             revision_row = conn.execute(
                 "SELECT revision FROM revisions WHERE stream_key=? AND migration_epoch=?",
                 (stream, epoch),
@@ -474,6 +504,90 @@ class MigrationOutbox:
                 (object_key, epoch, next_revision, reason, now),
             )
         return {"status": "enqueued", "source_revision": next_revision}
+
+    def retire_streams(
+        self,
+        stream_keys: list[str] | tuple[str, ...],
+        migration_epoch: str,
+        *,
+        operation_id: str,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        """Atomically close reconciled streams before destructive lifecycle work."""
+        epoch = _token(migration_epoch)
+        operation = _token(operation_id)
+        reason = _token(reason_code, limit=80)
+        streams = sorted({_token(item) for item in stream_keys if _token(item)})
+        if not epoch or not operation or not reason or not 1 <= len(streams) <= 16:
+            raise OutboxError("outbox_stream_retirement_invalid")
+        request_hash = hashlib.sha256(_canonical({
+            "streams": streams, "reason_code": reason,
+        }).encode("utf-8")).hexdigest()
+        now = float(self._clock())
+        with self._transaction() as conn:
+            if conn.execute(
+                "SELECT 1 FROM migration_epochs WHERE migration_epoch=?", (epoch,)
+            ).fetchone() is None:
+                raise StaleMigrationEpoch("migration_epoch_missing")
+            prior_operation = conn.execute(
+                "SELECT request_hash,result_json FROM stream_retirement_operations WHERE operation_id=? AND migration_epoch=?",
+                (operation, epoch),
+            ).fetchone()
+            if prior_operation is not None:
+                if prior_operation["request_hash"] != request_hash:
+                    raise OutboxConflict("outbox_stream_retirement_conflict")
+                return json.loads(prior_operation["result_json"])
+            for stream in streams:
+                prior_stream = conn.execute(
+                    "SELECT operation_id FROM retired_streams WHERE stream_key=? AND migration_epoch=?",
+                    (stream, epoch),
+                ).fetchone()
+                if prior_stream is not None:
+                    raise OutboxConflict("outbox_stream_retired")
+                backlog = conn.execute(
+                    """SELECT COUNT(*) AS count FROM outbox
+                       WHERE migration_epoch=? AND stream_key=? AND state IN ('pending','failed')""",
+                    (epoch, stream),
+                ).fetchone()
+                if backlog is not None and int(backlog["count"]) != 0:
+                    raise OutboxConflict("outbox_stream_backlog")
+            revisions: dict[str, int] = {}
+            for stream in streams:
+                row = conn.execute(
+                    "SELECT revision FROM revisions WHERE stream_key=? AND migration_epoch=?",
+                    (stream, epoch),
+                ).fetchone()
+                revision = int(row["revision"]) if row is not None else 0
+                revisions[stream] = revision
+                conn.execute(
+                    """INSERT INTO retired_streams(
+                           stream_key,migration_epoch,operation_id,retired_revision,reason_code,created_at
+                       ) VALUES(?,?,?,?,?,?)""",
+                    (stream, epoch, operation, revision, reason, now),
+                )
+            result = {
+                "code": "outbox_streams_retired",
+                "stream_count": len(streams),
+                "revisions": revisions,
+                "reason_code": reason,
+            }
+            conn.execute(
+                """INSERT INTO stream_retirement_operations(
+                       operation_id,migration_epoch,request_hash,result_json,created_at
+                   ) VALUES(?,?,?,?,?)""",
+                (operation, epoch, request_hash, _canonical(result), now),
+            )
+            return result
+
+    def retired_stream(self, stream_key: str, migration_epoch: str) -> dict[str, Any]:
+        stream, epoch = _token(stream_key), _token(migration_epoch)
+        with self._connection() as conn:
+            row = conn.execute(
+                """SELECT stream_key,migration_epoch,operation_id,retired_revision,reason_code,created_at
+                   FROM retired_streams WHERE stream_key=? AND migration_epoch=?""",
+                (stream, epoch),
+            ).fetchone()
+        return dict(row) if row is not None else {}
 
     @staticmethod
     def _item(row: sqlite3.Row) -> OutboxItem:

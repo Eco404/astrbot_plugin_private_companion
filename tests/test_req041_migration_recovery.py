@@ -221,6 +221,52 @@ class MigrationOutboxTests(unittest.TestCase):
         self.assertEqual(1, self.outbox.stream_revision("identity:person-a", EPOCH))
         self.assertEqual(1, self.outbox.tombstone("identity-link:link-hash", EPOCH)["revision"])
 
+    def test_stream_retirement_requires_zero_backlog_and_blocks_new_events(self) -> None:
+        identity_kwargs = {
+            "stream_key": "identity:person-a", "event_id": "identity-event-1",
+            "namespace": _context(), "migration_epoch": EPOCH, "policy_version": POLICY,
+            "payload": {"operation": "identity_link", "identity_ref": "person-a"},
+        }
+        relationship_kwargs = {
+            "stream_key": "relationship:person-a", "event_id": "relationship-event-1",
+            "namespace": _context(), "migration_epoch": EPOCH, "policy_version": POLICY,
+            "payload": {"operation": "relationship_event", "applied_delta": 1},
+        }
+        self.outbox.enqueue_next(**identity_kwargs)
+        self.outbox.enqueue_next(**relationship_kwargs)
+        with self.assertRaisesRegex(OutboxConflict, "outbox_stream_backlog"):
+            self.outbox.retire_streams(
+                ["identity:person-a", "relationship:person-a"], EPOCH,
+                operation_id="archive-streams-1", reason_code="person_archive",
+            )
+        self.assertEqual({}, self.outbox.retired_stream("identity:person-a", EPOCH))
+        self.outbox.mark_applied("identity-event-1", EPOCH, target_revision=1)
+        self.outbox.mark_applied("relationship-event-1", EPOCH, target_revision=1)
+        retired = self.outbox.retire_streams(
+            ["relationship:person-a", "identity:person-a"], EPOCH,
+            operation_id="archive-streams-1", reason_code="person_archive",
+        )
+        self.assertEqual(2, retired["stream_count"])
+        self.assertEqual(retired, self.outbox.retire_streams(
+            ["identity:person-a", "relationship:person-a"], EPOCH,
+            operation_id="archive-streams-1", reason_code="person_archive",
+        ))
+        # A retry of an already persisted event remains idempotent.
+        self.assertEqual({"status": "duplicate", "source_revision": 1}, self.outbox.enqueue_next(**identity_kwargs))
+        with self.assertRaisesRegex(OutboxConflict, "outbox_stream_retired"):
+            self.outbox.enqueue_next(**{
+                **relationship_kwargs, "event_id": "relationship-event-after-archive",
+            })
+        reopened = MigrationOutbox(self.path)
+        self.assertEqual("person_archive", reopened.retired_stream(
+            "relationship:person-a", EPOCH,
+        )["reason_code"])
+        with self.assertRaisesRegex(OutboxConflict, "outbox_stream_retirement_conflict"):
+            reopened.retire_streams(
+                ["identity:person-a"], EPOCH,
+                operation_id="archive-streams-1", reason_code="different",
+            )
+
     def test_epoch_checkpoint_survives_restart(self) -> None:
         state = self.outbox.set_epoch_state(EPOCH, "replaying", checkpoint="identity:42")
         self.assertEqual("identity:42", state["checkpoint"])

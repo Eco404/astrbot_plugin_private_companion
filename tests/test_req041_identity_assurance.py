@@ -129,6 +129,76 @@ class IdentityAssuranceNamespaceTests(unittest.TestCase):
         )
         self.assertEqual("operation_id_conflict", conflict["code"])
 
+    def test_person_archive_requires_remote_receipt_and_is_idempotent(self) -> None:
+        created = self.registry.create_or_link(_identity("10001"), operation_id="create-1")
+        linked = self.registry.link_identity(
+            created["person_id"], _identity("10002"), operation_id="link-1",
+        )
+        prepared = self.registry.prepare_person_archive(
+            created["person_id"], operation_id="archive-1", actor_id="page_administrator",
+        )
+        self.assertTrue(prepared["ok"])
+        self.assertEqual(2, prepared["active_identity_count"])
+        self.assertEqual(prepared, self.registry.prepare_person_archive(
+            created["person_id"], operation_id="archive-1", actor_id="page_administrator",
+        ))
+        conflict = self.registry.prepare_person_archive(
+            created["person_id"], operation_id="archive-1", actor_id="different_actor",
+        )
+        self.assertEqual("operation_id_conflict", conflict["code"])
+        failed = self.registry.finalize_person_archive(
+            created["person_id"], "archive-1", prepared["confirmation_token"],
+            {"ok": False, "code": "memory_unavailable"},
+            {"code": "relationship_account_tombstoned", "last_revision": 1},
+            {"code": "outbox_streams_retired", "stream_count": 2, "revisions": {}},
+            actor_id="page_administrator",
+        )
+        self.assertEqual("archive_remote_not_confirmed", failed["code"])
+        self.assertEqual("active", self.registry.read_projection(created["person_id"])["profile_status"])
+        self.assertEqual([], self.registry.confirmed_person_archives())
+        wrong_token = self.registry.finalize_person_archive(
+            created["person_id"], "archive-1", "0" * 64,
+            {"ok": True, "code": "identity_scopes_tombstoned", "count": 4, "namespace_count": 2},
+            {"code": "relationship_account_tombstoned", "last_revision": 1},
+            {"code": "outbox_streams_retired", "stream_count": 2, "revisions": {}},
+            actor_id="page_administrator",
+        )
+        self.assertEqual("archive_confirmation_mismatch", wrong_token["code"])
+        confirmed = self.registry.confirm_person_archive(
+            created["person_id"], "archive-1", prepared["confirmation_token"],
+            actor_id="page_administrator",
+        )
+        self.assertEqual("person_archive_confirmed", confirmed["code"])
+        self.assertEqual(1, len(self.registry.confirmed_person_archives()))
+        archived = self.registry.finalize_person_archive(
+            created["person_id"], "archive-1", prepared["confirmation_token"],
+            {"ok": True, "code": "identity_scopes_tombstoned", "count": 4, "namespace_count": 2},
+            {"code": "relationship_account_tombstoned", "last_revision": 1},
+            {"code": "outbox_streams_retired", "stream_count": 2, "revisions": {}},
+            actor_id="page_administrator",
+        )
+        self.assertEqual("person_archived", archived["code"])
+        self.assertEqual(2, archived["detached_identity_count"])
+        self.assertEqual("deleted", self.registry.read_projection(created["person_id"])["profile_status"])
+        self.assertFalse(self.registry.matches_person_subject(created["person_id"], "10001"))
+        root = self.store["unified_person"]
+        self.assertEqual({}, root["identity_links"])
+        self.assertEqual({created["identity_key"], linked["identity_key"]}, set(root["detached_identity_links"]))
+        self.assertEqual([], self.registry.confirmed_person_archives())
+        self.assertEqual(archived, self.registry.finalize_person_archive(
+            created["person_id"], "archive-1", prepared["confirmation_token"],
+            {"ok": True, "code": "identity_scopes_already_empty", "count": 0, "namespace_count": 0},
+            {"code": "relationship_account_already_empty", "last_revision": 0},
+            {"code": "outbox_streams_retired", "stream_count": 2, "revisions": {}},
+            actor_id="page_administrator",
+        ))
+
+    def test_archive_prepare_rejects_corrupt_or_inactive_people(self) -> None:
+        created = self.registry.create_or_link(_identity("10001"), operation_id="create-1")
+        self.store["unified_person"]["profiles"][created["person_id"]]["identity_keys"].append("orphan")
+        corrupt = self.registry.prepare_person_archive(created["person_id"], operation_id="archive-corrupt")
+        self.assertEqual("identity_exact_link_invalid", corrupt["code"])
+
 
 if __name__ == "__main__":
     unittest.main()

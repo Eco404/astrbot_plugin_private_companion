@@ -112,11 +112,15 @@ class ScopedProjectionSynchronizer:
         tombstone: Callable[..., dict[str, Any]],
         migration_epoch: str,
         policy_version: str,
+        tombstone_identity_scopes: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self._read = read
         self._list = list_records
         self._upsert = upsert
         self._tombstone = tombstone
+        self._tombstone_identity_scopes = (
+            tombstone_identity_scopes if callable(tombstone_identity_scopes) else None
+        )
         self.migration_epoch = str(migration_epoch or "").strip()
         self.policy_version = str(policy_version or "").strip()
         if not self.migration_epoch or not self.policy_version:
@@ -455,6 +459,33 @@ class ScopedProjectionSynchronizer:
                 return {"ok": False, "code": "scoped_projection_not_reconciled", "fields": {}}
             fields = deepcopy(self._projection_cache.get(scope, {}))
         return {"ok": True, "code": "scoped_projection_read", "fields": fields}
+
+    def archive_identity_scopes(
+        self,
+        context: NamespaceContext,
+        *,
+        operation_id: str,
+        reason_code: str = "person_archive",
+    ) -> dict[str, Any]:
+        """Invalidate hot views before invoking Memory's atomic person archive."""
+        self.mark_dirty()
+        if (
+            context.kind != "private"
+            or context.group_id
+            or not context.identity_id
+            or context.migration_epoch != self.migration_epoch
+            or context.policy_version != self.policy_version
+            or context.errors()
+        ):
+            return {"ok": False, "state": "rejected", "code": "scoped_identity_archive_context_invalid"}
+        if self._tombstone_identity_scopes is None:
+            return {"ok": False, "state": "degraded", "code": "scoped_identity_archive_unavailable"}
+        result = self._tombstone_identity_scopes(
+            context, operation_id=operation_id, reason_code=reason_code,
+        )
+        if not isinstance(result, dict):
+            return {"ok": False, "state": "degraded", "code": "scoped_identity_archive_response_invalid"}
+        return result
 
 
 __all__ = [
