@@ -86,13 +86,17 @@ def scoped_approved_expression_rules(context_owner: Any) -> list[dict[str, Any]]
     """Return current-namespace rules, or ``None`` when legacy selection still owns the read.
 
     An empty list is authoritative for a reconciled namespace and therefore
-    must not fall back to the legacy cross-source aggregate.
+    must not fall back to the legacy cross-source aggregate.  The same
+    fail-closed empty result applies while an already-bound scoped namespace
+    is being reconciled after a write.
     """
-    if (
-        not isinstance(context_owner, dict)
-        or context_owner.get("req041_scoped_read_generation") != "new"
-    ):
+    if not isinstance(context_owner, dict):
         return None
+    generation = context_owner.get("req041_scoped_read_generation")
+    if generation not in {"new", "new_unavailable"}:
+        return None
+    if generation == "new_unavailable":
+        return []
     profile = context_owner.get("expression_profile")
     if not isinstance(profile, dict):
         return []

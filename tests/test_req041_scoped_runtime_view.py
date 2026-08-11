@@ -101,6 +101,10 @@ class ScopedRuntimeViewTests(unittest.TestCase):
         self.assertEqual([], scoped_approved_expression_rules({
             "req041_scoped_read_generation": "new",
         }))
+        self.assertEqual([], scoped_approved_expression_rules({
+            "req041_scoped_read_generation": "new_unavailable",
+            "expression_profile": {"learned_rules": [{"id": "stale-must-not-enter"}]},
+        }))
         rules = scoped_approved_expression_rules({
             "req041_scoped_read_generation": "new",
             "expression_profile": {
@@ -193,6 +197,21 @@ class ScopedLearningSelectionTests(unittest.TestCase):
         self.assertEqual("legacy_aggregate", result["selection_scope"])
         self.assertEqual(1, harness.legacy_reads)
 
+    def test_scoped_reconciliation_window_fails_closed_without_legacy_aggregate(self) -> None:
+        harness = _ExpressionHarness()
+        result = harness._expression_voice_selection(
+            scope="private", target_id="user-a",
+            context_owner={
+                "req041_scoped_read_generation": "new_unavailable",
+                "expression_profile": {
+                    "learned_rules": [{"id": "stale-private-a", "evidence_count": 9}],
+                },
+            },
+        )
+        self.assertEqual([], result["rules"])
+        self.assertEqual("", result["prompt"])
+        self.assertEqual(0, harness.legacy_reads)
+
 
 class _Router:
     def __init__(self) -> None:
@@ -252,6 +271,11 @@ class ConsumerWiringTests(unittest.TestCase):
         self.assertIn('profile_fact_changes["style"] = user["style"]', page)
         self.assertIn("legacy_profile_before", page)
         self.assertIn("user.pop(key, None)", page)
+
+    def test_sync_save_invalidates_scoped_projection_before_persisting(self) -> None:
+        source = (ROOT / "core_store.py").read_text(encoding="utf-8")
+        method = source[source.index("    def _save_data_sync(self):"):source.index("    def _save_data_now_sync", source.index("    def _save_data_sync(self):"))]
+        self.assertLess(method.index("_req041_schedule_scoped_sync"), method.index("_active_persona_scope"))
 
 
 if __name__ == "__main__":

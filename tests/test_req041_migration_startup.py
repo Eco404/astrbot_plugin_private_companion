@@ -536,6 +536,19 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("group-b-sentinel", str(group_view))
         self.assertNotIn("req041_scoped_read_generation", host.data["groups"]["group-a"])
 
+        host.req041_scoped_projection_sync.mark_dirty()
+        private_dirty_event = types.SimpleNamespace()
+        private_dirty = host._req041_scoped_private_read_view(private_dirty_event, relation_copy)
+        self.assertEqual("new_unavailable", private_dirty["req041_scoped_read_generation"])
+        self.assertIs(private_dirty, private_dirty_event.req041_scoped_private_read_view)
+        group_dirty_event = types.SimpleNamespace()
+        group_dirty = host._req041_scoped_group_read_view(
+            group_dirty_event, group_id="group-a", group=host.data["groups"]["group-a"],
+            sender_id="10001", relationship_user=user,
+        )
+        self.assertEqual("new_unavailable", group_dirty["req041_scoped_read_generation"])
+        self.assertIs(group_dirty, group_dirty_event.req041_scoped_group_read_view)
+
     async def test_external_sqlite_path_fails_safe_without_blocking_legacy_runtime(self) -> None:
         outside = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(outside, ignore_errors=True))

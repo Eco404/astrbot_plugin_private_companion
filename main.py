@@ -5150,6 +5150,14 @@ class PrivateCompanionPlugin(
         if synchronizer is None or context is None:
             return view
         projection = synchronizer.read_projection(context)
+        if not isinstance(projection, dict) or projection.get("ok") is not True:
+            if isinstance(view, dict):
+                view["req041_scoped_read_generation"] = "new_unavailable"
+                try:
+                    setattr(event, "req041_scoped_private_read_view", view)
+                except Exception:
+                    pass
+            return view
         view = overlay_private_runtime_view(view, projection)
         if not isinstance(view, dict) or view.get("req041_scoped_read_generation") != "new":
             return view
@@ -5189,6 +5197,13 @@ class PrivateCompanionPlugin(
         )
         if member_context is not None:
             member_projection = synchronizer.read_projection(member_context)
+        if not isinstance(shared_projection, dict) or shared_projection.get("ok") is not True:
+            view["req041_scoped_read_generation"] = "new_unavailable"
+            try:
+                setattr(event, "req041_scoped_group_read_view", view)
+            except Exception:
+                pass
+            return view
         view = overlay_group_runtime_view(
             view, shared_projection, sender_id=sender_id, member_projection=member_projection,
         )

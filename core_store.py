@@ -962,6 +962,9 @@ class CoreStoreMixin:
             raise
 
     def _save_data_sync(self):
+        scoped_scheduler = getattr(self, "_req041_schedule_scoped_sync", None)
+        if callable(scoped_scheduler):
+            scoped_scheduler()
         active_persona = str(getattr(self, "_active_persona_scope", lambda: "")() or "")
         if bool(getattr(self, "enable_multi_persona_mode", False)) and active_persona:
             try:
