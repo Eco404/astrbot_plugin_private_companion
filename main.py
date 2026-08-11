@@ -147,7 +147,7 @@ from .person_context_contract import (
     contract_self_check as person_contract_self_check,
 )
 from .unified_person_registry import UnifiedPersonRegistry
-from .migration_backfill import MigrationBackfill
+from .migration_backfill import MigrationBackfill, legacy_pending_reference
 from .migration_dual_write import MigrationDualWriteProducer
 from .migration_replay import MigrationReplayWorker
 from .migration_read_router import MigrationRelationshipReadRouter
@@ -4317,6 +4317,44 @@ class PrivateCompanionPlugin(
                 })
         return matches[0] if len(matches) == 1 else None
 
+    def _req041_resolve_legacy_pending_for_person(self, person_id: str) -> int:
+        """Resolve one S4 opaque pending row only after S5 proves exact parity."""
+        coordinator = getattr(self, "req041_migration_coordinator", None)
+        status = coordinator.status() if coordinator is not None else {}
+        epoch = _single_line(status.get("migration_epoch"), 128) if isinstance(status, dict) else ""
+        if not epoch:
+            return 0
+        scoped_stores: list[tuple[str, dict[str, Any]]] = []
+        default_data = getattr(self, "_data_default", None)
+        if not isinstance(default_data, dict):
+            default_data = self.data if isinstance(getattr(self, "data", None), dict) else None
+        if isinstance(default_data, dict):
+            scoped_stores.append(("default", default_data))
+        profiles = getattr(self, "_persona_data_profiles", {})
+        if isinstance(profiles, dict):
+            for persona_id, profile_data in profiles.items():
+                if not isinstance(profile_data, dict):
+                    continue
+                scope_hash = hashlib.sha256(str(persona_id).encode("utf-8")).hexdigest()[:24]
+                scoped_stores.append((f"persona:{scope_hash}", profile_data))
+        matches: list[tuple[str, str]] = []
+        for source_scope, store in scoped_stores:
+            registry = UnifiedPersonRegistry(store)
+            users = store.get("users") if isinstance(store.get("users"), dict) else {}
+            for legacy_key, user in users.items():
+                if not isinstance(user, dict) or user.get("unified_person_id") != person_id:
+                    continue
+                subject = _single_line(
+                    user.get("identity_subject_id") or user.get("user_id") or legacy_key, 160
+                )
+                if subject and registry.matches_person_subject(person_id, subject):
+                    matches.append((source_scope, str(legacy_key)))
+        if len(matches) != 1:
+            return 0
+        source_scope, legacy_key = matches[0]
+        reference = legacy_pending_reference(epoch, source_scope, legacy_key)
+        return int(bool(coordinator.resolve_pending(reference)))
+
     def _req041_schedule_replay(self) -> None:
         worker = getattr(self, "req041_migration_replay", None)
         if worker is None:
@@ -5227,7 +5265,7 @@ class PrivateCompanionPlugin(
                         "s5": result,
                     })
                 return
-            if int(result.get("count") or 0) >= 100:
+            if int(result.get("count") or 0) > 0 or int(result.get("recovered") or 0) > 0:
                 self._req041_replay_requested = True
 
     async def _req041_initialize_automatic_migration(self) -> None:
@@ -5365,6 +5403,7 @@ class PrivateCompanionPlugin(
                         registry=active_registry,
                         registry_resolver=self._req041_registry_for_person,
                         legacy_relationship_resolver=self._req041_legacy_relationship_state,
+                        legacy_pending_resolver=self._req041_resolve_legacy_pending_for_person,
                         enable_gap_recovery=True,
                         migration_epoch=epoch,
                         policy_version=policy,

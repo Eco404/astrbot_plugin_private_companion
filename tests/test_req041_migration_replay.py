@@ -105,6 +105,40 @@ class MigrationReplayTests(unittest.TestCase):
         self.assertEqual("reconciling", identity["state"])
         self.assertEqual(2, identity["stable_cycles"])
 
+    def test_late_identity_snapshot_creates_missing_account_and_replays_after_crash(self) -> None:
+        created = self.registry.create_or_link(_identity("late-user"), operation_id="late-create")
+        person_id = created["person_id"]
+        self.coordinator.register_identity(person_id, assurance="verified")
+        emitted = self.producer.emit_relationship_snapshot(
+            registry=self.registry,
+            user={
+                "user_id": "late-user", "unified_person_id": person_id,
+                "relationship_role": "owner", "relationship_mode": "normal",
+                "relationship_score": 87, "relationship_positive_stage_cap_key": "deeply_bonded",
+                "relationship_daily_totals": {"day": "", "positive": 0, "negative": 0},
+                "relationship_last_effective_at": 0,
+            },
+            reason_code="migration_gap_recovery",
+            source_revision=1,
+        )
+        self.assertEqual("enqueued", emitted["status"])
+        item = next(
+            pending for pending in self.outbox.pending(self.epoch)
+            if pending.stream_key == f"relationship:{person_id}"
+        )
+        context, payload = self.worker._validate_envelope(item)
+        self.worker._apply_relationship(item, context, payload)
+        self.assertEqual(87, self.relationships.account(context)["relationship_score"])
+
+        replayed = self.worker.run_batch()
+        self.assertEqual("ok", replayed["status"])
+        self.assertEqual(1, replayed["count"])
+        account = self.relationships.account(context)
+        self.assertEqual("owner", account["relationship_role"])
+        self.assertEqual("normal", account["relationship_mode"])
+        self.assertTrue(account["legacy_snapshot"])
+        self.assertEqual(1, account["revision"])
+
     def test_bad_event_proof_pauses_epoch_without_changing_target(self) -> None:
         self.outbox.enqueue_next(
             stream_key=f"relationship:{self.person_id}", event_id="bad-proof",

@@ -15,7 +15,7 @@ import unittest
 from typing import Any
 
 from migration_coordinator import MigrationCoordinator
-from migration_backfill import MigrationBackfill
+from migration_backfill import MigrationBackfill, legacy_pending_reference
 from migration_dual_write import MigrationDualWriteProducer
 from migration_outbox import MigrationOutbox
 from migration_replay import MigrationReplayWorker
@@ -49,6 +49,7 @@ def _load_methods(*names: str) -> dict[str, Any]:
         "hashlib": hashlib,
         "math": math,
         "MigrationBackfill": MigrationBackfill,
+        "legacy_pending_reference": legacy_pending_reference,
         "MigrationDualWriteProducer": MigrationDualWriteProducer,
         "MigrationReplayWorker": MigrationReplayWorker,
         "MigrationRelationshipReadRouter": MigrationRelationshipReadRouter,
@@ -72,6 +73,7 @@ METHODS = _load_methods(
     "_req041_compatibility_snapshot",
     "_req041_registry_for_person",
     "_req041_legacy_relationship_state",
+    "_req041_resolve_legacy_pending_for_person",
     "_req041_schedule_replay",
     "_req041_legacy_snapshots_locked",
     "_req041_sync_scoped_now",
@@ -89,6 +91,7 @@ class Harness:
     _req041_compatibility_snapshot = METHODS["_req041_compatibility_snapshot"]
     _req041_registry_for_person = METHODS["_req041_registry_for_person"]
     _req041_legacy_relationship_state = METHODS["_req041_legacy_relationship_state"]
+    _req041_resolve_legacy_pending_for_person = METHODS["_req041_resolve_legacy_pending_for_person"]
     _req041_schedule_replay = METHODS["_req041_schedule_replay"]
     _req041_legacy_snapshots_locked = METHODS["_req041_legacy_snapshots_locked"]
     _req041_sync_scoped_now = METHODS["_req041_sync_scoped_now"]
@@ -263,6 +266,58 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
             )
             for view in group_views
         ))
+
+    async def test_first_exact_event_claims_pending_v608_owner_and_finishes_replay(self) -> None:
+        host = self._host()
+        host.data = json.loads(Path(host.data_file).read_text(encoding="utf-8"))
+        host._data_default = host.data
+
+        await host._req041_initialize_automatic_migration()
+
+        self.assertEqual(2, host.req041_migration_coordinator.pending_summary()["total"])
+        registry = UnifiedPersonRegistry(host.data)
+        created = registry.create_or_link(
+            {
+                "companion_instance_id": "astrbot_plugin_private_companion",
+                "bot_account_id": "onebot:bot-fixture",
+                "adapter_instance_id": "onebot:fixture",
+                "subject_namespace": "onebot:user",
+                "platform_subject_id": "10001",
+            },
+            profile={"display_name": "Fixture Owner", "affinity_score": 87, "owner_mode": "owner"},
+            operation_id="fixture-first-exact-event",
+        )
+        user = host.data["users"]["10001"]
+        user["unified_person_id"] = created["person_id"]
+        emitted = host.req041_dual_write_producer.emit_identity_change(
+            registry=registry,
+            result=created,
+            action="create",
+            operation_id="fixture-first-exact-event",
+        )
+        self.assertEqual("enqueued", emitted["status"])
+        task = host._req041_replay_task
+        await asyncio.wait_for(task, timeout=2.0)
+
+        status = host.req041_migration_coordinator.identity_status(created["person_id"])
+        self.assertEqual("new", status["read_generation"])
+        self.assertGreaterEqual(status["stable_cycles"], 2)
+        self.assertEqual(1, host.req041_migration_coordinator.pending_summary()["total"])
+        context = NamespaceContext(
+            kind="private", identity_id=created["person_id"], group_id="",
+            assurance="verified", profile_status="active", policy_version="req041-v1",
+            migration_epoch=host.req041_migration_coordinator.status()["migration_epoch"],
+        )
+        account = host.req041_relationship_store.account(context)
+        self.assertEqual("owner", account["relationship_role"])
+        self.assertEqual("normal", account["relationship_mode"])
+        self.assertEqual(87, account["relationship_score"])
+        self.assertEqual([], host.req041_migration_outbox.pending(context.migration_epoch))
+
+        replayed = host.req041_migration_replay.run_batch()
+        self.assertEqual("ok", replayed["status"])
+        self.assertEqual(0, replayed["count"])
+        self.assertEqual(1, host.req041_migration_coordinator.pending_summary()["total"])
 
     async def test_v608_sqlite_store_is_detected_and_backed_up_online_without_source_mutation(self) -> None:
         host = self._host(source=False)

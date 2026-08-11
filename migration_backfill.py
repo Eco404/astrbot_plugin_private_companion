@@ -42,6 +42,11 @@ def _opaque_ref(epoch: str, source_kind: str, source_scope: str, legacy_key: Any
     return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
 
 
+def legacy_pending_reference(epoch: str, source_scope: str, legacy_key: Any) -> str:
+    """Rebuild the opaque S4 pending key without exposing the legacy identity."""
+    return _opaque_ref(epoch, "legacy_user", source_scope, legacy_key)
+
+
 def _token(value: Any, limit: int = 128) -> str:
     if not isinstance(value, str):
         return ""
@@ -164,7 +169,7 @@ class MigrationBackfill:
 
     def _pending(self, legacy_key: Any, reason: str, source_scope: str) -> None:
         self.coordinator.record_pending(
-            _opaque_ref(self.migration_epoch, "legacy_user", source_scope, legacy_key),
+            legacy_pending_reference(self.migration_epoch, source_scope, legacy_key),
             source_kind="legacy_user",
             reason_code=reason,
         )
@@ -355,7 +360,7 @@ class MigrationBackfill:
                 else:
                     migrated += 1
                 self.coordinator.resolve_pending(
-                    _opaque_ref(self.migration_epoch, "legacy_user", scope, legacy_key)
+                    legacy_pending_reference(self.migration_epoch, scope, legacy_key)
                 )
             except RelationshipConflict:
                 self._pending(legacy_key, "relationship_snapshot_conflict", scope)
@@ -381,4 +386,4 @@ class MigrationBackfill:
         }
 
 
-__all__ = ["MigrationBackfill"]
+__all__ = ["MigrationBackfill", "legacy_pending_reference"]

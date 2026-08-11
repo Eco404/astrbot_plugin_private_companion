@@ -36,6 +36,7 @@ class MigrationReplayWorker:
         registry: UnifiedPersonRegistry,
         registry_resolver: Any = None,
         legacy_relationship_resolver: Any = None,
+        legacy_pending_resolver: Any = None,
         enable_gap_recovery: bool = False,
         migration_epoch: str,
         policy_version: str,
@@ -48,6 +49,10 @@ class MigrationReplayWorker:
         self.legacy_relationship_resolver = (
             legacy_relationship_resolver if callable(legacy_relationship_resolver) else None
         )
+        self.legacy_pending_resolver = (
+            legacy_pending_resolver if callable(legacy_pending_resolver) else None
+        )
+        self._last_resolved_pending = 0
         self.enable_gap_recovery = bool(enable_gap_recovery)
         self.migration_epoch = str(migration_epoch or "").strip()
         self.policy_version = str(policy_version or "").strip()
@@ -135,12 +140,25 @@ class MigrationReplayWorker:
             }
             if payload.get("snapshot_hash") != _digest(expected):
                 raise MigrationReplayError("migration_replay_snapshot_proof_mismatch")
-            self.relationship_store.replay_legacy_snapshot(
-                context,
-                operation_id=item.event_id,
-                score=payload.get("relationship_score"),
-                **common,
-            )
+            try:
+                existing = self.relationship_store.account(context)
+            except RelationshipNotFound:
+                self.relationship_store.create_account(
+                    context,
+                    operation_id=item.event_id,
+                    actor="migration",
+                    score=payload.get("relationship_score"),
+                    legacy_snapshot=True,
+                    **common,
+                )
+            else:
+                if self._relationship_state(existing) != expected or not existing.get("legacy_snapshot"):
+                    self.relationship_store.replay_legacy_snapshot(
+                        context,
+                        operation_id=item.event_id,
+                        score=payload.get("relationship_score"),
+                        **common,
+                    )
         else:
             raise MigrationReplayError("migration_replay_operation_unsupported")
         account = self.relationship_store.account(context)
@@ -387,6 +405,7 @@ class MigrationReplayWorker:
 
     def reconcile_all(self) -> list[dict[str, Any]]:
         """Reconcile one combined identity, relationship and backlog checkpoint."""
+        self._last_resolved_pending = 0
         streams = self.outbox.stream_keys(self.migration_epoch)
         people = sorted(
             {stream.split(":", 1)[1] for stream in streams if ":" in stream}
@@ -478,6 +497,16 @@ class MigrationReplayWorker:
                 source_revision != target_revision or source_hash != target_hash
             ):
                 raise MigrationReplayError("migration_reconcile_mismatch")
+            if (
+                self.legacy_pending_resolver is not None
+                and backlog == 0
+                and source_revision == target_revision
+                and source_hash == target_hash
+                and int(reconciled.get("stable_cycles") or 0) >= 2
+            ):
+                self._last_resolved_pending += max(
+                    0, int(self.legacy_pending_resolver(person_id) or 0)
+                )
         return results
 
     def run_batch(self, *, limit: int = 100) -> dict[str, Any]:
@@ -501,7 +530,8 @@ class MigrationReplayWorker:
         switched = self.switch_ready_identities()
         return {
             "status": "ok", "applied": applied, "count": len(applied),
-            "recovered": recovered, "reconciled": reconciled, "switched": switched,
+            "recovered": recovered, "resolved_pending": self._last_resolved_pending,
+            "reconciled": reconciled, "switched": switched,
         }
 
 

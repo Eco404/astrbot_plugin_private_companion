@@ -278,6 +278,9 @@ class MigrationDualWriteTests(unittest.TestCase):
         self.assertEqual(1, item.payload["projection_revision"])
         self.assertNotIn("sensitive-subject-id", str(item.payload))
         self.assertNotIn("raw-admin-operation", item.event_id)
+        registered = self.coordinator.identity_status(created["person_id"])
+        self.assertEqual("verified", registered["assurance"])
+        self.assertEqual("legacy", registered["read_generation"])
 
     def test_identity_link_replay_is_idempotent(self) -> None:
         linked = self.registry.link_identity(

@@ -308,6 +308,7 @@ class MigrationDualWriteProducer:
             or not _token(checkpoint.get("checkpoint_hash"), 80)
         ):
             raise MigrationDualWriteError("dual_write_identity_checkpoint_invalid")
+        self.coordinator.register_identity(person_id, assurance=context.assurance)
         target_assurance = (
             "explicit_linked"
             if projection.get("identity_assurance") == "explicit_linked"
