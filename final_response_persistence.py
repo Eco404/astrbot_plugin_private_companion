@@ -38,6 +38,7 @@ class DeliveryLedger:
     streaming: bool = False
     context_token: contextvars.Token | None = None
     fallback_task: asyncio.Task | None = None
+    final_chain_start: int | None = None
     finalized: bool = False
     finalize_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -167,6 +168,18 @@ class FinalResponsePersistenceCoordinator:
         ledger.background_tasks.add(task)
         task.add_done_callback(ledger.background_tasks.discard)
 
+    def mark_final_response_ready(self, event: AstrMessageEvent) -> None:
+        """Separate tool-step deliveries from the final assistant reply."""
+        ledger = self._event_ledger(event)
+        if ledger is None or ledger.final_chain_start is not None:
+            return
+        if (
+            getattr(event, "_private_companion_official_assistant_message", None)
+            is None
+        ):
+            return
+        ledger.final_chain_start = len(ledger.confirmed_chains)
+
     def install_send_tracking(self, event: AstrMessageEvent) -> None:
         if not bool(getattr(event, "_private_companion_persistence_managed", False)):
             return
@@ -239,6 +252,23 @@ class FinalResponsePersistenceCoordinator:
         async with ledger.finalize_lock:
             if ledger.finalized:
                 return True
+            # A tool-calling turn streams intermediate assistant text before
+            # the agent finishes. That intermediate send must not be treated
+            # as the final reply: on_agent_done has not run yet, so there is
+            # no official assistant message to stage, and finalising here
+            # would lock the ledger before the real reply arrives. The real
+            # reply's _no_save flag would then never be cleared and the core
+            # would drop it from history. Wait for the final reply's own
+            # after_message_sent instead. A stopped event is the exception:
+            # no final reply is coming, so this send IS the reply (the
+            # direct-send-and-stop path).
+            if ledger.final_chain_start is None:
+                try:
+                    stopped = bool(event.is_stopped())
+                except Exception:
+                    stopped = False
+                if not stopped:
+                    return False
             current = asyncio.current_task()
             pending = [
                 task
@@ -266,15 +296,22 @@ class FinalResponsePersistenceCoordinator:
                     for sent_chain in ledger.confirmed_chains
                 ):
                     ledger.confirmed_chains.insert(0, list(ledger.candidate_chain))
-            if not ledger.confirmed_chains:
+            confirmed_chains = ledger.confirmed_chains
+            if ledger.final_chain_start is not None:
+                confirmed_chains = confirmed_chains[ledger.final_chain_start :]
+            if not confirmed_chains:
                 return False
             delivered_text = self._delivered_text(
-                ledger.confirmed_chains,
+                confirmed_chains,
                 separator="" if ledger.streaming else "\n",
             )
             written = await self.owner._finalize_passive_delivered_response(
                 event,
-                chain=ledger.delivered_chain,
+                chain=[
+                    component
+                    for sent_chain in confirmed_chains
+                    for component in sent_chain
+                ],
                 fallback_text=delivered_text,
                 force=True,
             )
@@ -344,6 +381,9 @@ class FinalResponsePersistenceMixin:
             return
         try:
             self._prepare_final_response_persistence(event, run_context, response)
+            self._final_response_persistence_coordinator().mark_final_response_ready(
+                event
+            )
         finally:
             self._restore_livingmemory_response_capture(event)
 
