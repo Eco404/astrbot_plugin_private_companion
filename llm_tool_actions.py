@@ -877,7 +877,7 @@ class LlmToolActionsMixin:
                     '- 自拍也应延续角色此刻的生活状态。结合本轮已有的当前日程、位置和对话判断：如果角色正在上课、通勤或处理别的事，而用户想看海边、旅行地等明显不在当前现场的自拍，优先保持生活连续性，不要让角色像瞬间换了地点。用户只是想看这类画面时，通常可以自然理解为分享之前拍的、相册里的照片；仍可调用 `pc_generate_photo`，在 prompt 中说明按此前拍摄的照片呈现，并在 `caption` 里用角色口吻轻轻交代来源。',
                     '- 这不是固定拒绝规则。当前状态没有明显冲突、用户是在延续刚才的拍摄情境，或语境本来就是设想/COS/创作时，可以照常生成；只有用户明确强调“现在、立刻、现场拍”且与当前活动明显不合适时，再自然商量晚点拍。不要向用户复述内部日程判断或规则。',
                     '- 用户引用上一张角色照片并要求“比个心、看镜头、换个动作/表情/角度、再来一张”等自然续拍时，仍使用 `kind="selfie"`，并在 prompt 中说明只改变这次要求的部分、其余人物穿搭与场景继续保持；工具会读取本轮引用图片，不要猜测或手填图片路径。若本轮没有引用或携带图片，则按普通新自拍处理，选图器不会自动复用上一张成图。明确换装、换地点、换人物或另起主题时按新要求生成。',
-                    '- 合影、合照、双人或多人同框必须有本轮携带或引用的其他人物参考图；Bot 单人人设图和今日穿搭图都不算，纯文字关系卡都不算其他人物参考，模型自行填写的本地路径/URL 也不能单独授权合影。没有本轮参考图时不要调用生图，也不要凭文字捏造另一张脸；可以说明需要先发或引用参考图。',
+                    '- 合影、合照、双人或多人同框必须有可验证的其他人物参考图：优先使用本轮携带或引用的图片；若请求明确点名了已在 Bot 关系网角色卡中绑定可用参考图的角色，也可直接调用 `pc_generate_photo` 并让工具自动选图，不要填写或猜测路径。Bot 单人人设图、今日穿搭图和纯文字关系卡都不算其他人物参考，模型自行填写的本地路径/URL 也不能单独授权合影。两类参考来源都没有时不要调用生图，也不要凭文字捏造另一张脸；可以说明需要先为该角色绑定参考图，或让用户发送/引用人物图片。',
                     '- 如果前几轮文字剧情已经明确让角色换装，而本轮只说“继续、再拍一张、保持刚才的穿搭”等，不要把它理解成恢复今日穿搭。必须把仍有效的具体服装展开写进 prompt，例如“角色当前仍穿 JK 校服，保持本轮地点和人物连续性”；当前对话已发生的换装高于日程、人格默认衣着、每日穿搭参考图和旧图片。',
                     '- “JK”在服装语境下请规范写成“JK 校服/JK 制服”；只有用户明确改变服装时才替换连续状态，提问、假设或用户自己换衣不算角色已换装。',
                     '- 角色表情包/贴纸：传 `{"prompt":"表情和画面要求","kind":"sticker"}`；默认走自拍/人像链路并使用“表情包场景”预设，让角色仍可识别。',
@@ -3224,10 +3224,38 @@ class LlmToolActionsMixin:
             add_reference_source(raw_multi_references)
 
         if group_photo_requested:
-            # 合影只能由本轮用户携带或引用的图片授权。工具参数可能来自模型，
-            # 不能让配置的人设图、今日穿搭图或臆造路径绕过这一能力边界。
+            # A group shot may be authorized by either a current-turn user
+            # image or an explicitly named, plugin-managed relationship-role
+            # asset. Model-supplied paths remain untrusted and cannot grant
+            # this capability.
             reference_sources.clear()
             reference_path = ""
+            role_reference_candidates: list[dict[str, Any]] = []
+            role_reference_resolver = getattr(
+                self,
+                "_photo_reference_role_asset_candidates",
+                None,
+            )
+            if callable(role_reference_resolver):
+                try:
+                    resolved_candidates = role_reference_resolver(
+                        request_text=content,
+                    )
+                    if isinstance(resolved_candidates, list):
+                        role_reference_candidates = [
+                            candidate
+                            for candidate in resolved_candidates
+                            if isinstance(candidate, dict)
+                            and candidate.get("kind") == "relation_role"
+                            and bool(candidate.get("role_explicit_mention"))
+                            and _path_text(candidate.get("path"), 1000)
+                        ]
+                except Exception as exc:
+                    logger.info(
+                        "[PrivateCompanion] 合影关系网角色参考图解析失败，继续检查本轮图片: %s",
+                        _single_line(exc, 160),
+                    )
+            has_named_role_reference = bool(role_reference_candidates)
             context_resolver = getattr(self, "_photo_reference_image_from_command_context", None)
             saw_image = False
             if callable(context_resolver):
@@ -3235,25 +3263,26 @@ class LlmToolActionsMixin:
                     resolved_path, _resolved_label, saw_image = await context_resolver(event, requester_id)
                     reference_path = _path_text(resolved_path, 1000)
                 except Exception as exc:
-                    missing = _missing_optional_model_dependency(exc)
-                    message = (
-                        f"合影参考图解析缺少可选依赖 {missing}，请让用户重新发送或引用人物图片。"
-                        if missing
-                        else f"合影参考图解析失败：{_single_line(exc, 160)}"
-                    )
-                    return public_receipt(
-                        {
-                            "status": "need_reference",
-                            "success": False,
-                            "generated": False,
-                            "sent": False,
-                            "message": message,
-                            "must_not_claim_sent": True,
-                            "retryable": False,
-                        },
-                        ensure_ascii=False,
-                    )
-            if not reference_path:
+                    if not has_named_role_reference:
+                        missing = _missing_optional_model_dependency(exc)
+                        message = (
+                            f"合影参考图解析缺少可选依赖 {missing}，请让用户重新发送或引用人物图片。"
+                            if missing
+                            else f"合影参考图解析失败：{_single_line(exc, 160)}"
+                        )
+                        return public_receipt(
+                            {
+                                "status": "need_reference",
+                                "success": False,
+                                "generated": False,
+                                "sent": False,
+                                "message": message,
+                                "must_not_claim_sent": True,
+                                "retryable": False,
+                            },
+                            ensure_ascii=False,
+                        )
+            if not reference_path and not has_named_role_reference:
                 return public_receipt(
                     {
                         "status": "need_reference",
@@ -3263,14 +3292,15 @@ class LlmToolActionsMixin:
                         "message": (
                             "看到了本轮图片，但没能保存成可用的其他人物参考图；请让用户重新发送或引用人物图片。"
                             if saw_image
-                            else "合影需要本轮随消息发送或引用的其他人物参考图。Bot 单人人设图、今日穿搭图、纯文字描述或单独传入的路径都不算，已停止生成。"
+                            else "合影需要本轮随消息发送或引用的其他人物参考图，或明确点名已绑定可用参考图的关系网角色。Bot 单人人设图、今日穿搭图、纯文字描述或单独传入的路径都不算，已停止生成。"
                         ),
                         "must_not_claim_sent": True,
                         "retryable": False,
                     },
                     ensure_ascii=False,
                 )
-            add_reference_source(reference_path)
+            if reference_path:
+                add_reference_source(reference_path)
 
         resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
         resolved_reference_paths: list[str] = []
