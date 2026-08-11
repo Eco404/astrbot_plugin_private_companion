@@ -2813,7 +2813,7 @@ const configDescriptions = {
   photo_generation_selfie_fixed_prompt: "只追加到 selfie/portrait，包括 QQ 空间自拍、主动自拍和每日穿搭。会清理控制字符和内部结构标记、拆分正负面语义并执行服装冲突保护。",
   photo_generation_edit_fixed_prompt: "只追加到 edit/改图/重绘请求。会清理控制字符和内部结构标记、拆分正负面语义并执行服装冲突保护。",
   photo_generation_scene_presets: "格式参考通用生图插件，一行一个：预设名:提示词。内置已有角色自拍、COS自拍、日常穿搭、镜前穿搭、头像特写、房间日常、可拍画面、表情包场景；普通穿搭默认走日常穿搭，只有明确镜前/对镜/镜子时才走镜前穿搭；自定义同名会覆盖内置。",
-  enable_bot_relationship_network: "开启后可配置 Bot 熟悉的角色卡；主动拍照/生图时只把它用于理解关系情境，可用第二只杯子、礼物、便签等非人物线索自然表达。角色卡文字不等于人物参考图，当前不会让关系卡人物直接入镜或生成合影。",
+  enable_bot_relationship_network: "开启后可配置 Bot 熟悉的角色卡。角色卡文字只用于理解关系情境，不等于人物参考图；为角色绑定可用参考图后，明确点名该角色的生图请求可以让其入镜或与 Bot 合影。没有角色参考图时仍只会用第二只杯子、礼物、便签等非人物线索表达关系。",
   bot_relationship_cards: "一行一张角色卡，格式：角色名 || 与Bot的关系 || 角色外貌描述。例如：小林 || 高中同学兼死党 || 齐肩短发，戴黑框眼镜，常穿灰色连帽卫衣。最多保存 16 张。没有其他人物参考图时禁止合影，不会仅凭文字生成该角色。",
   private_reading_min_interval_hours: "两次私下阅读之间的最小间隔。",
   private_reading_max_photo_count: "只阅读页数不超过该值的素材，避免视觉理解成本过高。",
