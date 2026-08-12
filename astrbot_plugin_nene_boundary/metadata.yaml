@@ -1,0 +1,17 @@
+name: "astrbot_plugin_nene_boundary"
+author: "Yucloud"
+display_name: "边界与情感反馈"
+description: "为 private_companion 角色增加边界与情感反馈闭环：越界行为（按关系档位 LLM 判断）扣好感度（弹性恢复）、阶段反应（回避→明令禁止→反思）、道歉恢复与信任标记、底线三级惩罚、跟朋友吐槽与告状。角色对越界者不再一味迎合。"
+version: "0.1.0"
+repo: ""
+tags:
+  - "private_companion"
+  - "边界"
+  - "好感度"
+  - "情感反馈"
+license: "MIT"
+astrbot_version: ">=4.11.4"
+support_platforms:
+  - "aiocqhttp"
+  - "qq_official"
+  - "telegram"
