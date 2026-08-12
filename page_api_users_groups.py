@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import re
+import hashlib
+import hmac
+import json
 import time
 import uuid
 from copy import deepcopy
@@ -33,6 +36,115 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         if callable(normalizer):
             return normalizer(value)
         return self._single_line(value, 160)
+
+    @staticmethod
+    def _identity_unlink_confirmation(
+        *, person_id: str, operation_id: str, identity: dict[str, Any], checkpoint: dict[str, Any]
+    ) -> str:
+        """Bind an unlink preview to the exact identity projection revision."""
+        payload = {
+            "person_id": person_id,
+            "operation_id": operation_id,
+            "identity": identity,
+            "projection_revision": int(checkpoint.get("projection_revision") or 0),
+            "checkpoint_hash": str(checkpoint.get("checkpoint_hash") or ""),
+        }
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _safe_identity_unlink_result(result: dict[str, Any]) -> dict[str, Any]:
+        """Strip raw identity keys and migration checkpoints from page output."""
+        return {
+            "ok": bool(result.get("ok")),
+            "state": str(result.get("state") or "pending")[:32],
+            "code": str(result.get("code") or "identity_unlink_failed")[:80],
+            "changed": bool(result.get("changed")),
+            "source_event_count": max(0, _safe_int(result.get("source_event_count"), 0)),
+            "replayable_event_count": max(0, _safe_int(result.get("replayable_event_count"), 0)),
+            "ambiguity_count": max(0, _safe_int(result.get("ambiguity_count"), 0)),
+        }
+
+    def _identity_admin_summary(self, user: dict[str, Any]) -> dict[str, Any]:
+        """Build the official user-page identity view from allowlisted state."""
+        if not isinstance(user, dict):
+            return {"linked": False, "code": "identity_pending"}
+        person_id = self._single_line(user.get("unified_person_id"), 80)
+        subject = self._single_line(
+            user.get("identity_subject_id") or user.get("user_id"), 160
+        )
+        if not person_id:
+            return {
+                "linked": False,
+                "code": "identity_pending",
+                "profile_status": "pending",
+                "identity_assurance": "unverified",
+                "migration": {"state": "pending", "read_generation": "legacy"},
+                "domains": {
+                    "private": "legacy_isolated",
+                    "group_member": "per_group_isolated",
+                    "group_shared": "per_group_isolated",
+                },
+            }
+        registry = self._page_unified_person_registry()
+        reader = getattr(registry, "safe_admin_person_summary", None)
+        summary = reader(person_id, subject) if callable(reader) else {
+            "linked": False, "code": "identity_summary_unavailable"
+        }
+        if not isinstance(summary, dict):
+            summary = {"linked": False, "code": "identity_summary_unavailable"}
+        summary = dict(summary)
+        summary["person_id"] = person_id
+
+        coordinator = getattr(self.plugin, "req041_migration_coordinator", None)
+        migration_reader = getattr(coordinator, "identity_status", None)
+        migration = migration_reader(person_id) if callable(migration_reader) else {}
+        if not isinstance(migration, dict):
+            migration = {}
+        summary["migration"] = {
+            "state": self._single_line(migration.get("state"), 32) or "pending",
+            "read_generation": self._single_line(
+                migration.get("read_generation"), 16
+            ) or "legacy",
+            "backlog": max(0, _safe_int(migration.get("backlog"), 0)),
+            "stable_cycles": max(0, _safe_int(migration.get("stable_cycles"), 0)),
+        }
+
+        private_ready = False
+        context_getter = getattr(self.plugin, "_req041_scoped_context_for_user", None)
+        synchronizer = getattr(self.plugin, "req041_scoped_projection_sync", None)
+        try:
+            context = (
+                context_getter(user, kind="private", purpose="memory_read")
+                if callable(context_getter) else None
+            )
+            private_ready = bool(
+                context is not None
+                and synchronizer is not None
+                and callable(getattr(synchronizer, "is_ready", None))
+                and synchronizer.is_ready(context)
+            )
+        except Exception:
+            private_ready = False
+        summary["domains"] = {
+            "private": "ready" if private_ready else "reconciling",
+            "group_member": "per_group_isolated",
+            "group_shared": "per_group_isolated",
+        }
+        summary["lifecycle"] = {
+            "can_unlink_current": bool(
+                summary.get("current_identity_linked")
+                and int(summary.get("active_identity_count") or 0) > 1
+                and summary.get("profile_status") == "active"
+            ),
+            "can_archive": bool(
+                summary.get("linked") and summary.get("profile_status") == "active"
+            ),
+            "can_purge": bool(summary.get("profile_status") == "deleted"),
+        }
+        return summary
 
     @staticmethod
     def _relationship_score_input(value: Any) -> int:
@@ -135,6 +247,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 if callable(portrait_status_reader)
                 else {"available": False, "code": "bridge_unavailable", "last_synced_at": "", "portrait_revision": 0}
             )
+            detail["identity_admin"] = self._identity_admin_summary(user)
             return self._ok(detail)
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取用户详情失败: {exc}", exc_info=True)
@@ -179,16 +292,49 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         if not isinstance(payload, dict):
             return self._error("请求体必须是 JSON 对象")
         person_id = self._single_line(payload.get("person_id"), 80)
+        user_id = self._single_line(payload.get("user_id"), 160)
         identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
         operation_id = self._single_line(payload.get("operation_id"), 120)
+        confirmation_token = self._single_line(payload.get("confirmation_token"), 80)
         if "dry_run" in payload and type(payload.get("dry_run")) is not bool:
             return self._error("dry_run 必须是 JSON 布尔值")
         dry_run = payload.get("dry_run", True)
-        if not person_id or not identity or not operation_id:
-            return self._error("person_id、identity 和 operation_id 均为必填项")
+        if not person_id or (not identity and not user_id) or not operation_id:
+            return self._error("person_id、user_id/identity 和 operation_id 均为必填项")
+        if not dry_run and not confirmation_token:
+            return self._error("执行解绑必须提交预览返回的 confirmation_token")
         try:
             async with self.plugin._data_lock:
                 registry = self._page_unified_person_registry()
+                if user_id:
+                    users = self.plugin.data.get("users")
+                    user = users.get(user_id) if isinstance(users, dict) else None
+                    if not isinstance(user, dict):
+                        return self._error("用户不存在")
+                    if self._single_line(user.get("unified_person_id"), 80) != person_id:
+                        return self._error("用户与统一人物不匹配")
+                    subject = self._single_line(
+                        user.get("identity_subject_id") or user.get("user_id") or user_id,
+                        160,
+                    )
+                    resolver = getattr(registry, "identity_for_person_subject", None)
+                    identity = resolver(person_id, subject) if callable(resolver) else None
+                    if not isinstance(identity, dict):
+                        return self._error("当前用户没有唯一的正式身份链接")
+                checkpoint_reader = getattr(registry, "identity_projection_checkpoint", None)
+                checkpoint = checkpoint_reader(person_id) if callable(checkpoint_reader) else {}
+                if not isinstance(checkpoint, dict) or checkpoint.get("ok") is not True:
+                    return self._error("统一身份投影暂不可安全变更")
+                expected_confirmation = self._identity_unlink_confirmation(
+                    person_id=person_id,
+                    operation_id=operation_id,
+                    identity=identity,
+                    checkpoint=checkpoint,
+                )
+                if not dry_run and not hmac.compare_digest(
+                    confirmation_token, expected_confirmation
+                ):
+                    return self._error("身份状态已变化，请刷新后重新预览")
                 result = registry.unlink_identity(
                     person_id,
                     identity,
@@ -208,7 +354,10 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     self.plugin._schedule_data_save()
             if not result.get("ok") and result.get("code") != "split_manual_review_required":
                 return self._error(str(result.get("code") or "统一身份解绑失败"))
-            return self._ok({"result": result})
+            safe_result = self._safe_identity_unlink_result(result)
+            if dry_run and result.get("ok"):
+                safe_result["confirmation_token"] = expected_confirmation
+            return self._ok({"result": safe_result})
         except Exception as exc:
             logger.warning("[PrivateCompanionPage] 统一身份解绑失败: %s", exc)
             return self._error("统一身份解绑失败")
@@ -674,6 +823,14 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     self.plugin.data["users"] = users
                 canonical_user_id = self.plugin._canonical_private_user_id(user_id)
                 stored_user_id = canonical_user_id if canonical_user_id in users else user_id
+                existing_user = users.get(stored_user_id)
+                if (
+                    isinstance(existing_user, dict)
+                    and self._single_line(existing_user.get("unified_person_id"), 80)
+                ):
+                    return self._error(
+                        "该用户已属于统一人物，请在“身份与隔离”中预览并归档，不能绕过统一数据链直接删除"
+                    )
                 removed_ids = {user_id, canonical_user_id, stored_user_id}
                 removed_user = users.pop(stored_user_id, None)
                 if isinstance(removed_user, dict):

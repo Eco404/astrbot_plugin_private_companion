@@ -557,6 +557,94 @@ class UnifiedPersonRegistry:
                     return True
         return False
 
+    def identity_for_person_subject(
+        self, person_id: str, subject_id: str
+    ) -> dict[str, str] | None:
+        """Resolve one exact active identity for a trusted internal operation.
+
+        The returned identity contains storage-level routing fields and must not
+        be serialized to the page.  Page handlers use it only after selecting a
+        concrete legacy user row, so unlink operations never accept a partial
+        identity assembled by the browser.
+        """
+        try:
+            clean_person = _text(person_id, "person_id")
+            subject = _text(subject_id, "subject_id", 160)
+        except ValueError:
+            return None
+        matches: list[dict[str, str]] = []
+        with _LOCK:
+            root = _root(self._store)
+            for candidate in root["identity_links"].values():
+                if (
+                    not isinstance(candidate, dict)
+                    or candidate.get("status") != "active"
+                    or candidate.get("person_id") != clean_person
+                ):
+                    continue
+                try:
+                    identity = _identity(candidate.get("identity"))
+                    if build_identity_key(identity) != candidate.get("identity_key"):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                platform_subject = identity["platform_subject_id"]
+                parts = subject.rsplit(":", 2)
+                opaque_subject_match = (
+                    len(parts) == 3
+                    and len(parts[2]) == 16
+                    and all(char in "0123456789abcdef" for char in parts[2].lower())
+                    and parts[0].lower() == identity["subject_namespace"].split(":", 1)[0]
+                    and parts[1] == platform_subject
+                )
+                if subject == platform_subject or opaque_subject_match:
+                    matches.append(identity)
+        return deepcopy(matches[0]) if len(matches) == 1 else None
+
+    def safe_admin_person_summary(
+        self, person_id: str, subject_id: str = ""
+    ) -> dict[str, Any]:
+        """Return bounded identity state without raw subjects or identity keys."""
+        try:
+            clean_person = _text(person_id, "person_id")
+            subject = _text(subject_id, "subject_id", 160) if subject_id else ""
+        except ValueError:
+            return {"linked": False, "code": "identity_reference_invalid"}
+        with _LOCK:
+            root = _root(self._store)
+            projection = build_person_projection(self._store, clean_person)
+            profile = root["profiles"].get(clean_person)
+            if (
+                not isinstance(profile, dict)
+                or projection is None
+                or validate_projection(projection)
+            ):
+                return {"linked": False, "code": "identity_projection_invalid"}
+            active = [
+                link for link in root["identity_links"].values()
+                if isinstance(link, dict)
+                and link.get("person_id") == clean_person
+                and link.get("status") == "active"
+            ]
+            detached_count = sum(
+                1 for link in root["detached_identity_links"].values()
+                if isinstance(link, dict) and link.get("person_id") == clean_person
+            )
+            current_linked = False
+            if subject:
+                current_linked = self.identity_for_person_subject(clean_person, subject) is not None
+            return {
+                "linked": True,
+                "code": "identity_admin_summary",
+                "current_identity_linked": current_linked,
+                "identity_assurance": str(projection.get("identity_assurance") or "unverified"),
+                "profile_status": str(projection.get("profile_status") or "active"),
+                "projection_revision": int(projection.get("projection_revision") or 0),
+                "active_identity_count": len(active),
+                "detached_identity_count": detached_count,
+                "updated_at": str(projection.get("updated_at") or ""),
+            }
+
     def create_or_link(
         self, identity: dict[str, Any], profile: dict[str, Any] | None = None,
         operation_id: str = "", actor_id: str = "companion", **_: Any,

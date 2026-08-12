@@ -14865,7 +14865,7 @@ async function renderUserDetail(forceFetch = false) {
     </header>
     <div class="user-detail-summary"><span class="badge ${detail.proactive_private_enabled ? "ok" : "off"}">${detail.proactive_private_enabled ? "主动权限已开启" : "主动权限未开启"}</span><span class="muted">最近互动 ${escapeHtml(detail.last_seen || "暂无")}</span></div>
     <nav class="user-detail-tabs" role="tablist" aria-label="用户详情视图">
-      ${[["overview","概览"],["relationship","关系"],["proactive","主动陪伴"],["memory","记忆与学习"],["diagnostics","诊断"]].map(([key,label]) => `<button type="button" role="tab" data-user-detail-view="${key}" aria-selected="${state.userDetailView === key ? "true" : "false"}" class="${state.userDetailView === key ? "is-active" : ""}">${label}</button>`).join("")}
+      ${[["overview","概览"],["identity","身份与隔离"],["relationship","关系"],["proactive","主动陪伴"],["memory","记忆与学习"],["diagnostics","诊断"]].map(([key,label]) => `<button type="button" role="tab" data-user-detail-view="${key}" aria-selected="${state.userDetailView === key ? "true" : "false"}" class="${state.userDetailView === key ? "is-active" : ""}">${label}</button>`).join("")}
     </nav>
     <section class="user-detail-view ${state.userDetailView === "overview" ? "is-active" : "is-hidden"}" data-user-detail-panel="overview">
       ${renderUserViewOverview("用户概览", "集中查看身份、最近互动和仍需延续的对话线索。", [["关系阶段", relationshipLabel], ["今日主动", `${detail.sent_today || 0} / ${proactiveLimitLabel}`], ["未完话头", String(openLoopCount)]])}
@@ -14889,6 +14889,10 @@ async function renderUserDetail(forceFetch = false) {
     </div>
       ${detailBlock("最近对话", "", [["用户消息", detail.last_user_message || ""], ["陪伴回复", detail.last_companion_message || ""]])}
       ${renderOpenLoopBlock(detail)}
+    </section>
+    <section class="user-detail-view ${state.userDetailView === "identity" ? "is-active" : "is-hidden"}" data-user-detail-panel="identity">
+      ${renderUserViewOverview("身份与隔离", "确认同一人物、统一关系账户与分域记忆是否处于安全状态。", [["身份", identityAssuranceLabel(detail.identity_admin?.identity_assurance)], ["读取", detail.identity_admin?.migration?.read_generation === "new" ? "统一账户" : "兼容旧数据"], ["私聊域", detail.identity_admin?.domains?.private === "ready" ? "已就绪" : "对账中"]])}
+      ${renderUnifiedIdentityPanel(detail)}
     </section>
     <section class="user-detail-view ${state.userDetailView === "relationship" ? "is-active" : "is-hidden"}" data-user-detail-panel="relationship">
       ${renderUserViewOverview("关系与互动", "分别管理长期关系阶段和当前互动语气，避免把短期情绪误当成长期关系。", [["长期阶段", relationshipLabel], ["当前互动", currentInteractionLabel], ["关系节点", detail.worldbook_member ? "已登记" : "未登记"]])}
@@ -14956,6 +14960,67 @@ function renderUnifiedProfileCapabilityPanel(detail) {
       <header class="detail-block-head"><div><h2>统一档案与主动权限</h2><p>普通私聊始终可用；主动联系仍需管理员单独开启。</p></div><span class="badge ${proactiveEnabled ? "ok" : "off"}">${escapeHtml(proactiveEnabled ? "主动已授权" : "主动未授权")}</span></header>
       <dl><dt>统一人物</dt><dd>${escapeHtml(personId || "等待精确身份投影")}</dd><dt>主动陪伴</dt><dd>${escapeHtml(effectiveProactive ? "可在既有日程和安全门内执行" : "关闭")}</dd><dt>画像实际模式</dt><dd>${escapeHtml(portraitModeLabel(effectivePortraitMode))}</dd></dl>
     </section>
+  `;
+}
+
+function identityAssuranceLabel(value) {
+  return {
+    explicit_linked: "管理员明确关联",
+    verified: "已核验",
+    observed: "仅观察",
+    unverified: "未核验",
+  }[String(value || "")] || "待确认";
+}
+
+function identityProfileStatusLabel(value) {
+  return { active: "有效", pending: "待确认", deleted: "已归档" }[String(value || "")] || "未知";
+}
+
+function maskedPersonReference(value) {
+  const text = String(value || "");
+  if (!text) return "尚未建立";
+  return text.length <= 14 ? text : `${text.slice(0, 10)}…${text.slice(-4)}`;
+}
+
+function renderUnifiedIdentityPanel(detail) {
+  const identity = detail?.identity_admin && typeof detail.identity_admin === "object" ? detail.identity_admin : {};
+  const migration = identity.migration && typeof identity.migration === "object" ? identity.migration : {};
+  const domains = identity.domains && typeof identity.domains === "object" ? identity.domains : {};
+  const lifecycle = identity.lifecycle && typeof identity.lifecycle === "object" ? identity.lifecycle : {};
+  const linked = Boolean(identity.linked);
+  const generation = migration.read_generation === "new" ? "统一账户" : "兼容旧数据";
+  const privateDomain = domains.private === "ready" ? "已对账，可用" : (linked ? "对账中，安全回退" : "等待精确身份");
+  const updatedAt = identity.updated_at ? new Date(identity.updated_at).toLocaleString() : "暂无";
+  return `
+    <section class="detail-block unified-profile-capabilities">
+      <header class="detail-block-head"><div><h2>统一身份档案</h2><p>人物与好感度统一；私聊、群成员和不同群的记忆仍按作用域隔离。</p></div><span class="badge ${linked && identity.profile_status === "active" ? "ok" : "off"}">${escapeHtml(identityProfileStatusLabel(identity.profile_status))}</span></header>
+      <dl>
+        <dt>人物引用</dt><dd class="mono">${escapeHtml(maskedPersonReference(identity.person_id))}</dd>
+        <dt>身份可信度</dt><dd>${escapeHtml(identityAssuranceLabel(identity.identity_assurance))}</dd>
+        <dt>当前账号</dt><dd>${escapeHtml(identity.current_identity_linked ? "已精确关联" : "等待自动认领")}</dd>
+        <dt>身份数量</dt><dd>${escapeHtml(`${Number(identity.active_identity_count || 0)} 个有效 · ${Number(identity.detached_identity_count || 0)} 个已解绑`)}</dd>
+        <dt>档案版本</dt><dd>${escapeHtml(identity.projection_revision ? `r${identity.projection_revision}` : "-")} · ${escapeHtml(updatedAt)}</dd>
+        <dt>读取代际</dt><dd>${escapeHtml(generation)} · ${escapeHtml(migration.state || "pending")}</dd>
+      </dl>
+    </section>
+    <section class="detail-block">
+      <header class="detail-block-head"><div><h2>数据隔离状态</h2><p>这里只显示边界和就绪状态，不显示聊天原文、群号或底层身份键。</p></div></header>
+      <dl>
+        <dt>私聊画像 / 记忆 / 学习</dt><dd>${escapeHtml(privateDomain)}</dd>
+        <dt>群成员记忆</dt><dd>${escapeHtml(domains.group_member === "per_group_isolated" ? "按每个群分别隔离" : "等待初始化")}</dd>
+        <dt>群共享记忆</dt><dd>${escapeHtml(domains.group_shared === "per_group_isolated" ? "按每个群分别隔离" : "等待初始化")}</dd>
+        <dt>迁移积压</dt><dd>${escapeHtml(String(Number(migration.backlog || 0)))} · 稳定周期 ${escapeHtml(String(Number(migration.stable_cycles || 0)))}</dd>
+      </dl>
+    </section>
+    ${linked ? `<section class="detail-block">
+      <header class="detail-block-head"><div><h2>身份生命周期</h2><p>危险操作先生成影响预览，再次点击才会执行；失败时保留当前有效数据。</p></div></header>
+      <div class="toolbar user-danger-actions">
+        ${lifecycle.can_unlink_current ? '<button type="button" data-identity-action="unlink" class="secondary-button">预览解绑当前账号</button>' : ""}
+        ${lifecycle.can_archive ? '<button type="button" data-identity-action="archive" class="danger">预览归档统一人物</button>' : ""}
+        ${lifecycle.can_purge ? '<button type="button" data-identity-action="purge" class="danger">预览永久删除</button>' : ""}
+      </div>
+      ${!lifecycle.can_unlink_current && lifecycle.can_archive ? '<p class="muted">当前是唯一或主身份，不能直接拆分；如需移除，请使用统一人物归档。</p>' : ""}
+    </section>` : `<section class="detail-block"><header class="detail-block-head"><div><h2>等待自动建档</h2><p>下一次产生精确、已核验的真实聊天事件后会自动建立统一人物；系统不会按昵称或模糊 ID 猜测合并。</p></div></header></section>`}
   `;
 }
 
@@ -16625,6 +16690,70 @@ function bindExpressionLibraryActions(library, root) {
   });
 }
 
+function identityOperationId(action) {
+  const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `page-${action}-${random}`.slice(0, 120);
+}
+
+function bindUnifiedIdentityActions(detail, refreshSelectedUserDetail) {
+  document.querySelectorAll("[data-identity-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = String(button.dataset.identityAction || "");
+      const personId = String(detail?.identity_admin?.person_id || detail?.unified_person_id || "");
+      if (!personId || !["unlink", "archive", "purge"].includes(action)) return;
+      const endpoint = action === "unlink" ? "/user/identity/unlink" : (action === "archive" ? "/user/identity/archive" : "/user/identity/delete");
+      const preview = button._identityLifecyclePreview;
+      if (!preview) {
+        const operationId = identityOperationId(action);
+        const body = { person_id: personId, operation_id: operationId, dry_run: true };
+        if (action === "unlink") body.user_id = detail.user_id;
+        const response = await runAction(
+          () => postJson(endpoint, body),
+          "影响预览已生成，请核对后再次点击",
+          button,
+          { reload: false },
+        );
+        const result = response?.result;
+        if (!result || result.ok !== true) {
+          showToast(action === "unlink" ? "该身份不能安全自动拆分，需要保留或归档统一人物" : "未能生成安全预览", "error");
+          return;
+        }
+        button._identityLifecyclePreview = {
+          operationId,
+          confirmationToken: String(result.confirmation_token || ""),
+        };
+        const count = Number(result.active_identity_count ?? result.detached_identity_count ?? 0);
+        button.textContent = action === "unlink"
+          ? `确认解绑（${Number(result.replayable_event_count || 0)} 条可回放事件）`
+          : (action === "archive" ? `确认归档（${count} 个身份）` : `确认永久删除（${count} 个身份）`);
+        return;
+      }
+      const body = {
+        person_id: personId,
+        operation_id: preview.operationId,
+        confirmation_token: preview.confirmationToken,
+        dry_run: false,
+      };
+      if (action === "unlink") body.user_id = detail.user_id;
+      const response = await runAction(
+        () => postJson(endpoint, body),
+        action === "unlink" ? "当前账号已解绑" : (action === "archive" ? "统一人物已归档" : "统一人物已永久删除"),
+        button,
+        { reload: false },
+      );
+      if (!response?.result?.ok) return;
+      button._identityLifecyclePreview = null;
+      delete state.userDetailCache[detail.user_id];
+      if (action === "purge") {
+        state.selectedUserId = "";
+        await loadAll();
+        return;
+      }
+      await refreshSelectedUserDetail();
+    });
+  });
+}
+
 function bindUserActions(detail) {
   bindEmotionTraceButtons(detail);
   const refreshSelectedUserDetail = async () => {
@@ -16632,6 +16761,7 @@ function bindUserActions(detail) {
       await renderUserDetail(true);
     }
   };
+  bindUnifiedIdentityActions(detail, refreshSelectedUserDetail);
   $("#relationshipStageForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const selectedKey = String(new FormData(event.currentTarget).get("relationship_stage_key") || "");
@@ -16640,6 +16770,14 @@ function bindUserActions(detail) {
       showToast("专属联结只允许主要用户使用", "error");
       return;
     }
+    const currentStageKey = detail.relationship_mode === "owner_exclusive"
+      ? "owner_exclusive"
+      : String(detail?.relationship_intimacy?.phase?.key || "");
+    if (selectedKey !== currentStageKey && !requireSecondClick(
+      event.submitter,
+      `relationship-stage:${detail.user_id}:${selectedKey}`,
+      selectedKey === "owner_exclusive" ? "再次点击确认冻结主要用户的自动好感度" : "再次点击确认切换长期关系阶段",
+    )) return;
     const stages = normalizedRelationshipStages(detail?.relationship_intimacy?.stages);
     const stage = stages.find((item) => item.key === selectedKey);
     const body = {
@@ -16712,6 +16850,11 @@ function bindUserActions(detail) {
       showToast("请先把专属联结切换为一个普通关系阶段，再修改关系角色", "error");
       return;
     }
+    if (selectedRole !== detail.relationship_role && !requireSecondClick(
+      event.submitter,
+      `relationship-role:${detail.user_id}:${selectedRole}`,
+      selectedRole === "owner" ? "再次点击确认授予主要用户关系角色" : "再次点击确认移除主要用户关系角色",
+    )) return;
     const body = {
       user_id: detail.user_id,
       nickname: form.get("nickname"),
