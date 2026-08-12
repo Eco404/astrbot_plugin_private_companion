@@ -403,6 +403,7 @@ class P4P6ParityTests(unittest.TestCase):
         method = _load_p4_relationship_event_settlement()
 
         class Host:
+            enable_custom_relationship_stage_policy = True
             relationship_positive_daily_cap = 12
             relationship_event_window_minutes = 30
             relationship_positive_event_cap = 4

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import types
 import unittest
+from types import SimpleNamespace
 
 
 COMPANION_ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +29,9 @@ MEMORY_ROOT = _memory_root()
 
 
 def _load_modules():
-    if "astrbot.api" not in sys.modules:
+    try:
+        import astrbot.api  # noqa: F401
+    except ImportError:
         astrbot = types.ModuleType("astrbot")
         api = types.ModuleType("astrbot.api")
         api.logger = types.SimpleNamespace(
@@ -73,7 +76,13 @@ def test_companion_profile_facade_reads_memory_profile_without_raw_payload_leak(
         service.store = store_type(Path(temporary) / "memory.db")
         service.store.initialize()
         service._schedule_memory_embedding = lambda *args, **kwargs: None
+        producer = type("PrivateCompanionProducer", (), {})()
+        service.context = SimpleNamespace(get_all_stars=lambda: [SimpleNamespace(
+            star_cls=producer, star_cls_type=type(producer), activated=True,
+            root_dir_name="astrbot_plugin_private_companion", name="陪伴插件",
+        )])
         bridge = bridge_type(service)
+        capability = bridge.register_private_companion(producer)
 
         async def run():
             archived = await bridge.record_bot_personal_archive({
@@ -84,7 +93,7 @@ def test_companion_profile_facade_reads_memory_profile_without_raw_payload_leak(
                 "source_refs": ["companion:c4:creative"],
                 "idempotency_key": "c4:dual:creative",
                 "payload": {"summary": "raw creative detail must remain internal"},
-            })
+            }, producer_capability=capability)
             companion = Companion(bridge)
             result = await companion._memory_companion_read_profile(
                 "bot_creative",

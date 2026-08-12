@@ -75,6 +75,14 @@ class RealityCompanionBridgeMixin:
         visible = _single_line(text, 500)
         if not normalized_user_id or not visible:
             return {"recorded": False, "reason": "invalid_payload"}
+        binder = getattr(self, "_req041_reality_private_binding", None)
+        binding = binder(normalized_user_id, purpose="memory_write") if callable(binder) else None
+        if callable(binder) and (not isinstance(binding, dict) or binding.get("ok") is not True):
+            return {
+                "recorded": False,
+                "reason": _single_line(binding.get("code"), 120)
+                if isinstance(binding, dict) else "formal_private_identity_required",
+            }
         users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else None
         if not isinstance(users, dict) or not isinstance(users.get(normalized_user_id), dict):
             return {"recorded": False, "reason": "private_user_not_managed"}
@@ -88,22 +96,41 @@ class RealityCompanionBridgeMixin:
             current["last_proactive_sent_at"] = timestamp
             current["last_proactive_reason"] = normalized_source
             current["last_proactive_action"] = "reality_touch_audio"
-            current["last_reality_touch_output"] = {
+            output = {
                 "text": visible,
                 "source": normalized_source,
                 "delivered_at": timestamp,
             }
+            if isinstance(binding, dict):
+                root = self.data.setdefault("reality_touch_outputs", {})
+                root[_single_line(binding.get("store_key"), 160)] = output
+                current.pop("last_reality_touch_output", None)
+            else:
+                current["last_reality_touch_output"] = output
             self._save_data_sync()
-        logger.info(
-            "[PrivateCompanion] 已同步现实设备输出: user=%s source=%s text=%s",
-            normalized_user_id,
-            normalized_source,
-            _single_line(visible, 120),
-        )
+        log_info = getattr(logger, "info", None)
+        if callable(log_info):
+            log_info(
+                "[PrivateCompanion] 已同步现实设备输出: scope=%s source=%s text=%s",
+                _single_line(binding.get("subject_ref"), 80) if isinstance(binding, dict) else "legacy",
+                normalized_source,
+                _single_line(visible, 120),
+            )
         return {"recorded": True, "user_id": normalized_user_id, "delivered_at": timestamp}
 
     def _format_reality_touch_continuity_context(self, user: dict[str, Any]) -> str:
-        output = user.get("last_reality_touch_output") if isinstance(user, dict) else None
+        binder = getattr(self, "_req041_reality_private_binding", None)
+        binding = binder(self._reality_bridge_user_id(user), purpose="memory_read") if callable(binder) else None
+        if callable(binder) and (not isinstance(binding, dict) or binding.get("ok") is not True):
+            return ""
+        continuity_user = binding.get("user") if isinstance(binding, dict) else user
+        if not isinstance(continuity_user, dict):
+            continuity_user = user
+        if isinstance(binding, dict):
+            root = self.data.get("reality_touch_outputs") if isinstance(getattr(self, "data", None), dict) else None
+            output = root.get(_single_line(binding.get("store_key"), 160)) if isinstance(root, dict) else None
+        else:
+            output = user.get("last_reality_touch_output") if isinstance(user, dict) else None
         if not isinstance(output, dict):
             return ""
         text = _single_line(output.get("text"), 300)
@@ -115,8 +142,8 @@ class RealityCompanionBridgeMixin:
             "【刚刚发生的跨设备对话】",
             f"Bot 已通过现实音频设备对用户说：{text}",
         ]
-        user_text = _single_line(user.get("last_user_message"), 300)
-        user_at = _safe_float(user.get("last_user_message_at"), 0.0, 0.0)
+        user_text = _single_line(continuity_user.get("last_user_message"), 300)
+        user_at = _safe_float(continuity_user.get("last_user_message_at"), 0.0, 0.0)
         if user_text and user_at >= delivered_at:
             lines.append(f"用户随后在私聊回应：{user_text}")
         lines.append(

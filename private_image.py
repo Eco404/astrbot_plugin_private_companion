@@ -4871,10 +4871,15 @@ class PrivateImageMixin:
             return ""
         raw_users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
         user = raw_users.get(user_id) if user_id and isinstance(raw_users, dict) else None
-        if not (
-            isinstance(user, dict)
-            and self._private_passive_profile_available(user_id, user)
-        ):
+        profile_checker = getattr(self, "_private_passive_profile_available", None)
+        if callable(profile_checker):
+            profile_available = bool(profile_checker(user_id, user)) if isinstance(user, dict) else False
+        else:
+            target_checker = getattr(self, "_is_target_private_user", None)
+            profile_available = bool(
+                isinstance(user, dict) and callable(target_checker) and target_checker(user_id, user)
+            )
+        if not profile_available:
             return ""
         feature_checker = getattr(self, "_feature_enabled_or_temp_unlocked", None)
         if callable(feature_checker) and not feature_checker(

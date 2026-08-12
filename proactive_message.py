@@ -20577,7 +20577,11 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 complete = False
             quote_message_id = ""
             if index < len(segments) - 1:
-                await asyncio.sleep(await self._calc_segmented_proactive_interval(segment, umo=umo))
+                try:
+                    interval = await self._calc_segmented_proactive_interval(segment, umo=umo)
+                except TypeError:
+                    interval = await self._calc_segmented_proactive_interval(segment)
+                await asyncio.sleep(interval)
         delivered_text = "\n".join(delivered_segments).strip()
         return _ProactiveSendOutcome(
             delivered=bool(delivered_text),

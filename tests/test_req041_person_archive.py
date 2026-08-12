@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import copy
+import hashlib
 from copy import deepcopy
 from pathlib import Path
 import re
@@ -39,6 +40,7 @@ def _load_methods(*names: str) -> dict[str, Any]:
         "Any": Any,
         "NamespaceContext": NamespaceContext,
         "deepcopy": deepcopy,
+        "hashlib": hashlib,
         "scoped_persona_ref": scoped_persona_ref,
         "_single_line": lambda value, limit=240: " ".join(str(value or "").split())[:limit],
     }
@@ -48,6 +50,8 @@ def _load_methods(*names: str) -> dict[str, Any]:
 
 METHODS = _load_methods(
     "_req041_scoped_private_context_for_person",
+    "_req041_person_private_aux_key",
+    "_req041_erase_person_private_auxiliary_locked",
     "_req041_persist_archive_saga_locked",
     "archive_unified_person",
     "_req041_resume_confirmed_person_archives",
@@ -172,6 +176,8 @@ class _Coordinator:
 
 class _Host:
     _req041_scoped_private_context_for_person = METHODS["_req041_scoped_private_context_for_person"]
+    _req041_person_private_aux_key = staticmethod(METHODS["_req041_person_private_aux_key"])
+    _req041_erase_person_private_auxiliary_locked = METHODS["_req041_erase_person_private_auxiliary_locked"]
     _req041_persist_archive_saga_locked = METHODS["_req041_persist_archive_saga_locked"]
     archive_unified_person = METHODS["archive_unified_person"]
     _req041_resume_confirmed_person_archives = METHODS["_req041_resume_confirmed_person_archives"]
@@ -243,6 +249,19 @@ class PersonArchiveSagaTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_remote_failure_keeps_identity_and_relationship_active_then_resume_completes(self) -> None:
+        auxiliary_key = self.host._req041_person_private_aux_key(self.host.person_id)
+        self.host.data["users"] = {
+            "10001": {
+                "user_id": "10001", "identity_subject_id": "10001",
+                "unified_person_id": self.host.person_id,
+            }
+        }
+        self.host.data["place_cognitive_maps"] = {
+            auxiliary_key: {"places": {}}, "10001": {"places": {"legacy": {}}},
+        }
+        self.host.data["reality_touch_outputs"] = {
+            auxiliary_key: {"text": "private"}, "10001": {"text": "legacy"},
+        }
         preview = asyncio.run(self.host.archive_unified_person(
             self.host.person_id, operation_id="archive-1", dry_run=True,
         ))
@@ -268,6 +287,9 @@ class PersonArchiveSagaTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "relationship_account_missing"):
             self.host.req041_relationship_store.account(context)
         self.assertEqual([(self.host.person_id, "person_archived")], self.host.req041_migration_coordinator.rollbacks)
+        self.assertEqual({}, self.host.data["place_cognitive_maps"])
+        self.assertEqual({}, self.host.data["reality_touch_outputs"])
+        self.assertEqual(4, completed["auxiliary_removed_record_count"])
         self.assertEqual(6, self.host.persisted)
 
     def test_wrong_confirmation_never_calls_destructive_stores(self) -> None:

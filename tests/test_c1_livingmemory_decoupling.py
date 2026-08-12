@@ -10,7 +10,9 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 
-if "astrbot.api" not in sys.modules:
+try:
+    import astrbot.api  # noqa: F401
+except ImportError:
     astrbot = types.ModuleType("astrbot")
     api = types.ModuleType("astrbot.api")
     api.logger = types.SimpleNamespace(warning=lambda *args, **kwargs: None, debug=lambda *args, **kwargs: None)

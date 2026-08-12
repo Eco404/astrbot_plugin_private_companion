@@ -14772,7 +14772,7 @@ function renderRelationshipStatus(detail) {
   return `
     <section class="companion-intimacy-card">
       <div class="companion-intimacy-head">
-        <div><span class="relationship-kicker">长期好感度</span><h3>关系阶段与当前相处状态</h3><p>${escapeHtml(exclusive ? "主要用户专属固定关系，不参与自动增减或自然回落。" : "上方是长期关系阶段与分数；下方是这一刻的七档互动语气，两者共同影响主动陪伴。")}</p></div>
+        <div><span class="relationship-kicker">长期好感度</span><h3>亲密度与互动表达</h3><p>${escapeHtml(exclusive ? "主要用户专属固定关系，不参与自动增减或自然回落。" : "上方是长期关系阶段与分数；下方是这一刻的七档互动语气，两者共同影响主动陪伴。")}</p></div>
         <div class="companion-intimacy-current"><strong>${escapeHtml(exclusive ? (ownerProjection.label || "专属联结") : (phase.label || "初识"))}</strong><span>${exclusive ? "固定" : escapeHtml(value)}</span></div>
       </div>
       ${relationshipStageBar(stages, currentKey, value, isOwner)}

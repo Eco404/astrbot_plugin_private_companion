@@ -505,9 +505,16 @@ class PrivateCompanionExtensionAPI:
         """Expose bounded identity and relationship context to the device plugin."""
         plugin = self._plugin
         normalized = _single_line(user_id, 120)
-        users = plugin.data.get("users") if isinstance(plugin.data, dict) else None
-        user = users.get(normalized) if isinstance(users, dict) else None
-        user = user if isinstance(user, dict) else {}
+        binder = getattr(plugin, "_req041_reality_private_binding", None)
+        binding = binder(normalized, purpose="memory_read") if callable(binder) else None
+        if callable(binder):
+            user = binding.get("user") if isinstance(binding, dict) and binding.get("ok") is True else {}
+            identity_ready = bool(user)
+        else:
+            users = plugin.data.get("users") if isinstance(plugin.data, dict) else None
+            user = users.get(normalized) if isinstance(users, dict) else None
+            user = user if isinstance(user, dict) else {}
+            identity_ready = bool(user)
         admin_checker = getattr(plugin, "_is_configured_admin_user_id", None)
         owner_getter = getattr(plugin, "_relationship_owner_user_ids", None)
         owners = set(owner_getter() if callable(owner_getter) else ())
@@ -521,6 +528,7 @@ class PrivateCompanionExtensionAPI:
         return {
             "user_id": normalized,
             "exists": bool(user),
+            "identity_ready": identity_ready,
             "is_admin": bool(callable(admin_checker) and admin_checker(normalized)),
             "is_primary_user": is_primary_user,
             "eligible": bool(
@@ -4623,6 +4631,75 @@ class PrivateCompanionPlugin(
         )
         return context if not context.errors() else None
 
+    @staticmethod
+    def _req041_person_private_aux_key(person_id: str) -> str:
+        """Return a stable opaque key for persona-local person-private helpers."""
+        clean_person = str(person_id or "").strip()
+        if not clean_person:
+            return ""
+        digest = hashlib.sha256(f"req041-person-private-aux:{clean_person}".encode("utf-8")).hexdigest()
+        return f"person:{digest}"
+
+    def _req041_reality_private_binding(
+        self,
+        user_id: Any,
+        *,
+        purpose: str = "memory_read",
+    ) -> dict[str, Any]:
+        """Resolve one mobile/reality operation to a reconciled private person scope."""
+        normalized = _single_line(user_id, 120)
+        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else None
+        user = users.get(normalized) if normalized and isinstance(users, dict) else None
+        if not isinstance(user, dict):
+            return {"ok": False, "code": "private_user_not_managed"}
+        context = self._req041_scoped_context_for_user(user, kind="private", purpose=purpose)
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if context is None or synchronizer is None:
+            return {"ok": False, "code": "formal_private_identity_required"}
+        projection = synchronizer.read_projection(context)
+        if not isinstance(projection, dict) or projection.get("ok") is not True:
+            return {
+                "ok": False,
+                "code": str(projection.get("code") or "scoped_projection_not_reconciled")[:120]
+                if isinstance(projection, dict) else "scoped_projection_not_reconciled",
+            }
+        person_id = _single_line(getattr(context, "identity_id", ""), 80)
+        store_key = self._req041_person_private_aux_key(person_id)
+        if not person_id or not store_key:
+            return {"ok": False, "code": "formal_private_identity_required"}
+        snapshot = self._req041_relationship_snapshot_view(
+            user, source=f"reality_{_single_line(purpose, 40) or 'memory'}",
+        )
+        return {
+            "ok": True,
+            "code": "formal_private_identity_bound",
+            "context": context,
+            "person_id": person_id,
+            "store_key": store_key,
+            "subject_ref": store_key,
+            "user": snapshot if isinstance(snapshot, dict) else user,
+        }
+
+    def _req041_erase_person_private_auxiliary_locked(
+        self,
+        person_id: str,
+        subjects: list[str] | tuple[str, ...] = (),
+    ) -> dict[str, int]:
+        """Erase canonical and exact legacy auxiliary nodes for one person."""
+        canonical = self._req041_person_private_aux_key(person_id)
+        keys = {canonical} if canonical else set()
+        keys.update(_single_line(item, 160) for item in subjects if _single_line(item, 160))
+        counts = {"place_cognitive_maps": 0, "reality_touch_outputs": 0}
+        for root_name in tuple(counts):
+            root = self.data.get(root_name) if isinstance(self.data, dict) else None
+            if not isinstance(root, dict):
+                continue
+            for key in keys:
+                if key in root:
+                    root.pop(key, None)
+                    counts[root_name] += 1
+        return counts
+
     def _req041_scoped_group_context(
         self,
         group_id: str,
@@ -4965,6 +5042,10 @@ class PrivateCompanionPlugin(
                 return prepared
             self._req041_persist_archive_saga_locked()
             if prepared.get("code") == "person_archived":
+                subjects = registry.archived_identity_subjects(clean_person)
+                removed = self._req041_erase_person_private_auxiliary_locked(clean_person, subjects)
+                if sum(removed.values()) > 0:
+                    self._req041_persist_archive_saga_locked()
                 return prepared
             if dry_run:
                 return prepared
@@ -5034,12 +5115,22 @@ class PrivateCompanionPlugin(
                     "code": _single_line(exc, 120) or "relationship_archive_failed",
                     "person_id": clean_person, "operation_id": clean_operation, "changed": False,
                 }
+            legacy_subjects = [
+                _single_line(item.get("identity_subject_id") or item.get("user_id"), 160)
+                for item in (self.data.get("users") or {}).values()
+                if isinstance(item, dict)
+                and _single_line(item.get("unified_person_id"), 80) == clean_person
+            ] if isinstance(self.data.get("users"), dict) else []
+            auxiliary_counts = self._req041_erase_person_private_auxiliary_locked(
+                clean_person, legacy_subjects,
+            )
             result = registry.finalize_person_archive(
                 clean_person, clean_operation, confirmation_token,
                 scoped_receipt, relationship_receipt, stream_receipt,
                 actor_id=actor_id, reason_code=reason_code,
             )
             if result.get("changed"):
+                result["auxiliary_removed_record_count"] = sum(auxiliary_counts.values())
                 coordinator = getattr(self, "req041_migration_coordinator", None)
                 rollback = getattr(coordinator, "rollback_identity", None)
                 if callable(rollback):
@@ -5186,6 +5277,7 @@ class PrivateCompanionPlugin(
                     "code": _single_line(exc, 120) or "purge_outbox_failed",
                     "person_id": clean_person, "operation_id": clean_operation, "changed": False,
                 }
+            auxiliary_counts = self._req041_erase_person_private_auxiliary_locked(clean_person, subjects)
             legacy_counts = self._req041_purge_legacy_person_locked(clean_person, subjects)
             result = registry.finalize_person_purge(
                 clean_person, clean_operation, confirmation_token, outbox_receipt,
@@ -5193,6 +5285,7 @@ class PrivateCompanionPlugin(
             )
             if result.get("changed"):
                 result["legacy_removed_record_count"] = int(legacy_counts.get("records") or 0)
+                result["auxiliary_removed_record_count"] = sum(auxiliary_counts.values())
                 self._req041_persist_archive_saga_locked()
             return result
 
@@ -5539,6 +5632,7 @@ class PrivateCompanionPlugin(
             )
 
     @filter.after_message_sent(priority=-110000)
+    @_multi_persona_event_context
     async def finish_req041_read_chain(self, event: AstrMessageEvent, *args, **kwargs) -> None:
         router = getattr(self, "req041_relationship_read_router", None)
         chain_id = str(getattr(event, "req041_read_chain_id", "") or "")
@@ -12587,9 +12681,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         else:
             return "", False, "unchanged_light" if lightweight else "unchanged"
 
-        reply_policy = self._private_passive_state_reply_policy_prompt()
         if reason == "continuity_anchor":
-            state_text = state_text[: 300 - len(reply_policy) - 1].rstrip()
+            reply_policy = "\n".join([
+                "【私聊被动回复策略】",
+                "先自然回应用户当前表达；主动提供一处与 Bot 自身有关的具体细节；不要逐项汇报状态；不要把回复写成连续盘问；整次回复最多提出一个问题；没有必要时可以不提问。",
+            ])
+            state_text = state_text[: max(0, 300 - len(reply_policy) - 1)].rstrip()
+        else:
+            reply_policy = self._private_passive_state_reply_policy_prompt()
         return f"{state_text}\n{reply_policy}", state_changed, reason
 
     async def _append_group_active_period_boundary_to_request(
@@ -16721,6 +16820,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     @_multi_persona_event_context
     async def on_private_message(self, event: AstrMessageEvent, *args, **kwargs):
+        if await self._handle_private_message_preflight(event):
+            return
+        return await handle_private_message(self, event, *args, **kwargs)
+
+    async def _handle_private_message_preflight(self, event: AstrMessageEvent) -> bool:
         feedback_handler = getattr(self, "_maybe_handle_wakeup_feedback", None)
         feedback_text = str(getattr(event, "message_str", "") or "")
         is_companion_command = feedback_text.lstrip().startswith(("陪伴", "/陪伴", "私聊陪伴", "主动陪伴"))
@@ -16744,7 +16848,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if confirmation_reply:
                 await self._reply(event, confirmation_reply)
                 event.stop_event()
-                return
+                return True
         if callable(feedback_handler) and not is_companion_command:
             raw_user_id = str(event.get_sender_id() or "").strip()
             normalizer = getattr(self, "_canonical_private_user_id", None)
@@ -16757,8 +16861,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 user,
                 feedback_text,
             ):
-                return
-        return await handle_private_message(self, event, *args, **kwargs)
+                return True
+        return False
 
     def _record_c3_inbound_activity(
         self,

@@ -392,6 +392,7 @@ class CoreStoreMixin:
             "agenda_version": 1,
             "observed_activities": [],
             "place_cognitive_maps": {},
+            "reality_touch_outputs": {},
             "window_snapshots": [],
             "agenda_reconciliation_history": [],
             "daily_state": {},
@@ -484,6 +485,7 @@ class CoreStoreMixin:
         data.setdefault("agenda_version", 1)
         data.setdefault("observed_activities", [])
         data.setdefault("place_cognitive_maps", {})
+        data.setdefault("reality_touch_outputs", {})
         data.setdefault("window_snapshots", [])
         data.setdefault("agenda_reconciliation_history", [])
         data.setdefault("daily_state", {})
@@ -2559,16 +2561,16 @@ class CoreStoreMixin:
         now: float | None = None,
         req041_group_admission_event_id: str = "",
     ) -> dict[str, Any]:
-        if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
-            return {
-                "changed": False,
-                "code": "relationship_system_disabled",
-                "score": user.get("relationship_score"),
-            }
         if bool(getattr(self, "enable_p4_b_legacy_score_isolation", False)):
             return {
                 "changed": False,
                 "code": "p4_legacy_score_isolated",
+                "score": user.get("relationship_score"),
+            }
+        if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
+            return {
+                "changed": False,
+                "code": "relationship_system_disabled",
                 "score": user.get("relationship_score"),
             }
         score_migration = migrate_legacy_relationship_score(
