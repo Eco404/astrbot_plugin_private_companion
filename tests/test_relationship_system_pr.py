@@ -261,6 +261,18 @@ UPDATE_SETTINGS = _class_method(
         "request": REQUEST,
     },
 )
+REQ041_CONFIG_RUNTIME_SNAPSHOT = _class_method(
+    "page_api.py",
+    "PrivateCompanionPageApi",
+    "_req041_config_runtime_snapshot",
+    {"Any": Any, "deepcopy": copy.deepcopy},
+)
+ROLLBACK_REQ041_CONFIG_RUNTIME = _class_method(
+    "page_api.py",
+    "PrivateCompanionPageApi",
+    "_rollback_req041_config_runtime",
+    {"Any": Any, "deepcopy": copy.deepcopy, "logger": _Logger()},
+)
 ENSURE_RELATIONSHIP_STATE = _class_method(
     "core_store.py",
     "CoreStoreMixin",
@@ -388,6 +400,8 @@ class _SettingsApiHost:
     _apply_relationship_profile_config_batch = APPLY_RELATIONSHIP_PROFILE_BATCH
     _restore_relationship_config_values = RESTORE_RELATIONSHIP_CONFIG_VALUES
     _rollback_relationship_config_transaction = ROLLBACK_RELATIONSHIP_CONFIG_TRANSACTION
+    _req041_config_runtime_snapshot = REQ041_CONFIG_RUNTIME_SNAPSHOT
+    _rollback_req041_config_runtime = ROLLBACK_REQ041_CONFIG_RUNTIME
     update_settings = UPDATE_SETTINGS
 
     def __init__(self) -> None:
@@ -420,6 +434,10 @@ class _SettingsApiHost:
     @staticmethod
     def _normalize_setting_value(_key: str, value: Any) -> Any:
         return value
+
+    @staticmethod
+    def _normalize_bool_value(value: Any) -> bool:
+        return bool(value)
 
     @staticmethod
     async def _record_personality_auto_tune_manual_values(_changed: dict[str, Any]) -> None:
@@ -750,6 +768,125 @@ def test_settings_batch_rolls_back_profiles_and_runtime_when_config_save_returns
             "normal_interaction_band_cap": "warm",
         },
     ]
+
+
+def test_req041_settings_roll_back_runtime_and_config_when_save_returns_false() -> None:
+    host = _SettingsApiHost()
+    host.plugin.enable_auto_user_profile_creation = False
+    host.plugin.enable_group_relationship_affinity = False
+    host.plugin.group_relationship_affinity_allowlist = []
+    host._allowed_feature_keys = lambda: {
+        "enable_auto_user_profile_creation", "enable_group_relationship_affinity",
+    }
+    host._allowed_setting_keys = lambda: {"group_relationship_affinity_allowlist"}
+    save_calls: list[dict[str, Any]] = []
+
+    async def save_config() -> bool:
+        save_calls.append(copy.deepcopy(host.config_values))
+        return len(save_calls) > 1
+
+    host._save_config_if_possible = save_config
+    REQUEST.payload = {
+        "features": {
+            "enable_auto_user_profile_creation": True,
+            "enable_group_relationship_affinity": True,
+        },
+        "settings": {"group_relationship_affinity_allowlist": ["group-a"]},
+    }
+    result = asyncio.run(host.update_settings())
+
+    assert result["success"] is False
+    assert "REQ-041 关键运行值已回滚" in result["error"]
+    assert host.plugin.enable_auto_user_profile_creation is False
+    assert host.plugin.enable_group_relationship_affinity is False
+    assert host.plugin.group_relationship_affinity_allowlist == []
+    assert host.config_values == {
+        "enable_auto_user_profile_creation": False,
+        "enable_group_relationship_affinity": False,
+        "group_relationship_affinity_allowlist": [],
+    }
+    assert save_calls[0] == {
+        "enable_auto_user_profile_creation": True,
+        "enable_group_relationship_affinity": True,
+        "group_relationship_affinity_allowlist": ["group-a"],
+    }
+    assert save_calls[1] == host.config_values
+
+
+def test_req041_settings_report_inconsistent_when_rollback_save_also_fails() -> None:
+    host = _SettingsApiHost()
+    host.plugin.enable_auto_user_profile_creation = False
+    host._allowed_feature_keys = lambda: {"enable_auto_user_profile_creation"}
+    host._allowed_setting_keys = lambda: set()
+
+    async def save_config() -> bool:
+        return False
+
+    host._save_config_if_possible = save_config
+    REQUEST.payload = {"features": {"enable_auto_user_profile_creation": True}}
+    result = asyncio.run(host.update_settings())
+
+    assert result["success"] is False
+    assert "旧配置重新持久化失败" in result["error"]
+    assert host.plugin.enable_auto_user_profile_creation is False
+    assert host.config_values["enable_auto_user_profile_creation"] is False
+
+
+def test_req041_settings_roll_back_when_config_save_raises() -> None:
+    host = _SettingsApiHost()
+    host.plugin.enable_group_relationship_affinity = False
+    host._allowed_feature_keys = lambda: {"enable_group_relationship_affinity"}
+    host._allowed_setting_keys = lambda: set()
+    calls = 0
+
+    async def save_config() -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("simulated req041 write failure")
+        return True
+
+    host._save_config_if_possible = save_config
+    REQUEST.payload = {"features": {"enable_group_relationship_affinity": True}}
+    result = asyncio.run(host.update_settings())
+
+    assert result["success"] is False
+    assert "simulated req041 write failure" in result["error"]
+    assert calls == 2
+    assert host.plugin.enable_group_relationship_affinity is False
+    assert host.config_values["enable_group_relationship_affinity"] is False
+
+
+def test_mixed_relationship_and_req041_settings_roll_back_together() -> None:
+    host = _SettingsApiHost()
+    before = copy.deepcopy(host.plugin.data)
+    host.plugin.enable_group_relationship_affinity = False
+    host._allowed_feature_keys = lambda: {"enable_group_relationship_affinity"}
+    host._allowed_setting_keys = lambda: {
+        "relationship_positive_stage_cap_key", "normal_interaction_band_cap",
+    }
+    save_calls = 0
+
+    async def save_config() -> bool:
+        nonlocal save_calls
+        save_calls += 1
+        return save_calls > 1
+
+    host._save_config_if_possible = save_config
+    REQUEST.payload = {
+        "features": {"enable_group_relationship_affinity": True},
+        "settings": {"relationship_positive_stage_cap_key": "close"},
+    }
+    result = asyncio.run(host.update_settings())
+
+    assert result["success"] is False
+    assert "关系配置、人格资料及 REQ-041 关键运行值已回滚" in result["error"]
+    assert host.plugin.data == before
+    assert host.plugin.enable_group_relationship_affinity is False
+    assert host.plugin.relationship_positive_stage_cap_key == "deeply_bonded"
+    assert host.config_values["enable_group_relationship_affinity"] is False
+    assert host.config_values["relationship_positive_stage_cap_key"] == "deeply_bonded"
+    assert save_calls == 3
 
 
 def test_settings_batch_rolls_back_when_config_save_raises() -> None:

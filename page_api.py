@@ -4695,6 +4695,7 @@ class PrivateCompanionPageApi(
                     provider_payload = self._expand_provider_overwrite_bundle(str(mode_value), provider_payload)
                 changed.update(provider_payload)
             storage_changed = bool({"storage_backend", "storage_sqlite_path"} & set(changed))
+            req041_config_snapshot = self._req041_config_runtime_snapshot(changed)
             apply_overrides = dict(changed)
             apply_overrides["__defer_relationship_data_save"] = True
             if storage_changed:
@@ -4763,15 +4764,35 @@ class PrivateCompanionPageApi(
             if changed:
                 try:
                     config_saved = await self._save_config_if_possible()
-                except Exception:
+                except Exception as save_exc:
+                    if req041_config_snapshot:
+                        rollback_saved = await self._rollback_req041_config_runtime(req041_config_snapshot)
+                        if not rollback_saved:
+                            raise RuntimeError(
+                                "配置写入失败，REQ-041 运行值已恢复，但旧配置重新持久化失败"
+                            ) from save_exc
                     if apply_overrides.get("__relationship_profile_transaction"):
                         await self._rollback_relationship_config_transaction(apply_overrides)
                     raise
                 if apply_overrides.get("__relationship_profile_transaction"):
                     if not config_saved:
+                        if req041_config_snapshot:
+                            rollback_saved = await self._rollback_req041_config_runtime(req041_config_snapshot)
+                            if not rollback_saved:
+                                raise RuntimeError(
+                                    "配置保存失败，REQ-041 运行值已恢复，但旧配置重新持久化失败"
+                                )
                         await self._rollback_relationship_config_transaction(apply_overrides)
-                        raise RuntimeError("配置保存失败，关系配置及人格资料已回滚")
-                    apply_overrides.pop("__relationship_profile_transaction", None)
+                        raise RuntimeError("配置保存失败，关系配置、人格资料及 REQ-041 关键运行值已回滚")
+                    else:
+                        apply_overrides.pop("__relationship_profile_transaction", None)
+                if not config_saved and req041_config_snapshot:
+                    rollback_saved = await self._rollback_req041_config_runtime(req041_config_snapshot)
+                    if not rollback_saved:
+                        raise RuntimeError(
+                            "配置保存失败，REQ-041 运行值已恢复，但旧配置重新持久化失败"
+                        )
+                    raise RuntimeError("配置保存失败，REQ-041 关键运行值已回滚")
             overview = await self.get_overview()
             if self._is_http_error_response(overview):
                 return overview
@@ -4783,11 +4804,12 @@ class PrivateCompanionPageApi(
                 data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
                 features = data.get("features") if isinstance(data.get("features"), dict) else {}
                 settings = data.get("settings") if isinstance(data.get("settings"), dict) else {}
-                for key, value in changed.items():
-                    if key in self._allowed_feature_keys():
-                        features[key] = self._normalize_bool_value(value)
-                    if key in self._allowed_setting_keys():
-                        settings[key] = value
+                if config_saved:
+                    for key, value in changed.items():
+                        if key in self._allowed_feature_keys():
+                            features[key] = self._normalize_bool_value(value)
+                        if key in self._allowed_setting_keys():
+                            settings[key] = value
             return overview
         except CatalogValidationError as exc:
             detail = next(
@@ -4808,6 +4830,48 @@ class PrivateCompanionPageApi(
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新设置失败: {exc}", exc_info=True)
             return self._exception_error(str(exc))
+
+    def _req041_config_runtime_snapshot(self, changed: dict[str, Any]) -> dict[str, Any]:
+        """Snapshot only identity/relationship isolation controls before hot apply."""
+        critical = {
+            "enable_auto_user_profile_creation",
+            "portrait_global_mode",
+            "auto_profile_platforms",
+            "owner_group_relationship_projection",
+            "owner_group_interaction_projection",
+            "enable_group_relationship_affinity",
+            "group_relationship_affinity_allowlist",
+            "group_relationship_daily_net_cap",
+            "group_relationship_window_minutes",
+            "group_relationship_window_absolute_cap",
+            "group_relationship_person_daily_absolute_cap",
+            "group_relationship_scope_daily_absolute_cap",
+            "relationship_event_window_minutes",
+            "relationship_positive_event_cap",
+            "relationship_negative_event_cap",
+            "relationship_positive_daily_cap",
+        }
+        snapshot: dict[str, Any] = {}
+        getter = getattr(self, "_config_get_raw", None)
+        for key in sorted(critical & set(changed)):
+            if hasattr(self.plugin, key):
+                snapshot[key] = deepcopy(getattr(self.plugin, key))
+            elif callable(getter):
+                snapshot[key] = deepcopy(getter(key, None))
+        return snapshot
+
+    async def _rollback_req041_config_runtime(self, snapshot: dict[str, Any]) -> bool:
+        """Restore runtime and config object, then durably save the old values."""
+        for key, value in snapshot.items():
+            self._apply_config_value(key, deepcopy(value))
+        try:
+            return bool(await self._save_config_if_possible())
+        except Exception as exc:
+            logger.error(
+                "[PrivateCompanionPage] REQ-041 配置回滚持久化失败: %s",
+                self._single_line(exc, 160),
+            )
+            return False
 
     async def swap_image_api_settings(self) -> dict[str, Any]:
         try:
