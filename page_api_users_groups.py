@@ -204,19 +204,18 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             }
         return result
 
-    def _identity_pending_summary(self, user_id: str) -> dict[str, Any]:
+    def _identity_pending_reference(self, user_id: str) -> str:
         coordinator = getattr(self.plugin, "req041_migration_coordinator", None)
         status_reader = getattr(coordinator, "status", None)
-        pending_reader = getattr(coordinator, "pending_status", None)
-        if not callable(status_reader) or not callable(pending_reader):
-            return {"found": False, "state": "unavailable", "reason_code": "migration_unavailable"}
+        if not callable(status_reader):
+            return ""
         try:
             status = status_reader()
         except Exception:
-            return {"found": False, "state": "degraded", "reason_code": "pending_lookup_failed"}
+            return ""
         epoch = str(status.get("migration_epoch") or "") if isinstance(status, dict) else ""
         if not epoch:
-            return {"found": False, "state": "none", "reason_code": ""}
+            return ""
         active_scope = ""
         scope_getter = getattr(self.plugin, "_active_persona_scope", None)
         try:
@@ -227,15 +226,72 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             "default" if not active_scope
             else "persona:" + hashlib.sha256(active_scope.encode("utf-8")).hexdigest()[:24]
         )
+        return legacy_pending_reference(epoch, source_scope, user_id)
+
+    def _identity_pending_summary(self, user_id: str) -> dict[str, Any]:
+        coordinator = getattr(self.plugin, "req041_migration_coordinator", None)
+        pending_reader = getattr(coordinator, "pending_status", None)
+        if not callable(pending_reader):
+            return {"found": False, "state": "unavailable", "reason_code": "migration_unavailable"}
+        reference = self._identity_pending_reference(user_id)
+        if not reference:
+            return {"found": False, "state": "degraded", "reason_code": "pending_lookup_failed"}
         try:
-            result = pending_reader(
-                legacy_pending_reference(epoch, source_scope, user_id)
-            )
+            result = pending_reader(reference)
         except Exception:
             return {"found": False, "state": "degraded", "reason_code": "pending_lookup_failed"}
         return result if isinstance(result, dict) else {
             "found": False, "state": "degraded", "reason_code": "pending_lookup_failed"
         }
+
+    async def update_pending_identity_review(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return self._error("请求体必须是 JSON 对象")
+        user_id = self._single_line(payload.get("user_id"), 160)
+        action = self._single_line(payload.get("action"), 24)
+        if not user_id or action not in {"dismiss", "restore"}:
+            return self._error("user_id 与有效 action 均为必填项")
+        async with self.plugin._data_lock:
+            users = self.plugin.data.get("users") if isinstance(self.plugin.data, dict) else {}
+            user = users.get(user_id) if isinstance(users, dict) else None
+            if not isinstance(user, dict):
+                return self._error("用户不存在")
+            if self._single_line(user.get("unified_person_id"), 80):
+                return self._error("该用户已绑定统一人物，不能修改待确认状态")
+        coordinator = getattr(self.plugin, "req041_migration_coordinator", None)
+        reference = self._identity_pending_reference(user_id)
+        status_reader = getattr(coordinator, "pending_status", None)
+        transition = getattr(
+            coordinator, "dismiss_pending" if action == "dismiss" else "restore_pending", None
+        )
+        if not reference or not callable(status_reader) or not callable(transition):
+            return self._error("待确认身份服务不可用")
+        try:
+            before = status_reader(reference)
+            if not isinstance(before, dict) or not before.get("found"):
+                return self._error("没有找到该用户的待确认记录")
+            expected = "pending" if action == "dismiss" else "dismissed"
+            target = "dismissed" if action == "dismiss" else "pending"
+            current = str(before.get("state") or "")
+            changed = False
+            if current == expected:
+                changed = bool(transition(reference))
+            elif current != target:
+                return self._error("待确认记录状态已变化，请刷新后重试")
+            after = status_reader(reference)
+            safe = after if isinstance(after, dict) else {}
+            return self._ok({
+                "result": {
+                    "ok": str(safe.get("state") or "") == target,
+                    "state": str(safe.get("state") or "")[:24],
+                    "reason_code": str(safe.get("reason_code") or "")[:80],
+                    "changed": changed,
+                }
+            })
+        except Exception as exc:
+            logger.warning("[PrivateCompanionPage] 更新待确认身份状态失败: %s", exc)
+            return self._error("更新待确认身份状态失败")
 
     def _identity_admin_summary(
         self, user: dict[str, Any], *, user_id: str = "", snapshot: dict[str, Any] | None = None

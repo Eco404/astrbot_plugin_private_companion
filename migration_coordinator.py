@@ -560,11 +560,26 @@ class MigrationCoordinator:
                    ON CONFLICT(legacy_ref_hash) DO UPDATE SET
                        source_kind=excluded.source_kind,
                        reason_code=excluded.reason_code,
-                       state='pending',
+                       state=CASE
+                           WHEN migration_pending_records.state='dismissed'
+                            AND migration_pending_records.source_kind=excluded.source_kind
+                            AND migration_pending_records.reason_code=excluded.reason_code
+                           THEN 'dismissed'
+                           ELSE 'pending'
+                       END,
                        updated_at=excluded.updated_at""",
                 (reference, source, reason, now, now),
             )
-            if prior is None or prior["source_kind"] != source or prior["reason_code"] != reason or prior["state"] != "pending":
+            preserved_dismissal = bool(
+                prior is not None
+                and prior["state"] == "dismissed"
+                and prior["source_kind"] == source
+                and prior["reason_code"] == reason
+            )
+            if not preserved_dismissal and (
+                prior is None or prior["source_kind"] != source
+                or prior["reason_code"] != reason or prior["state"] != "pending"
+            ):
                 self._audit(connection, "pending_recorded", reference, reason)
             row = connection.execute(
                 "SELECT * FROM migration_pending_records WHERE legacy_ref_hash=?", (reference,)
@@ -579,11 +594,47 @@ class MigrationCoordinator:
         with self._transaction() as connection:
             changed = connection.execute(
                 """UPDATE migration_pending_records SET state='resolved',reason_code=?,updated_at=?
-                   WHERE legacy_ref_hash=? AND state='pending'""",
+                   WHERE legacy_ref_hash=? AND state IN ('pending','dismissed')""",
                 (resolution, float(self._clock()), reference),
             ).rowcount
             if changed:
                 self._audit(connection, "pending_resolved", reference, resolution)
+        return bool(changed)
+
+    def dismiss_pending(
+        self, legacy_ref_hash: str, *, resolution_code: str = "administrator_deferred"
+    ) -> bool:
+        """Hide one exception from the active queue without deleting its evidence."""
+        reference = _digest(legacy_ref_hash)
+        resolution = _token(resolution_code, 80)
+        if not reference or not resolution:
+            raise MigrationCoordinatorError("migration_pending_invalid")
+        with self._transaction() as connection:
+            changed = connection.execute(
+                """UPDATE migration_pending_records SET state='dismissed',updated_at=?
+                   WHERE legacy_ref_hash=? AND state='pending'""",
+                (float(self._clock()), reference),
+            ).rowcount
+            if changed:
+                self._audit(connection, "pending_dismissed", reference, resolution)
+        return bool(changed)
+
+    def restore_pending(
+        self, legacy_ref_hash: str, *, resolution_code: str = "administrator_restored"
+    ) -> bool:
+        """Return a dismissed exception to the active review queue."""
+        reference = _digest(legacy_ref_hash)
+        resolution = _token(resolution_code, 80)
+        if not reference or not resolution:
+            raise MigrationCoordinatorError("migration_pending_invalid")
+        with self._transaction() as connection:
+            changed = connection.execute(
+                """UPDATE migration_pending_records SET state='pending',updated_at=?
+                   WHERE legacy_ref_hash=? AND state='dismissed'""",
+                (float(self._clock()), reference),
+            ).rowcount
+            if changed:
+                self._audit(connection, "pending_restored", reference, resolution)
         return bool(changed)
 
     def pending_summary(self) -> dict[str, Any]:

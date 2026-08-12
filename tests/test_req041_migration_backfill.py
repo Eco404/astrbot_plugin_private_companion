@@ -156,6 +156,30 @@ class MigrationBackfillTests(unittest.TestCase):
         self.assertNotIn("legacy_ref_hash", status)
         self.assertNotIn(raw_id, json.dumps(status, ensure_ascii=False))
 
+    def test_dismissed_pending_survives_backfill_and_can_be_restored_or_resolved(self) -> None:
+        raw_id = "legacy-review-10001"
+        snapshot = {"users": {raw_id: {"relationship_score": 9}}}
+        self.backfill.run(deepcopy(snapshot))
+        reference = legacy_pending_reference(self.epoch, "default", raw_id)
+
+        self.assertTrue(self.coordinator.dismiss_pending(reference))
+        self.assertEqual("dismissed", self.coordinator.pending_status(reference)["state"])
+        self.assertEqual(0, self.coordinator.pending_summary()["total"])
+
+        self.backfill.run(deepcopy(snapshot))
+        self.assertEqual("dismissed", self.coordinator.pending_status(reference)["state"])
+        self.assertEqual(0, self.coordinator.pending_summary()["total"])
+        self.assertFalse(self.coordinator.dismiss_pending(reference))
+
+        self.assertTrue(self.coordinator.restore_pending(reference))
+        self.assertEqual("pending", self.coordinator.pending_status(reference)["state"])
+        self.assertEqual(1, self.coordinator.pending_summary()["total"])
+        self.assertFalse(self.coordinator.restore_pending(reference))
+
+        self.assertTrue(self.coordinator.dismiss_pending(reference))
+        self.assertTrue(self.coordinator.resolve_pending(reference))
+        self.assertEqual("resolved", self.coordinator.pending_status(reference)["state"])
+
     def test_tampered_fingerprint_is_not_migrated(self) -> None:
         snapshot, person_id = self._snapshot()
         root = snapshot["unified_person"]

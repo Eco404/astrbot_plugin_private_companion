@@ -15002,6 +15002,9 @@ function identityPendingGuidance(pending) {
   if (value.state === "degraded") {
     return { title: "待确认状态读取失败", detail: "当前继续读取旧资料；请稍后刷新，不要手工合并不确定的账号。", tone: "off" };
   }
+  if (value.found && value.state === "dismissed") {
+    return { title: "已暂不处理这条身份异常", detail: "旧资料仍保持隔离和可读。后续精确真实消息仍可安全认领，也可手动重新加入审核队列。", tone: "off" };
+  }
   if (value.found && reason === "identity_link_missing") {
     return { title: "等待精确身份事件", detail: "此旧档案仍可读取。用户下一次通过已核验平台身份真实发言后，系统会自动认领并对账，无需手工搬数据。", tone: "warn" };
   }
@@ -15052,7 +15055,7 @@ function renderUnifiedIdentityPanel(detail) {
       </div>
       <div data-identity-lifecycle-preview class="notice-box" role="status" aria-live="polite" hidden></div>
       ${!lifecycle.can_unlink_current && lifecycle.can_archive ? '<p class="muted">当前是唯一或主身份，不能直接拆分；如需移除，请使用统一人物归档。</p>' : ""}
-    </section>` : `<section class="detail-block"><header class="detail-block-head"><div><h2>${escapeHtml(pendingGuidance.title)}</h2><p>${escapeHtml(pendingGuidance.detail)}</p></div><span class="badge ${escapeHtml(pendingGuidance.tone)}">只读安全提示</span></header><p class="muted">当前页面不会提供猜测确认或忽略按钮；在没有精确平台身份时，任何人工合并都有串档风险。</p></section>`}
+    </section>` : `<section class="detail-block"><header class="detail-block-head"><div><h2>${escapeHtml(pendingGuidance.title)}</h2><p>${escapeHtml(pendingGuidance.detail)}</p></div><span class="badge ${escapeHtml(pendingGuidance.tone)}">安全待确认</span></header><p class="muted">当前页面不会按昵称或模糊 ID 猜测合并。“暂不处理”只移出审核队列，不删除旧资料，不阻断未来精确消息认领。</p>${identity.pending?.found && ["pending", "dismissed"].includes(String(identity.pending?.state || "")) ? `<div class="toolbar"><button type="button" class="secondary-button" data-pending-identity-action="${identity.pending.state === "dismissed" ? "restore" : "dismiss"}">${identity.pending.state === "dismissed" ? "重新加入审核" : "暂不处理"}</button></div>` : ""}</section>`}
   `;
 }
 
@@ -16868,6 +16871,30 @@ function bindUnifiedIdentityActions(detail, refreshSelectedUserDetail) {
   });
 }
 
+function bindPendingIdentityActions(detail, refreshSelectedUserDetail) {
+  document.querySelectorAll("[data-pending-identity-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = String(button.dataset.pendingIdentityAction || "");
+      if (!detail?.user_id || !["dismiss", "restore"].includes(action)) return;
+      if (!requireSecondClick(
+        button,
+        `pending-identity:${detail.user_id}:${action}`,
+        action === "dismiss" ? "再次点击暂不处理；旧资料不会删除" : "再次点击重新加入审核",
+        action === "dismiss" ? "再次点击暂不处理" : "再次点击恢复审核",
+      )) return;
+      const response = await runAction(
+        () => postJson("/user/identity/pending", { user_id: detail.user_id, action }),
+        action === "dismiss" ? "已移出待处理队列，旧资料保持不变" : "已重新加入待处理队列",
+        button,
+        { reload: false },
+      );
+      if (!response?.result?.ok) return;
+      delete state.userDetailCache[detail.user_id];
+      await refreshSelectedUserDetail();
+    });
+  });
+}
+
 function bindUserActions(detail) {
   bindEmotionTraceButtons(detail);
   const refreshSelectedUserDetail = async () => {
@@ -16876,6 +16903,7 @@ function bindUserActions(detail) {
     }
   };
   bindUnifiedIdentityActions(detail, refreshSelectedUserDetail);
+  bindPendingIdentityActions(detail, refreshSelectedUserDetail);
   $("#relationshipStageForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const selectedKey = String(new FormData(event.currentTarget).get("relationship_stage_key") || "");

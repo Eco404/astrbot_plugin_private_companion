@@ -47,6 +47,7 @@ def _load_page_unlink():
     )
     names = {
         "_identity_domain_summary",
+        "_identity_pending_reference",
         "_identity_pending_summary",
         "_identity_admin_summary",
         "_identity_link_confirmation",
@@ -54,6 +55,7 @@ def _load_page_unlink():
         "_safe_identity_unlink_result",
         "link_unified_identity",
         "unlink_unified_identity",
+        "update_pending_identity_review",
     }
     methods = [
         copy.deepcopy(node) for node in owner.body
@@ -90,6 +92,7 @@ class _AsyncLock:
 
 class _PageHost:
     _identity_domain_summary = PAGE_METHODS["_identity_domain_summary"]
+    _identity_pending_reference = PAGE_METHODS["_identity_pending_reference"]
     _identity_pending_summary = PAGE_METHODS["_identity_pending_summary"]
     _identity_admin_summary = PAGE_METHODS["_identity_admin_summary"]
     _identity_link_confirmation = staticmethod(PAGE_METHODS["_identity_link_confirmation"])
@@ -97,6 +100,7 @@ class _PageHost:
     _safe_identity_unlink_result = staticmethod(PAGE_METHODS["_safe_identity_unlink_result"])
     link_unified_identity = PAGE_METHODS["link_unified_identity"]
     unlink_unified_identity = PAGE_METHODS["unlink_unified_identity"]
+    update_pending_identity_review = PAGE_METHODS["update_pending_identity_review"]
 
     def __init__(self) -> None:
         self.data: dict[str, Any] = {"users": {}}
@@ -349,6 +353,58 @@ class IdentityAdminUiTests(unittest.TestCase):
         self.assertNotIn(epoch, encoded)
         self.assertNotIn(expected, encoded)
 
+    def test_pending_review_defer_and_restore_use_only_selected_user(self) -> None:
+        host = _PageHost()
+        raw_user_id = "legacy-user-review"
+        host.data["users"][raw_user_id] = {"user_id": raw_user_id}
+        epoch = "migration-epoch-review"
+        states: dict[str, str] = {}
+
+        class Coordinator:
+            @staticmethod
+            def status():
+                return {"migration_epoch": epoch}
+
+            @staticmethod
+            def pending_status(reference):
+                state = states.get(reference, "pending")
+                return {
+                    "found": True, "source_kind": "legacy_user",
+                    "reason_code": "identity_link_missing", "state": state,
+                }
+
+            @staticmethod
+            def dismiss_pending(reference):
+                if states.get(reference, "pending") != "pending":
+                    return False
+                states[reference] = "dismissed"
+                return True
+
+            @staticmethod
+            def restore_pending(reference):
+                if states.get(reference) != "dismissed":
+                    return False
+                states[reference] = "pending"
+                return True
+
+        host.req041_migration_coordinator = Coordinator()
+        reference = legacy_pending_reference(epoch, "default", raw_user_id)
+        PAGE_REQUEST.payload = {"user_id": raw_user_id, "action": "dismiss"}
+        dismissed = asyncio.run(host.update_pending_identity_review())
+        self.assertTrue(dismissed["ok"])
+        self.assertEqual("dismissed", dismissed["data"]["result"]["state"])
+        self.assertEqual("dismissed", states[reference])
+        self.assertNotIn(raw_user_id, json.dumps(dismissed, ensure_ascii=False))
+        self.assertNotIn(reference, json.dumps(dismissed, ensure_ascii=False))
+
+        PAGE_REQUEST.payload = {"user_id": raw_user_id, "action": "restore"}
+        restored = asyncio.run(host.update_pending_identity_review())
+        self.assertTrue(restored["ok"])
+        self.assertEqual("pending", restored["data"]["result"]["state"])
+
+        PAGE_REQUEST.payload = {"user_id": "10001", "action": "dismiss"}
+        self.assertFalse(asyncio.run(host.update_pending_identity_review())["ok"])
+
     def test_page_unlink_derives_exact_identity_from_selected_user(self) -> None:
         host = _PageHost()
         PAGE_REQUEST.payload = {
@@ -414,12 +470,16 @@ class IdentityAdminUiTests(unittest.TestCase):
         self.assertIn('"/user/identity/link"', english)
         self.assertIn('postJson(endpoint, body)', english)
         self.assertIn('confirmation_token: preview.confirmationToken', english)
-        self.assertIn("只读安全提示", english)
+        self.assertIn("安全待确认", english)
         self.assertIn("等待精确身份事件", english)
         self.assertIn("data-identity-lifecycle-preview", english)
         self.assertIn("当前版本尚无自动恢复归档的全链路", english)
         self.assertIn("群共享记忆不归个人所有", english)
         self.assertIn("archive_retention_active", english)
+        self.assertIn('data-pending-identity-action=', english)
+        self.assertIn('"/user/identity/pending"', english)
+        self.assertIn("暂不处理", english)
+        self.assertIn("重新加入审核", english)
         self.assertNotIn('data-identity-action="confirm-pending"', english)
         self.assertIn("不能绕过统一数据链直接删除", (ROOT / "page_api_users_groups.py").read_text(encoding="utf-8"))
         self.assertNotIn("identity.identity_key", english)
