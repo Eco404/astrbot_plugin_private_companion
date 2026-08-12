@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import base64
 import sys
 import tempfile
 import unittest
@@ -336,11 +337,13 @@ class PhotoBackendReferenceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.session_options["trust_env"])
         self.assertNotIn("proxy", session.post_options)
 
-    async def test_comfyui_preserves_long_reference_path_in_input_images(self) -> None:
+    async def test_comfyui_encodes_unicode_reference_path_as_ascii_base64(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             generated = Path(directory) / "generated.png"
             generated.write_bytes(b"generated")
-            long_reference = "C:/reference/" + ("nested folder/" * 22) + "persona  original.png"
+            reference = Path(directory) / "人设参考图.png"
+            reference_bytes = b"persona reference bytes"
+            reference.write_bytes(reference_bytes)
 
             def find_workflow_file(_name, _texts, images, _videos, _directory):
                 return "workflow-images-1.json" if images == 1 else "workflow-images-0.json"
@@ -361,21 +364,20 @@ class PhotoBackendReferenceContractTests(unittest.IsolatedAsyncioTestCase):
 
             module._save_image_to_persistent_path = save_persistent
             harness = _ComfyHarness(module)
-            with patch(
-                "astrbot_plugin_private_companion.proactive_message.os.path.isfile",
-                return_value=True,
-            ):
-                path, note = await harness._run_comfyui_photo_workflow(
-                    "selfie",
-                    "keep the character",
-                    session_key="comfy-long-path",
-                    reference_image_path=long_reference,
-                )
+            path, note = await harness._run_comfyui_photo_workflow(
+                "selfie",
+                "keep the character",
+                session_key="comfy-unicode-path",
+                reference_image_path=str(reference),
+            )
 
-        self.assertGreater(len(long_reference), 260)
         self.assertEqual(path, str(generated))
         self.assertIn("已使用 1 张本地参考图", note)
-        self.assertEqual(_FakeWorkflow.latest.input_images, [long_reference])
+        self.assertEqual(
+            _FakeWorkflow.latest.input_images,
+            [base64.b64encode(reference_bytes).decode("ascii")],
+        )
+        self.assertTrue(_FakeWorkflow.latest.input_images[0].isascii())
 
     async def test_comfyui_falls_back_to_available_single_image_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -414,7 +416,10 @@ class PhotoBackendReferenceContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(path, str(generated))
         self.assertIn("当前工作流仅支持 1/2 张参考图", note)
-        self.assertEqual(_FakeWorkflow.latest.input_images, [str(bot_reference)])
+        self.assertEqual(
+            _FakeWorkflow.latest.input_images,
+            [base64.b64encode(b"bot").decode("ascii")],
+        )
         self.assertEqual(
             _FakeWorkflow.latest.texts[0],
             "reference image 1 is Bot; reference image 2 is sister",

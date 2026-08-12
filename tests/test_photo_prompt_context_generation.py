@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import sys
@@ -1167,7 +1168,10 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image_path, str(output))
         self.assertIn("3 张本地参考图", note)
         self.assertEqual(submitted["workflow_file"], str(workflow_file))
-        self.assertEqual(submitted["images"], [str(path) for path in references])
+        self.assertEqual(
+            submitted["images"],
+            [base64.b64encode(b"reference").decode("ascii")] * 3,
+        )
         self.assertEqual(submitted["texts"], ["portrait"])
 
     async def test_invalid_multi_image_binding_is_skipped_with_missing_role_audit(self) -> None:

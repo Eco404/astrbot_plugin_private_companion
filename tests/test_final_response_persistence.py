@@ -174,6 +174,11 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("第一段\n\n第二段", _strip_outbound_control_blocks(raw))
 
+    def test_outbound_cleanup_removes_leaked_emotion_controls(self):
+        raw = "[affectionate]嗯……\n[shy]才没有呢。[公告]明天见。"
+
+        self.assertEqual("嗯……\n才没有呢。[公告]明天见。", _strip_outbound_control_blocks(raw))
+
     def test_proactive_archive_uses_internal_marker_instead_of_visible_placeholder(self):
         harness = _Harness()
 

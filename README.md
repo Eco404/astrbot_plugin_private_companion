@@ -10,7 +10,7 @@
 | --- | --- |
 | 插件名 | <code>astrbot_plugin_private_companion</code> |
 | 显示名 | 我会永远陪着你 |
-| 版本 | <code>6.2.0</code> |
+| 版本 | <code>6.2.1</code> |
 | AstrBot | <code>>= 4.22.0</code> |
 | 官方声明平台 | <code>aiocqhttp</code>、<code>qq_official</code> |
 | 管理入口 | AstrBot 插件拓展页中的“陪伴面板”（含纯英文路径兜底入口） |
@@ -802,10 +802,10 @@ tests/                          回归测试
 
 ## Star History
 
-<a href="https://www.star-history.com/#menglimi/astrbot_plugin_private_companion&type=timeline&logscale&legend=top-left">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=menglimi/astrbot_plugin_private_companion&type=timeline&theme=dark&logscale&legend=top-left" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=menglimi/astrbot_plugin_private_companion&type=timeline&logscale&legend=top-left" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=menglimi/astrbot_plugin_private_companion&type=timeline&logscale&legend=top-left" />
-  </picture>
+<a href="https://www.star-history.com/?repos=menglimi%2Fastrbot_plugin_private_companion&type=timeline&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=menglimi/astrbot_plugin_private_companion&type=timeline&theme=dark&legend=top-left&sealed_token=-xXOBZHvp4k4IzQmljVguHcJlVNLP77MuWX0ZzOWq3ZvxJaKEuWLoSo3xyoz106dlMtpFa2qh70qyoxikoOrTv9eOyzNdJNcyPxbCnGZ8IwEOjc488HxkY2DztxYJ1IZmuyE_Rhd3O13SF0W0S3m9pJ20gSNoJaP7a6DtRZ_66oSkQbOylCZYhZabnA3" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=menglimi/astrbot_plugin_private_companion&type=timeline&legend=top-left&sealed_token=-xXOBZHvp4k4IzQmljVguHcJlVNLP77MuWX0ZzOWq3ZvxJaKEuWLoSo3xyoz106dlMtpFa2qh70qyoxikoOrTv9eOyzNdJNcyPxbCnGZ8IwEOjc488HxkY2DztxYJ1IZmuyE_Rhd3O13SF0W0S3m9pJ20gSNoJaP7a6DtRZ_66oSkQbOylCZYhZabnA3" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=menglimi/astrbot_plugin_private_companion&type=timeline&legend=top-left&sealed_token=-xXOBZHvp4k4IzQmljVguHcJlVNLP77MuWX0ZzOWq3ZvxJaKEuWLoSo3xyoz106dlMtpFa2qh70qyoxikoOrTv9eOyzNdJNcyPxbCnGZ8IwEOjc488HxkY2DztxYJ1IZmuyE_Rhd3O13SF0W0S3m9pJ20gSNoJaP7a6DtRZ_66oSkQbOylCZYhZabnA3" />
+ </picture>
 </a>

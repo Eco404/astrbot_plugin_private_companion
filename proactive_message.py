@@ -15170,6 +15170,27 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             continuity_key=continuity_key,
         )
 
+    @staticmethod
+    def _comfyui_reference_images_to_base64(
+        image_paths: list[str],
+    ) -> tuple[list[str], str]:
+        """Encode local reference files for ComfyUI's ETN_LoadImageBase64 nodes."""
+        encoded_images: list[str] = []
+        for index, image_path in enumerate(image_paths, start=1):
+            try:
+                image_bytes = Path(image_path).read_bytes()
+            except OSError as exc:
+                logger.warning(
+                    "[PrivateCompanion] ComfyUI 参考图读取失败: index=%s error=%s",
+                    index,
+                    _single_line(exc, 160),
+                )
+                return [], f"ComfyUI 无法读取第 {index} 张参考图，已停止提交"
+            if not image_bytes:
+                return [], f"ComfyUI 第 {index} 张参考图为空，已停止提交"
+            encoded_images.append(base64.b64encode(image_bytes).decode("ascii"))
+        return encoded_images, ""
+
     async def _run_comfyui_photo_workflow(
         self,
         workflow_name: str,
@@ -15332,8 +15353,13 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     f"已找到参考图，但 ComfyUI 工作流 {workflow_name} 实际没有接收图片输入。"
                     "请检查工作流 images 参数数量。"
                 )
+            encoded_input_images, image_encoding_error = self._comfyui_reference_images_to_base64(
+                input_images
+            )
+            if image_encoding_error:
+                return "", image_encoding_error
             prompt_id = await workflow.submit_only(
-                input_images,
+                encoded_input_images,
                 [submitted_prompt_text] * max(1, text_count),
                 [],
                 debug=debug,

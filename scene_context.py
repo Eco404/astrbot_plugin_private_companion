@@ -701,3 +701,65 @@ class SceneContextMixin:
         if _single_line(visual.get("topic"), 80):
             parts.append(f"视觉话题：{_single_line(visual.get('topic'), 80)}")
         return _single_line("；".join(part for part in parts if part), 1200)
+
+    def _format_mobile_user_location_context(self, user: dict[str, Any] | None) -> str:
+        """Format authorized Android location for the current private dialogue."""
+        current_user = user if isinstance(user, dict) else {}
+        user_id = _single_line(current_user.get("user_id"), 80)
+        getter = getattr(self, "_reality_mobile_context", None)
+        if not user_id or not callable(getter):
+            return ""
+        try:
+            mobile_context = getter(user_id)
+        except Exception:
+            return ""
+        if not isinstance(mobile_context, dict):
+            return ""
+        location = mobile_context.get("location") if isinstance(mobile_context.get("location"), dict) else {}
+        map_observer = getattr(self, "_observe_mobile_place_context", None)
+        cognitive_map: dict[str, Any] = {}
+        if callable(map_observer):
+            try:
+                candidate = map_observer(user_id, location)
+                if isinstance(candidate, dict):
+                    cognitive_map = candidate
+            except Exception:
+                cognitive_map = {}
+
+        facts: list[str] = []
+        place = location.get("place") if isinstance(location.get("place"), dict) else {}
+        place_name = _single_line(place.get("name"), 40)
+        if location.get("available"):
+            if place.get("matched") and place_name:
+                kind = _single_line(place.get("kind"), 24)
+                kind_label = {"home": "家", "work": "工作地点", "custom": "自定义地点"}.get(kind, "已标记地点")
+                facts.append(f"用户当前位于已标记地点“{place_name}”（{kind_label}）范围内")
+            else:
+                latitude = _single_line(location.get("latitude"), 16)
+                longitude = _single_line(location.get("longitude"), 16)
+                accuracy = _single_line(location.get("accuracy_m"), 16)
+                if latitude and longitude:
+                    coordinate = f"用户当前约在纬度 {latitude}、经度 {longitude}"
+                    if accuracy:
+                        coordinate += f"，定位精度约 {accuracy} 米"
+                    facts.append(coordinate)
+                else:
+                    facts.append("用户已开启手机位置感知，但当前没有可用的地点名称")
+
+        map_formatter = getattr(self, "_format_place_cognitive_map_context", None)
+        if callable(map_formatter):
+            try:
+                map_text = _single_line(map_formatter(cognitive_map), 420)
+            except Exception:
+                map_text = ""
+            if map_text:
+                facts.append(map_text)
+        if not facts:
+            return ""
+        return (
+            "【用户手机位置感知】\n"
+            + "；".join(facts)
+            + "\n这些是用户主动授权的短期环境事实，只用于理解用户所在场景、出行方向和行为语境。"
+            "除非用户明确询问位置，否则不要主动复述经纬度、轨迹或声称正在监视用户；"
+            "不得把未标记地点猜成具体住址。"
+        )

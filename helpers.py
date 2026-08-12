@@ -596,6 +596,13 @@ _MARKDOWN_CODE_SPAN_PATTERN = re.compile(
     re.MULTILINE,
 )
 
+_LEAKED_CHAT_EMOTION_CONTROL_PATTERN = re.compile(
+    r"(?i)(?<![\w`])\[(?:affectionate|shy|happy|sad|angry|calm|excited|surprised|"
+    r"nervous|scared|worried|upset|frustrated|embarrassed|disgusted|moved|proud|"
+    r"relaxed|grateful|confident|curious|confused|nostalgic|sleepy|thoughtful|"
+    r"yawning|comforting|warm|softly|whispering|laughing|chuckling|sighing)\]"
+)
+
 _GROUP_MEMBER_SAFETY_MARKER_PATTERN = re.compile(
     r"<\s*pc_member_safety\s*>(?P<body>[\s\S]*?)<\s*/\s*pc_member_safety\s*>",
     re.IGNORECASE,
@@ -634,6 +641,7 @@ def _strip_nonstandard_chat_control_tags(text: Any) -> str:
         return ""
     normalized = _NONSTANDARD_SELF_CLOSING_TAG_PATTERN.sub("", normalized)
     normalized = _ESCAPED_NONSTANDARD_SELF_CLOSING_TAG_PATTERN.sub("", normalized)
+    normalized = _LEAKED_CHAT_EMOTION_CONTROL_PATTERN.sub("", normalized)
     normalized = re.sub(r"\s+([，,。！？!?；;：:、~～…])", r"\1", normalized)
     normalized = re.sub(r"([（(【\[])\s+", r"\1", normalized)
     normalized = re.sub(r"\s+([）)】\]])", r"\1", normalized)

@@ -11780,6 +11780,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 69,
                 lambda: self._format_reality_touch_continuity_context(current_user),
             )
+            add_spec(
+                "reality_touch.mobile_location",
+                "reality_touch",
+                68,
+                lambda: self._format_mobile_user_location_context(current_user),
+                metadata={"范围": "当前私聊会话", "来源": "用户主动授权的手机前台定位"},
+            )
         if self._feature_enabled_or_temp_unlocked("enable_skill_growth_passive_injection"):
             add_spec("skill.growth", "skill", 66, self._format_skill_growth_for_prompt)
         else:

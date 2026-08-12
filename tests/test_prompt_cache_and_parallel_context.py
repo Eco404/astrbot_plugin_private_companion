@@ -42,6 +42,7 @@ def _private_collector_harness() -> PrivateCompanionPlugin:
         "_format_private_reading_preference_influence_for_reply",
         "_format_recent_news_context_for_reply",
         "_format_recent_web_exploration_context_for_reply",
+        "_format_mobile_user_location_context",
         "_format_skill_growth_for_user_text",
         "_format_self_timeline_context_for_reply",
         "_format_private_chat_context_injection",
@@ -132,6 +133,28 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(state_calls, 0)
         self.assertNotIn("memory.current_state", {item["key"] for item in collected})
+
+    async def test_private_turn_includes_authorized_mobile_location_context(self) -> None:
+        plugin = _private_collector_harness()
+        plugin._format_mobile_user_location_context = lambda _user: (
+            "【用户手机位置感知】\n用户当前位于已标记地点“公司”（工作地点）范围内"
+        )
+
+        async def private_recall(**_kwargs) -> str:
+            return ""
+
+        plugin._memory_companion_compose_private_recall = private_recall
+        collected = await plugin._collect_private_passive_prompt_contexts(
+            _PrivateEvent(),
+            SimpleNamespace(system_prompt="", prompt=""),
+            inbound_text="今天工作有点忙",
+            current_user={"user_id": "10001"},
+            is_private_chat=True,
+        )
+
+        by_key = {item["key"]: item for item in collected}
+        self.assertEqual(by_key["reality_touch.mobile_location"]["priority"], 68)
+        self.assertIn("已标记地点“公司”", by_key["reality_touch.mobile_location"]["content"])
 
     async def test_colloquial_current_activity_question_triggers_state_context(self) -> None:
         plugin = _private_collector_harness()

@@ -1094,8 +1094,8 @@ class PrivateCompanionPageApi(
         return {
             "state": state if state in {"active", "replaying", "degraded", "paused", "complete"} else "unknown",
             "phase": phase if phase in {"S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"} else "",
-            "code": _single_line(runtime.get("code") or control.get("error_code"), 120),
-            "checkpoint": _single_line(runtime.get("checkpoint") or control.get("checkpoint"), 120),
+            "code": self._single_line(runtime.get("code") or control.get("error_code"), 120),
+            "checkpoint": self._single_line(runtime.get("checkpoint") or control.get("checkpoint"), 120),
             "required": bool(runtime.get("required")),
             "migration": aggregates,
             "outbox": queue,

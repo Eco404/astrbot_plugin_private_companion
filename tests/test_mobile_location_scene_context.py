@@ -59,3 +59,13 @@ def test_authorized_mobile_location_is_prompt_context_not_primary_location() -> 
     assert "地点认知地图" in rendered
     assert "已确认地点：公司（工作地点）" in rendered
     assert "不向用户主动暴露精确坐标" in rendered
+
+
+def test_authorized_mobile_location_has_dedicated_private_dialogue_context() -> None:
+    harness = MobileSceneHarness()
+
+    rendered = harness._format_mobile_user_location_context({"user_id": "owner-1"})
+
+    assert "【用户手机位置感知】" in rendered
+    assert "用户当前位于已标记地点“公司”（工作地点）范围内" in rendered
+    assert "不得把未标记地点猜成具体住址" in rendered

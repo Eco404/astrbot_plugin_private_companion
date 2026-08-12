@@ -1354,9 +1354,52 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
     def test_visible_text_removes_known_emotion_cues_but_keeps_normal_brackets(self):
         harness = _TtsHarness()
 
-        cleaned = harness._sanitize_tts_visible_text("[happy]今天很开心。[公告]明天见。")
+        cleaned = harness._sanitize_tts_visible_text("[happy][affectionate][shy]今天很开心。[公告]明天见。")
 
         self.assertEqual("今天很开心。[公告]明天见。", cleaned)
+
+    async def test_global_probability_100_converts_plain_fast_tag_reply_without_legacy_auto_voice(self):
+        harness = _TtsHarness()
+        harness.tts_generation_mode = "fast_tag"
+        harness.tts_conversion_scope = "full"
+        harness.tts_frequency_control_mode = "global"
+        harness.tts_trigger_probability = 1.0
+        harness.tts_private_trigger_probability = -0.01
+        harness.auto_voice_enabled = False
+        harness._tts_auto_voice_last_at = {}
+        harness._event_targets_main_user = lambda _event: False
+        harness._process_tts_tags = AsyncMock(return_value=[Plain("processed")])
+        event = SimpleNamespace(
+            unified_msg_origin="default:FriendMessage:10001",
+            message_str="普通聊天",
+        )
+
+        result = await harness._maybe_convert_plain_reply_to_tts("这条普通回复也应进入语音。", event)
+
+        call = harness._process_tts_tags.await_args
+        self.assertEqual("<tts>这条普通回复也应进入语音。</tts>", call.args[0])
+        self.assertEqual("processed", result[0].text)
+
+    async def test_global_probability_100_keeps_functional_command_as_text(self):
+        harness = _TtsHarness()
+        harness.tts_generation_mode = "fast_tag"
+        harness.tts_frequency_control_mode = "global"
+        harness.tts_trigger_probability = 1.0
+        harness.tts_private_trigger_probability = -0.01
+        harness.auto_voice_enabled = False
+        harness._tts_auto_voice_last_at = {}
+        harness._event_targets_main_user = lambda _event: False
+        harness._process_tts_tags = AsyncMock(return_value=[Plain("不应转换")])
+        event = SimpleNamespace(
+            unified_msg_origin="default:FriendMessage:10001",
+            message_str="/陪伴 状态",
+            is_command=True,
+        )
+
+        result = await harness._maybe_convert_plain_reply_to_tts("当前状态正常。", event)
+
+        self.assertEqual([], result)
+        harness._process_tts_tags.assert_not_awaited()
 
     async def test_proactive_outbound_guard_removes_orphan_emotion_cue(self):
         harness = _TtsHarness()

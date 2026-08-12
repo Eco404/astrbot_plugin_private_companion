@@ -119,6 +119,7 @@ TTS_VISIBLE_EMOTION_CUES = frozenset(
             "embarrassed", "disgusted", "moved", "proud", "relaxed",
             "grateful", "confident", "curious", "confused", "nostalgic",
             "sleepy", "thoughtful", "yawning", "comforting",
+            "affectionate", "shy", "warm", "softly",
         }
     )
     if str(item).strip()
@@ -3822,6 +3823,8 @@ TTS 朗读文本：
             )
             return []
         user_requested_tts = self._event_explicitly_requests_tts(event)
+        if self._tts_functional_command_reason(event) and not user_requested_tts:
+            return []
         strong_block_reason = self._tts_strong_constraint_block_reason(
             event,
             user_requested_tts=user_requested_tts,
@@ -3925,10 +3928,14 @@ TTS 朗读文本：
         )
 
     def _auto_voice_trigger_reason(self, text: str, event: Any) -> tuple[bool, str]:
-        if not getattr(self, "auto_voice_enabled", False):
+        use_legacy_frequency = getattr(self, "tts_frequency_control_mode", "global") == "legacy"
+        probability_forces_conversion = (
+            not use_legacy_frequency
+            and self._tts_effective_trigger_probability(event) >= 1.0
+        )
+        if not getattr(self, "auto_voice_enabled", False) and not probability_forces_conversion:
             return False, ""
         session = str(getattr(event, "unified_msg_origin", "") or "")
-        use_legacy_frequency = getattr(self, "tts_frequency_control_mode", "global") == "legacy"
         is_main = self._event_targets_main_user(event)
         if use_legacy_frequency and is_main and self.main_user_voice_probability >= 0:
             probability = self.main_user_voice_probability
@@ -3937,7 +3944,7 @@ TTS 朗读文本：
         else:
             probability = getattr(self, "auto_voice_probability", 0.0) if use_legacy_frequency else 1.0
             bypass_limits = False
-            reason = "auto"
+            reason = "probability_100" if probability_forces_conversion else "auto"
         if use_legacy_frequency and self._event_mentions_main_user_with_keyword(event):
             probability = max(probability, getattr(self, "main_user_mention_voice_probability", 0.0))
             bypass_limits = True
@@ -3945,7 +3952,7 @@ TTS 朗读文本：
         if probability <= 0 or random.random() > probability:
             return False, ""
         cleaned = _single_line(self._normalize_tts_spoken_text(text, provider_kind="generic"), 10000)
-        max_chars = int(getattr(self, "auto_voice_max_chars", 0) or 0)
+        max_chars = 0 if probability_forces_conversion else int(getattr(self, "auto_voice_max_chars", 0) or 0)
         if max_chars > 0 and not bypass_limits and len(cleaned) > max_chars:
             return False, ""
         cooldown = int(getattr(self, "auto_voice_cooldown_seconds", 0) or 0) if use_legacy_frequency else 0
