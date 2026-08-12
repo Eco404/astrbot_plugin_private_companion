@@ -11,6 +11,7 @@ from relationship_account_store import (
     RelationshipAccountStore,
     RelationshipConflict,
 )
+from relationship_event_policy import build_group_interaction_proof
 
 
 EPOCH = "req041-20260810-001"
@@ -36,8 +37,9 @@ class RelationshipAccountStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "relationship.sqlite3"
+        self.now = [1_786_291_200.0]
         self.store = RelationshipAccountStore(
-            self.path, active_migration_epoch=EPOCH, clock=lambda: 1_786_291_200.0
+            self.path, active_migration_epoch=EPOCH, clock=lambda: self.now[0]
         )
 
     def tearDown(self) -> None:
@@ -48,6 +50,21 @@ class RelationshipAccountStoreTests(unittest.TestCase):
             _context(), operation_id="create-account", actor="administrator",
             relationship_role=role, relationship_mode=mode, score=score,
         )
+
+    @staticmethod
+    def _group_proof(context: NamespaceContext, event_id: str, **changes):
+        values = {
+            "event_id": event_id,
+            "directed_by": "at_bot",
+            "inbound": True,
+            "human_sender": True,
+            "bot_reply_succeeded": True,
+            "forwarded": False,
+            "echo": False,
+            "historical": False,
+        }
+        values.update(changes)
+        return build_group_interaction_proof(context, **values)
 
     def test_account_is_identity_global_but_group_summary_is_low_sensitive(self) -> None:
         self._create(score=200)
@@ -119,17 +136,110 @@ class RelationshipAccountStoreTests(unittest.TestCase):
         first = self.store.apply_event(
             group_a, event_id="group-a-1", actor="group_pipeline", reason_code="direct_group_interaction",
             delta=4, weight=1.0, allow_group_affinity=True,
+            group_interaction_proof=self._group_proof(group_a, "group-a-1"),
         )
         second = self.store.apply_event(
             group_a, event_id="group-a-2", actor="group_pipeline", reason_code="direct_group_interaction",
             delta=8, weight=1.0, allow_group_affinity=True,
+            group_interaction_proof=self._group_proof(group_a, "group-a-2"),
         )
         third = self.store.apply_event(
             group_b, event_id="group-b-1", actor="group_pipeline", reason_code="direct_group_interaction",
             delta=4, weight=1.0, allow_group_affinity=True,
+            group_interaction_proof=self._group_proof(group_b, "group-b-1"),
         )
-        self.assertEqual((1, 1, 1), (first.applied_delta, second.applied_delta, third.applied_delta))
-        self.assertEqual(3, self.store.account(_context())["relationship_score"])
+        self.assertEqual((1, 0, 1), (first.applied_delta, second.applied_delta, third.applied_delta))
+        self.assertEqual("group_affinity_budget_exhausted", second.code)
+        self.assertEqual(2, self.store.account(_context())["relationship_score"])
+
+    def test_group_proof_is_bound_to_event_and_rejects_forward_echo_or_failed_reply(self) -> None:
+        self._create()
+        group = _context(kind="group_member", group_id="group-a")
+        cases = (
+            ("missing", None, "group_interaction_proof_invalid"),
+            ("wrong-binding", self._group_proof(group, "another-event"), "group_interaction_proof_binding_mismatch"),
+            ("forward", self._group_proof(group, "forward", forwarded=True), "group_interaction_source_denied"),
+            ("echo", self._group_proof(group, "echo", echo=True), "group_interaction_source_denied"),
+            ("failed", self._group_proof(group, "failed", bot_reply_succeeded=False), "group_interaction_proof_incomplete"),
+        )
+        for event_id, proof, expected in cases:
+            with self.subTest(event_id=event_id):
+                result = self.store.apply_event(
+                    group, event_id=event_id, actor="group_pipeline",
+                    reason_code="direct_group_interaction", delta=4,
+                    allow_group_affinity=True, group_interaction_proof=proof,
+                )
+                self.assertFalse(result.applied)
+                self.assertEqual(expected, result.code)
+        self.assertEqual(0, self.store.account(_context())["relationship_score"])
+
+    def test_group_absolute_budgets_stop_sign_churn_and_cross_group_spam(self) -> None:
+        self._create()
+        group_a = _context(kind="group_member", group_id="group-a")
+        group_b = _context(kind="group_member", group_id="group-b")
+
+        def settle(context, event_id, delta, **budgets):
+            return self.store.apply_event(
+                context, event_id=event_id, actor="group_pipeline",
+                reason_code="direct_group_interaction", delta=delta,
+                allow_group_affinity=True,
+                group_interaction_proof=self._group_proof(context, event_id),
+                **budgets,
+            )
+
+        first = settle(group_a, "churn-positive", 4, group_window_absolute_cap=4)
+        negative = settle(group_a, "churn-negative", -4, group_window_absolute_cap=1)
+        self.assertEqual(1, first.applied_delta)
+        self.assertEqual(0, negative.applied_delta)
+
+        self.now[0] += 1900
+        second_group = settle(
+            group_b, "cross-group-1", 4,
+            group_person_daily_absolute_cap=2,
+        )
+        self.now[0] += 1900
+        exhausted = settle(
+            group_a, "cross-group-2", 4,
+            group_person_daily_absolute_cap=2,
+        )
+        self.assertEqual(1, second_group.applied_delta)
+        self.assertEqual(0, exhausted.applied_delta)
+        self.assertEqual("group_affinity_budget_exhausted", exhausted.code)
+
+    def test_group_scope_budget_is_atomic_across_identities(self) -> None:
+        identities = [IDENTITY, "person_bbbbbbbbbbbbbbbbbbbbbbbb"]
+        self._create()
+        self.store.create_account(
+            _context(identity_id=identities[1]), operation_id="create-account-b",
+            actor="administrator",
+        )
+
+        def settle(index: int) -> int:
+            identity = identities[index % 2]
+            context = _context(
+                kind="group_member", group_id="group-shared", identity_id=identity
+            )
+            event_id = f"group-concurrent-{index}"
+            local = RelationshipAccountStore(
+                self.path, active_migration_epoch=EPOCH, clock=lambda: self.now[0]
+            )
+            return local.apply_event(
+                context, event_id=event_id, actor="group_pipeline",
+                reason_code="direct_group_interaction", delta=4,
+                allow_group_affinity=True,
+                group_interaction_proof=self._group_proof(context, event_id),
+                group_window_absolute_cap=20,
+                group_person_daily_absolute_cap=20,
+                group_scope_daily_absolute_cap=3,
+            ).applied_delta
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            deltas = list(pool.map(settle, range(20)))
+        self.assertEqual(3, sum(abs(value) for value in deltas))
+        audits = []
+        for identity in identities:
+            audits.extend(self.store.audit_events(_context(identity_id=identity), limit=100))
+        self.assertEqual(20, len(audits))
 
     def test_event_is_idempotent_across_restart_and_payload_conflict_fails(self) -> None:
         self._create()

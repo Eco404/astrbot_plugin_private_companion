@@ -25,6 +25,7 @@ from relationship_ledger import (
     normalize_relationship_positive_stage_cap_key,
 )
 from relationship_policy import relationship_stage_for_score
+from relationship_event_policy import validate_group_interaction_proof
 
 
 ACCOUNT_ROLES = frozenset({"friend", "owner"})
@@ -206,6 +207,7 @@ class RelationshipAccountStore:
                     account_revision INTEGER NOT NULL,
                     day_key TEXT NOT NULL,
                     created_at REAL NOT NULL,
+                    group_scope TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY(event_id, migration_epoch),
                     FOREIGN KEY(identity_id) REFERENCES relationship_accounts(identity_id)
                 );
@@ -213,6 +215,8 @@ class RelationshipAccountStore:
                     ON relationship_events(identity_id, account_revision, created_at);
                 CREATE INDEX IF NOT EXISTS idx_relationship_events_group_budget
                     ON relationship_events(identity_id, source_scope, day_key, reason_code);
+                CREATE INDEX IF NOT EXISTS idx_relationship_events_window_budget
+                    ON relationship_events(identity_id, source_scope, reason_code, created_at);
                 CREATE TABLE IF NOT EXISTS relationship_account_changes (
                     operation_id TEXT NOT NULL,
                     migration_epoch TEXT NOT NULL,
@@ -243,6 +247,18 @@ class RelationshipAccountStore:
                     UNIQUE(operation_id,migration_epoch)
                 );
                 """
+            )
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(relationship_events)").fetchall()
+            }
+            if "group_scope" not in columns:
+                connection.execute(
+                    "ALTER TABLE relationship_events ADD COLUMN group_scope TEXT NOT NULL DEFAULT ''"
+                )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_relationship_events_group_scope_budget "
+                "ON relationship_events(group_scope,day_key,reason_code)"
             )
             connection.execute(
                 "INSERT OR IGNORE INTO relationship_store_meta(key,value) VALUES('active_migration_epoch',?)",
@@ -711,6 +727,12 @@ class RelationshipAccountStore:
         weight: float = 1.0,
         allow_group_affinity: bool = False,
         group_daily_net_cap: int = 2,
+        group_window_seconds: int = 30 * 60,
+        group_window_absolute_cap: int = 1,
+        group_person_daily_absolute_cap: int = 4,
+        group_scope_daily_absolute_cap: int = 20,
+        group_event_cap: int = 4,
+        group_interaction_proof: dict[str, Any] | None = None,
         positive_daily_cap: int = 12,
         positive_event_cap: int = 4,
         negative_event_cap: int = 12,
@@ -746,11 +768,26 @@ class RelationshipAccountStore:
             "weight": numeric_weight,
             "allow_group_affinity": bool(allow_group_affinity),
             "group_daily_net_cap": int(group_daily_net_cap),
+            "group_window_seconds": int(group_window_seconds),
+            "group_window_absolute_cap": int(group_window_absolute_cap),
+            "group_person_daily_absolute_cap": int(group_person_daily_absolute_cap),
+            "group_scope_daily_absolute_cap": int(group_scope_daily_absolute_cap),
+            "group_event_cap": int(group_event_cap),
+            "group_proof_hash": hashlib.sha256(
+                _canonical(group_interaction_proof).encode("utf-8")
+            ).hexdigest() if isinstance(group_interaction_proof, dict) else "",
             "policy_version": context.policy_version,
         }
         request_hash = hashlib.sha256(_canonical(request).encode("utf-8")).hexdigest()
         now = float(self._clock())
         day_key = time.strftime("%Y-%m-%d", time.gmtime(now))
+        source_scope = _source_scope(context)
+        group_scope = (
+            "group:" + hashlib.sha256(
+                _canonical({"kind": context.kind, "group_id": context.group_id}).encode("utf-8")
+            ).hexdigest()[:24]
+            if context.kind == "group_member" else ""
+        )
         with self._transaction() as connection:
             previous = connection.execute(
                 "SELECT * FROM relationship_events WHERE event_id=? AND migration_epoch=?",
@@ -765,21 +802,66 @@ class RelationshipAccountStore:
             weighted = numeric_delta
             result_code = ""
             if context.kind == "group_member":
+                proof_ok, proof_code = validate_group_interaction_proof(
+                    group_interaction_proof,
+                    context,
+                    event_id=event,
+                )
                 if not allow_group_affinity or reason != GROUP_DIRECT_REASON:
                     weighted = 0
                     result_code = "group_global_settlement_disabled"
+                elif not proof_ok:
+                    weighted = 0
+                    result_code = proof_code
                 else:
-                    weighted = _weighted_integer(numeric_delta, min(numeric_weight, 0.25))
+                    event_cap = max(1, min(20, int(group_event_cap)))
+                    bounded_delta = max(-event_cap, min(event_cap, numeric_delta))
+                    weighted = _weighted_integer(bounded_delta, min(numeric_weight, 0.25))
                     cap = max(0, min(20, int(group_daily_net_cap)))
                     net_row = connection.execute(
                         """SELECT COALESCE(SUM(applied_delta),0) AS net FROM relationship_events
                            WHERE identity_id=? AND source_scope=? AND day_key=? AND reason_code=?""",
-                        (context.identity_id, _source_scope(context), day_key, GROUP_DIRECT_REASON),
+                        (context.identity_id, source_scope, day_key, GROUP_DIRECT_REASON),
                     ).fetchone()
                     current_net = int(net_row["net"])
+                    original_weighted = weighted
                     weighted = max(-cap - current_net, min(cap - current_net, weighted))
+                    window_seconds = max(60, min(86400, int(group_window_seconds)))
+                    window_cap = max(0, min(20, int(group_window_absolute_cap)))
+                    person_cap = max(0, min(120, int(group_person_daily_absolute_cap)))
+                    scope_cap = max(0, min(1000, int(group_scope_daily_absolute_cap)))
+                    window_used = int(connection.execute(
+                        """SELECT COALESCE(SUM(ABS(applied_delta)),0) AS used
+                           FROM relationship_events
+                           WHERE identity_id=? AND source_scope=? AND reason_code=? AND created_at>=?""",
+                        (context.identity_id, source_scope, GROUP_DIRECT_REASON, now - window_seconds),
+                    ).fetchone()["used"])
+                    person_used = int(connection.execute(
+                        """SELECT COALESCE(SUM(ABS(applied_delta)),0) AS used
+                           FROM relationship_events
+                           WHERE identity_id=? AND source_kind='group_member'
+                             AND day_key=? AND reason_code=?""",
+                        (context.identity_id, day_key, GROUP_DIRECT_REASON),
+                    ).fetchone()["used"])
+                    scope_used = int(connection.execute(
+                        """SELECT COALESCE(SUM(ABS(applied_delta)),0) AS used
+                           FROM relationship_events
+                           WHERE group_scope=? AND day_key=? AND reason_code=?""",
+                        (group_scope, day_key, GROUP_DIRECT_REASON),
+                    ).fetchone()["used"])
+                    absolute_remaining = min(
+                        max(0, window_cap - window_used),
+                        max(0, person_cap - person_used),
+                        max(0, scope_cap - scope_used),
+                    )
+                    if weighted:
+                        weighted = (1 if weighted > 0 else -1) * min(
+                            abs(weighted), absolute_remaining
+                        )
                     if weighted == 0:
                         result_code = "group_affinity_budget_exhausted"
+                    elif weighted != original_weighted:
+                        result_code = "group_affinity_budget_clamped"
             if weighted == 0:
                 ledger_result = {
                     "changed": False,
@@ -819,17 +901,22 @@ class RelationshipAccountStore:
                         stage_key, revision, now, context.identity_id,
                     ),
                 )
+            stored_result_code = (
+                "applied_group_budget_clamped"
+                if applied and result_code == "group_affinity_budget_clamped"
+                else str(ledger_result.get("code") or "relationship_event_rejected")
+            )
             connection.execute(
                 """INSERT INTO relationship_events(
                        event_id,migration_epoch,request_hash,identity_id,source_scope,source_kind,
                        reason_code,actor,policy_version,requested_delta,weighted_delta,applied_delta,
-                       score_after,weight,result_code,account_revision,day_key,created_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       score_after,weight,result_code,account_revision,day_key,created_at,group_scope)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     event, context.migration_epoch, request_hash, context.identity_id,
-                    _source_scope(context), context.kind, reason, clean_actor, context.policy_version,
+                    source_scope, context.kind, reason, clean_actor, context.policy_version,
                     numeric_delta, weighted, applied_delta, score_after, numeric_weight,
-                    str(ledger_result.get("code") or "relationship_event_rejected"), revision, day_key, now,
+                    stored_result_code, revision, day_key, now, group_scope,
                 ),
             )
             inserted = connection.execute(
