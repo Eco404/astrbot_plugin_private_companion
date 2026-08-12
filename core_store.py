@@ -391,6 +391,7 @@ class CoreStoreMixin:
             "daily_plan_history": [],
             "agenda_version": 1,
             "observed_activities": [],
+            "place_cognitive_maps": {},
             "window_snapshots": [],
             "agenda_reconciliation_history": [],
             "daily_state": {},
@@ -482,6 +483,7 @@ class CoreStoreMixin:
         data.setdefault("daily_plan_history", [])
         data.setdefault("agenda_version", 1)
         data.setdefault("observed_activities", [])
+        data.setdefault("place_cognitive_maps", {})
         data.setdefault("window_snapshots", [])
         data.setdefault("agenda_reconciliation_history", [])
         data.setdefault("daily_state", {})

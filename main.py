@@ -352,6 +352,7 @@ from .daily_state import DailyStateMixin
 from .agenda_runtime import AgendaRuntimeMixin
 from .daily_review import DailyReviewMixin
 from .scene_context import SceneContextMixin
+from .place_cognitive_map import PlaceCognitiveMapMixin
 from .game_integration import GameIntegrationMixin
 from .state_views import StateViewsMixin
 from .interaction_utils import InteractionUtilsMixin
@@ -465,12 +466,20 @@ class PrivateCompanionExtensionAPI:
         plugin = self._plugin
         owner_getter = getattr(plugin, "_relationship_owner_user_ids", None)
         owners = set(owner_getter() if callable(owner_getter) else ())
+        target_getter = getattr(plugin, "_configured_target_ids", None)
+        targets = set(target_getter() if callable(target_getter) else ())
         admins = {
             _single_line(item, 120)
             for item in getattr(plugin, "admin_user_ids", ())
             if _single_line(item, 120)
         }
-        return sorted({_single_line(item, 120) for item in owners | admins if _single_line(item, 120)})
+        return sorted(
+            {
+                _single_line(item, 120)
+                for item in owners | targets | admins
+                if _single_line(item, 120)
+            }
+        )
 
     def get_reality_touch_host_context(self, user_id: str) -> dict[str, Any]:
         """Expose bounded identity and relationship context to the device plugin."""
@@ -482,6 +491,9 @@ class PrivateCompanionExtensionAPI:
         admin_checker = getattr(plugin, "_is_configured_admin_user_id", None)
         owner_getter = getattr(plugin, "_relationship_owner_user_ids", None)
         owners = set(owner_getter() if callable(owner_getter) else ())
+        target_getter = getattr(plugin, "_configured_target_ids", None)
+        targets = set(target_getter() if callable(target_getter) else ())
+        is_primary_user = normalized in owners or normalized in targets
         quota_getter = getattr(plugin, "_proactive_quota_policy", None)
         quota = quota_getter(user) if callable(quota_getter) and user else {}
         relationship_formatter = getattr(plugin, "_format_proactive_relationship_fact", None)
@@ -490,8 +502,14 @@ class PrivateCompanionExtensionAPI:
             "user_id": normalized,
             "exists": bool(user),
             "is_admin": bool(callable(admin_checker) and admin_checker(normalized)),
-            "is_primary_user": normalized in owners,
-            "eligible": bool(normalized and (normalized in owners or (callable(admin_checker) and admin_checker(normalized)))),
+            "is_primary_user": is_primary_user,
+            "eligible": bool(
+                normalized
+                and (
+                    is_primary_user
+                    or (callable(admin_checker) and admin_checker(normalized))
+                )
+            ),
             "proactive_tier": _safe_int(quota.get("tier"), 1, 1, 5) if isinstance(quota, dict) else 1,
             "relationship": _single_line(relationship, 500),
             "umo": _single_line(user.get("umo"), 180),
@@ -580,6 +598,25 @@ class PrivateCompanionExtensionAPI:
         if not callable(sender) or not _single_line(umo, 180) or not _single_line(text, 1000):
             return False
         return bool(await sender(umo, [Plain(str(text))]))
+
+    async def record_reality_touch_output(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        source: str = "reality_touch_audio",
+        delivered_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Record speech delivered outside chat so the next reply can continue it."""
+        recorder = getattr(self._plugin, "_record_reality_touch_output", None)
+        if not callable(recorder):
+            return {"recorded": False, "reason": "recorder_unavailable"}
+        return await recorder(
+            user_id,
+            text,
+            source=source,
+            delivered_at=delivered_at,
+        )
 
     def get_reality_touch_cron_manager(self) -> Any | None:
         getter = getattr(self._plugin, "_official_cron_manager", None)
@@ -1487,6 +1524,7 @@ class PrivateCompanionPlugin(
     ProactiveMixin,
     ProactiveEngineMixin,
     GameIntegrationMixin,
+    PlaceCognitiveMapMixin,
     SceneContextMixin,
     ProactiveMessageMixin,
     DailyStateMixin,
@@ -9604,6 +9642,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
         add_spec("news.recent", "news", 64, lambda: self._format_recent_news_context_for_reply(inbound_text))
         add_spec("web_exploration.recent", "web_exploration", 65, lambda: self._format_recent_web_exploration_context_for_reply(inbound_text))
+        if is_private_chat:
+            add_spec(
+                "reality_touch.continuity",
+                "reality_touch",
+                69,
+                lambda: self._format_reality_touch_continuity_context(current_user),
+            )
         if self._feature_enabled_or_temp_unlocked("enable_skill_growth_passive_injection"):
             add_spec("skill.growth", "skill", 66, self._format_skill_growth_for_prompt)
         else:

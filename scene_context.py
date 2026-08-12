@@ -416,6 +416,15 @@ class SceneContextMixin:
             except Exception:
                 mobile_context = {}
         mobile_location = mobile_context.get("location") if isinstance(mobile_context.get("location"), dict) else {}
+        cognitive_map: dict[str, Any] = {}
+        map_observer = getattr(self, "_observe_mobile_place_context", None)
+        if user_id and callable(map_observer):
+            try:
+                candidate = map_observer(user_id, mobile_location)
+                if isinstance(candidate, dict):
+                    cognitive_map = candidate
+            except Exception:
+                cognitive_map = {}
 
         dialogue_outfit_override: dict[str, Any] = {}
         if include_dialogue_outfit and role == "owner":
@@ -516,6 +525,7 @@ class SceneContextMixin:
                 "category": scene_category,
                 "category_label": scene_category_label,
                 "mobile": mobile_location,
+                "cognitive_map": cognitive_map,
             },
             "weather": {
                 "text": weather,
@@ -592,6 +602,7 @@ class SceneContextMixin:
         if _single_line(location.get("category_label"), 24):
             parts.append(f"当前场景：{_single_line(location.get('category_label'), 24)}")
         mobile_location = location.get("mobile") if isinstance(location.get("mobile"), dict) else {}
+        cognitive_map = location.get("cognitive_map") if isinstance(location.get("cognitive_map"), dict) else {}
         if mobile_location.get("available"):
             lat = _single_line(mobile_location.get("latitude"), 16)
             lon = _single_line(mobile_location.get("longitude"), 16)
@@ -602,10 +613,38 @@ class SceneContextMixin:
                 coordinate_text += f"（精度约 {accuracy} 米）"
             if label:
                 coordinate_text += f"，设备标签：{label}"
+            place = mobile_location.get("place") if isinstance(mobile_location.get("place"), dict) else {}
+            place_name = _single_line(place.get("name"), 40)
+            place_kind = _single_line(place.get("kind"), 24)
+            if place_name:
+                distance = _single_line(place.get("distance_m"), 16)
+                radius = _single_line(place.get("radius_m"), 16)
+                kind_label = {"home": "家", "work": "工作地点", "custom": "自定义地点"}.get(place_kind, place_kind)
+                match_text = "已在标记地点范围内" if place.get("matched") else "未在标记地点范围内"
+                place_text = f"地点档案：{place_name}"
+                if kind_label:
+                    place_text += f"（{kind_label}）"
+                place_text += f"，{match_text}"
+                if distance:
+                    place_text += f"，距离约 {distance} 米"
+                if radius:
+                    place_text += f"（识别半径 {radius} 米）"
+                coordinate_text += f"；{place_text}"
             parts.append(
                 "手机定位上下文（用户已授权、仅作场景判断，不向用户主动暴露精确坐标）："
                 + coordinate_text
             )
+        cognitive_context_formatter = getattr(self, "_format_place_cognitive_map_context", None)
+        if callable(cognitive_context_formatter):
+            try:
+                cognitive_text = _single_line(cognitive_context_formatter(cognitive_map), 520)
+            except Exception:
+                cognitive_text = ""
+            if cognitive_text:
+                parts.append(
+                    "地点认知地图（仅来自用户主动标记且已命中的地点；用于理解来处、去向与场景，"
+                    "不自行推断未标记地点，也不向用户主动展示轨迹）：" + cognitive_text
+                )
         if _single_line(weather.get("text"), 220):
             parts.append(f"天气背景：{_single_line(weather.get('text'), 220)}")
         alert_items = weather_alerts.get("alerts") if isinstance(weather_alerts.get("alerts"), list) else []

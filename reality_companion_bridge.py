@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import importlib
 import sys
+import time
 from typing import Any
 
 from astrbot.api import logger
 
-from .helpers import _single_line
+from .helpers import _safe_float, _single_line
 
 
 class RealityCompanionBridgeMixin:
@@ -61,6 +62,67 @@ class RealityCompanionBridgeMixin:
         api = self._reality_companion_api()
         checker = getattr(api, "audio_consented", None) if api is not None else None
         return bool(callable(checker) and checker(self._reality_bridge_user_id(user)))
+
+    async def _record_reality_touch_output(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        source: str = "reality_touch_audio",
+        delivered_at: float | None = None,
+    ) -> dict[str, Any]:
+        normalized_user_id = _single_line(user_id, 120)
+        visible = _single_line(text, 500)
+        if not normalized_user_id or not visible:
+            return {"recorded": False, "reason": "invalid_payload"}
+        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else None
+        if not isinstance(users, dict) or not isinstance(users.get(normalized_user_id), dict):
+            return {"recorded": False, "reason": "private_user_not_managed"}
+        timestamp = _safe_float(delivered_at, time.time(), 0.0) or time.time()
+        normalized_source = _single_line(source, 80) or "reality_touch_audio"
+        async with self._data_lock:
+            current = self._get_user(normalized_user_id)
+            current["last_companion_message"] = visible
+            current["last_companion_message_at"] = timestamp
+            current["last_proactive_message"] = visible
+            current["last_proactive_sent_at"] = timestamp
+            current["last_proactive_reason"] = normalized_source
+            current["last_proactive_action"] = "reality_touch_audio"
+            current["last_reality_touch_output"] = {
+                "text": visible,
+                "source": normalized_source,
+                "delivered_at": timestamp,
+            }
+            self._save_data_sync()
+        logger.info(
+            "[PrivateCompanion] 已同步现实设备输出: user=%s source=%s text=%s",
+            normalized_user_id,
+            normalized_source,
+            _single_line(visible, 120),
+        )
+        return {"recorded": True, "user_id": normalized_user_id, "delivered_at": timestamp}
+
+    def _format_reality_touch_continuity_context(self, user: dict[str, Any]) -> str:
+        output = user.get("last_reality_touch_output") if isinstance(user, dict) else None
+        if not isinstance(output, dict):
+            return ""
+        text = _single_line(output.get("text"), 300)
+        delivered_at = _safe_float(output.get("delivered_at"), 0.0, 0.0)
+        age = time.time() - delivered_at
+        if not text or delivered_at <= 0 or age < -60 or age > 2 * 3600:
+            return ""
+        lines = [
+            "【刚刚发生的跨设备对话】",
+            f"Bot 已通过现实音频设备对用户说：{text}",
+        ]
+        user_text = _single_line(user.get("last_user_message"), 300)
+        user_at = _safe_float(user.get("last_user_message_at"), 0.0, 0.0)
+        if user_text and user_at >= delivered_at:
+            lines.append(f"用户随后在私聊回应：{user_text}")
+        lines.append(
+            "这是真实发生且与当前私聊连续的对话。自然承接用户此刻的回应；不要把它当作首次问候，也不要重复刚才已经说过的话。"
+        )
+        return "\n".join(lines)
 
     def _reality_companion_enabled(self) -> bool:
         api = self._reality_companion_api()

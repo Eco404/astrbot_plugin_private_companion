@@ -1,0 +1,303 @@
+# -*- coding: utf-8 -*-
+"""User-confirmed place knowledge derived from the optional mobile bridge."""
+from __future__ import annotations
+
+import asyncio
+import time
+from datetime import datetime, timezone
+from typing import Any
+
+from astrbot.api import logger
+
+from .helpers import _safe_float, _single_line
+
+
+_MAP_STORE_KEY = "place_cognitive_maps"
+_MAP_VERSION = 1
+_MAX_PLACES_PER_USER = 24
+_MAX_ROUTES_PER_USER = 32
+_PLACE_KINDS = frozenset({"home", "work", "custom"})
+_PLACE_KIND_LABELS = {"home": "家", "work": "工作地点", "custom": "自定义地点"}
+
+
+class PlaceCognitiveMapMixin:
+    """Keep a small, consent-based semantic map without retaining coordinates."""
+
+    @staticmethod
+    def _place_cognitive_map_now_ts() -> float:
+        return time.time()
+
+    @staticmethod
+    def _place_cognitive_map_key(name: str, kind: str) -> str:
+        return f"{kind}:{''.join(name.casefold().split())}"
+
+    @staticmethod
+    def _place_cognitive_map_iso(timestamp: float) -> str:
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat(timespec="seconds")
+
+    @staticmethod
+    def _place_cognitive_map_place(mobile_location: Any) -> dict[str, Any]:
+        location = mobile_location if isinstance(mobile_location, dict) else {}
+        raw = location.get("place") if isinstance(location.get("place"), dict) else {}
+        if not bool(location.get("available")) or not bool(raw.get("matched")):
+            return {}
+        name = _single_line(raw.get("name"), 48)
+        kind = _single_line(raw.get("kind"), 24).casefold()
+        if not name:
+            return {}
+        if kind not in _PLACE_KINDS:
+            kind = "custom"
+        return {
+            "key": PlaceCognitiveMapMixin._place_cognitive_map_key(name, kind),
+            "name": name,
+            "kind": kind,
+            "radius_m": round(_safe_float(raw.get("radius_m"), 0.0, 0.0, 10000.0), 1),
+        }
+
+    def _place_cognitive_map_root(self) -> dict[str, Any]:
+        data = getattr(self, "data", None)
+        if not isinstance(data, dict):
+            return {}
+        root = data.get(_MAP_STORE_KEY)
+        if not isinstance(root, dict):
+            root = {}
+            data[_MAP_STORE_KEY] = root
+        return root
+
+    def _place_cognitive_map_user_state(self, user_id: str) -> dict[str, Any]:
+        root = self._place_cognitive_map_root()
+        if not isinstance(root, dict) or not user_id:
+            return {}
+        state = root.get(user_id)
+        if not isinstance(state, dict):
+            state = {
+                "version": _MAP_VERSION,
+                "places": {},
+                "routes": {},
+                "current_place_key": "",
+                "updated_at": "",
+            }
+            root[user_id] = state
+        state["version"] = _MAP_VERSION
+        if not isinstance(state.get("places"), dict):
+            state["places"] = {}
+        if not isinstance(state.get("routes"), dict):
+            state["routes"] = {}
+        return state
+
+    @staticmethod
+    def _place_cognitive_map_event(
+        *,
+        event: str,
+        user_id: str,
+        place: dict[str, Any],
+        timestamp: float,
+        previous_place: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        name = _single_line(place.get("name"), 48)
+        key = _single_line(place.get("key"), 96)
+        event_id = f"place-{event}:{user_id}:{key}:{int(timestamp)}"
+        if event == "arrival":
+            title = f"用户到达已确认地点：{name}"
+        else:
+            title = f"用户离开已确认地点：{name}"
+        if event == "arrival" and isinstance(previous_place, dict):
+            previous_name = _single_line(previous_place.get("name"), 48)
+            if previous_name:
+                title += f"（从{previous_name}前往）"
+        return {
+            "visibility": "private",
+            "activity_id": event_id,
+            "title": title,
+            "kind": f"confirmed_place_{event}",
+            "start_at": PlaceCognitiveMapMixin._place_cognitive_map_iso(timestamp),
+            "source_refs": [f"reality:mobile_place:{user_id}:{key}"],
+        }
+
+    def _place_cognitive_map_emit_memory_event(self, event: dict[str, Any]) -> None:
+        recorder = getattr(self, "_memory_companion_record_observed_activity", None)
+        if not callable(recorder):
+            return
+
+        async def _record() -> None:
+            try:
+                await recorder(event)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 地点认知活动归档失败: %s", _single_line(exc, 160))
+
+        try:
+            task = asyncio.create_task(_record())
+        except RuntimeError:
+            return
+        tasks = getattr(self, "_place_cognitive_map_memory_tasks", None)
+        if not isinstance(tasks, set):
+            tasks = set()
+            self._place_cognitive_map_memory_tasks = tasks
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    @staticmethod
+    def _place_cognitive_map_summary(state: dict[str, Any]) -> dict[str, Any]:
+        places = state.get("places") if isinstance(state.get("places"), dict) else {}
+        routes = state.get("routes") if isinstance(state.get("routes"), dict) else {}
+        current_key = _single_line(state.get("current_place_key"), 96)
+        current = places.get(current_key) if isinstance(places.get(current_key), dict) else {}
+        known = sorted(
+            (item for item in places.values() if isinstance(item, dict) and _single_line(item.get("name"), 48)),
+            key=lambda item: float(item.get("last_seen_ts") or 0),
+            reverse=True,
+        )[:6]
+        route_items = sorted(
+            (item for item in routes.values() if isinstance(item, dict)),
+            key=lambda item: float(item.get("last_seen_ts") or 0),
+            reverse=True,
+        )[:4]
+        return {
+            "available": bool(known),
+            "current_place": {
+                "name": _single_line(current.get("name"), 48),
+                "kind": _single_line(current.get("kind"), 24),
+            } if current else {},
+            "known_places": [
+                {"name": _single_line(item.get("name"), 48), "kind": _single_line(item.get("kind"), 24)}
+                for item in known
+            ],
+            "recent_routes": [
+                {
+                    "from_name": _single_line(item.get("from_name"), 48),
+                    "to_name": _single_line(item.get("to_name"), 48),
+                    "count": max(1, int(item.get("count") or 1)),
+                }
+                for item in route_items
+                if _single_line(item.get("from_name"), 48) and _single_line(item.get("to_name"), 48)
+            ],
+        }
+
+    def _observe_mobile_place_context(
+        self,
+        user_id: Any,
+        mobile_location: Any,
+        *,
+        observed_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Observe one authorized location snapshot and return a bounded map view.
+
+        Only an explicitly named place that the mobile app reports as *matched*
+        can create a durable map fact. Raw coordinates and unmatched labels are
+        intentionally never placed in this store.
+        """
+        normalized_user_id = _single_line(user_id, 120)
+        if not normalized_user_id:
+            return {"available": False, "current_place": {}, "known_places": [], "recent_routes": []}
+        location = mobile_location if isinstance(mobile_location, dict) else {}
+        data = getattr(self, "data", None)
+        root = data.get(_MAP_STORE_KEY) if isinstance(data, dict) and isinstance(data.get(_MAP_STORE_KEY), dict) else {}
+        if not bool(location.get("available")):
+            existing = root.get(normalized_user_id)
+            return self._place_cognitive_map_summary(existing) if isinstance(existing, dict) else {
+                "available": False, "current_place": {}, "known_places": [], "recent_routes": [],
+            }
+        place = self._place_cognitive_map_place(location)
+        existing = root.get(normalized_user_id)
+        if not place and not isinstance(existing, dict):
+            return {"available": False, "current_place": {}, "known_places": [], "recent_routes": []}
+        state = self._place_cognitive_map_user_state(normalized_user_id)
+        if not state:
+            return {"available": False, "current_place": {}, "known_places": [], "recent_routes": []}
+        timestamp = float(observed_at) if isinstance(observed_at, (int, float)) else self._place_cognitive_map_now_ts()
+        timestamp = max(0.0, timestamp)
+        places = state["places"]
+        previous_key = _single_line(state.get("current_place_key"), 96)
+        previous = places.get(previous_key) if isinstance(places.get(previous_key), dict) else {}
+        changed = False
+        events: list[dict[str, Any]] = []
+
+        if not place:
+            if previous:
+                previous["last_left_at"] = self._place_cognitive_map_iso(timestamp)
+                state["current_place_key"] = ""
+                state["updated_at"] = self._place_cognitive_map_iso(timestamp)
+                changed = True
+                events.append(self._place_cognitive_map_event(
+                    event="departure", user_id=normalized_user_id, place=previous, timestamp=timestamp,
+                ))
+        else:
+            key = place["key"]
+            stored = places.get(key)
+            if not isinstance(stored, dict):
+                stored = {"key": key, "name": place["name"], "kind": place["kind"], "first_seen_at": self._place_cognitive_map_iso(timestamp)}
+                places[key] = stored
+                changed = True
+            stored["name"] = place["name"]
+            stored["kind"] = place["kind"]
+            if place["radius_m"] > 0:
+                stored["radius_m"] = place["radius_m"]
+            stored["last_seen_ts"] = timestamp
+            stored["last_seen_at"] = self._place_cognitive_map_iso(timestamp)
+
+            if previous_key != key:
+                if previous:
+                    previous["last_left_at"] = self._place_cognitive_map_iso(timestamp)
+                    events.append(self._place_cognitive_map_event(
+                        event="departure", user_id=normalized_user_id, place=previous, timestamp=timestamp,
+                    ))
+                    route_key = f"{previous_key}>{key}"
+                    route = state["routes"].get(route_key)
+                    if not isinstance(route, dict):
+                        route = {"from_key": previous_key, "to_key": key, "from_name": previous.get("name", ""), "to_name": stored["name"], "count": 0}
+                        state["routes"][route_key] = route
+                    route["from_name"] = _single_line(previous.get("name"), 48)
+                    route["to_name"] = stored["name"]
+                    route["count"] = max(0, int(route.get("count") or 0)) + 1
+                    route["last_seen_ts"] = timestamp
+                    route["last_seen_at"] = self._place_cognitive_map_iso(timestamp)
+                state["current_place_key"] = key
+                state["updated_at"] = self._place_cognitive_map_iso(timestamp)
+                changed = True
+                events.append(self._place_cognitive_map_event(
+                    event="arrival", user_id=normalized_user_id, place=stored, timestamp=timestamp,
+                    previous_place=previous or None,
+                ))
+
+        if len(places) > _MAX_PLACES_PER_USER:
+            removable = sorted(
+                (item for item in places.items() if item[0] != state.get("current_place_key")),
+                key=lambda item: float(item[1].get("last_seen_ts") or 0),
+            )
+            for stale_key, _item in removable[: max(0, len(places) - _MAX_PLACES_PER_USER)]:
+                places.pop(stale_key, None)
+        routes = state["routes"]
+        if len(routes) > _MAX_ROUTES_PER_USER:
+            removable = sorted(routes.items(), key=lambda item: float(item[1].get("last_seen_ts") or 0))
+            for stale_key, _item in removable[: max(0, len(routes) - _MAX_ROUTES_PER_USER)]:
+                routes.pop(stale_key, None)
+
+        if changed:
+            saver = getattr(self, "_schedule_data_save", None)
+            if callable(saver):
+                saver(delay=0.5)
+            for event in events:
+                self._place_cognitive_map_emit_memory_event(event)
+        return self._place_cognitive_map_summary(state)
+
+    @staticmethod
+    def _format_place_cognitive_map_context(cognitive_map: Any) -> str:
+        state = cognitive_map if isinstance(cognitive_map, dict) else {}
+        known = state.get("known_places") if isinstance(state.get("known_places"), list) else []
+        if not known:
+            return ""
+        place_text = "、".join(
+            f"{_single_line(item.get('name'), 48)}（{_PLACE_KIND_LABELS.get(_single_line(item.get('kind'), 24), '已标记地点')}）"
+            for item in known
+            if isinstance(item, dict) and _single_line(item.get("name"), 48)
+        )
+        routes = state.get("recent_routes") if isinstance(state.get("recent_routes"), list) else []
+        route_text = "；".join(
+            f"{_single_line(item.get('from_name'), 48)}→{_single_line(item.get('to_name'), 48)}（{max(1, int(item.get('count') or 1))}次）"
+            for item in routes
+            if isinstance(item, dict) and _single_line(item.get("from_name"), 48) and _single_line(item.get("to_name"), 48)
+        )
+        result = f"已确认地点：{place_text}"
+        if route_text:
+            result += f"；近期地点间移动：{route_text}"
+        return result
