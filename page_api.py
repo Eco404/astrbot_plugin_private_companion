@@ -4343,6 +4343,15 @@ class PrivateCompanionPageApi(
 
 
     async def get_reality_touch(self) -> dict[str, Any]:
+        bridge_getter = getattr(self.plugin, "_reality_companion_api", None)
+        bridge = bridge_getter() if callable(bridge_getter) else None
+        linked_snapshotter = getattr(bridge, "page_snapshot", None) if bridge is not None else None
+        if callable(linked_snapshotter):
+            try:
+                return self._ok(linked_snapshotter())
+            except Exception as exc:
+                logger.error("[PrivateCompanionPage] 获取现实触及联动状态失败: %s", exc, exc_info=True)
+                return self._exception_error("获取现实触及联动状态失败")
         snapshotter = getattr(self.plugin, "_reality_touch_page_snapshot", None)
         if not callable(snapshotter):
             return self._error("当前插件实例不支持现实触及控制台", status_code=503)
@@ -4356,6 +4365,24 @@ class PrivateCompanionPageApi(
 
     async def update_reality_touch(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
+        bridge_getter = getattr(self.plugin, "_reality_companion_api", None)
+        bridge = bridge_getter() if callable(bridge_getter) else None
+        linked_action = getattr(bridge, "page_action", None) if bridge is not None else None
+        if callable(linked_action):
+            try:
+                result = await linked_action(payload)
+                if not isinstance(result, dict) or not result.get("ok"):
+                    return self._error(
+                        self._single_line(result.get("message"), 240)
+                        if isinstance(result, dict)
+                        else "现实触及联动操作失败"
+                    )
+                snapshot = result.get("data") if isinstance(result.get("data"), dict) else {}
+                snapshot["message"] = self._single_line(result.get("message"), 240) or "现实触及联动操作已完成"
+                return self._ok(snapshot)
+            except Exception as exc:
+                logger.error("[PrivateCompanionPage] 更新现实触及联动失败: %s", exc, exc_info=True)
+                return self._exception_error("更新现实触及联动失败")
         action = self._single_line(payload.get("action"), 24).lower()
         user_id = self._single_line(payload.get("user_id"), 120)
         if action not in {

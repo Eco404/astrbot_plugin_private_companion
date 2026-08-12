@@ -172,6 +172,7 @@ from .photo_reference_catalog import (
 from .photo_prompt_context import (
     PhotoPromptSection,
     _clip as _clip_photo_prompt_text,
+    compile_local_photo_prompt,
     resolve_photo_prompt_context,
 )
 from .photo_reference_feedback import analyze_photo_reference_feedback
@@ -11964,6 +11965,10 @@ Output:
         )
         prompt_text = resolved_context.final_prompt
         complete_prompt_text = resolved_context.complete_prompt
+        local_backend_prompt_text = compile_local_photo_prompt(
+            resolved_context.prompt_sections,
+            prompt_format,
+        ) or prompt_text
         reference_candidate = dict(resolved_context.reference or {})
         if structured_reference_plan:
             # The public generation record retains only the managed asset ID and
@@ -12141,6 +12146,10 @@ Output:
                 "prompt_format": prompt_format,
                 "prompt": complete_prompt_text,
                 "submitted_prompt": prompt_text,
+                "local_backend_prompt": local_backend_prompt_text,
+                "local_backend_prompt_hash": hashlib.sha256(
+                    str(local_backend_prompt_text or "").encode("utf-8", "ignore")
+                ).hexdigest(),
                 "prompt_hash": prompt_hash,
                 "submitted_prompt_hash": hashlib.sha256(
                     str(prompt_text or "").encode("utf-8", "ignore")
@@ -12251,6 +12260,11 @@ Output:
             failure_stage: str = "",
         ) -> tuple[str, str, str]:
             elapsed_ms = int((time.time() - started) * 1000)
+            actual_submitted_prompt = (
+                local_backend_prompt_text
+                if backend in {"ComfyUI", "SDGen"}
+                else prompt_text
+            )
             image_path = _path_text(image_path, 1000)
             effective_submitted_reference_ids: tuple[str, ...] = ()
             if structured_reference_submitted and structured_reference_plan:
@@ -12353,11 +12367,11 @@ Output:
                 wardrobe=wardrobe,
                 prompt_hash=prompt_hash,
                 submitted_prompt_hash=hashlib.sha256(
-                    str(prompt_text or "").encode("utf-8", "ignore")
+                    str(actual_submitted_prompt or "").encode("utf-8", "ignore")
                 ).hexdigest(),
                 prompt_path=prompt_path,
                 complete_prompt_length=len(str(complete_prompt_text or "")),
-                submitted_prompt_length=len(str(prompt_text or "")),
+                submitted_prompt_length=len(str(actual_submitted_prompt or "")),
                 prompt_sections=prompt_sections_for_log,
                 conflicts=conflicts,
                 removed_conflicts=removed_conflicts,
@@ -12442,7 +12456,7 @@ Output:
                 return finish("ComfyUI", "", "Q5 受管参考素材票据签发失败")
             image_path, note = await self._run_comfyui_photo_workflow(
                 workflow_name,
-                prompt_text,
+                local_backend_prompt_text,
                 session_key=session_key,
                 reference_asset_gate=structured_reference_gate,
                 reference_asset_ticket=reference_asset_ticket,
@@ -12473,7 +12487,7 @@ Output:
                 return finish("ComfyUI", "", f"未配置 {workflow_kind} 对应的 ComfyUI 工作流")
             image_path, note = await self._run_comfyui_photo_workflow(
                 workflow_name,
-                prompt_text,
+                local_backend_prompt_text,
                 session_key=session_key,
                 reference_image_path=reference_image_path,
                 reference_image_paths=reference_image_paths,
@@ -12493,7 +12507,7 @@ Output:
             if busy_state:
                 return finish("SDGen", "", f"电脑高负荷,已跳过本地生图（{busy_state.get('reason') or '负载偏高'}）")
             image_path, note = await self._run_sdgen_photo_generation(
-                prompt_text,
+                local_backend_prompt_text,
                 session_key=session_key,
             )
             return finish("SDGen", image_path, note)
@@ -12600,7 +12614,7 @@ Output:
                 if workflow_name:
                     image_path, note = await self._run_comfyui_photo_workflow(
                         workflow_name,
-                        prompt_text,
+                        local_backend_prompt_text,
                         session_key=session_key,
                         reference_image_path=reference_image_path,
                         reference_image_paths=reference_image_paths,
@@ -12630,7 +12644,7 @@ Output:
                 logger.info("[PrivateCompanion] 生图后端跳过: trace=%s backend=sdgen note=%s", trace_id, _single_line(sdgen_note, 180))
             else:
                 image_path, note = await self._run_sdgen_photo_generation(
-                    prompt_text,
+                    local_backend_prompt_text,
                     session_key=session_key,
                 )
                 if image_path:
@@ -14953,10 +14967,11 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         *,
         planned_count: int,
         submitted_count: int,
+        include_metadata: bool = True,
     ) -> str:
         planned = max(0, int(planned_count or 0))
         submitted = max(0, min(planned, int(submitted_count or 0)))
-        if not planned or submitted >= planned:
+        if not planned or submitted >= planned or not include_metadata:
             return str(prompt_text or "")
         missing = (
             str(submitted + 1)
@@ -15200,6 +15215,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 prompt_text,
                 planned_count=planned_reference_count,
                 submitted_count=image_count,
+                include_metadata=False,
             )
             logger.info(
                 "[PrivateCompanion] ComfyUI 生图提交准备: workflow=%s file=%s text_count=%s image_count=%s reference=%s wait=%ss prompt_preview=%s",

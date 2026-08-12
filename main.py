@@ -359,7 +359,7 @@ from .llm_tool_actions import LlmToolActionsMixin, PHOTO_TOOL_SILENT_SENTINEL
 from .command_handlers import CommandHandlersMixin
 from .tts_enhancement import TtsEnhancementMixin
 from .tts_tool_sanitizer import TtsToolSanitizerMixin
-from .wakeup_alarm import WakeupAlarmMixin
+from .reality_companion_bridge import RealityCompanionBridgeMixin
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -459,6 +459,137 @@ class PrivateCompanionExtensionAPI:
             source=source,
             play_local=play_local,
         )
+
+    def get_reality_touch_authorized_user_ids(self) -> list[str]:
+        """Return host administrators and primary users eligible for device consent."""
+        plugin = self._plugin
+        owner_getter = getattr(plugin, "_relationship_owner_user_ids", None)
+        owners = set(owner_getter() if callable(owner_getter) else ())
+        admins = {
+            _single_line(item, 120)
+            for item in getattr(plugin, "admin_user_ids", ())
+            if _single_line(item, 120)
+        }
+        return sorted({_single_line(item, 120) for item in owners | admins if _single_line(item, 120)})
+
+    def get_reality_touch_host_context(self, user_id: str) -> dict[str, Any]:
+        """Expose bounded identity and relationship context to the device plugin."""
+        plugin = self._plugin
+        normalized = _single_line(user_id, 120)
+        users = plugin.data.get("users") if isinstance(plugin.data, dict) else None
+        user = users.get(normalized) if isinstance(users, dict) else None
+        user = user if isinstance(user, dict) else {}
+        admin_checker = getattr(plugin, "_is_configured_admin_user_id", None)
+        owner_getter = getattr(plugin, "_relationship_owner_user_ids", None)
+        owners = set(owner_getter() if callable(owner_getter) else ())
+        quota_getter = getattr(plugin, "_proactive_quota_policy", None)
+        quota = quota_getter(user) if callable(quota_getter) and user else {}
+        relationship_formatter = getattr(plugin, "_format_proactive_relationship_fact", None)
+        relationship = relationship_formatter(user) if callable(relationship_formatter) and user else ""
+        return {
+            "user_id": normalized,
+            "exists": bool(user),
+            "is_admin": bool(callable(admin_checker) and admin_checker(normalized)),
+            "is_primary_user": normalized in owners,
+            "eligible": bool(normalized and (normalized in owners or (callable(admin_checker) and admin_checker(normalized)))),
+            "proactive_tier": _safe_int(quota.get("tier"), 1, 1, 5) if isinstance(quota, dict) else 1,
+            "relationship": _single_line(relationship, 500),
+            "umo": _single_line(user.get("umo"), 180),
+            "display_name": _single_line(
+                user.get("nickname") or user.get("last_display_name") or user.get("display_name"),
+                80,
+            ),
+        }
+
+    def export_reality_touch_legacy_state(self) -> dict[str, Any]:
+        """Return a detached one-time migration payload for Reality Companion."""
+        plugin = self._plugin
+        source_config = getattr(plugin, "config", {})
+
+        def legacy_bool(key: str, default: bool = False) -> bool:
+            value = _flat_get(source_config, key, default)
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"true", "1", "yes", "y", "on", "enable", "enabled", "启用", "开启", "开", "是"}:
+                    return True
+                if normalized in {"false", "0", "no", "n", "off", "disable", "disabled", "停用", "关闭", "关", "否", ""}:
+                    return False
+            return bool(value)
+
+        def legacy_int(key: str, default: int, minimum: int, maximum: int) -> int:
+            return _safe_int(_flat_get(source_config, key, default), default, minimum, maximum)
+
+        source_users = plugin.data.get("users") if isinstance(plugin.data, dict) else None
+        allowed_keys = {
+            "user_id",
+            "umo",
+            "nickname",
+            "last_display_name",
+            "display_name",
+            "reality_touch_consent",
+            "reality_touch_pending_consent",
+            "reality_touch_policy",
+            "reality_touch_camera_consent",
+            "reality_touch_camera_policy",
+            "wakeup_alarm",
+            "reality_touch_reminders",
+        }
+        users: dict[str, dict[str, Any]] = {}
+        if isinstance(source_users, dict):
+            for user_id, user in source_users.items():
+                if not isinstance(user, dict):
+                    continue
+                selected = {
+                    key: deepcopy(value)
+                    for key, value in user.items()
+                    if key in allowed_keys
+                }
+                if any(key.startswith("reality_touch") or key == "wakeup_alarm" for key in selected):
+                    selected.setdefault("user_id", _single_line(user_id, 120))
+                    users[_single_line(user_id, 120)] = selected
+        store = plugin.data.get("reality_touch") if isinstance(plugin.data, dict) else None
+        config = {
+            "enabled": legacy_bool("enable_experimental_bluetooth_wakeup"),
+            "camera_enabled": legacy_bool("enable_reality_touch_camera"),
+            "camera_index": legacy_int("reality_touch_camera_index", 0, 0, 100000),
+            "camera_min_interval_seconds": legacy_int("reality_touch_camera_min_interval_seconds", 60, 10, 3600),
+            "camera_capture_timeout_seconds": legacy_int("reality_touch_camera_capture_timeout_seconds", 5, 2, 20),
+            "camera_analysis_timeout_seconds": legacy_int("reality_touch_camera_analysis_timeout_seconds", 25, 5, 90),
+            "camera_proactive_curiosity_enabled": legacy_bool("enable_reality_touch_camera_proactive_curiosity"),
+            "camera_proactive_min_tier": legacy_int("reality_touch_camera_proactive_min_tier", 4, 1, 5),
+            "camera_proactive_max_daily": legacy_int("reality_touch_camera_proactive_max_daily", 1, 0, 10),
+            "camera_proactive_cooldown_minutes": legacy_int("reality_touch_camera_proactive_cooldown_minutes", 240, 10, 1440),
+            "audio_default_playback_volume": legacy_int("tts_local_playback_volume", 35, 0, 100),
+        }
+        return {
+            "version": 1,
+            "users": users,
+            "reality_touch": deepcopy(store) if isinstance(store, dict) else {},
+            "config": config,
+        }
+
+    async def generate_reality_touch_text(self, prompt: str, **kwargs: Any) -> str:
+        """Generate bounded device-facing wording through the host model stack."""
+        caller = getattr(self._plugin, "_llm_call", None)
+        if not callable(caller):
+            return ""
+        return str(await caller(prompt, **kwargs) or "")
+
+    async def send_reality_touch_chat(self, umo: str, text: str) -> bool:
+        sender = getattr(self._plugin, "_send_chain_components", None)
+        if not callable(sender) or not _single_line(umo, 180) or not _single_line(text, 1000):
+            return False
+        return bool(await sender(umo, [Plain(str(text))]))
+
+    def get_reality_touch_cron_manager(self) -> Any | None:
+        getter = getattr(self._plugin, "_official_cron_manager", None)
+        return getter() if callable(getter) else None
+
+    async def delete_reality_touch_cron_job(self, job_id: str) -> tuple[bool, str]:
+        deleter = getattr(self._plugin, "_delete_official_llm_timer_job", None)
+        if not callable(deleter):
+            return False, "AstrBot 官方 Cron 不可用"
+        return await deleter(job_id)
 
     def get_bot_identity(self) -> dict[str, Any]:
         """Return a stable Bot identity without guessing between multiple accounts."""
@@ -1367,7 +1498,7 @@ class PrivateCompanionPlugin(
     CommandHandlersMixin,
     TtsEnhancementMixin,
     TtsToolSanitizerMixin,
-    WakeupAlarmMixin,
+    RealityCompanionBridgeMixin,
     GroupWakeupMixin,
     GroupObservationMixin,
     GroupMemberSafetyMixin,
@@ -7769,151 +7900,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             caption=caption,
         )
 
-    @filter.llm_tool(name="pc_reality_touch_reminder")
-    @_multi_persona_event_context
-    async def pc_reality_touch_reminder(
-        self,
-        event: AstrMessageEvent,
-        text: str,
-    ) -> str:
-        """执行当前 AstrBot 官方任务绑定的现实触及提醒。
-
-        Args:
-            text(string): 根据官方任务备注生成的一到两句最终提醒文本。
-        """
-        executor = getattr(self, "_execute_official_reality_touch_reminder", None)
-        if not callable(executor):
-            return "Reality touch reminder failed: capability unavailable"
-        delivered, detail = await executor(event, text)
-        prefix = "Reality touch reminder delivered: " if delivered else "Reality touch reminder failed: "
-        return prefix + (_single_line(detail, 180) or "unknown result")
-
-    @filter.llm_tool(name="pc_reality_touch_camera_snapshot")
-    @_multi_persona_event_context
-    async def pc_reality_touch_camera_snapshot(
-        self,
-        event: AstrMessageEvent,
-        purpose: str,
-    ) -> str:
-        """按明确目的读取当前用户已单独授权的摄像头单帧，返回完整视觉摘要供对话理解。
-
-        普通回复中，仅当当前已授权用户明确要求查看时调用。私聊里的“看看我在做什么/吃什么”属于
-        明确视觉请求；群聊则必须由当前发言者本人明确提到摄像头，且其管理员/主要用户资格与此前
-        私聊授权均由工具再次校验。不要自行把普通对话解读为许可。只有已授权的主动任务才可按当前
-        策略独立判断。视觉模型会先理解完整场景并返回针对目的的答案、可见证据与不确定项；不要用于
-        身份识别、情绪读脸、持续观察或读取屏幕文字，也不要猜测品牌、地点或人物身份。
-
-        Args:
-            purpose(string): 本次读取的具体目的，例如“主动问候前判断现在是否适合打扰”。
-        """
-        def failure_receipt(status: str, message: str) -> str:
-            return json.dumps(
-                {
-                    "status": status,
-                    "message": message,
-                    "captured": False,
-                    "must_not_claim_observed": True,
-                    "same_turn_retry_allowed": False,
-                    "final_response_instruction": (
-                        "本次摄像头工具没有获得任何可用画面。必须如实说明返回的失败原因；"
-                        "不得声称画面黑、镜头被挡、又没看到、看到了人物或物品，也不得猜测用户当前状态。"
-                    ),
-                },
-                ensure_ascii=False,
-            )
-
-        is_private = self._safe_event_is_private(event)
-        resolver = getattr(self, "_private_user_id_for_event", None)
-        user_id = resolver(event) if callable(resolver) else _single_line(event.get_sender_id(), 160)
-        if not self._reality_touch_camera_user_eligible(user_id):
-            return failure_receipt(
-                "forbidden",
-                "主机摄像头只允许 AstrBot 管理员或主要用户本人使用",
-            )
-        purpose_text = _single_line(purpose, 120)
-        if not purpose_text:
-            return failure_receipt(
-                "error",
-                "必须说明本次摄像头单帧读取的明确目的",
-            )
-        proactive_request = bool(getattr(event, "private_companion_proactive_framework", False))
-        request_text = str(getattr(event, "message_str", "") or "")
-        explicit_request = self._reality_touch_camera_request_matches(
-            request_text,
-            allow_implicit_self_observation=is_private,
-        )
-        session_key = _single_line(getattr(event, "unified_msg_origin", ""), 180)
-        followup_context = None
-        if (
-            is_private
-            and not explicit_request
-            and self._reality_touch_camera_followup_request_matches(request_text)
-        ):
-            followup_context = self._reality_touch_camera_followup_context(
-                session_key=session_key,
-                user_id=user_id,
-                consume=not proactive_request,
-            )
-        if not proactive_request and not explicit_request and followup_context is None:
-            return failure_receipt(
-                "forbidden",
-                (
-                    "群聊中必须由当前发言者本人明确提到摄像头并说明查看目的"
-                    if not is_private
-                    else "当前消息既不是明确的本人视觉请求，也没有可承接的近期摄像头重试"
-                ),
-            )
-        food_requested = bool(
-            self._reality_touch_camera_food_request_matches(request_text)
-            or (isinstance(followup_context, dict) and followup_context.get("food_requested"))
-        )
-        if isinstance(followup_context, dict):
-            purpose_text = _single_line(followup_context.get("purpose"), 120) or purpose_text
-        if food_requested and not self._reality_touch_camera_food_request_matches(purpose_text):
-            purpose_text = _single_line(
-                f"{purpose_text}；判断画面中正在吃或喝什么",
-                120,
-            )
-        snapshotter = getattr(self, "_reality_touch_camera_snapshot_for_user", None)
-        if not callable(snapshotter):
-            return failure_receipt(
-                "unavailable",
-                "当前插件实例没有摄像头单帧能力",
-            )
-        source = (
-            "proactive_curiosity"
-            if proactive_request
-            else "assistant_tool_private" if is_private else "assistant_tool_group"
-        )
-        result = await snapshotter(user_id, purpose_text, source=source)
-        result_status = str(result.get("status") or "").lower() if isinstance(result, dict) else ""
-        if is_private and explicit_request and result_status not in {"disabled", "forbidden"}:
-            self._remember_reality_touch_camera_request(
-                session_key=session_key,
-                user_id=user_id,
-                purpose=purpose_text,
-                food_requested=food_requested,
-            )
-        if isinstance(result, dict) and str(result.get("status") or "").lower() != "success":
-            result = dict(result)
-            captured = bool(result.get("captured"))
-            result["captured"] = captured
-            result["must_not_claim_observed"] = True
-            result["same_turn_retry_allowed"] = False
-            if not result.get("final_response_instruction"):
-                result["final_response_instruction"] = (
-                    (
-                        "摄像头已经取得一帧，但视觉模型没有可靠回答本次问题。只能说明无法判断；"
-                        "不得把不确定改写成画面黑、镜头被挡，也不得补充 observation 中没有的细节。"
-                    )
-                    if captured
-                    else (
-                        "本次摄像头工具没有获得任何可用画面。必须如实转述工具返回的失败原因；"
-                        "不得声称画面黑、镜头被挡、又没看到、看到了人物或物品，也不得猜测用户当前状态。"
-                    )
-                )
-        return json.dumps(result, ensure_ascii=False)
-
     @filter.llm_tool(name="pc_manage_memo")
     @_multi_persona_event_context
     async def pc_manage_memo(
@@ -12788,105 +12774,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if removed:
             await self._append_sensitive_screen_tool_guard_to_request(event, req, removed)
 
-    @filter.on_llm_request(priority=-20900)
-    @_multi_persona_event_context
-    async def append_reality_touch_camera_request_guidance(
-        self,
-        event: AstrMessageEvent,
-        req: ProviderRequest,
-        *args,
-        **kwargs,
-    ):
-        """Tell the reply model when this turn is an authorized camera request."""
-        if self is None or req is None:
-            return
-        tool_set = getattr(req, "func_tool", None)
-        if tool_set is None or not self._tool_set_has_named_tool(
-            tool_set,
-            "pc_reality_touch_camera_snapshot",
-        ):
-            return
-        if not bool(getattr(self, "enable_experimental_bluetooth_wakeup", False)) or not bool(
-            getattr(self, "enable_reality_touch_camera", False)
-        ):
-            return
-        is_private = self._safe_event_is_private(event)
-        request_text = str(getattr(event, "message_str", "") or "")
-        explicit_request = self._reality_touch_camera_request_matches(
-            request_text,
-            allow_implicit_self_observation=is_private,
-        )
-        resolver = getattr(self, "_private_user_id_for_event", None)
-        requester_id = (
-            resolver(event)
-            if callable(resolver)
-            else self._safe_event_sender_id(event)
-        )
-        if not requester_id or not self._reality_touch_camera_user_eligible(requester_id):
-            return
-        followup_context = None
-        if (
-            is_private
-            and not explicit_request
-            and self._reality_touch_camera_followup_request_matches(request_text)
-        ):
-            followup_context = self._reality_touch_camera_followup_context(
-                session_key=getattr(event, "unified_msg_origin", ""),
-                user_id=requester_id,
-                consume=False,
-            )
-        if not explicit_request and followup_context is None:
-            return
-        users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
-        user = users.get(str(requester_id)) if isinstance(users, dict) else None
-        if not isinstance(user, dict) or not self._reality_touch_camera_consented(user):
-            return
-        if not bool(self._reality_touch_camera_policy(user).get("enabled")):
-            return
-        food_requested = bool(
-            self._reality_touch_camera_food_request_matches(request_text)
-            or (isinstance(followup_context, dict) and followup_context.get("food_requested"))
-        )
-        food_hint = (
-            "用户在问画面中正在吃或喝什么；purpose 应准确写明该问题，工具会返回完整视觉摘要、直接答案和可见证据。"
-            if food_requested
-            else "purpose 应准确复述本轮问题，工具会先完整识图，再把与目的有关的视觉语义交回本模型。"
-        )
-        authorization_note = (
-            "本轮是同一私聊中上一条明确单帧视觉请求的短时重试。"
-            if followup_context is not None
-            else "本轮消息也构成明确的单帧视觉请求。"
-        )
-        guidance = (
-            "【摄像头请求】\n"
-            "当前发言者是已完成独立知情确认的 AstrBot 管理员或主要用户，"
-            f"{authorization_note}"
-            f"{food_hint} 应先调用 pc_reality_touch_camera_snapshot，再优先依据 observation.purpose_answer、"
-            "scene_description 和 visible_evidence 理解画面并自然回复；unknown/uncertain 只表示无法判断，不能解释成画面黑或镜头被挡。"
-            "不要声称没有摄像头功能，不要要求用户另发照片，也不要在工具失败时猜测画面或说成‘又没看到’。"
-            "群聊调用只回答当前明确问题，不扩展描述环境隐私。"
-        )
-        marker = "<!-- private_companion_camera_request_v1 -->"
-        current_prompt = str(getattr(req, "system_prompt", "") or "")
-        if marker in current_prompt:
-            return
-        req.system_prompt = f"{current_prompt}\n\n{marker}\n{guidance}".strip()
-        await self._record_request_prompt_fragment(
-            event,
-            title="摄像头请求",
-            key="tools.camera_request",
-            text=guidance,
-            source="tool_guidance",
-            mode="private" if is_private else "group",
-        )
-        logger.info(
-            "[PrivateCompanion] 已注入授权摄像头请求提示: session=%s requester=%s scope=%s food=%s",
-            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
-            _single_line(requester_id, 80),
-            "private" if is_private else "group",
-            food_requested,
-        )
-
     @filter.on_llm_request(priority=-20500)
     @_multi_persona_event_context
     async def sanitize_deepseek_tool_call_history(
@@ -14234,10 +14121,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     wakeup_test_requested = False
                 else:
                     response, wakeup_test_requested = self._wakeup_alarm_command(user, value)
-                feature_enabled = bool(getattr(self, "enable_experimental_bluetooth_wakeup", False))
+                enabled_getter = getattr(self, "_reality_companion_enabled", None)
+                feature_enabled = bool(callable(enabled_getter) and enabled_getter())
                 if not feature_enabled:
                     wakeup_test_requested = False
-                    response += "\n现实触及总开关仍关闭，请在插件配置中开启 enable_experimental_bluetooth_wakeup。"
+                    response += "\n现实触及联动插件未启用，请在“我会来到你身边”配置中开启总开关。"
             elif action in {"状态", "status"}:
                 self._reset_daily_counter_if_needed(user)
                 last_seen = self._format_timestamp_elapsed(self._latest_user_activity_ts(user))

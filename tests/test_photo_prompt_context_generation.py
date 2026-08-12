@@ -272,9 +272,8 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("nsfw", submitted)
             self.assertNotIn("watermark", submitted)
             self.assertIn("rain", submitted)
-            self.assertIn("lowres", submitted)
-            self.assertIn("bad hands", submitted)
-            self.assertEqual(submitted.count("lowres"), 1)
+            self.assertNotIn("lowres", submitted)
+            self.assertNotIn("bad hands", submitted)
 
     async def test_workflow_fixed_prompts_are_scoped_and_global_prompt_still_stacks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -334,10 +333,10 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
 
             submitted = harness.backend_calls[-1]["prompt"]
             self.assertNotIn("<instruction>", submitted)
-            self.assertEqual(submitted.count("[User image request]"), 1)
+            self.assertNotIn("[User image request]", submitted)
             self.assertNotIn("pajamas", submitted.lower())
             self.assertIn("fine film grain", submitted)
-            self.assertIn("watermark", submitted.lower())
+            self.assertNotIn("watermark", submitted.lower())
 
             record = harness.data["recent_photo_generations"][0]
             audit = record["workflow_fixed_prompt"]
@@ -404,11 +403,12 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
             )
             recent = harness.data["recent_photo_generations"][0]
 
-            self.assertIn("[section compacted]", backend_prompt)
+            self.assertNotIn("[section compacted]", backend_prompt)
             self.assertNotIn("[section compacted]", logged_prompt)
             self.assertIn(complete_preset, logged_prompt)
             self.assertEqual(trace_prompt_event["data"]["prompt"], logged_prompt)
-            self.assertEqual(trace_prompt_event["data"]["submitted_prompt"], backend_prompt)
+            self.assertEqual(trace_prompt_event["data"]["local_backend_prompt"], backend_prompt)
+            self.assertNotEqual(trace_prompt_event["data"]["submitted_prompt"], backend_prompt)
             self.assertLessEqual(len(recent["prompt"]), 900)
             self.assertEqual(recent["complete_prompt_length"], len(logged_prompt))
             self.assertEqual(recent["submitted_prompt_length"], len(backend_prompt))
@@ -575,7 +575,9 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
         for stage in ("prompt_composed", "backend_selected"):
             event = next(item for item in events if item["stage"] == stage)
             self.assertEqual(event["data"]["prompt_format"], "traditional")
-        self.assertTrue(harness.backend_calls[0]["prompt"].startswith("Positive prompt:\n"))
+        self.assertFalse(harness.backend_calls[0]["prompt"].startswith("Positive prompt:\n"))
+        self.assertNotIn("[User image request]", harness.backend_calls[0]["prompt"])
+        self.assertIn("1girl, red dress", harness.backend_calls[0]["prompt"])
         self.assertEqual(
             harness.data["recent_photo_generations"][0]["prompt_format"],
             "traditional",
@@ -831,10 +833,10 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
             submitted_prompt,
         )
         self.assertIn(
-            "Lip Color: preserve the exact natural lip color without simplification or substitution.",
+            "Lip Color: preserve the exact natural lip color without simplification or substitution",
             submitted_prompt,
         )
-        self.assertIn(composition_negative, submitted_prompt)
+        self.assertNotIn(composition_negative, submitted_prompt)
         self.assertNotIn("[section compacted]", submitted_prompt)
 
     async def test_locked_sleepwear_keeps_complete_global_fixed_prompt_at_backend(
@@ -863,7 +865,8 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(backend, "ComfyUI")
         self.assertEqual(image_path, str(output))
         submitted_prompt = harness.backend_calls[0]["prompt"]
-        self.assertIn(f"Additional fixed prompt: {fixed_prompt}", submitted_prompt)
+        self.assertIn(fixed_prompt.rstrip("."), submitted_prompt)
+        self.assertNotIn("Additional fixed prompt:", submitted_prompt)
         record = harness.data["recent_photo_generations"][0]
         self.assertTrue(record["outfit_locked"])
         self.assertEqual(record["wardrobe_category"], "sleepwear")
@@ -991,8 +994,9 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(backend, "ComfyUI")
         self.assertEqual(image_path, str(output))
         self.assertEqual(harness.backend_calls[0]["reference"], str(references[0]))
-        self.assertIn("outfit", harness.backend_calls[0]["prompt"])
-        self.assertIn("pose", harness.backend_calls[0]["prompt"])
+        self.assertIn("第二张的衣服", harness.backend_calls[0]["prompt"])
+        self.assertIn("第三张的姿势", harness.backend_calls[0]["prompt"])
+        self.assertNotIn("Reference attachment availability override", harness.backend_calls[0]["prompt"])
         recorded = harness.data["recent_photo_generations"][0]
         self.assertEqual(len(recorded["reference_plan"]["bindings"]), 3)
         self.assertEqual(
@@ -1045,9 +1049,10 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(backend, "ComfyUI")
         self.assertEqual(image_path, str(output))
         self.assertEqual(harness.backend_calls[0]["references"], [str(path) for path in references])
-        self.assertIn("reference image 1: identity", harness.backend_calls[0]["prompt"])
-        self.assertIn("reference image 2: outfit", harness.backend_calls[0]["prompt"])
-        self.assertIn("reference image 3: pose", harness.backend_calls[0]["prompt"])
+        self.assertIn("第一张的脸", harness.backend_calls[0]["prompt"])
+        self.assertIn("第二张的衣服", harness.backend_calls[0]["prompt"])
+        self.assertIn("第三张的姿势", harness.backend_calls[0]["prompt"])
+        self.assertNotIn("Submitted visual reference responsibilities", harness.backend_calls[0]["prompt"])
         recorded = harness.data["recent_photo_generations"][0]
         self.assertEqual(
             recorded["reference_plan"]["submitted_reference_ids"],
@@ -1325,7 +1330,7 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("ComfyUI", backend)
         self.assertEqual(str(output), image_path)
         submitted_prompt = harness.backend_calls[0]["prompt"].lower()
-        self.assertIn("school uniform", submitted_prompt)
+        self.assertIn("jk校服", submitted_prompt)
         self.assertNotIn("pajama", submitted_prompt)
         self.assertEqual("", harness.backend_calls[0]["reference"])
         record = harness.data["recent_photo_generations"][0]

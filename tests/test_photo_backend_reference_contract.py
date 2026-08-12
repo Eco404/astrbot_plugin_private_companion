@@ -415,7 +415,11 @@ class PhotoBackendReferenceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path, str(generated))
         self.assertIn("当前工作流仅支持 1/2 张参考图", note)
         self.assertEqual(_FakeWorkflow.latest.input_images, [str(bot_reference)])
-        self.assertIn("planned reference image(s) 2", _FakeWorkflow.latest.texts[0])
+        self.assertEqual(
+            _FakeWorkflow.latest.texts[0],
+            "reference image 1 is Bot; reference image 2 is sister",
+        )
+        self.assertNotIn("Reference attachment availability override", _FakeWorkflow.latest.texts[0])
 
     async def test_nonexistent_backend_output_is_not_reported_as_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

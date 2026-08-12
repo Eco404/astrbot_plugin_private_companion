@@ -22,6 +22,7 @@ if PACKAGE_NAME not in sys.modules:
 
 from astrbot_plugin_private_companion.photo_prompt_context import (
     PhotoPromptSection,
+    compile_local_photo_prompt,
     resolve_photo_prompt_context,
 )
 from astrbot_plugin_private_companion import photo_prompt_context
@@ -35,6 +36,7 @@ class PhotoPromptContextTests(unittest.TestCase):
             [
                 "PhotoPromptSection",
                 "ResolvedPhotoPromptContext",
+                "compile_local_photo_prompt",
                 "resolve_photo_prompt_context",
             ],
         )
@@ -513,6 +515,83 @@ class PhotoPromptContextTests(unittest.TestCase):
         self.assertIn("a portrait by the window", natural.final_prompt)
         self.assertIn("soft morning light", natural.final_prompt)
         self.assertEqual(traditional.prompt_sections, natural.prompt_sections)
+
+    def test_local_traditional_prompt_contains_only_renderable_positive_content(self) -> None:
+        sections = (
+            PhotoPromptSection(
+                "request",
+                "user_request",
+                positive="[User image request]\nuser request: 拍一张自拍",
+                negative="text, watermark",
+            ),
+            PhotoPromptSection(
+                "wardrobe",
+                "wardrobe_decision",
+                positive="Wardrobe decision: use the selected reference outfit.",
+            ),
+            PhotoPromptSection(
+                "scene",
+                "scene_context",
+                positive=(
+                    "Resolved selfie scene facts: 窗边，阳光。 "
+                    "An explicit scene or location in the current request overrides conflicting facts; "
+                    "otherwise preserve character identity."
+                ),
+            ),
+            PhotoPromptSection(
+                "preset",
+                "preset",
+                positive="Scene preset: 单人，柔和光线",
+            ),
+            PhotoPromptSection(
+                "composition",
+                "composition",
+                positive="Subject-count boundary: show at most one recognizable human character.",
+                negative="multiple people, collage",
+            ),
+            PhotoPromptSection(
+                "reference_fallback",
+                "reference_fallback",
+                positive="Reference attachment availability override: image 2 is not attached.",
+            ),
+        )
+
+        prompt = compile_local_photo_prompt(sections, "traditional")
+
+        self.assertEqual(
+            prompt,
+            "拍一张自拍, 窗边，阳光, 单人，柔和光线, "
+            "single character, coherent outfit, one continuous scene, visible face, "
+            "upper-body or three-quarter portrait",
+        )
+        for metadata in (
+            "[User image request]",
+            "user request:",
+            "Wardrobe decision:",
+            "Reference attachment availability override",
+            "Subject-count boundary:",
+            "Negative prompt:",
+            "text, watermark",
+        ):
+            self.assertNotIn(metadata, prompt)
+
+    def test_local_compiler_preserves_nai_and_natural_formats(self) -> None:
+        sections = (
+            PhotoPromptSection(
+                "request",
+                "user_request",
+                positive="{solo girl}, [crowd]",
+                negative="text",
+            ),
+        )
+
+        nai = compile_local_photo_prompt(sections, "nai")
+        natural = compile_local_photo_prompt(sections, "natural_language")
+
+        self.assertIn("{solo girl}, [crowd]", nai)
+        self.assertIn("-1.5::text::", nai)
+        self.assertIn("[User image request]", natural)
+        self.assertIn("Avoid text.", natural)
 
     def test_nai_format_avoids_square_bracket_section_labels_and_keeps_negative_weight(self) -> None:
         resolved = resolve_photo_prompt_context(

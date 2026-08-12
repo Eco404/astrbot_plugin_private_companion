@@ -406,6 +406,17 @@ class SceneContextMixin:
             except Exception:
                 role_label = role
 
+        mobile_context: dict[str, Any] = {}
+        mobile_context_getter = getattr(self, "_reality_mobile_context", None)
+        if user_id and callable(mobile_context_getter):
+            try:
+                candidate = mobile_context_getter(user_id)
+                if isinstance(candidate, dict):
+                    mobile_context = candidate
+            except Exception:
+                mobile_context = {}
+        mobile_location = mobile_context.get("location") if isinstance(mobile_context.get("location"), dict) else {}
+
         dialogue_outfit_override: dict[str, Any] = {}
         if include_dialogue_outfit and role == "owner":
             override_getter = getattr(self, "_current_dialogue_outfit_override", None)
@@ -504,6 +515,7 @@ class SceneContextMixin:
                 "confidence": state.get("location_confidence") if location_source == "detail_model" else None,
                 "category": scene_category,
                 "category_label": scene_category_label,
+                "mobile": mobile_location,
             },
             "weather": {
                 "text": weather,
@@ -579,6 +591,21 @@ class SceneContextMixin:
             parts.append(f"当前位置：{_single_line(location.get('text'), 80)}")
         if _single_line(location.get("category_label"), 24):
             parts.append(f"当前场景：{_single_line(location.get('category_label'), 24)}")
+        mobile_location = location.get("mobile") if isinstance(location.get("mobile"), dict) else {}
+        if mobile_location.get("available"):
+            lat = _single_line(mobile_location.get("latitude"), 16)
+            lon = _single_line(mobile_location.get("longitude"), 16)
+            accuracy = _single_line(mobile_location.get("accuracy_m"), 16)
+            label = _single_line(mobile_location.get("label"), 80)
+            coordinate_text = f"约在纬度 {lat}、经度 {lon}" if lat and lon else "已获得手机定位"
+            if accuracy:
+                coordinate_text += f"（精度约 {accuracy} 米）"
+            if label:
+                coordinate_text += f"，设备标签：{label}"
+            parts.append(
+                "手机定位上下文（用户已授权、仅作场景判断，不向用户主动暴露精确坐标）："
+                + coordinate_text
+            )
         if _single_line(weather.get("text"), 220):
             parts.append(f"天气背景：{_single_line(weather.get('text'), 220)}")
         alert_items = weather_alerts.get("alerts") if isinstance(weather_alerts.get("alerts"), list) else []

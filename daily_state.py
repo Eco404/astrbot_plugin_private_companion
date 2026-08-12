@@ -12924,10 +12924,8 @@ class DailyStateMixin(DailyStateTickMixin):
         )
         current_time = self._environment_fromtimestamp(_now_ts()).strftime("%Y-%m-%d %H:%M:%S")
         reality_consented = getattr(self, "_reality_touch_audio_consented", lambda _: False)(current_user)
-        reality_ready = bool(
-            getattr(self, "enable_experimental_bluetooth_wakeup", False)
-            and reality_consented
-        )
+        enabled_getter = getattr(self, "_reality_companion_enabled", None)
+        reality_ready = bool(callable(enabled_getter) and enabled_getter() and reality_consented)
         reality_touch_rule = (
             "用户已经具备现实触及音频授权。只有用户明确要求‘用现实触及/本机音响/电脑扬声器提醒’时，"
             "不要调用 `future_task`，必须只输出：\n"

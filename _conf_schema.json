@@ -11811,7 +11811,7 @@
   "experimental_motivation_config": {
     "description": "实验性功能",
     "type": "object",
-    "hint": "现实设备触及、表情表达、心理机制、动机调度、角色贴合校准和情绪余波等探索性功能。除已存在的情绪模拟会保留原默认值外，其它实验项默认关闭；建议逐项开启观察。设备能力还必须经过对应用户的显式知情确认。",
+    "hint": "现实设备触及已拆分为独立联动插件 astrbot_plugin_reality_companion（我会来到你身边）；本组保留的现实触及字段仅用于旧配置兼容，新安装请在联动插件配置页设置。其它实验项默认关闭；设备能力还必须经过对应用户的显式知情确认。",
     "items": {
       "enable_experimental_bluetooth_wakeup": {
         "description": "启用现实触及",

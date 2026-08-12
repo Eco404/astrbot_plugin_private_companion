@@ -61,6 +61,7 @@ _NEGATIVE_TO_POSITIVE_TRANSITION_PATTERN = re.compile(
 __all__ = [
     "PhotoPromptSection",
     "ResolvedPhotoPromptContext",
+    "compile_local_photo_prompt",
     "resolve_photo_prompt_context",
 ]
 
@@ -728,6 +729,96 @@ def _assemble(sections: Sequence[PhotoPromptSection], prompt_format: str) -> str
     if negative:
         prompt += f"\n\nNegative prompt:\n{negative}"
     return prompt.strip()
+
+
+_LOCAL_VISUAL_PROMPT_SOURCES = frozenset(
+    {
+        "user_request",
+        "visual_memory",
+        "scene_context",
+        "preset",
+        "fixed_prompt",
+        "composition",
+    }
+)
+
+
+def _local_visual_section_text(section: PhotoPromptSection) -> str:
+    """Project a sanitized section into text that an image model may render."""
+    text = str(section.positive or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    text = re.sub(
+        r"(?im)^\s*\[(?:User image request|Reference and wardrobe ruling|"
+        r"Scene, style and final preset|Composition and continuity)\]\s*$",
+        "",
+        text,
+    )
+    if section.source == "user_request":
+        text = re.sub(r"^\s*positive\s+prompt\s*:\s*", "", text, flags=re.I)
+        text = re.sub(r"^\s*user\s+request\s*:\s*", "", text, flags=re.I)
+    elif section.source == "scene_context":
+        text = re.sub(r"^\s*resolved\s+selfie\s+scene\s+facts\s*:\s*", "", text, flags=re.I)
+        text = re.split(
+            r"\s*An explicit scene or location in the current request overrides\b",
+            text,
+            maxsplit=1,
+            flags=re.I,
+        )[0]
+    elif section.source == "visual_memory":
+        text = re.sub(r"^\s*visual\s+continuity\s+reference\s*:\s*", "", text, flags=re.I)
+    elif section.source == "preset":
+        text = re.sub(r"^\s*scene\s+preset\s*:\s*", "", text, flags=re.I)
+    elif section.source == "fixed_prompt":
+        text = re.sub(r"^\s*additional\s+(?:fixed\s+prompt|outfit\s+preference)\s*:\s*", "", text, flags=re.I)
+    elif section.source == "composition":
+        lower_name = str(section.name or "").strip().lower()
+        if lower_name == "relationship_role_reference":
+            text = "two distinct people in one coherent scene" if "shared frame" in text.lower() else ""
+        elif lower_name == "composition":
+            if "multi-person" in text.lower():
+                text = "multi-person portrait, distinct people, one coherent scene"
+            elif "back-view" in text.lower():
+                text = "single character, back view, coherent outfit, natural environmental portrait"
+            elif "mirror" in text.lower():
+                text = "single character mirror portrait, coherent outfit, visible face"
+            else:
+                text = "single character, coherent outfit, one continuous scene, visible face, upper-body or three-quarter portrait"
+        elif lower_name == "subject_count":
+            text = "multi-person portrait, distinct referenced people" if "multi-person" in text.lower() else "single character, one person"
+        else:
+            text = ""
+    text = text.replace(" ... [section compacted] ... ", ", ")
+    text = re.sub(r"\s*\n+\s*", ", ", text)
+    text = re.sub(r"\s*;\s*", ", ", text)
+    text = re.sub(r"(?:\s*,\s*){2,}", ", ", text)
+    return text.strip(" \t\r\n,.;；。")
+
+
+def compile_local_photo_prompt(
+    sections: Sequence[PhotoPromptSection],
+    prompt_format: str,
+) -> str:
+    """Compile renderable positive content for single-text local image workflows.
+
+    Traditional prompt envelopes contain orchestration metadata intended for an
+    LLM. ComfyUI/SDGen often feed their only text input directly to CLIP/T5, so
+    those labels, decisions and negative blocks must not share that input.
+    """
+    mode = str(prompt_format or "traditional").strip().lower().replace("-", "_")
+    if mode != "traditional":
+        return _assemble(sections, mode)
+    values: list[str] = []
+    seen: set[str] = set()
+    for section in sections:
+        if section.source not in _LOCAL_VISUAL_PROMPT_SOURCES:
+            continue
+        value = _local_visual_section_text(section)
+        key = value.casefold()
+        if value and key not in seen:
+            seen.add(key)
+            values.append(value)
+    return ", ".join(values).strip()
 
 
 def _reference_roles(reference: Any, wardrobe: Any) -> tuple[str, ...]:
