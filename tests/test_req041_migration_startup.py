@@ -24,7 +24,7 @@ from migration_source_inspector import inspect_migration_sources
 from migration_scoped_projection import ScopedProjectionSynchronizer
 from migration_scoped_projection import scoped_group_ref, scoped_persona_ref
 from relationship_account_store import RelationshipAccountStore
-from identity_namespace import NamespaceContext
+from identity_namespace import AssurancePolicy, NamespaceContext
 from tests.test_req041_scoped_projection import _Remote
 from relationship_ledger import normalize_relationship_positive_stage_cap_key
 from unified_person_registry import UnifiedPersonRegistry
@@ -58,6 +58,7 @@ def _load_methods(*names: str) -> dict[str, Any]:
         "inspect_migration_sources": inspect_migration_sources,
         "ScopedProjectionSynchronizer": ScopedProjectionSynchronizer,
         "RelationshipAccountStore": RelationshipAccountStore,
+        "AssurancePolicy": AssurancePolicy,
         "NamespaceContext": NamespaceContext,
         "scoped_group_ref": scoped_group_ref,
         "scoped_persona_ref": scoped_persona_ref,
@@ -83,6 +84,7 @@ METHODS = _load_methods(
     "_req041_legacy_snapshots_locked",
     "_req041_sync_scoped_now",
     "_req041_scoped_context_for_user",
+    "_req041_persona_global_context",
     "_req041_scoped_private_read_view",
     "_req041_scoped_group_read_view",
     "_req041_replay_finished",
@@ -102,6 +104,7 @@ class Harness:
     _req041_legacy_snapshots_locked = METHODS["_req041_legacy_snapshots_locked"]
     _req041_sync_scoped_now = METHODS["_req041_sync_scoped_now"]
     _req041_scoped_context_for_user = METHODS["_req041_scoped_context_for_user"]
+    _req041_persona_global_context = METHODS["_req041_persona_global_context"]
     _req041_scoped_private_read_view = METHODS["_req041_scoped_private_read_view"]
     _req041_scoped_group_read_view = METHODS["_req041_scoped_group_read_view"]
     _req041_replay_finished = METHODS["_req041_replay_finished"]
