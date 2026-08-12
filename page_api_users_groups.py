@@ -67,7 +67,88 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             "ambiguity_count": max(0, _safe_int(result.get("ambiguity_count"), 0)),
         }
 
-    def _identity_admin_summary(self, user: dict[str, Any]) -> dict[str, Any]:
+    def _identity_domain_summary(
+        self, person_id: str, snapshot: dict[str, Any]
+    ) -> dict[str, dict[str, Any]]:
+        """Count projected domains without returning group identifiers or data."""
+        synchronizer = getattr(self.plugin, "req041_scoped_projection_sync", None)
+        builder = getattr(synchronizer, "build_records", None)
+        if not callable(builder) or not isinstance(snapshot, dict):
+            return {
+                kind: {"status": "unavailable", "scope_count": 0, "record_count": 0, "ready_scope_count": 0}
+                for kind in ("private", "group_member", "group_shared")
+            }
+        active_scope = ""
+        scope_getter = getattr(self.plugin, "_active_persona_scope", None)
+        try:
+            active_scope = str(scope_getter() or "") if callable(scope_getter) else ""
+        except Exception:
+            active_scope = ""
+        source_scope = (
+            "default" if not active_scope
+            else "persona:" + hashlib.sha256(active_scope.encode("utf-8")).hexdigest()[:24]
+        )
+        try:
+            records, contexts = builder(snapshot, source_scope=source_scope)
+        except Exception:
+            return {
+                kind: {"status": "degraded", "scope_count": 0, "record_count": 0, "ready_scope_count": 0}
+                for kind in ("private", "group_member", "group_shared")
+            }
+        member_groups = {
+            str(context.group_id)
+            for context in contexts
+            if getattr(context, "kind", "") == "group_member"
+            and getattr(context, "identity_id", "") == person_id
+            and str(getattr(context, "group_id", "") or "")
+        }
+        selected_contexts = {
+            "private": [
+                context for context in contexts
+                if getattr(context, "kind", "") == "private"
+                and getattr(context, "identity_id", "") == person_id
+            ],
+            "group_member": [
+                context for context in contexts
+                if getattr(context, "kind", "") == "group_member"
+                and getattr(context, "identity_id", "") == person_id
+            ],
+            "group_shared": [
+                context for context in contexts
+                if getattr(context, "kind", "") == "group_shared"
+                and str(getattr(context, "group_id", "") or "") in member_groups
+            ],
+        }
+        result: dict[str, dict[str, Any]] = {}
+        for kind, selected in selected_contexts.items():
+            scope_keys = {context.cache_scope() for context in selected}
+            record_count = sum(
+                1 for record in records
+                if record.context.cache_scope() in scope_keys
+                and (
+                    kind == "group_shared"
+                    or getattr(record.context, "identity_id", "") == person_id
+                )
+            )
+            ready_count = sum(
+                1 for context in selected
+                if callable(getattr(synchronizer, "is_ready", None))
+                and synchronizer.is_ready(context)
+            )
+            scope_count = len(scope_keys)
+            result[kind] = {
+                "status": "ready" if scope_count and ready_count == scope_count else (
+                    "reconciling" if scope_count else "empty"
+                ),
+                "scope_count": scope_count,
+                "record_count": record_count,
+                "ready_scope_count": ready_count,
+            }
+        return result
+
+    def _identity_admin_summary(
+        self, user: dict[str, Any], *, snapshot: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Build the official user-page identity view from allowlisted state."""
         if not isinstance(user, dict):
             return {"linked": False, "code": "identity_pending"}
@@ -83,9 +164,8 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 "identity_assurance": "unverified",
                 "migration": {"state": "pending", "read_generation": "legacy"},
                 "domains": {
-                    "private": "legacy_isolated",
-                    "group_member": "per_group_isolated",
-                    "group_shared": "per_group_isolated",
+                    kind: {"status": "pending", "scope_count": 0, "record_count": 0, "ready_scope_count": 0}
+                    for kind in ("private", "group_member", "group_shared")
                 },
             }
         registry = self._page_unified_person_registry()
@@ -112,27 +192,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             "stable_cycles": max(0, _safe_int(migration.get("stable_cycles"), 0)),
         }
 
-        private_ready = False
-        context_getter = getattr(self.plugin, "_req041_scoped_context_for_user", None)
-        synchronizer = getattr(self.plugin, "req041_scoped_projection_sync", None)
-        try:
-            context = (
-                context_getter(user, kind="private", purpose="memory_read")
-                if callable(context_getter) else None
-            )
-            private_ready = bool(
-                context is not None
-                and synchronizer is not None
-                and callable(getattr(synchronizer, "is_ready", None))
-                and synchronizer.is_ready(context)
-            )
-        except Exception:
-            private_ready = False
-        summary["domains"] = {
-            "private": "ready" if private_ready else "reconciling",
-            "group_member": "per_group_isolated",
-            "group_shared": "per_group_isolated",
-        }
+        summary["domains"] = self._identity_domain_summary(person_id, snapshot or {})
         summary["lifecycle"] = {
             "can_unlink_current": bool(
                 summary.get("current_identity_linked")
@@ -194,6 +254,14 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 user = deepcopy((self.plugin.data.get("users") or {}).get(user_id))
                 daily_state = deepcopy(self.plugin.data.get("daily_state"))
                 state_conditions = deepcopy(self.plugin.data.get("state_conditions"))
+                identity_snapshot = {
+                    key: deepcopy(self.plugin.data.get(key))
+                    for key in (
+                        "unified_person", "users", "groups", "_req041_private_memory",
+                        "_req041_persona_reset_saga", "_req041_group_reset_sagas",
+                    )
+                    if key in self.plugin.data
+                }
             if not isinstance(user, dict):
                 return self._error("用户不存在")
             relationship_view_getter = getattr(
@@ -247,7 +315,9 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 if callable(portrait_status_reader)
                 else {"available": False, "code": "bridge_unavailable", "last_synced_at": "", "portrait_revision": 0}
             )
-            detail["identity_admin"] = self._identity_admin_summary(user)
+            detail["identity_admin"] = self._identity_admin_summary(
+                user, snapshot=identity_snapshot
+            )
             return self._ok(detail)
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取用户详情失败: {exc}", exc_info=True)

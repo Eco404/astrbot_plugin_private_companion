@@ -11,6 +11,7 @@ import types
 from typing import Any
 import unittest
 
+from identity_namespace import NamespaceContext
 from unified_person_registry import UnifiedPersonRegistry
 
 
@@ -44,6 +45,7 @@ def _load_page_unlink():
         and node.name == "PrivateCompanionPageApiUsersGroupsMixin"
     )
     names = {
+        "_identity_domain_summary",
         "_identity_unlink_confirmation",
         "_safe_identity_unlink_result",
         "unlink_unified_identity",
@@ -81,6 +83,7 @@ class _AsyncLock:
 
 
 class _PageHost:
+    _identity_domain_summary = PAGE_METHODS["_identity_domain_summary"]
     _identity_unlink_confirmation = staticmethod(PAGE_METHODS["_identity_unlink_confirmation"])
     _safe_identity_unlink_result = staticmethod(PAGE_METHODS["_safe_identity_unlink_result"])
     unlink_unified_identity = PAGE_METHODS["unlink_unified_identity"]
@@ -110,6 +113,10 @@ class _PageHost:
         self._data_lock = _AsyncLock()
         self.saved = 0
 
+    @staticmethod
+    def _active_persona_scope() -> str:
+        return ""
+
     def _page_unified_person_registry(self):
         return self.registry
 
@@ -130,6 +137,55 @@ class _PageHost:
 
 
 class IdentityAdminUiTests(unittest.TestCase):
+    def test_domain_summary_counts_only_scopes_and_records_for_current_person(self) -> None:
+        host = _PageHost()
+        other = "person_" + "f" * 24
+
+        def context(kind: str, identity_id: str = "", group_id: str = "") -> NamespaceContext:
+            return NamespaceContext(
+                kind=kind, persona_id="default", identity_id=identity_id,
+                group_id=group_id, assurance="verified", profile_status="active",
+                policy_version="req041-v1", migration_epoch="epoch-1",
+            )
+
+        private = context("private", host.person_id)
+        member_a = context("group_member", host.person_id, "group-a")
+        member_b = context("group_member", host.person_id, "group-b")
+        shared_a = context("group_shared", group_id="group-a")
+        shared_b = context("group_shared", group_id="group-b")
+        other_private = context("private", other)
+        contexts = [private, member_a, member_b, shared_a, shared_b, other_private]
+        records = [
+            types.SimpleNamespace(context=private),
+            types.SimpleNamespace(context=private),
+            types.SimpleNamespace(context=member_a),
+            types.SimpleNamespace(context=shared_a),
+            types.SimpleNamespace(context=shared_b),
+            types.SimpleNamespace(context=other_private),
+        ]
+
+        class Synchronizer:
+            @staticmethod
+            def build_records(_snapshot, *, source_scope):
+                assert source_scope == "default"
+                return records, contexts
+
+            @staticmethod
+            def is_ready(value):
+                return value.cache_scope() in {private.cache_scope(), member_a.cache_scope(), shared_a.cache_scope()}
+
+        host.req041_scoped_projection_sync = Synchronizer()
+        summary = host._identity_domain_summary(host.person_id, {"users": {}})
+        self.assertEqual(
+            {"status": "ready", "scope_count": 1, "record_count": 2, "ready_scope_count": 1},
+            summary["private"],
+        )
+        self.assertEqual(2, summary["group_member"]["scope_count"])
+        self.assertEqual(1, summary["group_member"]["record_count"])
+        self.assertEqual(2, summary["group_shared"]["scope_count"])
+        self.assertEqual(2, summary["group_shared"]["record_count"])
+        self.assertNotIn("group-a", json.dumps(summary, ensure_ascii=False))
+
     def test_safe_summary_and_exact_resolver_never_expose_subject(self) -> None:
         host = _PageHost()
         resolved = host.registry.identity_for_person_subject(host.person_id, "10002")

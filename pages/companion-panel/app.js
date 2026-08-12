@@ -14891,7 +14891,7 @@ async function renderUserDetail(forceFetch = false) {
       ${renderOpenLoopBlock(detail)}
     </section>
     <section class="user-detail-view ${state.userDetailView === "identity" ? "is-active" : "is-hidden"}" data-user-detail-panel="identity">
-      ${renderUserViewOverview("身份与隔离", "确认同一人物、统一关系账户与分域记忆是否处于安全状态。", [["身份", identityAssuranceLabel(detail.identity_admin?.identity_assurance)], ["读取", detail.identity_admin?.migration?.read_generation === "new" ? "统一账户" : "兼容旧数据"], ["私聊域", detail.identity_admin?.domains?.private === "ready" ? "已就绪" : "对账中"]])}
+      ${renderUserViewOverview("身份与隔离", "确认同一人物、统一关系账户与分域记忆是否处于安全状态。", [["身份", identityAssuranceLabel(detail.identity_admin?.identity_assurance)], ["读取", detail.identity_admin?.migration?.read_generation === "new" ? "统一账户" : "兼容旧数据"], ["私聊域", detail.identity_admin?.domains?.private?.status === "ready" ? "已就绪" : "对账中"]])}
       ${renderUnifiedIdentityPanel(detail)}
     </section>
     <section class="user-detail-view ${state.userDetailView === "relationship" ? "is-active" : "is-hidden"}" data-user-detail-panel="relationship">
@@ -14982,6 +14982,17 @@ function maskedPersonReference(value) {
   return text.length <= 14 ? text : `${text.slice(0, 10)}…${text.slice(-4)}`;
 }
 
+function identityDomainText(domain, unit = "域") {
+  const value = domain && typeof domain === "object" ? domain : {};
+  const scopes = Number(value.scope_count || 0);
+  const records = Number(value.record_count || 0);
+  const ready = Number(value.ready_scope_count || 0);
+  if (value.status === "unavailable") return "服务未就绪";
+  if (value.status === "degraded") return "统计失败，已安全降级";
+  if (!scopes) return `0 个${unit} · 暂无记录`;
+  return `${scopes} 个${unit} · ${records} 条记录 · ${ready}/${scopes} 已就绪`;
+}
+
 function renderUnifiedIdentityPanel(detail) {
   const identity = detail?.identity_admin && typeof detail.identity_admin === "object" ? detail.identity_admin : {};
   const migration = identity.migration && typeof identity.migration === "object" ? identity.migration : {};
@@ -14989,7 +15000,7 @@ function renderUnifiedIdentityPanel(detail) {
   const lifecycle = identity.lifecycle && typeof identity.lifecycle === "object" ? identity.lifecycle : {};
   const linked = Boolean(identity.linked);
   const generation = migration.read_generation === "new" ? "统一账户" : "兼容旧数据";
-  const privateDomain = domains.private === "ready" ? "已对账，可用" : (linked ? "对账中，安全回退" : "等待精确身份");
+  const privateDomain = identityDomainText(domains.private, "私聊域");
   const updatedAt = identity.updated_at ? new Date(identity.updated_at).toLocaleString() : "暂无";
   return `
     <section class="detail-block unified-profile-capabilities">
@@ -15007,8 +15018,8 @@ function renderUnifiedIdentityPanel(detail) {
       <header class="detail-block-head"><div><h2>数据隔离状态</h2><p>这里只显示边界和就绪状态，不显示聊天原文、群号或底层身份键。</p></div></header>
       <dl>
         <dt>私聊画像 / 记忆 / 学习</dt><dd>${escapeHtml(privateDomain)}</dd>
-        <dt>群成员记忆</dt><dd>${escapeHtml(domains.group_member === "per_group_isolated" ? "按每个群分别隔离" : "等待初始化")}</dd>
-        <dt>群共享记忆</dt><dd>${escapeHtml(domains.group_shared === "per_group_isolated" ? "按每个群分别隔离" : "等待初始化")}</dd>
+        <dt>群成员记忆</dt><dd>${escapeHtml(identityDomainText(domains.group_member, "群域"))}</dd>
+        <dt>群共享记忆</dt><dd>${escapeHtml(identityDomainText(domains.group_shared, "群域"))}</dd>
         <dt>迁移积压</dt><dd>${escapeHtml(String(Number(migration.backlog || 0)))} · 稳定周期 ${escapeHtml(String(Number(migration.stable_cycles || 0)))}</dd>
       </dl>
     </section>
