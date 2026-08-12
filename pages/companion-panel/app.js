@@ -14993,12 +14993,31 @@ function identityDomainText(domain, unit = "域") {
   return `${scopes} 个${unit} · ${records} 条记录 · ${ready}/${scopes} 已就绪`;
 }
 
+function identityPendingGuidance(pending) {
+  const value = pending && typeof pending === "object" ? pending : {};
+  const reason = String(value.reason_code || "");
+  if (value.state === "unavailable") {
+    return { title: "迁移服务暂不可用", detail: "当前继续读取旧资料；服务恢复后再检查，不会自动猜测身份。", tone: "off" };
+  }
+  if (value.state === "degraded") {
+    return { title: "待确认状态读取失败", detail: "当前继续读取旧资料；请稍后刷新，不要手工合并不确定的账号。", tone: "off" };
+  }
+  if (value.found && reason === "identity_link_missing") {
+    return { title: "等待精确身份事件", detail: "此旧档案仍可读取。用户下一次通过已核验平台身份真实发言后，系统会自动认领并对账，无需手工搬数据。", tone: "warn" };
+  }
+  if (value.found) {
+    return { title: "身份数据需要复核", detail: "系统发现旧资料不满足安全合并条件，因此保持隔离和旧数据读取。请等待精确真实事件，或使用后续的受控重新关联流程。", tone: "warn" };
+  }
+  return { title: "等待首次精确消息", detail: "尚未发现可安全认领的身份。系统不会按昵称、群名片或模糊 ID 自动合并。", tone: "off" };
+}
+
 function renderUnifiedIdentityPanel(detail) {
   const identity = detail?.identity_admin && typeof detail.identity_admin === "object" ? detail.identity_admin : {};
   const migration = identity.migration && typeof identity.migration === "object" ? identity.migration : {};
   const domains = identity.domains && typeof identity.domains === "object" ? identity.domains : {};
   const lifecycle = identity.lifecycle && typeof identity.lifecycle === "object" ? identity.lifecycle : {};
   const linked = Boolean(identity.linked);
+  const pendingGuidance = identityPendingGuidance(identity.pending);
   const generation = migration.read_generation === "new" ? "统一账户" : "兼容旧数据";
   const privateDomain = identityDomainText(domains.private, "私聊域");
   const updatedAt = identity.updated_at ? new Date(identity.updated_at).toLocaleString() : "暂无";
@@ -15031,7 +15050,7 @@ function renderUnifiedIdentityPanel(detail) {
         ${lifecycle.can_purge ? '<button type="button" data-identity-action="purge" class="danger">预览永久删除</button>' : ""}
       </div>
       ${!lifecycle.can_unlink_current && lifecycle.can_archive ? '<p class="muted">当前是唯一或主身份，不能直接拆分；如需移除，请使用统一人物归档。</p>' : ""}
-    </section>` : `<section class="detail-block"><header class="detail-block-head"><div><h2>等待自动建档</h2><p>下一次产生精确、已核验的真实聊天事件后会自动建立统一人物；系统不会按昵称或模糊 ID 猜测合并。</p></div></header></section>`}
+    </section>` : `<section class="detail-block"><header class="detail-block-head"><div><h2>${escapeHtml(pendingGuidance.title)}</h2><p>${escapeHtml(pendingGuidance.detail)}</p></div><span class="badge ${escapeHtml(pendingGuidance.tone)}">只读安全提示</span></header><p class="muted">当前页面不会提供猜测确认或忽略按钮；在没有精确平台身份时，任何人工合并都有串档风险。</p></section>`}
   `;
 }
 

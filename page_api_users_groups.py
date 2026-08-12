@@ -22,6 +22,7 @@ from .relationship_ledger import (
     record_manual_relationship_change,
     relationship_positive_score_cap,
 )
+from .migration_backfill import legacy_pending_reference
 
 
 class PrivateCompanionPageApiUsersGroupsMixin:
@@ -146,8 +147,41 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             }
         return result
 
+    def _identity_pending_summary(self, user_id: str) -> dict[str, Any]:
+        coordinator = getattr(self.plugin, "req041_migration_coordinator", None)
+        status_reader = getattr(coordinator, "status", None)
+        pending_reader = getattr(coordinator, "pending_status", None)
+        if not callable(status_reader) or not callable(pending_reader):
+            return {"found": False, "state": "unavailable", "reason_code": "migration_unavailable"}
+        try:
+            status = status_reader()
+        except Exception:
+            return {"found": False, "state": "degraded", "reason_code": "pending_lookup_failed"}
+        epoch = str(status.get("migration_epoch") or "") if isinstance(status, dict) else ""
+        if not epoch:
+            return {"found": False, "state": "none", "reason_code": ""}
+        active_scope = ""
+        scope_getter = getattr(self.plugin, "_active_persona_scope", None)
+        try:
+            active_scope = str(scope_getter() or "") if callable(scope_getter) else ""
+        except Exception:
+            active_scope = ""
+        source_scope = (
+            "default" if not active_scope
+            else "persona:" + hashlib.sha256(active_scope.encode("utf-8")).hexdigest()[:24]
+        )
+        try:
+            result = pending_reader(
+                legacy_pending_reference(epoch, source_scope, user_id)
+            )
+        except Exception:
+            return {"found": False, "state": "degraded", "reason_code": "pending_lookup_failed"}
+        return result if isinstance(result, dict) else {
+            "found": False, "state": "degraded", "reason_code": "pending_lookup_failed"
+        }
+
     def _identity_admin_summary(
-        self, user: dict[str, Any], *, snapshot: dict[str, Any] | None = None
+        self, user: dict[str, Any], *, user_id: str = "", snapshot: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         """Build the official user-page identity view from allowlisted state."""
         if not isinstance(user, dict):
@@ -163,6 +197,9 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 "profile_status": "pending",
                 "identity_assurance": "unverified",
                 "migration": {"state": "pending", "read_generation": "legacy"},
+                "pending": self._identity_pending_summary(
+                    user_id or self._single_line(user.get("user_id"), 160)
+                ),
                 "domains": {
                     kind: {"status": "pending", "scope_count": 0, "record_count": 0, "ready_scope_count": 0}
                     for kind in ("private", "group_member", "group_shared")
@@ -316,7 +353,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 else {"available": False, "code": "bridge_unavailable", "last_synced_at": "", "portrait_revision": 0}
             )
             detail["identity_admin"] = self._identity_admin_summary(
-                user, snapshot=identity_snapshot
+                user, user_id=user_id, snapshot=identity_snapshot
             )
             return self._ok(detail)
         except Exception as exc:

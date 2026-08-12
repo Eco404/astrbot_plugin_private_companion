@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
 
 from identity_namespace import NamespaceContext
-from migration_backfill import MigrationBackfill
+from migration_backfill import MigrationBackfill, legacy_pending_reference
 from migration_coordinator import MigrationCoordinator
 from person_context_contract import build_identity_key
 from relationship_account_store import RelationshipNotFound
@@ -147,6 +148,13 @@ class MigrationBackfillTests(unittest.TestCase):
             connection.close()
         self.assertEqual(64, len(row[0]))
         self.assertNotIn(raw_id, row)
+        status = self.coordinator.pending_status(
+            legacy_pending_reference(self.epoch, "default", raw_id)
+        )
+        self.assertTrue(status["found"])
+        self.assertEqual("identity_link_missing", status["reason_code"])
+        self.assertNotIn("legacy_ref_hash", status)
+        self.assertNotIn(raw_id, json.dumps(status, ensure_ascii=False))
 
     def test_tampered_fingerprint_is_not_migrated(self) -> None:
         snapshot, person_id = self._snapshot()

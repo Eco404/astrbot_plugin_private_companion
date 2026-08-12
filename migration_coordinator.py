@@ -596,6 +596,28 @@ class MigrationCoordinator:
         items = [dict(row) for row in rows]
         return {"total": sum(int(item["count"]) for item in items), "reasons": items}
 
+    def pending_status(self, legacy_ref_hash: str) -> dict[str, Any]:
+        """Read one opaque pending record without returning its lookup hash."""
+        reference = _digest(legacy_ref_hash)
+        if not reference:
+            return {"found": False, "state": "invalid", "reason_code": "pending_reference_invalid"}
+        with self._connection() as connection:
+            row = connection.execute(
+                """SELECT source_kind,reason_code,state,first_seen_at,updated_at
+                   FROM migration_pending_records WHERE legacy_ref_hash=?""",
+                (reference,),
+            ).fetchone()
+        if row is None:
+            return {"found": False, "state": "none", "reason_code": ""}
+        return {
+            "found": True,
+            "source_kind": str(row["source_kind"] or "")[:40],
+            "reason_code": str(row["reason_code"] or "")[:80],
+            "state": str(row["state"] or "pending")[:24],
+            "first_seen_at": float(row["first_seen_at"] or 0),
+            "updated_at": float(row["updated_at"] or 0),
+        }
+
     def safe_admin_summary(self) -> dict[str, Any]:
         """Return aggregate migration state without identity or source values."""
         with self._connection() as connection:

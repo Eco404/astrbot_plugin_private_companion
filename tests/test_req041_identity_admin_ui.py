@@ -12,6 +12,7 @@ from typing import Any
 import unittest
 
 from identity_namespace import NamespaceContext
+from migration_backfill import legacy_pending_reference
 from unified_person_registry import UnifiedPersonRegistry
 
 
@@ -46,6 +47,8 @@ def _load_page_unlink():
     )
     names = {
         "_identity_domain_summary",
+        "_identity_pending_summary",
+        "_identity_admin_summary",
         "_identity_unlink_confirmation",
         "_safe_identity_unlink_result",
         "unlink_unified_identity",
@@ -66,6 +69,7 @@ def _load_page_unlink():
         "request": _Request(),
         "logger": types.SimpleNamespace(warning=lambda *_args, **_kwargs: None),
         "_safe_int": lambda value, default=0: int(value or default),
+        "legacy_pending_reference": legacy_pending_reference,
     }
     exec(compile(module, str(path), "exec"), namespace)
     return {name: namespace[name] for name in names}, namespace["request"]
@@ -84,6 +88,8 @@ class _AsyncLock:
 
 class _PageHost:
     _identity_domain_summary = PAGE_METHODS["_identity_domain_summary"]
+    _identity_pending_summary = PAGE_METHODS["_identity_pending_summary"]
+    _identity_admin_summary = PAGE_METHODS["_identity_admin_summary"]
     _identity_unlink_confirmation = staticmethod(PAGE_METHODS["_identity_unlink_confirmation"])
     _safe_identity_unlink_result = staticmethod(PAGE_METHODS["_safe_identity_unlink_result"])
     unlink_unified_identity = PAGE_METHODS["unlink_unified_identity"]
@@ -199,6 +205,42 @@ class IdentityAdminUiTests(unittest.TestCase):
         self.assertNotIn("10002", encoded)
         self.assertNotIn("identity_key", encoded)
 
+    def test_unlinked_user_maps_to_safe_pending_status_without_exposing_lookup_material(self) -> None:
+        host = _PageHost()
+        raw_user_id = "legacy-user-998877"
+        epoch = "migration-epoch-secret"
+        expected = legacy_pending_reference(epoch, "default", raw_user_id)
+
+        class Coordinator:
+            seen = ""
+
+            @staticmethod
+            def status():
+                return {"migration_epoch": epoch}
+
+            @classmethod
+            def pending_status(cls, reference):
+                cls.seen = reference
+                return {
+                    "found": True,
+                    "source_kind": "legacy_user",
+                    "reason_code": "identity_link_missing",
+                    "state": "pending",
+                    "first_seen_at": 1.0,
+                    "updated_at": 2.0,
+                }
+
+        host.req041_migration_coordinator = Coordinator()
+        summary = host._identity_admin_summary(
+            {"user_id": raw_user_id}, user_id=raw_user_id, snapshot={}
+        )
+        self.assertEqual(expected, Coordinator.seen)
+        self.assertEqual("identity_link_missing", summary["pending"]["reason_code"])
+        encoded = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn(raw_user_id, encoded)
+        self.assertNotIn(epoch, encoded)
+        self.assertNotIn(expected, encoded)
+
     def test_page_unlink_derives_exact_identity_from_selected_user(self) -> None:
         host = _PageHost()
         PAGE_REQUEST.payload = {
@@ -248,6 +290,9 @@ class IdentityAdminUiTests(unittest.TestCase):
         self.assertIn('data-identity-action="archive"', english)
         self.assertIn('postJson(endpoint, body)', english)
         self.assertIn('confirmation_token: preview.confirmationToken', english)
+        self.assertIn("只读安全提示", english)
+        self.assertIn("等待精确身份事件", english)
+        self.assertNotIn('data-identity-action="confirm-pending"', english)
         self.assertIn("不能绕过统一数据链直接删除", (ROOT / "page_api_users_groups.py").read_text(encoding="utf-8"))
         self.assertNotIn("identity.identity_key", english)
 
