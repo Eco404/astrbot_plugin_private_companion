@@ -15429,7 +15429,7 @@ function renderOpenLoopBlock(detail) {
 }
 
 function expressionLibrarySourceText(item) {
-  const kind = item?.source_kind_label || (item?.source_type === "group" ? "群聊" : "私聊");
+  const kind = item?.source_kind_label || (item?.source_type === "persona" ? "人格全局" : (item?.source_type === "group" ? "群聊" : "私聊"));
   const name = item?.source_name || item?.source_id || "未知来源";
   const id = item?.source_id || "";
   return `${kind} ${name} ${id}`.trim();
@@ -15615,7 +15615,7 @@ function renderExpressionLibraryView() {
   const library = state.expressionLibrary;
   if (!root || !library) return;
   renderLearningSummary();
-  const filter = ["all", "private", "group"].includes(state.expressionLibraryFilter)
+  const filter = ["all", "private", "group", "persona"].includes(state.expressionLibraryFilter)
     ? state.expressionLibraryFilter
     : "all";
   const type = ["all", "style", "grammar"].includes(state.expressionLibraryType)
@@ -15653,7 +15653,7 @@ function renderExpressionLibraryView() {
         <div class="expression-library-filter-block">
           <span>来源</span>
           <div class="expression-library-segments" role="group" aria-label="筛选表达来源类型">
-            ${[["all", "全部"], ["private", "私聊"], ["group", "群聊"]].map(([value, label]) => `
+            ${[["all", "全部"], ["private", "私聊"], ["group", "群聊"], ["persona", "人格全局"]].map(([value, label]) => `
               <button type="button" class="${filter === value ? "is-active" : ""}" data-expression-library-filter="${value}" aria-pressed="${filter === value}">${label}</button>
             `).join("")}
           </div>
@@ -15748,7 +15748,7 @@ function renderExpressionLibraryView() {
 }
 
 function expressionShareGroups(scope = "current") {
-  const groups = expressionRuleGroups(state.expressionLibrary, false);
+  const groups = expressionRuleGroups(state.expressionLibrary, false).filter((item) => item?.source_type !== "persona");
   if (scope === "all") return groups;
   const filter = ["all", "private", "group"].includes(state.expressionLibraryFilter)
     ? state.expressionLibraryFilter
@@ -16471,7 +16471,9 @@ function expressionRuleGroupItem(ruleGroup, pending = false, evidenceOpen = fals
       <div>${examples.map((item) => `<blockquote>${escapeHtml(item)}</blockquote>`).join("")}</div>
     </details>
   ` : "";
-  const deleteAction = `<div class="expression-rule-actions"><button type="button" class="danger-outline" data-expression-action="delete_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" ${revisionAttrs}>删除规则组</button></div>`;
+  const isPersonaGlobal = group?.source_type === "persona";
+  const promoteAction = isPersonaGlobal ? "" : `<button type="button" data-expression-action="promote_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" ${revisionAttrs}>提升为当前人格全局</button>`;
+  const deleteAction = `<div class="expression-rule-actions">${promoteAction}<button type="button" class="danger-outline" data-expression-action="delete_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" ${revisionAttrs}>${isPersonaGlobal ? "撤销全局规则组" : "删除规则组"}</button></div>`;
   return `
     <article class="expression-rule-item expression-rule-group-item ${pending ? "is-pending" : "is-approved"} ${needsReview ? "needs-review" : ""}">
       <div class="expression-rule-head">
@@ -16569,7 +16571,7 @@ function expressionRuleContext(rule) {
 }
 
 function expressionSourceBadge(item, compact = false) {
-  const kind = item?.source_kind_label || (item?.source_type === "group" ? "群聊" : "私聊");
+  const kind = item?.source_kind_label || (item?.source_type === "persona" ? "人格全局" : (item?.source_type === "group" ? "群聊" : "私聊"));
   const name = item?.source_name || item?.source_id || "未知来源";
   const id = item?.source_id || "";
   if (compact) {
@@ -16665,6 +16667,39 @@ function bindExpressionLibraryActions(library, root) {
       if (action === "delete_sample" && !requireSecondClick(button, `expression-delete:${sourceType}:${sourceId}:${button.dataset.expressionSampleId || button.dataset.expressionSampleIndex || ""}`, "再次点击删除这条观察素材", "再次点击删除")) return;
       if (action === "delete_rule" && !requireSecondClick(button, `expression-rule-delete:${sourceType}:${sourceId}:${button.dataset.expressionRuleId || ""}`, "再次点击删除这条表达规则", "再次点击删除")) return;
       if (action === "delete_rule_group" && !requireSecondClick(button, `expression-rule-group-delete:${sourceType}:${sourceId}:${button.dataset.expressionRuleFamilyId || ""}`, "再次点击删除整个规则组", "再次点击删除整组")) return;
+      if (action === "promote_rule_group") {
+        const preview = button._globalPromotionPreview;
+        const basePayload = {
+          source_type: sourceType,
+          source_id: sourceId,
+          expression_action: action,
+          rule_family_id: button.dataset.expressionRuleFamilyId || "",
+          expected_scope_revision: Number(button.dataset.expressionScopeRevision || 0),
+          expected_item_revisions: JSON.parse(button.dataset.expressionItemRevisions || "{}"),
+        };
+        if (!preview) {
+          const operationId = identityOperationId("promote-expression");
+          const response = await runAction(
+            () => postJson("/expression-library/update", { ...basePayload, operation_id: operationId, dry_run: true }),
+            "全局影响预览已生成，请再次点击确认", button, { reload: false },
+          );
+          const promotion = response?.promotion;
+          if (!promotion?.ok) return;
+          button._globalPromotionPreview = {
+            operationId,
+            confirmationToken: String(promotion.confirmation_token || ""),
+          };
+          button.textContent = `确认提升 ${Number(promotion.rule_count || 0)} 条规则`;
+          return;
+        }
+        await applyExpressionLibraryMutation({
+          ...basePayload,
+          operation_id: preview.operationId,
+          confirmation_token: preview.confirmationToken,
+          dry_run: false,
+        }, button, "已提升为当前人格全局规则");
+        return;
+      }
       await applyExpressionLibraryMutation(
         {
           source_type: sourceType,

@@ -17,9 +17,11 @@ from scoped_runtime_view import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _approved_rule(rule_id: str, evidence_count: int = 1) -> dict:
+def _approved_rule(rule_id: str, evidence_count: int = 1, *, kind: str = "private") -> dict:
     context = SimpleNamespace(
-        kind="private", persona_id="default", identity_id="person-a", group_id="",
+        kind=kind, persona_id="default",
+        identity_id="person-a" if kind == "private" else "",
+        group_id="group-a" if kind == "group_shared" else "",
         assurance="verified", profile_status="active", policy_version="req041-v1",
         migration_epoch="epoch-a", errors=lambda: [],
     )
@@ -138,6 +140,27 @@ class ScopedRuntimeViewTests(unittest.TestCase):
             ]},
         })
         self.assertEqual(["approved"], [item["id"] for item in rules])
+
+    def test_persona_global_rules_are_combined_only_from_reconciled_projection(self) -> None:
+        private_projection = {
+            "ok": True,
+            "fields": {"expression_profile": {"learned_rules": [_approved_rule("private-a")] }},
+        }
+        persona_projection = {
+            "ok": True,
+            "fields": {"expression_profile": {"learned_rules": [
+                _approved_rule("global-a", kind="persona_global")
+            ]}},
+        }
+        view = overlay_private_runtime_view({}, private_projection, persona_projection)
+        rules = scoped_approved_expression_rules(view)
+        self.assertEqual(["private-a", "global-a"], [item["id"] for item in rules])
+
+        without_global = overlay_private_runtime_view({}, private_projection, {"ok": False})
+        self.assertEqual(
+            ["private-a"],
+            [item["id"] for item in scoped_approved_expression_rules(without_global)],
+        )
 
 
 class _ExpressionHarness:

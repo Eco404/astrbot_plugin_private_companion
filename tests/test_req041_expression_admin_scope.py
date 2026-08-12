@@ -1,27 +1,52 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
+import hmac
+import json
 from pathlib import Path
 import time
 import unittest
+from types import SimpleNamespace
 
 from expression_scope_ownership import (
     ExpressionScopeError,
     bind_expression_item,
     bind_expression_profile,
+    validate_expression_scope_binding,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class _Request:
+    payload = {}
+
+    async def get_json(self, silent=True):
+        del silent
+        return deepcopy(self.payload)
+
+
+class _AsyncLock:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+
 def _method(name: str, globals_map: dict):
     tree = ast.parse((ROOT / "page_api.py").read_text(encoding="utf-8"))
     class_node = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "PrivateCompanionPageApi")
-    method = next(node for node in class_node.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    method = next(
+        node for node in class_node.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+    )
     module = ast.Module(
         body=[ast.ImportFrom(module="__future__", names=[ast.alias("annotations")], level=0), method],
         type_ignores=[],
@@ -52,8 +77,11 @@ class Harness:
 
     def __init__(self):
         self.plugin = self
+        self.data = {}
         self.req041_scoped_projection_sync = object()
         self.resolved_context = Context()
+        self._data_lock = _AsyncLock()
+        self.saved = 0
 
     @staticmethod
     def _single_line(value, limit=100):
@@ -95,15 +123,46 @@ class Harness:
     def _req041_scoped_group_context(self, _group_id, **_kwargs):
         return Context(kind="group_shared", identity_id="", group_id="group-a")
 
+    def _req041_persona_global_context(self, **_kwargs):
+        return Context(kind="persona_global", identity_id="", group_id="")
+
+    @staticmethod
+    def _expression_rule_definition_is_valid(rule):
+        return bool(rule.get("kind") in {"style", "grammar"} and rule.get("situation") and rule.get("pattern") and rule.get("instruction"))
+
+    def _save_data_sync(self):
+        self.saved += 1
+
+    @staticmethod
+    def _expression_library_summary(_snapshot):
+        return {"rule_count": 0}
+
+    @staticmethod
+    def _ok(value):
+        return {"ok": True, "data": value}
+
+    @staticmethod
+    def _error(message):
+        return {"ok": False, "error": message}
+
+    def _exception_error(self, message):
+        return self._error(message)
+
 
 GLOBALS = {
     "Any": object,
     "deepcopy": deepcopy,
     "datetime": datetime,
     "time": time,
+    "hashlib": hashlib,
+    "hmac": hmac,
+    "json": json,
+    "request": _Request(),
+    "logger": SimpleNamespace(error=lambda *_args, **_kwargs: None),
     "ExpressionScopeError": ExpressionScopeError,
     "bind_expression_item": bind_expression_item,
     "bind_expression_profile": bind_expression_profile,
+    "validate_expression_scope_binding": validate_expression_scope_binding,
 }
 for _name in (
     "_expression_admin_scope_context",
@@ -111,7 +170,12 @@ for _name in (
     "_expression_validate_admin_revision",
     "_expression_item_content",
     "_expression_finalize_admin_profile",
+    "_expression_share_value_list",
+    "_expression_share_rule",
+    "_expression_promotion_confirmation",
+    "_expression_global_promotion_state",
     "_apply_expression_profile_action",
+    "update_expression_library",
 ):
     setattr(Harness, _name, _method(_name, GLOBALS))
 
@@ -240,6 +304,159 @@ class ExpressionAdminScopeTests(unittest.TestCase):
             self.harness._expression_admin_scope_context(
                 "private", "raw-user", {"user_id": "raw-user"},
             )
+
+    def test_explicit_global_promotion_rebinds_sanitized_rules_to_persona(self):
+        owner = self.owner()
+        pending = owner["expression_profile"].pop("pending_rules")
+        learned = []
+        for item in pending:
+            learned.append(bind_expression_item(
+                item, self.context, approval_state="approved",
+                approved_by="administrator", bump_revision=True,
+            ))
+        owner["expression_profile"]["learned_rules"] = learned
+        self.harness.data = {"users": {"user-a": owner}}
+        revisions = {
+            "expected_scope_revision": owner["expression_profile"]["scope_revision"],
+            "expected_item_revisions": {
+                item["id"]: item["scope_binding"]["revision"] for item in learned
+            },
+        }
+        state = self.harness._expression_global_promotion_state(
+            source_type="private", source_id="user-a", family_id="family-a",
+            operation_id="promote-a", payload=revisions,
+        )
+        self.assertEqual(2, len(state["rules"]))
+        self.assertTrue(all(
+            item["scope_binding"]["owner_type"] == "persona"
+            and item["scope_binding"]["approved_by"] == "administrator"
+            for item in state["rules"]
+        ))
+        encoded = json.dumps(state["rules"], ensure_ascii=False)
+        self.assertNotIn("person-a", encoded)
+        self.assertNotIn("user-a", encoded)
+        self.assertNotIn("evidence_examples", encoded)
+
+    def test_promotion_preview_changes_when_target_revision_changes(self):
+        owner = self.owner()
+        pending = owner["expression_profile"].pop("pending_rules")
+        learned = [
+            bind_expression_item(
+                item, self.context, approval_state="approved",
+                approved_by="administrator", bump_revision=True,
+            ) for item in pending
+        ]
+        owner["expression_profile"]["learned_rules"] = learned
+        self.harness.data = {"users": {"user-a": owner}}
+        revisions = {
+            "expected_scope_revision": owner["expression_profile"]["scope_revision"],
+            "expected_item_revisions": {
+                item["id"]: item["scope_binding"]["revision"] for item in learned
+            },
+        }
+        first = self.harness._expression_global_promotion_state(
+            source_type="private", source_id="user-a", family_id="family-a",
+            operation_id="promote-a", payload=revisions,
+        )
+        global_context = self.harness._req041_persona_global_context()
+        self.harness.data["_req041_persona_expression_profile"] = bind_expression_profile(
+            first["target_profile"], global_context, bump_revision=True,
+        )
+        second = self.harness._expression_global_promotion_state(
+            source_type="private", source_id="user-a", family_id="family-a",
+            operation_id="promote-a", payload=revisions,
+        )
+        self.assertNotEqual(first["confirmation_token"], second["confirmation_token"])
+
+    def test_promotion_endpoint_requires_preview_then_persists_global_profile(self):
+        owner = self.owner()
+        pending = owner["expression_profile"].pop("pending_rules")
+        learned = [
+            bind_expression_item(
+                item, self.context, approval_state="approved",
+                approved_by="administrator", bump_revision=True,
+            ) for item in pending
+        ]
+        owner["expression_profile"]["learned_rules"] = learned
+        self.harness.data = {"users": {"user-a": owner}}
+        base = {
+            "source_type": "private",
+            "source_id": "user-a",
+            "expression_action": "promote_rule_group",
+            "rule_family_id": "family-a",
+            "operation_id": "promote-endpoint-a",
+            "expected_scope_revision": owner["expression_profile"]["scope_revision"],
+            "expected_item_revisions": {
+                item["id"]: item["scope_binding"]["revision"] for item in learned
+            },
+        }
+        GLOBALS["request"].payload = {**base, "dry_run": True}
+        preview = asyncio.run(self.harness.update_expression_library())
+        self.assertTrue(preview["ok"])
+        promotion = preview["data"]["promotion"]
+        self.assertEqual("persona_global_promotion_preview", promotion["code"])
+        self.assertNotIn("_req041_persona_expression_profile", self.harness.data)
+
+        GLOBALS["request"].payload = {
+            **base, "dry_run": False,
+            "confirmation_token": promotion["confirmation_token"],
+        }
+        applied = asyncio.run(self.harness.update_expression_library())
+        self.assertTrue(applied["ok"])
+        self.assertEqual("persona_global_promoted", applied["data"]["promotion"]["code"])
+        profile = self.harness.data["_req041_persona_expression_profile"]
+        self.assertEqual(2, len(profile["learned_rules"]))
+        self.assertEqual(1, self.harness.saved)
+        replayed = asyncio.run(self.harness.update_expression_library())
+        self.assertTrue(replayed["ok"])
+        self.assertEqual(
+            "persona_global_promotion_replayed",
+            replayed["data"]["promotion"]["code"],
+        )
+        self.assertEqual(1, self.harness.saved)
+
+        family_id = profile["learned_rules"][0]["family_id"]
+        GLOBALS["request"].payload = {
+            "source_type": "persona", "source_id": "current-persona",
+            "expression_action": "delete_rule_group", "rule_family_id": family_id,
+            "expected_scope_revision": profile["scope_revision"],
+            "expected_item_revisions": {
+                item["id"]: item["scope_binding"]["revision"]
+                for item in profile["learned_rules"]
+            },
+        }
+        revoked = asyncio.run(self.harness.update_expression_library())
+        self.assertTrue(revoked["ok"])
+        global_profile = self.harness.data["_req041_persona_expression_profile"]
+        self.assertEqual([], global_profile["learned_rules"])
+        self.assertEqual(2, len(global_profile["revoked_rules"]))
+        self.assertEqual(2, self.harness.saved)
+
+    def test_promotion_endpoint_rejects_forged_confirmation_without_write(self):
+        owner = self.owner()
+        pending = owner["expression_profile"].pop("pending_rules")
+        learned = [
+            bind_expression_item(
+                item, self.context, approval_state="approved",
+                approved_by="administrator", bump_revision=True,
+            ) for item in pending
+        ]
+        owner["expression_profile"]["learned_rules"] = learned
+        self.harness.data = {"users": {"user-a": owner}}
+        GLOBALS["request"].payload = {
+            "source_type": "private", "source_id": "user-a",
+            "expression_action": "promote_rule_group", "rule_family_id": "family-a",
+            "operation_id": "forged-promotion", "dry_run": False,
+            "confirmation_token": "0" * 64,
+            "expected_scope_revision": owner["expression_profile"]["scope_revision"],
+            "expected_item_revisions": {
+                item["id"]: item["scope_binding"]["revision"] for item in learned
+            },
+        }
+        rejected = asyncio.run(self.harness.update_expression_library())
+        self.assertFalse(rejected["ok"])
+        self.assertNotIn("_req041_persona_expression_profile", self.harness.data)
+        self.assertEqual(0, self.harness.saved)
 
 
 if __name__ == "__main__":

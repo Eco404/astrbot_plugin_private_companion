@@ -42,7 +42,13 @@ def _projection_fields(projection: Any) -> dict[str, Any] | None:
     return fields if isinstance(fields, dict) else {}
 
 
-def overlay_private_runtime_view(base: Any, projection: Any) -> Any:
+def _persona_expression_profile(projection: Any) -> dict[str, Any]:
+    fields = _projection_fields(projection)
+    profile = fields.get("expression_profile") if isinstance(fields, dict) else None
+    return deepcopy(profile) if isinstance(profile, dict) else {}
+
+
+def overlay_private_runtime_view(base: Any, projection: Any, persona_projection: Any = None) -> Any:
     """Overlay only allowlisted private-domain fields from a reconciled projection."""
     if not isinstance(base, dict):
         return base
@@ -53,6 +59,7 @@ def overlay_private_runtime_view(base: Any, projection: Any) -> Any:
     for key, value in fields.items():
         if key in PRIVATE_FIELDS:
             view[key] = deepcopy(value)
+    view["persona_global_expression_profile"] = _persona_expression_profile(persona_projection)
     view["req041_scoped_read_generation"] = "new"
     return view
 
@@ -63,6 +70,7 @@ def overlay_group_runtime_view(
     *,
     sender_id: str = "",
     member_projection: Any = None,
+    persona_projection: Any = None,
 ) -> Any:
     """Compose one group view without admitting private or another-group fields."""
     if not isinstance(base, dict):
@@ -84,6 +92,7 @@ def overlay_group_runtime_view(
                 if key in GROUP_MEMBER_FIELDS:
                     member[key] = deepcopy(value)
             members[sender_id] = member
+    view["persona_global_expression_profile"] = _persona_expression_profile(persona_projection)
     view["req041_scoped_read_generation"] = "new"
     return view
 
@@ -106,13 +115,23 @@ def scoped_approved_expression_rules(context_owner: Any) -> list[dict[str, Any]]
     profile = context_owner.get("expression_profile")
     if not isinstance(profile, dict):
         return []
-    rules = profile.get("learned_rules")
-    if not isinstance(rules, list):
-        return []
-    return [
-        deepcopy(item) for item in rules
-        if isinstance(item, dict) and runtime_binding_is_approved(item.get("scope_binding"))
-    ]
+    local_rules = profile.get("learned_rules") if isinstance(profile, dict) else []
+    global_profile = context_owner.get("persona_global_expression_profile")
+    global_rules = global_profile.get("learned_rules") if isinstance(global_profile, dict) else []
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in list(local_rules if isinstance(local_rules, list) else []) + list(
+        global_rules if isinstance(global_rules, list) else []
+    ):
+        if not isinstance(item, dict) or not runtime_binding_is_approved(item.get("scope_binding")):
+            continue
+        binding = item.get("scope_binding")
+        key = (str(binding.get("application_namespace") or ""), str(item.get("id") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(deepcopy(item))
+    return result
 
 
 __all__ = [

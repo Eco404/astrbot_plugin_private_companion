@@ -4644,6 +4644,21 @@ class PrivateCompanionPlugin(
         decision = policy.authorize(context, purpose)
         return context if decision.allowed and not context.errors() else None
 
+    def _req041_persona_global_context(
+        self, *, purpose: str = "rule_read"
+    ) -> NamespaceContext | None:
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            return None
+        context = NamespaceContext(
+            kind="persona_global", persona_id=scoped_persona_ref(self._active_persona_scope()),
+            identity_id="", group_id="", assurance="verified", profile_status="active",
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        decision = AssurancePolicy().authorize(context, purpose)
+        return context if decision.allowed and not context.errors() else None
+
     def _req041_erase_scoped_group_data(
         self,
         group_id: str,
@@ -5221,7 +5236,11 @@ class PrivateCompanionPlugin(
                 except Exception:
                     pass
             return view
-        view = overlay_private_runtime_view(view, projection)
+        persona_context = self._req041_persona_global_context(purpose="rule_read")
+        persona_projection = (
+            synchronizer.read_projection(persona_context) if persona_context is not None else None
+        )
+        view = overlay_private_runtime_view(view, projection, persona_projection)
         if not isinstance(view, dict) or view.get("req041_scoped_read_generation") != "new":
             return view
         try:
@@ -5254,6 +5273,10 @@ class PrivateCompanionPlugin(
             migration_epoch=synchronizer.migration_epoch,
         )
         shared_projection = synchronizer.read_projection(shared)
+        persona_context = self._req041_persona_global_context(purpose="rule_read")
+        persona_projection = (
+            synchronizer.read_projection(persona_context) if persona_context is not None else None
+        )
         member_projection = None
         member_context = self._req041_scoped_context_for_user(
             relationship_user or {}, kind="group_member", group_id=group_id, purpose="profile_read"
@@ -5269,6 +5292,7 @@ class PrivateCompanionPlugin(
             return view
         view = overlay_group_runtime_view(
             view, shared_projection, sender_id=sender_id, member_projection=member_projection,
+            persona_projection=persona_projection,
         )
         if not isinstance(view, dict) or view.get("req041_scoped_read_generation") != "new":
             return view

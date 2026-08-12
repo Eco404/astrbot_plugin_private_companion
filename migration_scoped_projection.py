@@ -278,25 +278,33 @@ class ScopedProjectionSynchronizer:
         rejected = profile.get("rejected_rules") if isinstance(profile.get("rejected_rules"), list) else []
         revoked = profile.get("revoked_rules") if isinstance(profile.get("revoked_rules"), list) else []
         approved = self._bound_expression_items(
-            approved, context, approval_state="approved", default_approved_by="legacy_migration",
+            approved, context, approval_state="approved",
+            default_approved_by="administrator" if context.kind == "persona_global" else "legacy_migration",
         )
+        if context.kind == "persona_global":
+            approved = [
+                item for item in approved
+                if str(item.get("scope_binding", {}).get("approved_by") or "") == "administrator"
+            ]
         approved_actors = {
             str(item.get("scope_binding", {}).get("approved_by") or "")
             for item in approved if isinstance(item.get("scope_binding"), dict)
         }
         envelope_approved_by = next(iter(approved_actors)) if len(approved_actors) == 1 else "multiple_approvers"
-        pending = self._bound_expression_items(pending, context, approval_state="pending")
+        pending = [] if context.kind == "persona_global" else self._bound_expression_items(
+            pending, context, approval_state="pending"
+        )
         rejected = self._bound_expression_items(
             rejected, context, approval_state="rejected", default_approved_by="administrator",
         )
         revoked = self._bound_expression_items(
             revoked, context, approval_state="revoked", default_approved_by="administrator",
         )
-        evidence: dict[str, Any] = {
+        evidence: dict[str, Any] = {} if context.kind == "persona_global" else {
             "scope_revision": source_revision,
             "scope_ownership": deepcopy(bound_profile["scope_ownership"]),
         }
-        for key in _RULE_EVIDENCE_FIELDS:
+        for key in (() if context.kind == "persona_global" else _RULE_EVIDENCE_FIELDS):
             value = profile.get(key)
             if not _present(value):
                 continue
@@ -368,6 +376,16 @@ class ScopedProjectionSynchronizer:
 
         def remember(context: NamespaceContext) -> None:
             contexts[context.cache_scope()] = context
+
+        persona_context = self._context(
+            kind="persona_global", persona_id=persona_id, identity_id="", group_id="",
+        )
+        remember(persona_context)
+        records.extend(self._learning_records(
+            persona_context,
+            snapshot.get("_req041_persona_expression_profile"),
+            prefix="req041-persona",
+        ))
 
         users = snapshot.get("users") if isinstance(snapshot.get("users"), dict) else {}
         by_person: dict[str, list[dict[str, Any]]] = {}

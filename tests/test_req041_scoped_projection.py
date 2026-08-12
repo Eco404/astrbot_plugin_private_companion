@@ -5,6 +5,7 @@ import unittest
 
 from migration_scoped_projection import ScopedProjectionSynchronizer
 from authoritative_private_memory import AuthoritativePrivateMemoryStore
+from expression_scope_ownership import bind_expression_item, bind_expression_profile
 from unified_person_registry import UnifiedPersonRegistry
 
 
@@ -173,6 +174,29 @@ class ScopedProjectionTests(unittest.TestCase):
         persona_records, _ = self.sync.build_records(self.snapshot, source_scope="persona:custom")
         self.assertNotEqual(default_records[0].context.persona_id, persona_records[0].context.persona_id)
         self.assertFalse(any(item.context.kind == "persona_global" for item in default_records + persona_records))
+
+    def test_explicit_admin_global_rules_project_only_to_current_persona(self) -> None:
+        context = self.sync._context(kind="persona_global", persona_id="default")
+        rule = bind_expression_item(
+            {"id": "global-approved", "style": "persona-global-rule", "evidence_count": 1},
+            context, approval_state="approved", approved_by="administrator",
+        )
+        self.snapshot["_req041_persona_expression_profile"] = bind_expression_profile(
+            {"learned_rules": [rule]}, context,
+        )
+        records, contexts = self.sync.build_records(self.snapshot)
+        global_records = [item for item in records if item.context.kind == "persona_global"]
+        self.assertEqual(1, len(global_records))
+        self.assertEqual("approved", global_records[0].payload["approval_state"])
+        self.assertEqual("administrator", global_records[0].payload["approved_by"])
+        self.assertFalse(any(item.record_kind == "evidence" for item in global_records))
+        self.assertTrue(any(item.kind == "persona_global" for item in contexts))
+
+        other_records, _ = self.sync.build_records(
+            {key: deepcopy(value) for key, value in self.snapshot.items() if key != "_req041_persona_expression_profile"},
+            source_scope="persona:other",
+        )
+        self.assertFalse(any(item.context.kind == "persona_global" for item in other_records))
 
     def test_authoritative_person_private_memory_wins_over_multiple_linked_legacy_rows(self) -> None:
         linked = UnifiedPersonRegistry(self.snapshot).link_identity(
