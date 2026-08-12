@@ -5,7 +5,10 @@ import hashlib
 import json
 from typing import Any
 
-from identity_namespace import NamespaceContext
+try:
+    from .identity_namespace import NamespaceContext
+except ImportError:  # pragma: no cover - direct-module test compatibility
+    from identity_namespace import NamespaceContext
 
 
 GROUP_PROOF_SCHEMA = "req041.group_interaction_proof.v1"

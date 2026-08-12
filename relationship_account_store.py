@@ -20,14 +20,24 @@ import threading
 import time
 from typing import Any, Iterator
 
-from identity_namespace import AssurancePolicy, NamespaceContext
-from relationship_ledger import (
-    apply_relationship_event,
-    normalize_relationship_mode,
-    normalize_relationship_positive_stage_cap_key,
-)
-from relationship_policy import relationship_stage_for_score
-from relationship_event_policy import validate_group_interaction_proof
+try:
+    from .identity_namespace import AssurancePolicy, NamespaceContext
+    from .relationship_ledger import (
+        apply_relationship_event,
+        normalize_relationship_mode,
+        normalize_relationship_positive_stage_cap_key,
+    )
+    from .relationship_policy import relationship_stage_for_score
+    from .relationship_event_policy import validate_group_interaction_proof
+except ImportError:  # pragma: no cover - direct-module test compatibility
+    from identity_namespace import AssurancePolicy, NamespaceContext
+    from relationship_ledger import (
+        apply_relationship_event,
+        normalize_relationship_mode,
+        normalize_relationship_positive_stage_cap_key,
+    )
+    from relationship_policy import relationship_stage_for_score
+    from relationship_event_policy import validate_group_interaction_proof
 
 
 ACCOUNT_ROLES = frozenset({"friend", "owner"})

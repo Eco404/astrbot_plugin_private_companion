@@ -5,9 +5,14 @@ import hashlib
 import re
 from typing import Any, Iterable
 
-from identity_namespace import NamespaceContext, build_namespace_context
-from relationship_account_store import GroupAffinityAdmissionResult, RelationshipAccountStore
-from relationship_event_policy import build_group_interaction_proof
+try:
+    from .identity_namespace import NamespaceContext, build_namespace_context
+    from .relationship_account_store import GroupAffinityAdmissionResult, RelationshipAccountStore
+    from .relationship_event_policy import build_group_interaction_proof
+except ImportError:  # pragma: no cover - direct-module test compatibility
+    from identity_namespace import NamespaceContext, build_namespace_context
+    from relationship_account_store import GroupAffinityAdmissionResult, RelationshipAccountStore
+    from relationship_event_policy import build_group_interaction_proof
 
 
 CANDIDATE_SCHEMA = "req041.group_affinity_candidate.v1"

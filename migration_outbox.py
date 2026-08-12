@@ -11,7 +11,10 @@ import threading
 import time
 from typing import Any, Iterator
 
-from identity_namespace import NamespaceContext, validate_namespace_context
+try:
+    from .identity_namespace import NamespaceContext, validate_namespace_context
+except ImportError:  # pragma: no cover - direct-module test compatibility
+    from identity_namespace import NamespaceContext, validate_namespace_context
 
 
 MIGRATION_STATES = frozenset({"active", "degraded", "paused", "replaying", "verified"})

@@ -8,7 +8,10 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from expression_scope_ownership import runtime_binding_is_approved
+try:
+    from .expression_scope_ownership import runtime_binding_is_approved
+except ImportError:  # pragma: no cover - direct-module test compatibility
+    from expression_scope_ownership import runtime_binding_is_approved
 
 
 PRIVATE_FIELDS = frozenset({

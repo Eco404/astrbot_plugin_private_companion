@@ -6,11 +6,18 @@ import json
 import time
 from typing import Any
 
-from identity_namespace import build_namespace_context
-from migration_coordinator import MigrationCoordinator
-from migration_outbox import MigrationOutbox, OutboxItem
-from relationship_account_store import RelationshipAccountStore, RelationshipNotFound
-from unified_person_registry import UnifiedPersonRegistry
+try:
+    from .identity_namespace import build_namespace_context
+    from .migration_coordinator import MigrationCoordinator
+    from .migration_outbox import MigrationOutbox, OutboxItem
+    from .relationship_account_store import RelationshipAccountStore, RelationshipNotFound
+    from .unified_person_registry import UnifiedPersonRegistry
+except ImportError:  # pragma: no cover - direct-module test compatibility
+    from identity_namespace import build_namespace_context
+    from migration_coordinator import MigrationCoordinator
+    from migration_outbox import MigrationOutbox, OutboxItem
+    from relationship_account_store import RelationshipAccountStore, RelationshipNotFound
+    from unified_person_registry import UnifiedPersonRegistry
 
 
 def _canonical(value: Any) -> str:

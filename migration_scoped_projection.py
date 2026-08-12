@@ -9,18 +9,32 @@ import threading
 import time
 from typing import Any, Callable
 
-from identity_namespace import NamespaceContext
-from expression_scope_ownership import (
-    ExpressionScopeError,
-    bind_expression_item,
-    bind_expression_profile,
-)
-from scoped_domain_contract import build_scoped_domain_payload
-from unified_person_registry import UnifiedPersonRegistry
-from authoritative_private_memory import (
-    AuthoritativePrivateMemoryError,
-    AuthoritativePrivateMemoryStore,
-)
+try:
+    from .identity_namespace import NamespaceContext
+    from .expression_scope_ownership import (
+        ExpressionScopeError,
+        bind_expression_item,
+        bind_expression_profile,
+    )
+    from .scoped_domain_contract import build_scoped_domain_payload
+    from .unified_person_registry import UnifiedPersonRegistry
+    from .authoritative_private_memory import (
+        AuthoritativePrivateMemoryError,
+        AuthoritativePrivateMemoryStore,
+    )
+except ImportError:  # pragma: no cover - direct-module test compatibility
+    from identity_namespace import NamespaceContext
+    from expression_scope_ownership import (
+        ExpressionScopeError,
+        bind_expression_item,
+        bind_expression_profile,
+    )
+    from scoped_domain_contract import build_scoped_domain_payload
+    from unified_person_registry import UnifiedPersonRegistry
+    from authoritative_private_memory import (
+        AuthoritativePrivateMemoryError,
+        AuthoritativePrivateMemoryStore,
+    )
 
 
 _PRIVATE_MEMORY_FIELDS = (

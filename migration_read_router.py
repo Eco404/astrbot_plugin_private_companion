@@ -5,10 +5,16 @@ import hashlib
 import time
 from typing import Any
 
-from identity_namespace import build_namespace_context
-from migration_coordinator import MigrationCoordinator
-from relationship_account_store import RelationshipAccountStore
-from unified_person_registry import UnifiedPersonRegistry
+try:
+    from .identity_namespace import build_namespace_context
+    from .migration_coordinator import MigrationCoordinator
+    from .relationship_account_store import RelationshipAccountStore
+    from .unified_person_registry import UnifiedPersonRegistry
+except ImportError:  # pragma: no cover - direct-module test compatibility
+    from identity_namespace import build_namespace_context
+    from migration_coordinator import MigrationCoordinator
+    from relationship_account_store import RelationshipAccountStore
+    from unified_person_registry import UnifiedPersonRegistry
 
 
 class MigrationReadError(RuntimeError):

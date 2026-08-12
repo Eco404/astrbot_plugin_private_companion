@@ -15,17 +15,30 @@ import math
 from pathlib import Path
 from typing import Any
 
-from identity_namespace import NamespaceContext
-from migration_coordinator import MigrationCoordinator
-from migration_outbox import MigrationOutbox
-from person_context_contract import build_identity_key, canonical_identity
-from relationship_account_store import (
-    RelationshipAccountStore,
-    RelationshipConflict,
-    RelationshipNotFound,
-    RelationshipStoreError,
-)
-from unified_person_registry import UnifiedPersonRegistry
+try:
+    from .identity_namespace import NamespaceContext
+    from .migration_coordinator import MigrationCoordinator
+    from .migration_outbox import MigrationOutbox
+    from .person_context_contract import build_identity_key, canonical_identity
+    from .relationship_account_store import (
+        RelationshipAccountStore,
+        RelationshipConflict,
+        RelationshipNotFound,
+        RelationshipStoreError,
+    )
+    from .unified_person_registry import UnifiedPersonRegistry
+except ImportError:  # pragma: no cover - direct-module test compatibility
+    from identity_namespace import NamespaceContext
+    from migration_coordinator import MigrationCoordinator
+    from migration_outbox import MigrationOutbox
+    from person_context_contract import build_identity_key, canonical_identity
+    from relationship_account_store import (
+        RelationshipAccountStore,
+        RelationshipConflict,
+        RelationshipNotFound,
+        RelationshipStoreError,
+    )
+    from unified_person_registry import UnifiedPersonRegistry
 
 
 def _canonical(value: Any) -> str:
