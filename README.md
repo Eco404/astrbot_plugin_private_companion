@@ -30,6 +30,7 @@
 
 - 开发者：<code>menglimi</code>
 - 仓库：[menglimi/astrbot_plugin_private_companion](https://github.com/menglimi/astrbot_plugin_private_companion)
+- 插件 Wiki：[vue.syuan.org](https://vue.syuan.org)
 - 问题反馈：[GitHub Issues](https://github.com/menglimi/astrbot_plugin_private_companion/issues)
 - 交流群：QQ 群 <code>1097283005</code>
 - 自愿支持：[爱发电](https://ifdian.net/a/xuhaun)
@@ -144,7 +145,7 @@ C:\Users\你的用户名\.astrbot\data\plugins\astrbot_plugin_private_companion
 
 ## 10 分钟完成首次配置
 
-第一次使用建议打开“陪伴面板”，点击右上角“配置引导”，然后按下面顺序配置。
+第一次使用建议先阅读[插件 Wiki](https://vue.syuan.org)，再打开“陪伴面板”点击右上角“配置引导”，按下面顺序配置。
 
 1. 在“总览”确认插件已加载，没有明显错误。
 2. 在“世界知识”确认主回复人格来源。只补充角色资料、世界观资料和关系背景，不要把 AstrBot 主人格原样复制一遍。
@@ -804,8 +805,8 @@ tests/                          回归测试
 
 <a href="https://www.star-history.com/?repos=menglimi%2Fastrbot_plugin_private_companion&type=timeline&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=menglimi/astrbot_plugin_private_companion&type=timeline&theme=dark&legend=top-left&sealed_token=-xXOBZHvp4k4IzQmljVguHcJlVNLP77MuWX0ZzOWq3ZvxJaKEuWLoSo3xyoz106dlMtpFa2qh70qyoxikoOrTv9eOyzNdJNcyPxbCnGZ8IwEOjc488HxkY2DztxYJ1IZmuyE_Rhd3O13SF0W0S3m9pJ20gSNoJaP7a6DtRZ_66oSkQbOylCZYhZabnA3" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=menglimi/astrbot_plugin_private_companion&type=timeline&legend=top-left&sealed_token=-xXOBZHvp4k4IzQmljVguHcJlVNLP77MuWX0ZzOWq3ZvxJaKEuWLoSo3xyoz106dlMtpFa2qh70qyoxikoOrTv9eOyzNdJNcyPxbCnGZ8IwEOjc488HxkY2DztxYJ1IZmuyE_Rhd3O13SF0W0S3m9pJ20gSNoJaP7a6DtRZ_66oSkQbOylCZYhZabnA3" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=menglimi/astrbot_plugin_private_companion&type=timeline&legend=top-left&sealed_token=-xXOBZHvp4k4IzQmljVguHcJlVNLP77MuWX0ZzOWq3ZvxJaKEuWLoSo3xyoz106dlMtpFa2qh70qyoxikoOrTv9eOyzNdJNcyPxbCnGZ8IwEOjc488HxkY2DztxYJ1IZmuyE_Rhd3O13SF0W0S3m9pJ20gSNoJaP7a6DtRZ_66oSkQbOylCZYhZabnA3" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=menglimi/astrbot_plugin_private_companion&type=timeline&theme=dark&legend=top-left&sealed_token=Am7AYWUWfiXCJxpYCYtYw7pYaSazhbj7ZljIMHOj7V-Qq2Pa1kFTi6tnOFr54KuUX7AAm4EZ7hZPIavsI5RZdqpg2PYZiU8D-lxdTsDCgZTbbb4twCIqnQ" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=menglimi/astrbot_plugin_private_companion&type=timeline&legend=top-left&sealed_token=Am7AYWUWfiXCJxpYCYtYw7pYaSazhbj7ZljIMHOj7V-Qq2Pa1kFTi6tnOFr54KuUX7AAm4EZ7hZPIavsI5RZdqpg2PYZiU8D-lxdTsDCgZTbbb4twCIqnQ" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=menglimi/astrbot_plugin_private_companion&type=timeline&legend=top-left&sealed_token=Am7AYWUWfiXCJxpYCYtYw7pYaSazhbj7ZljIMHOj7V-Qq2Pa1kFTi6tnOFr54KuUX7AAm4EZ7hZPIavsI5RZdqpg2PYZiU8D-lxdTsDCgZTbbb4twCIqnQ" />
  </picture>
 </a>
