@@ -392,6 +392,7 @@ class CoreStoreMixin:
             "agenda_version": 1,
             "observed_activities": [],
             "place_cognitive_maps": {},
+            "reality_touch_outputs": {},
             "window_snapshots": [],
             "agenda_reconciliation_history": [],
             "daily_state": {},
@@ -484,6 +485,7 @@ class CoreStoreMixin:
         data.setdefault("agenda_version", 1)
         data.setdefault("observed_activities", [])
         data.setdefault("place_cognitive_maps", {})
+        data.setdefault("reality_touch_outputs", {})
         data.setdefault("window_snapshots", [])
         data.setdefault("agenda_reconciliation_history", [])
         data.setdefault("daily_state", {})
@@ -962,6 +964,9 @@ class CoreStoreMixin:
             raise
 
     def _save_data_sync(self):
+        scoped_scheduler = getattr(self, "_req041_schedule_scoped_sync", None)
+        if callable(scoped_scheduler):
+            scoped_scheduler()
         active_persona = str(getattr(self, "_active_persona_scope", lambda: "")() or "")
         if bool(getattr(self, "enable_multi_persona_mode", False)) and active_persona:
             try:
@@ -1215,6 +1220,9 @@ class CoreStoreMixin:
             self._save_data_sync()
 
     def _schedule_data_save(self, delay: float = 1.5) -> None:
+        scoped_scheduler = getattr(self, "_req041_schedule_scoped_sync", None)
+        if callable(scoped_scheduler):
+            scoped_scheduler()
         active_getter = getattr(self, "_active_persona_scope", None)
         persona_id = str(active_getter() if callable(active_getter) else "").strip()
         if bool(getattr(self, "enable_multi_persona_mode", False)) and persona_id:
@@ -1910,6 +1918,8 @@ class CoreStoreMixin:
                 continue
             if key in additive_keys:
                 target[key] = _safe_int(target.get(key), 0) + _safe_int(value, 0)
+            elif key == "req041_relationship_source_revision":
+                target[key] = max(_safe_int(target.get(key), 0), _safe_int(value, 0))
             elif key in max_keys or key.endswith("_at") or key.endswith("_ts"):
                 target[key] = max(_safe_float(target.get(key), 0), _safe_float(value, 0))
             elif isinstance(value, list):
@@ -2534,7 +2544,12 @@ class CoreStoreMixin:
             "relationship_decay_settled_day": user.get("relationship_decay_settled_day"),
             "relationship_last_decay_stage_drop_at": user.get("relationship_last_decay_stage_drop_at"),
         }
-        return before != after or bool(score_migration.get("changed"))
+        changed = before != after or bool(score_migration.get("changed"))
+        if changed:
+            snapshot_emitter = getattr(self, "_req041_emit_relationship_snapshot", None)
+            if callable(snapshot_emitter):
+                snapshot_emitter(user, reason_code="relationship_state_normalized")
+        return changed
 
     def _apply_relationship_event(
         self,
@@ -2544,17 +2559,18 @@ class CoreStoreMixin:
         reason_code: str,
         event_id: str = "",
         now: float | None = None,
+        req041_group_admission_event_id: str = "",
     ) -> dict[str, Any]:
-        if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
-            return {
-                "changed": False,
-                "code": "relationship_system_disabled",
-                "score": user.get("relationship_score"),
-            }
         if bool(getattr(self, "enable_p4_b_legacy_score_isolation", False)):
             return {
                 "changed": False,
                 "code": "p4_legacy_score_isolated",
+                "score": user.get("relationship_score"),
+            }
+        if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
+            return {
+                "changed": False,
+                "code": "relationship_system_disabled",
                 "score": user.get("relationship_score"),
             }
         score_migration = migrate_legacy_relationship_score(
@@ -2602,6 +2618,48 @@ class CoreStoreMixin:
             positive_stage_cap_key=getattr(self, "relationship_positive_stage_cap_key", "close"),
             timezone_name=getattr(self, "environment_perception_timezone", None),
         )
+        producer = getattr(self, "req041_dual_write_producer", None)
+        if result.get("changed") and producer is not None:
+            try:
+                try:
+                    source_revision = max(0, int(user.get("req041_relationship_source_revision") or 0)) + 1
+                except (TypeError, ValueError, OverflowError):
+                    source_revision = 1
+                registry_getter = getattr(self, "_active_unified_person_registry", None)
+                registry = registry_getter() if callable(registry_getter) else None
+                if registry is None:
+                    raise RuntimeError("dual_write_registry_unavailable")
+                scope_getter = getattr(self, "_unified_persona_domain", None)
+                source_scope = scope_getter() if callable(scope_getter) else ""
+                dual_write = producer.emit_relationship(
+                    registry=registry,
+                    user=user,
+                    requested_delta=delta,
+                    reason_code=str(reason_code or ""),
+                    result=result,
+                    source_scope=source_scope or "default",
+                    source_revision=source_revision,
+                    group_admission_event_id=req041_group_admission_event_id,
+                )
+                if int(dual_write.get("source_revision") or 0) > 0:
+                    user["req041_relationship_source_revision"] = int(dual_write["source_revision"])
+                result["req041_dual_write"] = str(dual_write.get("status") or "unknown")
+                result["req041_dual_write_code"] = str(dual_write.get("code") or "")
+            except Exception as exc:
+                producer.fail_closed("relationship_dual_write_failed")
+                result["req041_dual_write"] = "failed"
+                result["req041_dual_write_code"] = "relationship_dual_write_failed"
+                migration_status = getattr(self, "req041_migration_status", None)
+                if isinstance(migration_status, dict):
+                    migration_status.update({
+                        "state": "paused",
+                        "code": "relationship_dual_write_failed",
+                        "dual_write": "failed",
+                    })
+                logger.warning(
+                    "[PrivateCompanion] REQ-041 关系双写失败，已暂停新读切换并保留 legacy 写入: %s",
+                    _single_line(exc, 160),
+                )
         if result.get("changed") or score_migration.get("changed"):
             self._schedule_data_save()
         return result

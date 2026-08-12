@@ -79,6 +79,9 @@ class LearningPageUiTests(unittest.TestCase):
         self.assertIn("expressionReviewQueueItem", review_renderer)
         self.assertIn("expressionRuleGroupItem(selectedItem.rule, true, true)", review_renderer)
         self.assertIn('data-expression-action="approve_rule_group"', self.script)
+        self.assertIn('data-expression-action="promote_rule_group"', self.script)
+        self.assertIn("提升为当前人格全局", self.script)
+        self.assertIn("全局影响预览已生成", self.script)
         self.assertIn('data-expression-action="reject_rule_group"', self.script)
         self.assertIn("一次处理整组，完成后自动进入下一组", review_renderer)
         self.assertIn("ArrowDown", review_renderer)
@@ -141,6 +144,16 @@ class LearningPageUiTests(unittest.TestCase):
         self.assertIn("可复用表达", self.script)
         self.assertIn("支持片段", self.script)
         self.assertIn("与人格/事实边界冲突，不会自动使用", self.script)
+
+    def test_expression_mutations_carry_profile_and_item_revisions(self) -> None:
+        self.assertIn("data-expression-scope-revision", self.script)
+        self.assertIn("data-expression-item-revisions", self.script)
+        self.assertIn("expected_scope_revision", self.script)
+        self.assertIn("expected_item_revisions", self.script)
+        self.assertIn("rule?.item_revisions || {}", self.script)
+        self.assertIn('JSON.parse(button.dataset.expressionItemRevisions || "{}")', self.script)
+        self.assertIn("state.expressionImportPreview?.target_scope_revision", self.script)
+        self.assertIn("state.expressionImportPreview?.preview_signature", self.script)
 
     def test_expression_library_supports_share_and_import_workflow(self) -> None:
         learning_panel = self.html.split('id="panel-learning"', 1)[1].split('id="panel-group"', 1)[0]

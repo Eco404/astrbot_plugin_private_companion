@@ -12,7 +12,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 
-if "astrbot.api" not in sys.modules:
+try:
+    import astrbot.api  # noqa: F401
+except ImportError:
     astrbot = types.ModuleType("astrbot")
     api = types.ModuleType("astrbot.api")
     api.logger = SimpleNamespace(debug=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None)
@@ -144,7 +146,7 @@ class EmotionE4AfterglowConditionTests(unittest.IsolatedAsyncioTestCase):
 
         await host._memory_companion_apply_emotional_drift(event=event, user_id="user-1", user=user)
 
-        self.assertIs(bridge.registered, type(host))
+        self.assertIs(bridge.registered, host)
         self.assertEqual(1, host.saved)
         self.assertEqual(1, len(host.data["state_conditions"]))
         condition = host.data["state_conditions"][0]

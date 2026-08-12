@@ -311,6 +311,14 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             if not self._simulation_active(fast_user) and _safe_float(fast_user.get("next_proactive_at"), 0) <= 0:
                 self._schedule_next_proactive(fast_user, now=received_ts)
         try:
+            read_view_getter = getattr(self, "_req041_relationship_read_view", None)
+            fast_read_user = (
+                read_view_getter(event, fast_user, kind="private")
+                if callable(read_view_getter) else fast_user
+            )
+            scoped_read_getter = getattr(self, "_req041_scoped_private_read_view", None)
+            if callable(scoped_read_getter):
+                fast_read_user = scoped_read_getter(event, fast_read_user)
             await self._memory_companion_apply_emotional_drift(
                 event=event,
                 user_id=user_id,
@@ -319,7 +327,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             self._memory_companion_attach_private_context(
                 event,
                 user_id=user_id,
-                user=fast_user,
+                user=fast_read_user,
                 text=safe_text or text,
             )
         except Exception as exc:
@@ -778,14 +786,32 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     _safe_int(expression_feedback.get("updated_rules"), 0, 0),
                     _safe_int(expression_feedback.get("demoted_rules"), 0, 0),
                 )
-            user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
+            private_memory_write_allowed = self._req041_private_memory_write_allowed(user)
+            private_memory_managed = self._req041_private_memory_managed()
+            private_memory_revision = (
+                self._req041_prepare_authoritative_private_memory(user)
+                if private_memory_write_allowed and private_memory_managed else None
+            )
+            if private_memory_write_allowed and private_memory_managed and private_memory_revision is None:
+                private_memory_write_allowed = False
+            if private_memory_write_allowed:
+                user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
             if self._expression_private_learning_source_enabled(user, user_id):
                 self._update_expression_profile_from_message(user, safe_text or text)
                 self._refresh_expression_voice_profile()
-            self._update_companion_memory_from_message(user, safe_text or text)
-            self._update_open_loops_from_message(user, safe_text or text)
-            self._update_action_preferences_from_message(user, safe_text or text)
-            self._update_user_behavior_habits_from_message(user, safe_text or text)
+            if private_memory_write_allowed:
+                self._update_companion_memory_from_message(user, safe_text or text)
+                self._update_open_loops_from_message(user, safe_text or text)
+                self._update_action_preferences_from_message(user, safe_text or text)
+                self._update_user_behavior_habits_from_message(user, safe_text or text)
+                if private_memory_managed:
+                    self._req041_commit_authoritative_private_memory(
+                        user,
+                        expected_revision=private_memory_revision,
+                        operation_id="req041-private-message:" + (
+                            self._event_message_id(event) or uuid.uuid4().hex
+                        ),
+                    )
             if (
                 not rest_silence_early_block
                 and (
@@ -930,10 +956,18 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         response = ""
         if is_target_user:
             try:
+                read_view_getter = getattr(self, "_req041_relationship_read_view", None)
+                relationship_read_user = (
+                    read_view_getter(event, user, kind="private")
+                    if callable(read_view_getter) else user
+                )
+                scoped_read_getter = getattr(self, "_req041_scoped_private_read_view", None)
+                if callable(scoped_read_getter):
+                    relationship_read_user = scoped_read_getter(event, relationship_read_user)
                 self._memory_companion_attach_private_context(
                     event,
                     user_id=user_id,
-                    user=user,
+                    user=relationship_read_user,
                     text=(safe_text if text else "") or text,
                 )
             except Exception as exc:
@@ -1558,10 +1592,25 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
         setattr(event, "private_companion_group_sender_name", sender_name)
         setattr(event, "private_companion_group_text", text)
         setattr(event, "private_companion_group_contextual_followup", bool(continuation))
+        read_view_getter = getattr(self, "_req041_relationship_read_view", None)
+        private_users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+        canonical_sender = self._canonical_private_user_id(sender_id)
+        relationship_user = private_users.get(canonical_sender) if isinstance(private_users, dict) else None
+        if callable(read_view_getter) and isinstance(relationship_user, dict):
+            read_view_getter(
+                event, relationship_user, kind="group_member", group_id=group_id,
+            )
+        group_read_view = group
+        scoped_group_getter = getattr(self, "_req041_scoped_group_read_view", None)
+        if callable(scoped_group_getter):
+            group_read_view = scoped_group_getter(
+                event, group_id=group_id, group=group, sender_id=sender_id,
+                relationship_user=relationship_user if isinstance(relationship_user, dict) else None,
+            )
         self._memory_companion_attach_group_context(
             event,
             group_id=group_id,
-            group=group,
+            group=group_read_view,
             sender_id=sender_id,
             sender_name=sender_name,
             text=text,
@@ -1716,6 +1765,25 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             text=text,
             group=group,
         )
+        affinity_preparer = getattr(self, "_req041_prepare_group_affinity_candidate", None)
+        if (
+            callable(affinity_preparer)
+            and scene_trigger in {"at_bot", "reply_bot"}
+            and not group_reference_media_with_text
+            and not (
+                isinstance(registration_payload, dict)
+                and bool(registration_payload.get("blocked_reply"))
+            )
+        ):
+            affinity_preparer(
+                event,
+                group_id=group_id,
+                relationship_user=(
+                    relationship_user if isinstance(relationship_user, dict) else None
+                ),
+                scene_trigger=scene_trigger,
+                forwarded=group_reference_media_with_text,
+            )
         share_scheduled = self._maybe_schedule_group_private_share(group_id, group, trigger_sender_id=sender_id)
         self._save_data_sync()
         group_snapshot = deepcopy(group)

@@ -36,8 +36,11 @@ from .photo_generation_scope import PHOTO_GENERATION_SCOPE_LIMIT_KEYS
 from .photo_reference_catalog import load_catalog, validate_and_serialize
 from .proactive_chat_runtime_bridge import ProactiveChatRuntimeBridge
 from .relationship_ledger import normalize_relationship_positive_stage_cap_key
+from .relationship_affinity_runtime import normalize_group_allowlist
 from .relationship_policy import normalize_relationship_stage_policy
 from .runtime_compat import probe_runtime_capabilities
+from .migration_coordinator import MigrationCoordinator
+from .migration_outbox import MigrationOutbox
 from .segmented_message import normalize_component_strategy
 from .unified_person_registry import UnifiedPersonRegistry
 
@@ -416,6 +419,27 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.relationship_event_window_minutes = self._cfg_int(c, "relationship_event_window_minutes", 30, 1, 1440)
     self.relationship_positive_event_cap = self._cfg_int(c, "relationship_positive_event_cap", 4, 1, 30)
     self.relationship_negative_event_cap = self._cfg_int(c, "relationship_negative_event_cap", 12, 1, 60)
+    self.enable_group_relationship_affinity = self._cfg_bool(
+        c, "enable_group_relationship_affinity", False
+    )
+    self.group_relationship_affinity_allowlist = tuple(sorted(normalize_group_allowlist(
+        self._cfg_raw(c, "group_relationship_affinity_allowlist", [])
+    )))
+    self.group_relationship_daily_net_cap = self._cfg_int(
+        c, "group_relationship_daily_net_cap", 2, 0, 20
+    )
+    self.group_relationship_window_minutes = self._cfg_int(
+        c, "group_relationship_window_minutes", 30, 1, 1440
+    )
+    self.group_relationship_window_absolute_cap = self._cfg_int(
+        c, "group_relationship_window_absolute_cap", 1, 0, 20
+    )
+    self.group_relationship_person_daily_absolute_cap = self._cfg_int(
+        c, "group_relationship_person_daily_absolute_cap", 4, 0, 120
+    )
+    self.group_relationship_scope_daily_absolute_cap = self._cfg_int(
+        c, "group_relationship_scope_daily_absolute_cap", 20, 0, 1000
+    )
 
 def _initialize_world_and_model_config(self: Any, c: Any) -> None:
     self.relationship_positive_daily_cap = self._cfg_int(c, "relationship_positive_daily_cap", 12, 0, 120)
@@ -1814,6 +1838,15 @@ def _initialize_group_and_provider_config(self: Any, c: Any) -> None:
     self.allow_voice_action = self.enable_voice_action
 
 def initialize_plugin_runtime(self: Any) -> None:
+    # These references are process-local capabilities. Never inherit them from
+    # mixin class attributes or a previous hot-reloaded plugin instance.
+    self._bridge_cache = None
+    self._bridge_cache_ts = 0.0
+    self._bridge_last_status = {}
+    self._bridge_dependency_failure_until = 0.0
+    self._bridge_dependency_failure_module = ""
+    self._memory_companion_emotion_capability_bridge = None
+    self._memory_companion_emotion_producer_capability_cache = None
     self._patch_livingmemory_processor_compat()
     self._report_integrated_feature_conflicts()
     self._data_lock = asyncio.Lock()
@@ -1877,3 +1910,21 @@ def initialize_plugin_post_runtime_state(self: Any, config: Any) -> None:
         ),
     )
     self.unified_person_registry = UnifiedPersonRegistry(self.data)
+    self.req041_migration_coordinator = MigrationCoordinator(self.data_dir)
+    self.req041_migration_outbox = MigrationOutbox(
+        Path(self.data_dir) / "req041_migration_outbox.db"
+    )
+    self.req041_migration_status = {
+        "required": False,
+        "state": "uninitialized",
+        "code": "migration_not_started",
+    }
+    self.req041_migration_backfill = None
+    self.req041_relationship_store = None
+    self.req041_dual_write_producer = None
+    self.req041_scoped_projection_sync = None
+    self.req041_scoped_projection_status = {
+        "ok": False, "code": "scoped_projection_not_initialized", "scopes": []
+    }
+    self._req041_scoped_sync_task = None
+    self._req041_scoped_sync_requested = False

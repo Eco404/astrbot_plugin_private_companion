@@ -506,6 +506,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             user_id = str(canonicalizer(user_id) or "").strip()
         users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else None
         user = users.get(user_id) if isinstance(users, dict) else None
+        snapshot_getter = getattr(self, "_req041_relationship_snapshot_view", None)
+        if isinstance(user, dict) and callable(snapshot_getter):
+            user = snapshot_getter(user, source="proactive_chat_bridge")
         return user_id, user if isinstance(user, dict) else None
 
     def _proactive_chat_decorating_context(self) -> dict[str, Any]:
@@ -20574,7 +20577,11 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 complete = False
             quote_message_id = ""
             if index < len(segments) - 1:
-                await asyncio.sleep(await self._calc_segmented_proactive_interval(segment, umo=umo))
+                try:
+                    interval = await self._calc_segmented_proactive_interval(segment, umo=umo)
+                except TypeError:
+                    interval = await self._calc_segmented_proactive_interval(segment)
+                await asyncio.sleep(interval)
         delivered_text = "\n".join(delivered_segments).strip()
         return _ProactiveSendOutcome(
             delivered=bool(delivered_text),

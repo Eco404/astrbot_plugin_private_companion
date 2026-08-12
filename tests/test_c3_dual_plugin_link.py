@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import types
+from types import SimpleNamespace
 
 
 COMPANION_ROOT = Path(__file__).resolve().parents[1]
@@ -45,7 +46,13 @@ def test_chat_outbox_delivers_structured_archive_to_memory_bridge_without_domain
         service.store = store_module.MemoryStore(Path(temporary) / "memory.db")
         service.store.initialize()
         service._schedule_memory_embedding = lambda *args, **kwargs: None
+        producer = type("PrivateCompanionProducer", (), {})()
+        service.context = SimpleNamespace(get_all_stars=lambda: [SimpleNamespace(
+            star_cls=producer, star_cls_type=type(producer), activated=True,
+            root_dir_name="astrbot_plugin_private_companion", name="陪伴插件",
+        )])
         bridge = bridge_module.MemoryCompanionBridge(service)
+        capability = bridge.register_private_companion(producer)
         outbox = outbox_module.BotPersonalOutbox({})
 
         async def run():
@@ -60,21 +67,25 @@ def test_chat_outbox_delivers_structured_archive_to_memory_bridge_without_domain
                 payload=payload,
                 idempotency_key="daily_plan:2026-07-30",
                 occurred_at="2026-07-30T19:00:00+08:00",
-                sender=bridge.record_bot_personal_archive,
+                sender=lambda envelope: bridge.record_bot_personal_archive(
+                    envelope, producer_capability=capability,
+                ),
             )
             duplicate = await outbox.enqueue(
                 memory_type="bot_schedule_plan",
                 payload=payload,
                 idempotency_key="daily_plan:2026-07-30",
                 occurred_at="2026-07-30T19:00:00+08:00",
-                sender=bridge.record_bot_personal_archive,
+                sender=lambda envelope: bridge.record_bot_personal_archive(
+                    envelope, producer_capability=capability,
+                ),
             )
             profile = await service.read_bot_personal_profile(limit=10)
             return first, duplicate, profile
 
         try:
             first, duplicate, profile = asyncio.run(run())
-            assert first["ok"] and first["state"] == "sent"
+            assert first["ok"] and first["state"] == "sent", first.get("error_code")
             assert duplicate["deduplicated"] is True
             assert profile["read_only"] is True
             assert len(profile["items"]) == 1
