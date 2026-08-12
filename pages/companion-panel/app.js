@@ -15027,7 +15027,7 @@ function renderUnifiedIdentityPanel(detail) {
       <dl>
         <dt>人物引用</dt><dd class="mono">${escapeHtml(maskedPersonReference(identity.person_id))}</dd>
         <dt>身份可信度</dt><dd>${escapeHtml(identityAssuranceLabel(identity.identity_assurance))}</dd>
-        <dt>当前账号</dt><dd>${escapeHtml(identity.current_identity_linked ? "已精确关联" : "等待自动认领")}</dd>
+        <dt>当前账号</dt><dd>${escapeHtml(identity.current_identity_linked ? "已精确关联" : (identity.current_identity_detached ? "已解绑，可安全恢复" : "等待自动认领"))}</dd>
         <dt>身份数量</dt><dd>${escapeHtml(`${Number(identity.active_identity_count || 0)} 个有效 · ${Number(identity.detached_identity_count || 0)} 个已解绑`)}</dd>
         <dt>档案版本</dt><dd>${escapeHtml(identity.projection_revision ? `r${identity.projection_revision}` : "-")} · ${escapeHtml(updatedAt)}</dd>
         <dt>读取代际</dt><dd>${escapeHtml(generation)} · ${escapeHtml(migration.state || "pending")}</dd>
@@ -15045,6 +15045,7 @@ function renderUnifiedIdentityPanel(detail) {
     ${linked ? `<section class="detail-block">
       <header class="detail-block-head"><div><h2>身份生命周期</h2><p>危险操作先生成影响预览，再次点击才会执行；失败时保留当前有效数据。</p></div></header>
       <div class="toolbar user-danger-actions">
+        ${lifecycle.can_relink_current ? '<button type="button" data-identity-action="relink" class="secondary-button">预览恢复当前账号</button>' : ""}
         ${lifecycle.can_unlink_current ? '<button type="button" data-identity-action="unlink" class="secondary-button">预览解绑当前账号</button>' : ""}
         ${lifecycle.can_archive ? '<button type="button" data-identity-action="archive" class="danger">预览归档统一人物</button>' : ""}
         ${lifecycle.can_purge ? '<button type="button" data-identity-action="purge" class="danger">预览永久删除</button>' : ""}
@@ -16730,13 +16731,13 @@ function bindUnifiedIdentityActions(detail, refreshSelectedUserDetail) {
     button.addEventListener("click", async () => {
       const action = String(button.dataset.identityAction || "");
       const personId = String(detail?.identity_admin?.person_id || detail?.unified_person_id || "");
-      if (!personId || !["unlink", "archive", "purge"].includes(action)) return;
-      const endpoint = action === "unlink" ? "/user/identity/unlink" : (action === "archive" ? "/user/identity/archive" : "/user/identity/delete");
+      if (!personId || !["relink", "unlink", "archive", "purge"].includes(action)) return;
+      const endpoint = action === "relink" ? "/user/identity/link" : (action === "unlink" ? "/user/identity/unlink" : (action === "archive" ? "/user/identity/archive" : "/user/identity/delete"));
       const preview = button._identityLifecyclePreview;
       if (!preview) {
         const operationId = identityOperationId(action);
         const body = { person_id: personId, operation_id: operationId, dry_run: true };
-        if (action === "unlink") body.user_id = detail.user_id;
+        if (["relink", "unlink"].includes(action)) body.user_id = detail.user_id;
         const response = await runAction(
           () => postJson(endpoint, body),
           "影响预览已生成，请核对后再次点击",
@@ -16745,7 +16746,7 @@ function bindUnifiedIdentityActions(detail, refreshSelectedUserDetail) {
         );
         const result = response?.result;
         if (!result || result.ok !== true) {
-          showToast(action === "unlink" ? "该身份不能安全自动拆分，需要保留或归档统一人物" : "未能生成安全预览", "error");
+          showToast(action === "unlink" ? "该身份不能安全自动拆分，需要保留或归档统一人物" : (action === "relink" ? "当前账号没有可安全恢复的精确身份" : "未能生成安全预览"), "error");
           return;
         }
         button._identityLifecyclePreview = {
@@ -16753,7 +16754,9 @@ function bindUnifiedIdentityActions(detail, refreshSelectedUserDetail) {
           confirmationToken: String(result.confirmation_token || ""),
         };
         const count = Number(result.active_identity_count ?? result.detached_identity_count ?? 0);
-        button.textContent = action === "unlink"
+        button.textContent = action === "relink"
+          ? `确认恢复（当前 ${Number(result.active_identity_count || 0)} 个有效身份）`
+          : action === "unlink"
           ? `确认解绑（${Number(result.replayable_event_count || 0)} 条可回放事件）`
           : (action === "archive" ? `确认归档（${count} 个身份）` : `确认永久删除（${count} 个身份）`);
         return;
@@ -16764,10 +16767,10 @@ function bindUnifiedIdentityActions(detail, refreshSelectedUserDetail) {
         confirmation_token: preview.confirmationToken,
         dry_run: false,
       };
-      if (action === "unlink") body.user_id = detail.user_id;
+      if (["relink", "unlink"].includes(action)) body.user_id = detail.user_id;
       const response = await runAction(
         () => postJson(endpoint, body),
-        action === "unlink" ? "当前账号已解绑" : (action === "archive" ? "统一人物已归档" : "统一人物已永久删除"),
+        action === "relink" ? "当前账号已恢复关联" : (action === "unlink" ? "当前账号已解绑" : (action === "archive" ? "统一人物已归档" : "统一人物已永久删除")),
         button,
         { reload: false },
       );

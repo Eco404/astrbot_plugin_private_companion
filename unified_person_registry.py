@@ -601,6 +601,44 @@ class UnifiedPersonRegistry:
                     matches.append(identity)
         return deepcopy(matches[0]) if len(matches) == 1 else None
 
+    def detached_identity_for_person_subject(
+        self, person_id: str, subject_id: str
+    ) -> dict[str, str] | None:
+        """Resolve one exact detached identity for a trusted relink operation."""
+        try:
+            clean_person = _text(person_id, "person_id")
+            subject = _text(subject_id, "subject_id", 160)
+        except ValueError:
+            return None
+        matches: list[dict[str, str]] = []
+        with _LOCK:
+            root = _root(self._store)
+            for candidate in root["detached_identity_links"].values():
+                if (
+                    not isinstance(candidate, dict)
+                    or candidate.get("status") != "detached"
+                    or candidate.get("person_id") != clean_person
+                ):
+                    continue
+                try:
+                    identity = _identity(candidate.get("identity"))
+                    if build_identity_key(identity) != candidate.get("identity_key"):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                platform_subject = identity["platform_subject_id"]
+                parts = subject.rsplit(":", 2)
+                opaque_subject_match = (
+                    len(parts) == 3
+                    and len(parts[2]) == 16
+                    and all(char in "0123456789abcdef" for char in parts[2].lower())
+                    and parts[0].lower() == identity["subject_namespace"].split(":", 1)[0]
+                    and parts[1] == platform_subject
+                )
+                if subject == platform_subject or opaque_subject_match:
+                    matches.append(identity)
+        return deepcopy(matches[0]) if len(matches) == 1 else None
+
     def safe_admin_person_summary(
         self, person_id: str, subject_id: str = ""
     ) -> dict[str, Any]:
@@ -631,12 +669,15 @@ class UnifiedPersonRegistry:
                 if isinstance(link, dict) and link.get("person_id") == clean_person
             )
             current_linked = False
+            current_detached = False
             if subject:
                 current_linked = self.identity_for_person_subject(clean_person, subject) is not None
+                current_detached = self.detached_identity_for_person_subject(clean_person, subject) is not None
             return {
                 "linked": True,
                 "code": "identity_admin_summary",
                 "current_identity_linked": current_linked,
+                "current_identity_detached": current_detached,
                 "identity_assurance": str(projection.get("identity_assurance") or "unverified"),
                 "profile_status": str(projection.get("profile_status") or "active"),
                 "projection_revision": int(projection.get("projection_revision") or 0),

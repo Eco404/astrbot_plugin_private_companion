@@ -49,8 +49,10 @@ def _load_page_unlink():
         "_identity_domain_summary",
         "_identity_pending_summary",
         "_identity_admin_summary",
+        "_identity_link_confirmation",
         "_identity_unlink_confirmation",
         "_safe_identity_unlink_result",
+        "link_unified_identity",
         "unlink_unified_identity",
     }
     methods = [
@@ -90,8 +92,10 @@ class _PageHost:
     _identity_domain_summary = PAGE_METHODS["_identity_domain_summary"]
     _identity_pending_summary = PAGE_METHODS["_identity_pending_summary"]
     _identity_admin_summary = PAGE_METHODS["_identity_admin_summary"]
+    _identity_link_confirmation = staticmethod(PAGE_METHODS["_identity_link_confirmation"])
     _identity_unlink_confirmation = staticmethod(PAGE_METHODS["_identity_unlink_confirmation"])
     _safe_identity_unlink_result = staticmethod(PAGE_METHODS["_safe_identity_unlink_result"])
+    link_unified_identity = PAGE_METHODS["link_unified_identity"]
     unlink_unified_identity = PAGE_METHODS["unlink_unified_identity"]
 
     def __init__(self) -> None:
@@ -118,6 +122,7 @@ class _PageHost:
         self.plugin = self
         self._data_lock = _AsyncLock()
         self.saved = 0
+        self.dual_writes: list[tuple[str, str]] = []
 
     @staticmethod
     def _active_persona_scope() -> str:
@@ -140,6 +145,11 @@ class _PageHost:
 
     def _schedule_data_save(self) -> None:
         self.saved += 1
+
+    def _req041_emit_identity_dual_write(self, result, *, action, operation_id, registry):
+        assert result.get("identity_key")
+        assert registry is self.registry
+        self.dual_writes.append((action, operation_id))
 
 
 class IdentityAdminUiTests(unittest.TestCase):
@@ -204,6 +214,104 @@ class IdentityAdminUiTests(unittest.TestCase):
         self.assertNotIn("10001", encoded)
         self.assertNotIn("10002", encoded)
         self.assertNotIn("identity_key", encoded)
+
+    def test_detached_identity_relink_requires_preview_and_never_exposes_identity(self) -> None:
+        host = _PageHost()
+        detached = host.registry.unlink_identity(
+            host.person_id,
+            _identity("10002"),
+            operation_id="detach-for-relink",
+            actor_id="page_administrator",
+            dry_run=False,
+        )
+        self.assertTrue(detached["ok"])
+        self.assertIsNotNone(
+            host.registry.detached_identity_for_person_subject(host.person_id, "10002")
+        )
+        summary = host._identity_admin_summary(
+            host.data["users"]["10002"], user_id="10002", snapshot={}
+        )
+        self.assertTrue(summary["current_identity_detached"])
+        self.assertTrue(summary["lifecycle"]["can_relink_current"])
+
+        PAGE_REQUEST.payload = {
+            "person_id": host.person_id,
+            "user_id": "10002",
+            "operation_id": "page-relink-b",
+            "dry_run": True,
+        }
+        preview = asyncio.run(host.link_unified_identity())
+        self.assertTrue(preview["ok"])
+        self.assertEqual("identity_relink_preview", preview["data"]["result"]["code"])
+        encoded_preview = json.dumps(preview, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn("platform_subject_id", encoded_preview)
+        self.assertNotIn("identity_key", encoded_preview)
+        self.assertNotIn("checkpoint", encoded_preview)
+
+        PAGE_REQUEST.payload["dry_run"] = False
+        PAGE_REQUEST.payload["confirmation_token"] = preview["data"]["result"]["confirmation_token"]
+        applied = asyncio.run(host.link_unified_identity())
+        self.assertTrue(applied["ok"])
+        self.assertEqual("identity_relinked", applied["data"]["result"]["code"])
+        self.assertIsNotNone(
+            host.registry.identity_for_person_subject(host.person_id, "10002")
+        )
+        self.assertEqual([("link", "page-relink-b")], host.dual_writes)
+        self.assertEqual(1, host.saved)
+
+    def test_detached_identity_relink_rejects_forged_confirmation(self) -> None:
+        host = _PageHost()
+        host.registry.unlink_identity(
+            host.person_id,
+            _identity("10002"),
+            operation_id="detach-for-forged-relink",
+            actor_id="page_administrator",
+            dry_run=False,
+        )
+        PAGE_REQUEST.payload = {
+            "person_id": host.person_id,
+            "user_id": "10002",
+            "operation_id": "page-relink-forged",
+            "dry_run": False,
+            "confirmation_token": "0" * 64,
+        }
+        rejected = asyncio.run(host.link_unified_identity())
+        self.assertFalse(rejected["ok"])
+        self.assertIsNotNone(
+            host.registry.detached_identity_for_person_subject(host.person_id, "10002")
+        )
+
+    def test_detached_identity_relink_rejects_stale_projection_preview(self) -> None:
+        host = _PageHost()
+        host.registry.unlink_identity(
+            host.person_id,
+            _identity("10002"),
+            operation_id="detach-for-stale-relink",
+            actor_id="page_administrator",
+            dry_run=False,
+        )
+        PAGE_REQUEST.payload = {
+            "person_id": host.person_id,
+            "user_id": "10002",
+            "operation_id": "page-relink-stale",
+            "dry_run": True,
+        }
+        preview = asyncio.run(host.link_unified_identity())
+        self.assertTrue(preview["ok"])
+        changed = host.registry.link_identity(
+            host.person_id,
+            _identity("10003"),
+            operation_id="concurrent-link",
+            actor_id="other_administrator",
+        )
+        self.assertTrue(changed["ok"])
+        PAGE_REQUEST.payload["dry_run"] = False
+        PAGE_REQUEST.payload["confirmation_token"] = preview["data"]["result"]["confirmation_token"]
+        rejected = asyncio.run(host.link_unified_identity())
+        self.assertFalse(rejected["ok"])
+        self.assertIsNotNone(
+            host.registry.detached_identity_for_person_subject(host.person_id, "10002")
+        )
 
     def test_unlinked_user_maps_to_safe_pending_status_without_exposing_lookup_material(self) -> None:
         host = _PageHost()
@@ -282,12 +390,28 @@ class IdentityAdminUiTests(unittest.TestCase):
             host.registry.identity_for_person_subject(host.person_id, "10002")
         )
 
+    def test_page_unlink_rejects_browser_supplied_raw_identity(self) -> None:
+        host = _PageHost()
+        PAGE_REQUEST.payload = {
+            "person_id": host.person_id,
+            "identity": _identity("10002"),
+            "operation_id": "raw-browser-identity",
+            "dry_run": True,
+        }
+        rejected = asyncio.run(host.unlink_unified_identity())
+        self.assertFalse(rejected["ok"])
+        self.assertIsNotNone(
+            host.registry.identity_for_person_subject(host.person_id, "10002")
+        )
+
     def test_official_v620_user_workspace_contains_safe_identity_lifecycle(self) -> None:
         english = (ROOT / "pages" / "companion-panel" / "app.js").read_text(encoding="utf-8")
         chinese = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
         self.assertEqual(english, chinese)
         self.assertIn('["identity","身份与隔离"]', english)
         self.assertIn('data-identity-action="archive"', english)
+        self.assertIn('data-identity-action="relink"', english)
+        self.assertIn('"/user/identity/link"', english)
         self.assertIn('postJson(endpoint, body)', english)
         self.assertIn('confirmation_token: preview.confirmationToken', english)
         self.assertIn("只读安全提示", english)

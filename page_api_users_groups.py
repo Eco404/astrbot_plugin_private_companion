@@ -56,6 +56,23 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
+    def _identity_link_confirmation(
+        *, person_id: str, operation_id: str, identity: dict[str, Any], checkpoint: dict[str, Any]
+    ) -> str:
+        payload = {
+            "action": "relink",
+            "person_id": person_id,
+            "operation_id": operation_id,
+            "identity": identity,
+            "projection_revision": int(checkpoint.get("projection_revision") or 0),
+            "checkpoint_hash": str(checkpoint.get("checkpoint_hash") or ""),
+        }
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
     def _safe_identity_unlink_result(result: dict[str, Any]) -> dict[str, Any]:
         """Strip raw identity keys and migration checkpoints from page output."""
         return {
@@ -240,6 +257,10 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 summary.get("linked") and summary.get("profile_status") == "active"
             ),
             "can_purge": bool(summary.get("profile_status") == "deleted"),
+            "can_relink_current": bool(
+                summary.get("current_identity_detached")
+                and summary.get("profile_status") == "active"
+            ),
         }
         return summary
 
@@ -364,35 +385,88 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         if not isinstance(payload, dict):
             return self._error("请求体必须是 JSON 对象")
         person_id = self._single_line(payload.get("person_id"), 80)
-        identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
+        user_id = self._single_line(payload.get("user_id"), 160)
         operation_id = self._single_line(payload.get("operation_id"), 120)
-        if not person_id or not identity or not operation_id:
-            return self._error("person_id、identity 和 operation_id 均为必填项")
+        confirmation_token = self._single_line(payload.get("confirmation_token"), 80)
+        if "dry_run" in payload and type(payload.get("dry_run")) is not bool:
+            return self._error("dry_run 必须是 JSON 布尔值")
+        dry_run = payload.get("dry_run", True)
+        if not person_id or not user_id or not operation_id:
+            return self._error("person_id、user_id 和 operation_id 均为必填项")
+        if not dry_run and not confirmation_token:
+            return self._error("执行重新关联必须提交预览返回的 confirmation_token")
         try:
             async with self.plugin._data_lock:
                 registry = self._page_unified_person_registry()
-                result = registry.link_identity(
-                    person_id,
-                    identity,
-                    operation_id=operation_id,
-                    actor_id="page_administrator",
+                users = self.plugin.data.get("users")
+                user = users.get(user_id) if isinstance(users, dict) else None
+                if not isinstance(user, dict):
+                    return self._error("用户不存在")
+                if self._single_line(user.get("unified_person_id"), 80) != person_id:
+                    return self._error("用户与统一人物不匹配")
+                subject = self._single_line(
+                    user.get("identity_subject_id") or user.get("user_id") or user_id,
+                    160,
                 )
+                resolver = getattr(registry, "detached_identity_for_person_subject", None)
+                identity = resolver(person_id, subject) if callable(resolver) else None
+                if not isinstance(identity, dict):
+                    return self._error("当前账号没有可安全恢复的已解绑身份")
+                checkpoint_reader = getattr(registry, "identity_projection_checkpoint", None)
+                checkpoint = checkpoint_reader(person_id) if callable(checkpoint_reader) else {}
+                if not isinstance(checkpoint, dict) or checkpoint.get("ok") is not True:
+                    return self._error("统一身份投影暂不可安全变更")
+                expected_confirmation = self._identity_link_confirmation(
+                    person_id=person_id,
+                    operation_id=operation_id,
+                    identity=identity,
+                    checkpoint=checkpoint,
+                )
+                if not dry_run and not hmac.compare_digest(
+                    confirmation_token, expected_confirmation
+                ):
+                    return self._error("身份状态已变化，请刷新后重新预览")
+                if dry_run:
+                    summary_reader = getattr(registry, "safe_admin_person_summary", None)
+                    summary = summary_reader(person_id, subject) if callable(summary_reader) else {}
+                    result = {
+                        "ok": True,
+                        "state": "pending",
+                        "code": "identity_relink_preview",
+                        "changed": False,
+                        "active_identity_count": max(0, _safe_int(summary.get("active_identity_count"), 0)),
+                        "detached_identity_count": max(0, _safe_int(summary.get("detached_identity_count"), 0)),
+                        "confirmation_token": expected_confirmation,
+                    }
+                else:
+                    raw_result = registry.link_identity(
+                        person_id,
+                        identity,
+                        operation_id=operation_id,
+                        actor_id="page_administrator",
+                    )
+                    result = {
+                        "ok": bool(raw_result.get("ok")),
+                        "state": self._single_line(raw_result.get("state"), 32) or "pending",
+                        "code": self._single_line(raw_result.get("code"), 80) or "identity_relink_failed",
+                        "changed": bool(raw_result.get("changed")),
+                    }
                 if result.get("changed"):
                     emitter = getattr(self.plugin, "_req041_emit_identity_dual_write", None)
                     if callable(emitter):
                         emitter(
-                            result,
+                            raw_result,
                             action="link",
                             operation_id=operation_id,
                             registry=registry,
                         )
                     self.plugin._schedule_data_save()
             if not result.get("ok"):
-                return self._error(str(result.get("code") or "统一身份链接失败"))
+                return self._error(str(result.get("code") or "统一身份重新关联失败"))
             return self._ok({"result": result})
         except Exception as exc:
-            logger.warning("[PrivateCompanionPage] 统一身份链接失败: %s", exc)
-            return self._error("统一身份链接失败")
+            logger.warning("[PrivateCompanionPage] 统一身份重新关联失败: %s", exc)
+            return self._error("统一身份重新关联失败")
 
     async def unlink_unified_identity(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True)
@@ -400,34 +474,32 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             return self._error("请求体必须是 JSON 对象")
         person_id = self._single_line(payload.get("person_id"), 80)
         user_id = self._single_line(payload.get("user_id"), 160)
-        identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
         operation_id = self._single_line(payload.get("operation_id"), 120)
         confirmation_token = self._single_line(payload.get("confirmation_token"), 80)
         if "dry_run" in payload and type(payload.get("dry_run")) is not bool:
             return self._error("dry_run 必须是 JSON 布尔值")
         dry_run = payload.get("dry_run", True)
-        if not person_id or (not identity and not user_id) or not operation_id:
-            return self._error("person_id、user_id/identity 和 operation_id 均为必填项")
+        if not person_id or not user_id or not operation_id:
+            return self._error("person_id、user_id 和 operation_id 均为必填项")
         if not dry_run and not confirmation_token:
             return self._error("执行解绑必须提交预览返回的 confirmation_token")
         try:
             async with self.plugin._data_lock:
                 registry = self._page_unified_person_registry()
-                if user_id:
-                    users = self.plugin.data.get("users")
-                    user = users.get(user_id) if isinstance(users, dict) else None
-                    if not isinstance(user, dict):
-                        return self._error("用户不存在")
-                    if self._single_line(user.get("unified_person_id"), 80) != person_id:
-                        return self._error("用户与统一人物不匹配")
-                    subject = self._single_line(
-                        user.get("identity_subject_id") or user.get("user_id") or user_id,
-                        160,
-                    )
-                    resolver = getattr(registry, "identity_for_person_subject", None)
-                    identity = resolver(person_id, subject) if callable(resolver) else None
-                    if not isinstance(identity, dict):
-                        return self._error("当前用户没有唯一的正式身份链接")
+                users = self.plugin.data.get("users")
+                user = users.get(user_id) if isinstance(users, dict) else None
+                if not isinstance(user, dict):
+                    return self._error("用户不存在")
+                if self._single_line(user.get("unified_person_id"), 80) != person_id:
+                    return self._error("用户与统一人物不匹配")
+                subject = self._single_line(
+                    user.get("identity_subject_id") or user.get("user_id") or user_id,
+                    160,
+                )
+                resolver = getattr(registry, "identity_for_person_subject", None)
+                identity = resolver(person_id, subject) if callable(resolver) else None
+                if not isinstance(identity, dict):
+                    return self._error("当前用户没有唯一的正式身份链接")
                 checkpoint_reader = getattr(registry, "identity_projection_checkpoint", None)
                 checkpoint = checkpoint_reader(person_id) if callable(checkpoint_reader) else {}
                 if not isinstance(checkpoint, dict) or checkpoint.get("ok") is not True:
