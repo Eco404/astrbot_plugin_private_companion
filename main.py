@@ -153,6 +153,11 @@ from .migration_replay import MigrationReplayWorker
 from .migration_read_router import MigrationRelationshipReadRouter
 from .migration_source_inspector import inspect_migration_sources
 from .relationship_account_store import RelationshipAccountStore
+from .relationship_affinity_runtime import (
+    admit_confirmed_group_affinity,
+    normalize_group_allowlist,
+    prepare_group_affinity_candidate,
+)
 from .identity_namespace import AssurancePolicy, NamespaceContext
 from .migration_scoped_projection import (
     ScopedProjectionSynchronizer,
@@ -5341,6 +5346,169 @@ class PrivateCompanionPlugin(
             scoped_getter(None, relationship_view)
             if callable(scoped_getter) else relationship_view
         )
+
+    def _req041_group_sender_is_human(self, event: AstrMessageEvent) -> bool:
+        if not self._event_is_inbound_chat_message(event):
+            return False
+        sender_id = self._event_sender_id(event)
+        self_id = self._event_self_id(event)
+        if not sender_id or (self_id and sender_id == self_id):
+            return False
+        raw = self._event_raw_payload(event)
+        sender = raw.get("sender") if isinstance(raw.get("sender"), dict) else {}
+        message_obj = getattr(event, "message_obj", None)
+        message_sender = getattr(message_obj, "sender", None) if message_obj is not None else None
+
+        def field(owner: Any, name: str) -> Any:
+            if isinstance(owner, dict):
+                return owner.get(name)
+            try:
+                return getattr(owner, name, None)
+            except Exception:
+                return None
+
+        for owner in (raw, sender, message_sender):
+            if owner is None:
+                continue
+            for key in ("is_bot", "bot", "is_system", "system"):
+                value = field(owner, key)
+                if value is True or str(value or "").strip().lower() in {"1", "true", "yes", "bot", "system"}:
+                    return False
+            role = str(field(owner, "role") or field(owner, "sender_type") or "").strip().lower()
+            if role in {"assistant", "bot", "system", "service"}:
+                return False
+        return True
+
+    def _req041_prepare_group_affinity_candidate(
+        self,
+        event: AstrMessageEvent,
+        *,
+        group_id: str,
+        relationship_user: dict[str, Any] | None,
+        scene_trigger: str,
+        forwarded: bool,
+    ) -> dict[str, Any] | None:
+        if (
+            not isinstance(relationship_user, dict)
+            or str(getattr(event, "req041_read_generation", "") or "") != "new"
+            or getattr(self, "req041_dual_write_producer", None) is None
+            or getattr(self, "req041_migration_replay", None) is None
+            or getattr(self, "req041_relationship_store", None) is None
+            or not bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+        ):
+            return None
+        direction = "at_bot" if scene_trigger == "at_bot" else "reply_bot" if scene_trigger == "reply_bot" else ""
+        context = self._req041_scoped_context_for_user(
+            relationship_user,
+            kind="group_member",
+            group_id=group_id,
+            purpose="relationship_write",
+        )
+        if context is None:
+            return None
+        candidate = prepare_group_affinity_candidate(
+            context,
+            raw_group_id=group_id,
+            allowlist=getattr(self, "group_relationship_affinity_allowlist", ()),
+            enabled=bool(getattr(self, "enable_group_relationship_affinity", False)),
+            inbound_event_id=self._event_message_id(event),
+            directed_by=direction,
+            legacy_user_key=str(relationship_user.get("user_id") or ""),
+            inbound=self._event_is_inbound_chat_message(event),
+            human_sender=self._req041_group_sender_is_human(event),
+            forwarded=bool(forwarded),
+            echo=False,
+            historical=False,
+        )
+        if isinstance(candidate, dict):
+            setattr(event, "req041_group_affinity_candidate", candidate)
+        return candidate
+
+    async def _req041_settle_confirmed_group_affinity(self, event: AstrMessageEvent) -> None:
+        candidate = getattr(event, "req041_group_affinity_candidate", None)
+        if not isinstance(candidate, dict) or bool(candidate.get("settled")):
+            return
+        if not self._reaction_expression_primary_reply_confirmed(
+            event, require_segmented_complete=True,
+        ):
+            return
+        live_allowlist = normalize_group_allowlist(
+            getattr(self, "group_relationship_affinity_allowlist", ())
+        )
+        if (
+            not bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            or not bool(getattr(self, "enable_group_relationship_affinity", False))
+            or str(candidate.get("raw_group_id") or "") not in live_allowlist
+        ):
+            candidate["settled"] = True
+            candidate["result_code"] = "group_affinity_config_revoked"
+            return
+        store = getattr(self, "req041_relationship_store", None)
+        if not isinstance(store, RelationshipAccountStore):
+            return
+        admission = await asyncio.to_thread(
+            admit_confirmed_group_affinity,
+            candidate,
+            store,
+            reply_succeeded=True,
+            requested_delta=4,
+            group_daily_net_cap=int(getattr(self, "group_relationship_daily_net_cap", 2)),
+            group_window_seconds=int(getattr(self, "group_relationship_window_minutes", 30)) * 60,
+            group_window_absolute_cap=int(getattr(self, "group_relationship_window_absolute_cap", 1)),
+            group_person_daily_absolute_cap=int(
+                getattr(self, "group_relationship_person_daily_absolute_cap", 4)
+            ),
+            group_scope_daily_absolute_cap=int(
+                getattr(self, "group_relationship_scope_daily_absolute_cap", 20)
+            ),
+            group_event_cap=4,
+        )
+        if admission is None:
+            return
+        candidate["settled"] = True
+        candidate["result_code"] = admission.code
+        if admission.admitted_delta == 0:
+            return
+        context = NamespaceContext(**candidate.get("context", {}))
+        user_key = str(candidate.get("legacy_user_key") or "")
+        async with self._data_lock:
+            users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+            user = users.get(user_key) if isinstance(users, dict) else None
+            if (
+                not isinstance(user, dict)
+                or str(user.get("unified_person_id") or "") != context.identity_id
+            ):
+                candidate["settled"] = False
+                raise RuntimeError("group_affinity_legacy_subject_mismatch")
+            result = self._apply_relationship_event(
+                user,
+                admission.admitted_delta,
+                reason_code="direct_group_interaction",
+                event_id=admission.event_id,
+                now=_now_ts(),
+                req041_group_admission_event_id=admission.event_id,
+            )
+            candidate["legacy_result_code"] = str(result.get("code") or "")
+            if result.get("changed"):
+                self._schedule_data_save()
+
+    @filter.after_message_sent(priority=-105000)
+    @_multi_persona_event_context
+    async def settle_req041_group_affinity_after_send(
+        self, event: AstrMessageEvent, *args, **kwargs
+    ) -> None:
+        if self is None or not self.enabled:
+            return
+        try:
+            await self._req041_settle_confirmed_group_affinity(event)
+        except Exception as exc:
+            status = getattr(self, "req041_migration_status", None)
+            if isinstance(status, dict):
+                status.update({"state": "degraded", "code": "group_affinity_settlement_failed"})
+            logger.warning(
+                "[PrivateCompanion] REQ-041 群好感度结算失败，已保持事件可重放: %s",
+                _single_line(exc, 160),
+            )
 
     @filter.after_message_sent(priority=-110000)
     async def finish_req041_read_chain(self, event: AstrMessageEvent, *args, **kwargs) -> None:

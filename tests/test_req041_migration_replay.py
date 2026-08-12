@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
+import json
 import tempfile
 import unittest
 
-from identity_namespace import build_namespace_context
+from identity_namespace import NamespaceContext, build_namespace_context
 from migration_coordinator import MigrationCoordinator
 from migration_dual_write import MigrationDualWriteProducer
 from migration_outbox import MigrationOutbox
 from migration_replay import MigrationReplayWorker
 from relationship_account_store import RelationshipAccountStore
+from relationship_event_policy import build_group_interaction_proof
 from unified_person_registry import UnifiedPersonRegistry
 
 
@@ -104,6 +107,81 @@ class MigrationReplayTests(unittest.TestCase):
         identity = self.coordinator.identity_status(self.person_id)
         self.assertEqual("reconciling", identity["state"])
         self.assertEqual(2, identity["stable_cycles"])
+
+    def test_pre_upgrade_private_event_hash_remains_replayable(self) -> None:
+        proof = {
+            "event_key": "z" * 24,
+            "reason_code": "inbound",
+            "applied_delta": 2,
+            "score_before": 10,
+            "score_after": 12,
+        }
+        digest = hashlib.sha256(json.dumps(
+            proof, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        self.outbox.enqueue_next(
+            stream_key=f"relationship:{self.person_id}", event_id="old-private-event",
+            namespace=self.context, migration_epoch=self.epoch, policy_version=POLICY,
+            payload={
+                "operation": "relationship_legacy_event", "identity_ref": self.person_id,
+                **proof, "requested_delta": 4,
+                "relationship_role": "friend", "relationship_mode": "normal",
+                "positive_stage_cap_key": "close",
+                "daily_totals": {"day": "2026-08-10", "positive": 2, "negative": 0},
+                "last_effective_at": 1_700_000_000,
+                "legacy_event_hash": digest,
+            },
+        )
+        result = self.worker.run_batch()
+        self.assertEqual(("ok", 1), (result["status"], result["count"]))
+        self.assertEqual(12, self.relationships.account(self.context)["relationship_score"])
+
+    def test_group_event_replay_requires_matching_admission_receipt(self) -> None:
+        group = NamespaceContext(
+            kind="group_member", persona_id=self.context.persona_id,
+            identity_id=self.person_id, group_id="group@opaque-a",
+            assurance=self.context.assurance, profile_status=self.context.profile_status,
+            policy_version=POLICY, migration_epoch=self.epoch,
+        )
+        admission_event = "req041-group-affinity-proof"
+        proof = build_group_interaction_proof(
+            group, event_id=admission_event, directed_by="at_bot",
+            inbound=True, human_sender=True, bot_reply_succeeded=True,
+            forwarded=False, echo=False, historical=False,
+        )
+        admission = self.relationships.admit_group_event(
+            group, event_id=admission_event, delta=4,
+            allow_group_affinity=True, group_interaction_proof=proof,
+        )
+        self.assertEqual(1, admission.admitted_delta)
+        user = self._user(score=11)
+        user["relationship_daily_totals"] = {
+            "day": "2026-08-10", "positive": 1, "negative": 0,
+        }
+        self.producer.emit_relationship(
+            registry=self.registry, user=user, requested_delta=1,
+            reason_code="direct_group_interaction", source_revision=1,
+            group_admission_event_id=admission_event,
+            result={
+                "changed": True, "delta": 1,
+                "entry": {"event_key": "g" * 24, "score_before": 10, "score_after": 11},
+            },
+        )
+        result = self.worker.run_batch()
+        self.assertEqual(("ok", 1), (result["status"], result["count"]))
+        self.assertEqual(11, self.relationships.account(self.context)["relationship_score"])
+
+    def test_group_event_without_admission_is_rejected_before_enqueue(self) -> None:
+        user = self._user(score=11)
+        with self.assertRaisesRegex(Exception, "dual_write_group_admission_missing"):
+            self.producer.emit_relationship(
+                registry=self.registry, user=user, requested_delta=1,
+                reason_code="direct_group_interaction", source_revision=1,
+                result={
+                    "changed": True, "delta": 1,
+                    "entry": {"event_key": "h" * 24, "score_before": 10, "score_after": 11},
+                },
+            )
 
     def test_late_identity_snapshot_creates_missing_account_and_replays_after_crash(self) -> None:
         created = self.registry.create_or_link(_identity("late-user"), operation_id="late-create")

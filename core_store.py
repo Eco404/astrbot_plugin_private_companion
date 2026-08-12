@@ -2557,6 +2557,7 @@ class CoreStoreMixin:
         reason_code: str,
         event_id: str = "",
         now: float | None = None,
+        req041_group_admission_event_id: str = "",
     ) -> dict[str, Any]:
         if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
             return {
@@ -2636,6 +2637,7 @@ class CoreStoreMixin:
                     result=result,
                     source_scope=source_scope or "default",
                     source_revision=source_revision,
+                    group_admission_event_id=req041_group_admission_event_id,
                 )
                 if int(dual_write.get("source_revision") or 0) > 0:
                     user["req041_relationship_source_revision"] = int(dual_write["source_revision"])

@@ -36,6 +36,7 @@ from .photo_generation_scope import PHOTO_GENERATION_SCOPE_LIMIT_KEYS
 from .photo_reference_catalog import load_catalog, validate_and_serialize
 from .proactive_chat_runtime_bridge import ProactiveChatRuntimeBridge
 from .relationship_ledger import normalize_relationship_positive_stage_cap_key
+from .relationship_affinity_runtime import normalize_group_allowlist
 from .relationship_policy import normalize_relationship_stage_policy
 from .runtime_compat import probe_runtime_capabilities
 from .migration_coordinator import MigrationCoordinator
@@ -418,6 +419,27 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.relationship_event_window_minutes = self._cfg_int(c, "relationship_event_window_minutes", 30, 1, 1440)
     self.relationship_positive_event_cap = self._cfg_int(c, "relationship_positive_event_cap", 4, 1, 30)
     self.relationship_negative_event_cap = self._cfg_int(c, "relationship_negative_event_cap", 12, 1, 60)
+    self.enable_group_relationship_affinity = self._cfg_bool(
+        c, "enable_group_relationship_affinity", False
+    )
+    self.group_relationship_affinity_allowlist = tuple(sorted(normalize_group_allowlist(
+        self._cfg_raw(c, "group_relationship_affinity_allowlist", [])
+    )))
+    self.group_relationship_daily_net_cap = self._cfg_int(
+        c, "group_relationship_daily_net_cap", 2, 0, 20
+    )
+    self.group_relationship_window_minutes = self._cfg_int(
+        c, "group_relationship_window_minutes", 30, 1, 1440
+    )
+    self.group_relationship_window_absolute_cap = self._cfg_int(
+        c, "group_relationship_window_absolute_cap", 1, 0, 20
+    )
+    self.group_relationship_person_daily_absolute_cap = self._cfg_int(
+        c, "group_relationship_person_daily_absolute_cap", 4, 0, 120
+    )
+    self.group_relationship_scope_daily_absolute_cap = self._cfg_int(
+        c, "group_relationship_scope_daily_absolute_cap", 20, 0, 1000
+    )
 
 def _initialize_world_and_model_config(self: Any, c: Any) -> None:
     self.relationship_positive_daily_cap = self._cfg_int(c, "relationship_positive_daily_cap", 12, 0, 120)

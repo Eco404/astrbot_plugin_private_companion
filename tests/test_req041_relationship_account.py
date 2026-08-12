@@ -10,6 +10,7 @@ from relationship_account_store import (
     RelationshipAccessDenied,
     RelationshipAccountStore,
     RelationshipConflict,
+    RelationshipStoreError,
 )
 from relationship_event_policy import build_group_interaction_proof
 
@@ -172,6 +173,30 @@ class RelationshipAccountStoreTests(unittest.TestCase):
                 self.assertFalse(result.applied)
                 self.assertEqual(expected, result.code)
         self.assertEqual(0, self.store.account(_context())["relationship_score"])
+
+    def test_group_admission_reserves_budget_without_changing_account(self) -> None:
+        self._create(score=20)
+        group = _context(kind="group_member", group_id="group-a")
+        proof = self._group_proof(group, "reserve-only")
+        first = self.store.admit_group_event(
+            group, event_id="reserve-only", delta=4,
+            allow_group_affinity=True, group_interaction_proof=proof,
+        )
+        replay = self.store.admit_group_event(
+            group, event_id="reserve-only", delta=4,
+            allow_group_affinity=True, group_interaction_proof=proof,
+        )
+        self.assertEqual(first, replay)
+        self.assertEqual(1, first.admitted_delta)
+        self.assertEqual("group_affinity_admitted", first.code)
+        self.assertEqual(20, self.store.account(_context())["relationship_score"])
+        self.assertEqual([], self.store.audit_events(_context()))
+        with self.assertRaisesRegex(RelationshipConflict, "group_affinity_admission_conflict"):
+            self.store.admit_group_event(
+                group, event_id="reserve-only", delta=-4,
+                allow_group_affinity=True,
+                group_interaction_proof=self._group_proof(group, "reserve-only"),
+            )
 
     def test_group_absolute_budgets_stop_sign_churn_and_cross_group_spam(self) -> None:
         self._create()
@@ -342,17 +367,61 @@ class RelationshipAccountStoreTests(unittest.TestCase):
                 relationship_mode="owner_exclusive",
             )
 
+    def test_owner_two_mode_transition_preserves_score_and_resumes_from_frozen_value(self) -> None:
+        self._create(role="owner", mode="normal", score=800)
+        frozen = self.store.configure_account(
+            _context(), operation_id="freeze-owner", actor="administrator",
+            expected_revision=1, relationship_mode="owner_exclusive",
+        )
+        self.assertEqual(("owner", "owner_exclusive", 800), (
+            frozen["relationship_role"], frozen["relationship_mode"],
+            frozen["relationship_score"],
+        ))
+        blocked = self.store.apply_event(
+            _context(), event_id="while-frozen", actor="private_pipeline",
+            reason_code="support", delta=4,
+        )
+        self.assertEqual("owner_exclusive_frozen", blocked.code)
+        resumed = self.store.configure_account(
+            _context(), operation_id="resume-owner", actor="administrator",
+            expected_revision=2, relationship_mode="normal",
+        )
+        self.assertEqual(("owner", "normal", 800), (
+            resumed["relationship_role"], resumed["relationship_mode"],
+            resumed["relationship_score"],
+        ))
+        applied = self.store.apply_event(
+            _context(), event_id="after-resume", actor="private_pipeline",
+            reason_code="support", delta=4, positive_daily_cap=120,
+            positive_stage_cap_key="close",
+        )
+        # High-score damping still applies, but the ordinary user's stage cap
+        # does not: owner normal continues upward from the frozen value.
+        self.assertEqual(803, applied.score)
+        with self.assertRaisesRegex(RelationshipStoreError, "relationship_account_mode_invalid"):
+            self.store.configure_account(
+                _context(), operation_id="third-mode", actor="administrator",
+                expected_revision=4, relationship_mode="dynamic_owner",
+            )
+
     def test_person_archive_purges_relationship_account_and_prevents_resurrection(self) -> None:
         self._create(score=100)
         self.store.apply_event(
             _context(), event_id="before-archive", actor="private_pipeline",
             reason_code="support", delta=2,
         )
+        group = _context(kind="group_member", group_id="group-a")
+        self.store.admit_group_event(
+            group, event_id="admission-before-archive", delta=4,
+            allow_group_affinity=True,
+            group_interaction_proof=self._group_proof(group, "admission-before-archive"),
+        )
         result = self.store.tombstone_account(
             _context(), operation_id="archive-account-1", reason_code="person_archive",
         )
         self.assertEqual("relationship_account_tombstoned", result["code"])
         self.assertEqual(1, result["event_count"])
+        self.assertEqual(1, result["admission_count"])
         self.assertGreaterEqual(result["change_count"], 1)
         self.assertEqual(result, self.store.tombstone_account(
             _context(), operation_id="archive-account-1", reason_code="person_archive",

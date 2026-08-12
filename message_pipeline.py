@@ -1765,6 +1765,25 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             text=text,
             group=group,
         )
+        affinity_preparer = getattr(self, "_req041_prepare_group_affinity_candidate", None)
+        if (
+            callable(affinity_preparer)
+            and scene_trigger in {"at_bot", "reply_bot"}
+            and not group_reference_media_with_text
+            and not (
+                isinstance(registration_payload, dict)
+                and bool(registration_payload.get("blocked_reply"))
+            )
+        ):
+            affinity_preparer(
+                event,
+                group_id=group_id,
+                relationship_user=(
+                    relationship_user if isinstance(relationship_user, dict) else None
+                ),
+                scene_trigger=scene_trigger,
+                forwarded=group_reference_media_with_text,
+            )
         share_scheduled = self._maybe_schedule_group_private_share(group_id, group, trigger_sender_id=sender_id)
         self._save_data_sync()
         group_snapshot = deepcopy(group)

@@ -84,6 +84,17 @@ class RelationshipEventResult:
     source_kind: str
 
 
+@dataclass(frozen=True, slots=True)
+class GroupAffinityAdmissionResult:
+    event_id: str
+    identity_id: str
+    code: str
+    requested_delta: int
+    weighted_delta: int
+    admitted_delta: int
+    source_scope: str
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -217,6 +228,28 @@ class RelationshipAccountStore:
                     ON relationship_events(identity_id, source_scope, day_key, reason_code);
                 CREATE INDEX IF NOT EXISTS idx_relationship_events_window_budget
                     ON relationship_events(identity_id, source_scope, reason_code, created_at);
+                CREATE TABLE IF NOT EXISTS relationship_group_admissions (
+                    event_id TEXT NOT NULL,
+                    migration_epoch TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    identity_id TEXT NOT NULL,
+                    source_scope TEXT NOT NULL,
+                    group_scope TEXT NOT NULL,
+                    requested_delta INTEGER NOT NULL,
+                    weighted_delta INTEGER NOT NULL,
+                    admitted_delta INTEGER NOT NULL,
+                    result_code TEXT NOT NULL,
+                    day_key TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(event_id,migration_epoch),
+                    FOREIGN KEY(identity_id) REFERENCES relationship_accounts(identity_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_group_admissions_window
+                    ON relationship_group_admissions(identity_id,source_scope,created_at);
+                CREATE INDEX IF NOT EXISTS idx_group_admissions_person_day
+                    ON relationship_group_admissions(identity_id,day_key);
+                CREATE INDEX IF NOT EXISTS idx_group_admissions_scope_day
+                    ON relationship_group_admissions(group_scope,day_key);
                 CREATE TABLE IF NOT EXISTS relationship_account_changes (
                     operation_id TEXT NOT NULL,
                     migration_epoch TEXT NOT NULL,
@@ -444,16 +477,25 @@ class RelationshipAccountStore:
                 "SELECT COUNT(*) AS count FROM relationship_events WHERE identity_id=?",
                 (context.identity_id,),
             ).fetchone()["count"])
+            admission_count = int(connection.execute(
+                "SELECT COUNT(*) AS count FROM relationship_group_admissions WHERE identity_id=?",
+                (context.identity_id,),
+            ).fetchone()["count"])
             change_count = int(connection.execute(
                 "SELECT COUNT(*) AS count FROM relationship_account_changes WHERE identity_id=?",
                 (context.identity_id,),
             ).fetchone()["count"])
             connection.execute("DELETE FROM relationship_events WHERE identity_id=?", (context.identity_id,))
+            connection.execute(
+                "DELETE FROM relationship_group_admissions WHERE identity_id=?",
+                (context.identity_id,),
+            )
             connection.execute("DELETE FROM relationship_account_changes WHERE identity_id=?", (context.identity_id,))
             connection.execute("DELETE FROM relationship_accounts WHERE identity_id=?", (context.identity_id,))
             result = {
                 "code": "relationship_account_tombstoned" if row is not None else "relationship_account_already_empty",
                 "event_count": event_count,
+                "admission_count": admission_count,
                 "change_count": change_count,
                 "last_revision": last_revision,
                 "reason_code": reason,
@@ -580,7 +622,8 @@ class RelationshipAccountStore:
         cap = normalize_relationship_positive_stage_cap_key(positive_stage_cap_key)
         totals, effective = self._validated_legacy_runtime(daily_totals, last_effective_at)
         if (
-            context.kind != "private" or not event or reason not in PRIVATE_EVENT_REASONS
+            context.kind != "private" or not event
+            or reason not in (PRIVATE_EVENT_REASONS | frozenset({GROUP_DIRECT_REASON}))
             or None in {requested, applied, before, after} or applied == 0
             or after - before != applied or not -1200 <= before <= 1200 or not -1200 <= after <= 1200
             or role not in ACCOUNT_ROLES or mode not in ACCOUNT_MODES
@@ -716,6 +759,200 @@ class RelationshipAccountStore:
             )
             return self._account_from_row(self._load_row(connection, context.identity_id))
 
+    @staticmethod
+    def _group_admission_result(row: sqlite3.Row) -> GroupAffinityAdmissionResult:
+        return GroupAffinityAdmissionResult(
+            event_id=str(row["event_id"]),
+            identity_id=str(row["identity_id"]),
+            code=str(row["result_code"]),
+            requested_delta=int(row["requested_delta"]),
+            weighted_delta=int(row["weighted_delta"]),
+            admitted_delta=int(row["admitted_delta"]),
+            source_scope=str(row["source_scope"]),
+        )
+
+    def _reserve_group_affinity_tx(
+        self,
+        connection: sqlite3.Connection,
+        context: NamespaceContext,
+        *,
+        event_id: str,
+        delta: int,
+        weight: float,
+        allow_group_affinity: bool,
+        group_daily_net_cap: int,
+        group_window_seconds: int,
+        group_window_absolute_cap: int,
+        group_person_daily_absolute_cap: int,
+        group_scope_daily_absolute_cap: int,
+        group_event_cap: int,
+        group_interaction_proof: dict[str, Any] | None,
+        now: float,
+    ) -> GroupAffinityAdmissionResult:
+        source_scope = _source_scope(context)
+        group_scope = "group:" + hashlib.sha256(
+            _canonical({"kind": context.kind, "group_id": context.group_id}).encode("utf-8")
+        ).hexdigest()[:24]
+        day_key = time.strftime("%Y-%m-%d", time.gmtime(now))
+        request = {
+            "identity_id": context.identity_id,
+            "source_scope": source_scope,
+            "delta": int(delta),
+            "weight": float(weight),
+            "allow_group_affinity": bool(allow_group_affinity),
+            "group_daily_net_cap": int(group_daily_net_cap),
+            "group_window_seconds": int(group_window_seconds),
+            "group_window_absolute_cap": int(group_window_absolute_cap),
+            "group_person_daily_absolute_cap": int(group_person_daily_absolute_cap),
+            "group_scope_daily_absolute_cap": int(group_scope_daily_absolute_cap),
+            "group_event_cap": int(group_event_cap),
+            "group_proof_hash": hashlib.sha256(
+                _canonical(group_interaction_proof).encode("utf-8")
+            ).hexdigest() if isinstance(group_interaction_proof, dict) else "",
+            "policy_version": context.policy_version,
+        }
+        request_hash = hashlib.sha256(_canonical(request).encode("utf-8")).hexdigest()
+        previous = connection.execute(
+            "SELECT * FROM relationship_group_admissions WHERE event_id=? AND migration_epoch=?",
+            (event_id, context.migration_epoch),
+        ).fetchone()
+        if previous is not None:
+            if previous["request_hash"] != request_hash:
+                raise RelationshipConflict("group_affinity_admission_conflict")
+            return self._group_admission_result(previous)
+
+        proof_ok, proof_code = validate_group_interaction_proof(
+            group_interaction_proof, context, event_id=event_id,
+        )
+        weighted = 0
+        admitted = 0
+        code = "group_global_settlement_disabled"
+        if allow_group_affinity and proof_ok:
+            event_cap = max(1, min(20, int(group_event_cap)))
+            bounded_delta = max(-event_cap, min(event_cap, int(delta)))
+            weighted = _weighted_integer(bounded_delta, min(float(weight), 0.25))
+            net_cap = max(0, min(20, int(group_daily_net_cap)))
+            current_net = int(connection.execute(
+                """SELECT COALESCE(SUM(admitted_delta),0) AS net
+                   FROM relationship_group_admissions
+                   WHERE identity_id=? AND source_scope=? AND day_key=?""",
+                (context.identity_id, source_scope, day_key),
+            ).fetchone()["net"])
+            admitted = max(-net_cap - current_net, min(net_cap - current_net, weighted))
+            window_seconds = max(60, min(86400, int(group_window_seconds)))
+            window_cap = max(0, min(20, int(group_window_absolute_cap)))
+            person_cap = max(0, min(120, int(group_person_daily_absolute_cap)))
+            scope_cap = max(0, min(1000, int(group_scope_daily_absolute_cap)))
+            window_used = int(connection.execute(
+                """SELECT COALESCE(SUM(ABS(admitted_delta)),0) AS used
+                   FROM relationship_group_admissions
+                   WHERE identity_id=? AND source_scope=? AND created_at>=?""",
+                (context.identity_id, source_scope, now - window_seconds),
+            ).fetchone()["used"])
+            person_used = int(connection.execute(
+                """SELECT COALESCE(SUM(ABS(admitted_delta)),0) AS used
+                   FROM relationship_group_admissions WHERE identity_id=? AND day_key=?""",
+                (context.identity_id, day_key),
+            ).fetchone()["used"])
+            scope_used = int(connection.execute(
+                """SELECT COALESCE(SUM(ABS(admitted_delta)),0) AS used
+                   FROM relationship_group_admissions WHERE group_scope=? AND day_key=?""",
+                (group_scope, day_key),
+            ).fetchone()["used"])
+            absolute_remaining = min(
+                max(0, window_cap - window_used),
+                max(0, person_cap - person_used),
+                max(0, scope_cap - scope_used),
+            )
+            if admitted:
+                admitted = (1 if admitted > 0 else -1) * min(abs(admitted), absolute_remaining)
+            if admitted == 0:
+                code = "group_affinity_budget_exhausted"
+            elif admitted != weighted:
+                code = "group_affinity_budget_clamped"
+            else:
+                code = "group_affinity_admitted"
+        elif allow_group_affinity:
+            code = proof_code
+        connection.execute(
+            """INSERT INTO relationship_group_admissions(
+                   event_id,migration_epoch,request_hash,identity_id,source_scope,group_scope,
+                   requested_delta,weighted_delta,admitted_delta,result_code,day_key,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                event_id, context.migration_epoch, request_hash, context.identity_id,
+                source_scope, group_scope, int(delta), weighted, admitted, code, day_key, now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM relationship_group_admissions WHERE event_id=? AND migration_epoch=?",
+            (event_id, context.migration_epoch),
+        ).fetchone()
+        assert row is not None
+        return self._group_admission_result(row)
+
+    def admit_group_event(
+        self,
+        context: NamespaceContext,
+        *,
+        event_id: str,
+        delta: int,
+        weight: float = 0.25,
+        allow_group_affinity: bool = False,
+        group_daily_net_cap: int = 2,
+        group_window_seconds: int = 30 * 60,
+        group_window_absolute_cap: int = 1,
+        group_person_daily_absolute_cap: int = 4,
+        group_scope_daily_absolute_cap: int = 20,
+        group_event_cap: int = 4,
+        group_interaction_proof: dict[str, Any] | None = None,
+    ) -> GroupAffinityAdmissionResult:
+        context = self._authorize(context, "relationship_write")
+        event = _token(event_id)
+        numeric_delta = _integer(delta)
+        try:
+            numeric_weight = float(weight)
+        except (TypeError, ValueError, OverflowError):
+            numeric_weight = -1.0
+        if context.kind != "group_member":
+            raise RelationshipAccessDenied("group_affinity_context_denied")
+        if not event or numeric_delta is None or numeric_delta == 0:
+            raise RelationshipStoreError("group_affinity_admission_invalid")
+        if not math.isfinite(numeric_weight) or numeric_weight < 0 or numeric_weight > 1:
+            raise RelationshipStoreError("relationship_event_weight_invalid")
+        with self._transaction() as connection:
+            self._load_row(connection, context.identity_id)
+            return self._reserve_group_affinity_tx(
+                connection, context, event_id=event, delta=numeric_delta,
+                weight=numeric_weight, allow_group_affinity=allow_group_affinity,
+                group_daily_net_cap=group_daily_net_cap,
+                group_window_seconds=group_window_seconds,
+                group_window_absolute_cap=group_window_absolute_cap,
+                group_person_daily_absolute_cap=group_person_daily_absolute_cap,
+                group_scope_daily_absolute_cap=group_scope_daily_absolute_cap,
+                group_event_cap=group_event_cap,
+                group_interaction_proof=group_interaction_proof,
+                now=float(self._clock()),
+            )
+
+    def group_admission(
+        self,
+        context: NamespaceContext,
+        *,
+        event_id: str,
+    ) -> GroupAffinityAdmissionResult | None:
+        context = self._authorize(context, "relationship_read")
+        event = _token(event_id)
+        if not event:
+            raise RelationshipStoreError("group_affinity_admission_invalid")
+        with self._connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM relationship_group_admissions
+                   WHERE event_id=? AND migration_epoch=? AND identity_id=?""",
+                (event, context.migration_epoch, context.identity_id),
+            ).fetchone()
+        return self._group_admission_result(row) if row is not None else None
+
     def apply_event(
         self,
         context: NamespaceContext,
@@ -802,66 +1039,24 @@ class RelationshipAccountStore:
             weighted = numeric_delta
             result_code = ""
             if context.kind == "group_member":
-                proof_ok, proof_code = validate_group_interaction_proof(
-                    group_interaction_proof,
-                    context,
-                    event_id=event,
-                )
                 if not allow_group_affinity or reason != GROUP_DIRECT_REASON:
                     weighted = 0
                     result_code = "group_global_settlement_disabled"
-                elif not proof_ok:
-                    weighted = 0
-                    result_code = proof_code
                 else:
-                    event_cap = max(1, min(20, int(group_event_cap)))
-                    bounded_delta = max(-event_cap, min(event_cap, numeric_delta))
-                    weighted = _weighted_integer(bounded_delta, min(numeric_weight, 0.25))
-                    cap = max(0, min(20, int(group_daily_net_cap)))
-                    net_row = connection.execute(
-                        """SELECT COALESCE(SUM(applied_delta),0) AS net FROM relationship_events
-                           WHERE identity_id=? AND source_scope=? AND day_key=? AND reason_code=?""",
-                        (context.identity_id, source_scope, day_key, GROUP_DIRECT_REASON),
-                    ).fetchone()
-                    current_net = int(net_row["net"])
-                    original_weighted = weighted
-                    weighted = max(-cap - current_net, min(cap - current_net, weighted))
-                    window_seconds = max(60, min(86400, int(group_window_seconds)))
-                    window_cap = max(0, min(20, int(group_window_absolute_cap)))
-                    person_cap = max(0, min(120, int(group_person_daily_absolute_cap)))
-                    scope_cap = max(0, min(1000, int(group_scope_daily_absolute_cap)))
-                    window_used = int(connection.execute(
-                        """SELECT COALESCE(SUM(ABS(applied_delta)),0) AS used
-                           FROM relationship_events
-                           WHERE identity_id=? AND source_scope=? AND reason_code=? AND created_at>=?""",
-                        (context.identity_id, source_scope, GROUP_DIRECT_REASON, now - window_seconds),
-                    ).fetchone()["used"])
-                    person_used = int(connection.execute(
-                        """SELECT COALESCE(SUM(ABS(applied_delta)),0) AS used
-                           FROM relationship_events
-                           WHERE identity_id=? AND source_kind='group_member'
-                             AND day_key=? AND reason_code=?""",
-                        (context.identity_id, day_key, GROUP_DIRECT_REASON),
-                    ).fetchone()["used"])
-                    scope_used = int(connection.execute(
-                        """SELECT COALESCE(SUM(ABS(applied_delta)),0) AS used
-                           FROM relationship_events
-                           WHERE group_scope=? AND day_key=? AND reason_code=?""",
-                        (group_scope, day_key, GROUP_DIRECT_REASON),
-                    ).fetchone()["used"])
-                    absolute_remaining = min(
-                        max(0, window_cap - window_used),
-                        max(0, person_cap - person_used),
-                        max(0, scope_cap - scope_used),
+                    admission = self._reserve_group_affinity_tx(
+                        connection, context, event_id=event, delta=numeric_delta,
+                        weight=numeric_weight, allow_group_affinity=True,
+                        group_daily_net_cap=group_daily_net_cap,
+                        group_window_seconds=group_window_seconds,
+                        group_window_absolute_cap=group_window_absolute_cap,
+                        group_person_daily_absolute_cap=group_person_daily_absolute_cap,
+                        group_scope_daily_absolute_cap=group_scope_daily_absolute_cap,
+                        group_event_cap=group_event_cap,
+                        group_interaction_proof=group_interaction_proof,
+                        now=now,
                     )
-                    if weighted:
-                        weighted = (1 if weighted > 0 else -1) * min(
-                            abs(weighted), absolute_remaining
-                        )
-                    if weighted == 0:
-                        result_code = "group_affinity_budget_exhausted"
-                    elif weighted != original_weighted:
-                        result_code = "group_affinity_budget_clamped"
+                    weighted = admission.admitted_delta
+                    result_code = admission.code
             if weighted == 0:
                 ledger_result = {
                     "changed": False,
@@ -982,6 +1177,7 @@ class RelationshipAccountStore:
 
 __all__ = [
     "ACCOUNT_MODES", "ACCOUNT_ROLES", "GROUP_DIRECT_REASON", "PRIVATE_EVENT_REASONS",
+    "GroupAffinityAdmissionResult",
     "RelationshipAccessDenied", "RelationshipAccountStore", "RelationshipConflict",
     "RelationshipEventResult", "RelationshipNotFound", "RelationshipStoreError",
 ]

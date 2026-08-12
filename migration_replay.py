@@ -115,8 +115,21 @@ class MigrationReplayWorker:
                 "score_before": payload.get("score_before"),
                 "score_after": payload.get("score_after"),
             }
+            if "group_admission_event_ref" in payload:
+                proof["group_admission_event_ref"] = payload.get("group_admission_event_ref") or ""
             if payload.get("legacy_event_hash") != _digest(proof):
                 raise MigrationReplayError("migration_replay_event_proof_mismatch")
+            if payload.get("reason_code") == "direct_group_interaction":
+                admission_ref = str(payload.get("group_admission_event_ref") or "").strip()
+                admission = self.relationship_store.group_admission(
+                    context, event_id=admission_ref,
+                ) if admission_ref else None
+                if (
+                    admission is None
+                    or admission.identity_id != context.identity_id
+                    or admission.admitted_delta != payload.get("applied_delta")
+                ):
+                    raise MigrationReplayError("migration_replay_group_admission_invalid")
             result = self.relationship_store.replay_legacy_event(
                 context,
                 event_id=item.event_id,

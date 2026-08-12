@@ -143,6 +143,7 @@ class MigrationDualWriteProducer:
         result: dict[str, Any],
         source_scope: str = "default",
         source_revision: int,
+        group_admission_event_id: str = "",
     ) -> dict[str, Any]:
         if not isinstance(user, dict) or not isinstance(result, dict):
             raise MigrationDualWriteError("dual_write_relationship_invalid")
@@ -163,6 +164,11 @@ class MigrationDualWriteProducer:
         score_after = _integer(entry.get("score_after"))
         if not event_key or not reason or None in {requested, applied, score_before, score_after}:
             raise MigrationDualWriteError("dual_write_relationship_entry_invalid")
+        admission_ref = _token(group_admission_event_id, 128)
+        if reason == "direct_group_interaction" and not admission_ref:
+            raise MigrationDualWriteError("dual_write_group_admission_missing")
+        if reason != "direct_group_interaction" and admission_ref:
+            raise MigrationDualWriteError("dual_write_group_admission_unexpected")
         role = "owner" if str(user.get("relationship_role") or "").strip().lower() == "owner" else "friend"
         mode = "owner_exclusive" if role == "owner" and str(user.get("relationship_mode") or "").strip().lower() == "owner_exclusive" else "normal"
         payload = {
@@ -174,6 +180,7 @@ class MigrationDualWriteProducer:
             "applied_delta": applied,
             "score_before": score_before,
             "score_after": score_after,
+            "group_admission_event_ref": admission_ref,
             "relationship_role": role,
             "relationship_mode": mode,
             **_relationship_runtime_state(user),
@@ -184,6 +191,7 @@ class MigrationDualWriteProducer:
                     "applied_delta": applied,
                     "score_before": score_before,
                     "score_after": score_after,
+                    "group_admission_event_ref": admission_ref,
                 }).encode("utf-8")
             ).hexdigest(),
         }
