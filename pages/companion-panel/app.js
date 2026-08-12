@@ -15050,6 +15050,7 @@ function renderUnifiedIdentityPanel(detail) {
         ${lifecycle.can_archive ? '<button type="button" data-identity-action="archive" class="danger">预览归档统一人物</button>' : ""}
         ${lifecycle.can_purge ? '<button type="button" data-identity-action="purge" class="danger">预览永久删除</button>' : ""}
       </div>
+      <div data-identity-lifecycle-preview class="notice-box" role="status" aria-live="polite" hidden></div>
       ${!lifecycle.can_unlink_current && lifecycle.can_archive ? '<p class="muted">当前是唯一或主身份，不能直接拆分；如需移除，请使用统一人物归档。</p>' : ""}
     </section>` : `<section class="detail-block"><header class="detail-block-head"><div><h2>${escapeHtml(pendingGuidance.title)}</h2><p>${escapeHtml(pendingGuidance.detail)}</p></div><span class="badge ${escapeHtml(pendingGuidance.tone)}">只读安全提示</span></header><p class="muted">当前页面不会提供猜测确认或忽略按钮；在没有精确平台身份时，任何人工合并都有串档风险。</p></section>`}
   `;
@@ -16761,6 +16762,38 @@ function identityOperationId(action) {
   return `page-${action}-${random}`.slice(0, 120);
 }
 
+function identityLifecyclePreviewHtml(action, result) {
+  const value = result && typeof result === "object" ? result : {};
+  const impact = value.impact && typeof value.impact === "object" ? value.impact : {};
+  if (action === "archive") {
+    return `
+      <b>归档影响预览</b>
+      <ul>
+        <li>${Number(value.active_identity_count || 0)} 个有效账号会解除关联并建立防重连标记；已解绑账号也会被锁定。</li>
+        <li>该人物的私聊域与各群成员域投影会被擦除；群共享记忆不归个人所有，不随之删除。</li>
+        <li>统一好感度账户会停用，${Number(value.group_overlay_count || 0)} 个群场景补充会移除，${Number(impact.migration_stream_count || 0)} 条迁移流会退役。</li>
+      </ul>
+      <p class="migration-warn">当前版本尚无自动恢复归档的全链路。7 天只是防止继续永久删除的保留期，不是可一键恢复窗口。</p>
+    `;
+  }
+  if (action === "purge") {
+    const eligible = value.eligible_at ? new Date(value.eligible_at) : null;
+    const eligibleText = eligible && Number.isFinite(eligible.getTime()) ? eligible.toLocaleString() : "";
+    if (value.code === "archive_retention_active") {
+      return `<b>仍在保留期</b><p>永久删除尚未开放${eligibleText ? `，最早可于 ${escapeHtml(eligibleText)} 再次预览` : ""}。当前归档标记保持不变。</p>`;
+    }
+    return `
+      <b>永久删除影响预览</b>
+      <ul>
+        <li>${Number(value.detached_identity_count || 0)} 个已解绑账号记录与 ${Number(value.binding_checkpoint_count || 0)} 个绑定检查点会被删除。</li>
+        <li>只按精确归属清理旧资料、已退役迁移流和统一人物主记录；不使用昵称或文本模糊匹配。</li>
+      </ul>
+      <p class="migration-warn">执行后页面和启动续执都无法恢复；仅在确认不再需要该人物资料时继续。</p>
+    `;
+  }
+  return `<b>${action === "relink" ? "恢复关联预览" : "解绑预览"}</b><p>只处理当前精确账号；人物关系账户与其他账号保持不变。</p>`;
+}
+
 function bindUnifiedIdentityActions(detail, refreshSelectedUserDetail) {
   document.querySelectorAll("[data-identity-action]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -16768,6 +16801,7 @@ function bindUnifiedIdentityActions(detail, refreshSelectedUserDetail) {
       const personId = String(detail?.identity_admin?.person_id || detail?.unified_person_id || "");
       if (!personId || !["relink", "unlink", "archive", "purge"].includes(action)) return;
       const endpoint = action === "relink" ? "/user/identity/link" : (action === "unlink" ? "/user/identity/unlink" : (action === "archive" ? "/user/identity/archive" : "/user/identity/delete"));
+      const previewPanel = button.closest(".detail-block")?.querySelector("[data-identity-lifecycle-preview]");
       const preview = button._identityLifecyclePreview;
       if (!preview) {
         const operationId = identityOperationId(action);
@@ -16780,6 +16814,14 @@ function bindUnifiedIdentityActions(detail, refreshSelectedUserDetail) {
           { reload: false },
         );
         const result = response?.result;
+        if (action === "purge" && result?.code === "archive_retention_active") {
+          if (previewPanel) {
+            previewPanel.innerHTML = identityLifecyclePreviewHtml(action, result);
+            previewPanel.hidden = false;
+          }
+          showToast("仍在归档保留期，尚不能永久删除", "error");
+          return;
+        }
         if (!result || result.ok !== true) {
           showToast(action === "unlink" ? "该身份不能安全自动拆分，需要保留或归档统一人物" : (action === "relink" ? "当前账号没有可安全恢复的精确身份" : "未能生成安全预览"), "error");
           return;
@@ -16788,6 +16830,10 @@ function bindUnifiedIdentityActions(detail, refreshSelectedUserDetail) {
           operationId,
           confirmationToken: String(result.confirmation_token || ""),
         };
+        if (previewPanel) {
+          previewPanel.innerHTML = identityLifecyclePreviewHtml(action, result);
+          previewPanel.hidden = false;
+        }
         const count = Number(result.active_identity_count ?? result.detached_identity_count ?? 0);
         button.textContent = action === "relink"
           ? `确认恢复（当前 ${Number(result.active_identity_count || 0)} 个有效身份）`

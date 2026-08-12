@@ -5,6 +5,7 @@ import asyncio
 import copy
 from copy import deepcopy
 from pathlib import Path
+import re
 import tempfile
 import types
 from typing import Any
@@ -114,6 +115,32 @@ def _load_page_delete():
 
 
 PAGE_DELETE, DELETE_REQUEST = _load_page_delete()
+
+
+def _load_page_lifecycle_sanitizer():
+    path = ROOT / "page_api_users_groups.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    owner = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "PrivateCompanionPageApiUsersGroupsMixin"
+    )
+    method = next(
+        copy.deepcopy(node) for node in owner.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_safe_person_lifecycle_result"
+    )
+    method.decorator_list = []
+    module = ast.Module(body=[method], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {
+        "Any": Any,
+        "re": re,
+        "_safe_int": lambda value, default=0: int(value) if str(value).lstrip("-").isdigit() else default,
+    }
+    exec(compile(module, str(path), "exec"), namespace)
+    return namespace["_safe_person_lifecycle_result"]
+
+
+PAGE_SAFE_LIFECYCLE = _load_page_lifecycle_sanitizer()
 
 
 def _identity(subject: str = "10001") -> dict[str, str]:
@@ -343,6 +370,7 @@ class PersonArchiveSagaTests(unittest.TestCase):
 
 class _PageHost:
     archive_unified_person = PAGE_ARCHIVE
+    _safe_person_lifecycle_result = staticmethod(PAGE_SAFE_LIFECYCLE)
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -406,6 +434,7 @@ class PersonArchivePageTests(unittest.TestCase):
         class Page:
             plugin = Service()
             delete_unified_person = PAGE_DELETE
+            _safe_person_lifecycle_result = staticmethod(PAGE_SAFE_LIFECYCLE)
 
             @staticmethod
             def _single_line(value: Any, limit: int) -> str:
@@ -427,6 +456,64 @@ class PersonArchivePageTests(unittest.TestCase):
         DELETE_REQUEST.payload = {"person_id": "person_a", "operation_id": "purge-2", "dry_run": False}
         self.assertFalse(asyncio.run(Page().delete_unified_person())["ok"])
         self.assertEqual(1, len(calls))
+
+    def test_page_lifecycle_result_is_minimal_and_retention_is_actionable(self) -> None:
+        raw = {
+            "ok": True,
+            "state": "prepared",
+            "code": "person_archive_prepared",
+            "confirmation_token": "c" * 64,
+            "active_identity_count": 2,
+            "group_overlay_count": 3,
+            "person_id": "person_secret",
+            "operation_id": "operation_secret",
+            "identity_key": "identity_secret",
+            "remote_receipt": {"payload": "secret"},
+        }
+        safe = PAGE_SAFE_LIFECYCLE(raw, "archive")
+        serialized = repr(safe)
+        self.assertEqual(2, safe["active_identity_count"])
+        self.assertEqual(3, safe["group_overlay_count"])
+        self.assertEqual(2, safe["impact"]["migration_stream_count"])
+        self.assertFalse(safe["impact"]["automatic_restore_available"])
+        for secret in ("person_secret", "operation_secret", "identity_secret", "payload"):
+            self.assertNotIn(secret, serialized)
+
+        calls: list[dict[str, Any]] = []
+
+        class Service:
+            async def purge_unified_person(self, person_id: str, **kwargs):
+                calls.append({"person_id": person_id, **kwargs})
+                return {
+                    "ok": False, "state": "retention", "code": "archive_retention_active",
+                    "eligible_at": "2030-01-02T03:04:05+00:00", "person_id": "person_secret",
+                }
+
+        class Page:
+            plugin = Service()
+            delete_unified_person = PAGE_DELETE
+            _safe_person_lifecycle_result = staticmethod(PAGE_SAFE_LIFECYCLE)
+
+            @staticmethod
+            def _single_line(value: Any, limit: int) -> str:
+                return " ".join(str(value or "").split())[:limit]
+
+            @staticmethod
+            def _ok(value: dict[str, Any]) -> dict[str, Any]:
+                return {"ok": True, "data": value}
+
+            @staticmethod
+            def _error(message: str) -> dict[str, Any]:
+                return {"ok": False, "error": message}
+
+        DELETE_REQUEST.payload = {"person_id": "person_a", "operation_id": "purge-wait", "dry_run": True}
+        response = asyncio.run(Page().delete_unified_person())
+        self.assertTrue(response["ok"])
+        result = response["data"]["result"]
+        self.assertFalse(result["ok"])
+        self.assertEqual("archive_retention_active", result["code"])
+        self.assertEqual("2030-01-02T03:04:05+00:00", result["eligible_at"])
+        self.assertNotIn("person_secret", repr(result))
 
 
 if __name__ == "__main__":

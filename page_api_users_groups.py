@@ -85,6 +85,46 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             "ambiguity_count": max(0, _safe_int(result.get("ambiguity_count"), 0)),
         }
 
+    @staticmethod
+    def _safe_person_lifecycle_result(result: dict[str, Any], action: str) -> dict[str, Any]:
+        """Expose lifecycle impact without leaking identity or storage keys."""
+        safe_action = action if action in {"archive", "purge"} else "archive"
+        safe = {
+            "ok": bool(result.get("ok")),
+            "state": str(result.get("state") or "pending")[:32],
+            "code": str(result.get("code") or f"person_{safe_action}_failed")[:80],
+            "changed": bool(result.get("changed")),
+            "active_identity_count": max(0, _safe_int(result.get("active_identity_count"), 0)),
+            "detached_identity_count": max(0, _safe_int(result.get("detached_identity_count"), 0)),
+            "group_overlay_count": max(0, _safe_int(result.get("group_overlay_count"), 0)),
+            "binding_checkpoint_count": max(0, _safe_int(result.get("binding_checkpoint_count"), 0)),
+        }
+        token = str(result.get("confirmation_token") or "")
+        if len(token) == 64 and re.fullmatch(r"[0-9a-f]{64}", token):
+            safe["confirmation_token"] = token
+        eligible_at = str(result.get("eligible_at") or "")[:40]
+        if eligible_at:
+            safe["eligible_at"] = eligible_at
+        if safe_action == "archive":
+            safe["impact"] = {
+                "identity_links": "detach_and_tombstone",
+                "scoped_private_and_group_member": "tombstone",
+                "relationship_account": "tombstone",
+                "group_overlays": "remove",
+                "migration_stream_count": 2,
+                "automatic_restore_available": False,
+                "purge_retention_days": 7,
+            }
+        else:
+            safe["impact"] = {
+                "detached_identity_links": "remove",
+                "binding_checkpoints": "remove",
+                "legacy_exact_records": "remove",
+                "retired_migration_streams": "remove",
+                "automatic_restore_available": False,
+            }
+        return safe
+
     def _identity_domain_summary(
         self, person_id: str, snapshot: dict[str, Any]
     ) -> dict[str, dict[str, Any]]:
@@ -566,7 +606,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             )
             if not result.get("ok"):
                 return self._error(str(result.get("code") or "人物归档失败"))
-            return self._ok({"result": result})
+            return self._ok({"result": self._safe_person_lifecycle_result(result, "archive")})
         except Exception as exc:
             logger.warning("[PrivateCompanionPage] 人物归档失败: %s", exc)
             return self._error("人物归档失败")
@@ -594,9 +634,10 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 confirmation_token=confirmation_token, dry_run=dry_run,
                 actor_id="page_administrator", reason_code="person_delete",
             )
-            if not result.get("ok"):
+            safe_result = self._safe_person_lifecycle_result(result, "purge")
+            if not result.get("ok") and result.get("code") != "archive_retention_active":
                 return self._error(str(result.get("code") or "人物删除失败"))
-            return self._ok({"result": result})
+            return self._ok({"result": safe_result})
         except Exception as exc:
             logger.warning("[PrivateCompanionPage] 人物删除失败: %s", exc)
             return self._error("人物删除失败")
