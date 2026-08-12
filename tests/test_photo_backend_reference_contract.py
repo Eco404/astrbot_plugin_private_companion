@@ -421,6 +421,53 @@ class PhotoBackendReferenceContractTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("Reference attachment availability override", _FakeWorkflow.latest.texts[0])
 
+    async def test_comfyui_strips_traditional_orchestration_envelope_before_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            generated = Path(directory) / "generated.png"
+            generated.write_bytes(b"generated")
+            module = SimpleNamespace(
+                _plugin_config={"debug_mode": False},
+                _get_server_config=lambda _config: ("127.0.0.1:8188", "client"),
+                _get_workflow_dir=lambda: directory,
+                find_workflow_file=lambda *_args: "workflow-text-1.json",
+                ComfyUIWorkflow=_FakeWorkflow,
+                _get_result_for_prompt=self._comfy_result,
+                _download_image_to_temp=self._comfy_download,
+            )
+
+            async def save_persistent(_temp_path, _session_key):
+                return str(generated)
+
+            module._save_image_to_persistent_path = save_persistent
+            harness = _ComfyHarness(module)
+            prompt = (
+                "Positive prompt:\n[User image request]\nuser request: 拍一张自拍\n\n"
+                "[Reference and wardrobe ruling]\nWardrobe decision: use the selected reference outfit.\n\n"
+                "[Scene, style and final preset]\npreserve character identity and stable appearance from available visual continuity\n"
+                "窗边, 阳光, 单人\n\nNegative prompt:\ntext, watermark"
+            )
+            path, note = await harness._run_comfyui_photo_workflow(
+                "selfie",
+                prompt,
+                session_key="comfy-traditional-envelope",
+            )
+
+        self.assertEqual(path, str(generated))
+        self.assertEqual(note, "ok")
+        self.assertEqual(_FakeWorkflow.latest.texts, ["拍一张自拍, 窗边, 阳光, 单人"])
+
+    def test_comfyui_prompt_sanitizer_handles_flattened_traditional_envelope(self) -> None:
+        prompt = (
+            "Positive prompt: [User image request] user request: 拍一张自拍 "
+            "[Reference and wardrobe ruling] Wardrobe decision: use the selected reference outfit. "
+            "[Scene, style and final preset] preserve character identity and stable appearance "
+            "from available visual continuity 窗边, 阳光, 单人 Negative prompt: text, watermark"
+        )
+
+        cleaned = ProactiveMessageMixin._comfyui_renderable_prompt_text(prompt)
+
+        self.assertEqual(cleaned, "拍一张自拍, 窗边, 阳光, 单人")
+
     async def test_nonexistent_backend_output_is_not_reported_as_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             missing = str(Path(directory) / "missing.png")

@@ -15009,6 +15009,74 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             return min(fallback, 1)
         return fallback
 
+    @staticmethod
+    def _comfyui_renderable_prompt_text(prompt_text: Any) -> str:
+        """Keep traditional orchestration envelopes out of local text encoders.
+
+        The normal photo pipeline already passes ``compile_local_photo_prompt``
+        output to ComfyUI. This final boundary guard also protects legacy call
+        sites and third-party extensions that still pass a traditional prompt
+        envelope directly to a Simple String/CLIP/T5 workflow node.
+        """
+        raw = str(prompt_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not raw:
+            return ""
+        looks_like_envelope = bool(
+            re.search(
+                r"(?i)(?:^|\n)\s*(?:positive|negative)\s+prompt\s*:|"
+                r"\[(?:User image request|Reference and wardrobe ruling|"
+                r"Scene, style and final preset|Composition and continuity)\]|"
+                r"\b(?:Wardrobe decision|Reference attachment availability override)\s*:",
+                raw,
+            )
+        )
+        if not looks_like_envelope:
+            return raw
+        positive = re.split(r"(?is)\bnegative\s+prompt\s*:\s*", raw, maxsplit=1)[0]
+        section_label = (
+            r"\[(?:User image request|Reference and wardrobe ruling|"
+            r"Scene, style and final preset|Composition and continuity)\]"
+        )
+        # Logs and some legacy callers flatten newlines. Restore boundaries for
+        # the known orchestration headings before selecting renderable lines.
+        positive = re.sub(rf"\s*({section_label})\s*", r"\n\1\n", positive, flags=re.I)
+        positive = re.sub(
+            r"(?is)\b(?:wardrobe\s+decision|reference\s+attachment\s+availability\s+override|"
+            r"subject-count\s+boundary)\s*:.*?(?=\n\s*\[|$)",
+            "",
+            positive,
+        )
+        values: list[str] = []
+        for raw_line in positive.split("\n"):
+            line = raw_line.strip()
+            if not line or re.fullmatch(section_label, line, re.I):
+                continue
+            line = re.sub(r"(?i)^\s*positive\s+prompt\s*:\s*", "", line)
+            line = re.sub(r"(?i)^\s*user\s+request\s*:\s*", "", line)
+            line = re.sub(r"(?i)^\s*resolved\s+selfie\s+scene\s+facts\s*:\s*", "", line)
+            line = re.sub(r"(?i)^\s*scene\s+preset\s*:\s*", "", line)
+            if re.match(
+                r"(?i)^(?:wardrobe\s+decision|reference\s+attachment\s+availability\s+override|"
+                r"subject-count\s+boundary)\s*:",
+                line,
+            ):
+                continue
+            line = re.split(
+                r"(?i)\s*an explicit scene or location in the current request overrides\b",
+                line,
+                maxsplit=1,
+            )[0]
+            line = re.sub(
+                r"(?i)\s*preserve character identity and stable appearance from available visual continuity\.?",
+                "",
+                line,
+            )
+            line = re.sub(r"\s+", " ", line).strip(" ,;，；.")
+            if line:
+                values.append(line)
+        cleaned = ", ".join(values).strip(" ,;，；.")
+        return cleaned or raw
+
     async def _select_photo_reference_image_async(
         self,
         workflow_kind: str,
@@ -15215,7 +15283,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 need = f"images={planned_reference_count}" if (use_reference_image or use_structured_assets) else "images=0"
                 return "", f"未找到匹配工作流 {workflow_name}（需要 texts>=1、{need}、videos=0）"
             submitted_prompt_text = self._photo_reference_prompt_for_backend_capacity(
-                prompt_text,
+                self._comfyui_renderable_prompt_text(prompt_text),
                 planned_count=planned_reference_count,
                 submitted_count=image_count,
                 include_metadata=False,
