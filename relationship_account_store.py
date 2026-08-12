@@ -8,6 +8,8 @@ Shadow reconciliation gate is accepted.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -134,7 +136,10 @@ def _source_scope(context: NamespaceContext) -> str:
 class RelationshipAccountStore:
     """SQLite Shadow store with atomic settlement and redacted provenance."""
 
-    def __init__(self, path: str | Path, *, active_migration_epoch: str, clock: Any = None) -> None:
+    def __init__(
+        self, path: str | Path, *, active_migration_epoch: str, clock: Any = None,
+        observability: Any = None,
+    ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._active_migration_epoch = _token(active_migration_epoch)
@@ -142,7 +147,13 @@ class RelationshipAccountStore:
             raise RelationshipStoreError("relationship_store_epoch_required")
         self._clock = clock if callable(clock) else time.time
         self._lock = threading.RLock()
+        self._observability = observability
+        self._account_cache: OrderedDict[str, tuple[int, dict[str, Any]]] = OrderedDict()
+        self._account_cache_limit = 2048
         self._initialize()
+
+    def set_observability(self, observability: Any) -> None:
+        self._observability = observability
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.path), timeout=15.0, isolation_level=None)
@@ -169,6 +180,7 @@ class RelationshipAccountStore:
                 yield connection
                 if connection.in_transaction:
                     connection.execute("COMMIT")
+                self._account_cache.clear()
             except Exception:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
@@ -1134,13 +1146,11 @@ class RelationshipAccountStore:
         context = self._authorize(context, "relationship_read")
         if context.kind != "private":
             raise RelationshipAccessDenied("relationship_detail_private_only")
-        with self._connection() as connection:
-            return self._account_from_row(self._load_row(connection, context.identity_id))
+        return self._cached_account(context.identity_id, namespace_kind=context.kind)
 
     def summary(self, context: NamespaceContext) -> dict[str, Any]:
         context = self._authorize(context, "relationship_read")
-        with self._connection() as connection:
-            account = self._account_from_row(self._load_row(connection, context.identity_id))
+        account = self._cached_account(context.identity_id, namespace_kind=context.kind)
         projection = relationship_stage_for_score(
             account["relationship_score"], previous_stage_key=account["relationship_stage_key"]
         )
@@ -1159,6 +1169,42 @@ class RelationshipAccountStore:
         if context.kind == "private":
             summary["score"] = account["relationship_score"]
         return summary
+
+    def _cached_account(self, identity_id: str, *, namespace_kind: str) -> dict[str, Any]:
+        """Revision-validated cache: external writers cannot leave a stale account readable."""
+        started = time.perf_counter()
+        outcome = "miss"
+        with self._lock:
+            with self._connection() as connection:
+                revision_row = connection.execute(
+                    "SELECT revision FROM relationship_accounts WHERE identity_id=?",
+                    (identity_id,),
+                ).fetchone()
+                if revision_row is None:
+                    raise RelationshipNotFound("relationship_account_missing")
+                revision = int(revision_row["revision"])
+                cached = self._account_cache.get(identity_id)
+                if cached is not None and cached[0] == revision:
+                    outcome = "hit"
+                    self._account_cache.move_to_end(identity_id)
+                    account = deepcopy(cached[1])
+                else:
+                    account = self._account_from_row(self._load_row(connection, identity_id))
+                    self._account_cache[identity_id] = (revision, deepcopy(account))
+                    self._account_cache.move_to_end(identity_id)
+                    if len(self._account_cache) > self._account_cache_limit:
+                        self._account_cache.popitem(last=False)
+                        if self._observability is not None:
+                            self._observability.cache_event(
+                                "relationship", "eviction", size=len(self._account_cache),
+                            )
+            size = len(self._account_cache)
+        if self._observability is not None:
+            self._observability.cache_event(
+                "relationship", outcome, namespace_kind=namespace_kind,
+                latency_ms=(time.perf_counter() - started) * 1000.0, size=size,
+            )
+        return account
 
     def audit_events(self, context: NamespaceContext, *, limit: int = 100) -> list[dict[str, Any]]:
         context = self._authorize(context, "relationship_read")

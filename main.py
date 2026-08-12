@@ -151,8 +151,10 @@ from .migration_backfill import MigrationBackfill, legacy_pending_reference
 from .migration_dual_write import MigrationDualWriteProducer
 from .migration_replay import MigrationReplayWorker
 from .migration_read_router import MigrationRelationshipReadRouter
+from .migration_stability import advance_migration_stability
 from .migration_source_inspector import inspect_migration_sources
 from .relationship_account_store import RelationshipAccountStore
+from .req041_observability import Req041Observability
 from .relationship_affinity_runtime import (
     admit_confirmed_group_affinity,
     normalize_group_allowlist,
@@ -2914,6 +2916,8 @@ class PrivateCompanionPlugin(
         initialize_plugin_config(self, config)
         initialize_plugin_runtime(self)
         initialize_plugin_post_runtime_state(self, config)
+        self.req041_observability = Req041Observability()
+        self._req041_runtime_boot_ref = f"boot-{id(self)}"
 
     async def _pull_body_monitor_candidates(self) -> dict[str, Any]:
         integration = getattr(self, "_body_monitor_integration", None)
@@ -5523,6 +5527,20 @@ class PrivateCompanionPlugin(
                 setattr(event, "req041_read_chain_id", "")
             except Exception:
                 pass
+            status = getattr(self, "req041_migration_status", None)
+            metrics = getattr(self, "req041_observability", None)
+            phase = str((status or {}).get("phase") or "") if isinstance(status, dict) else ""
+            now = _now_ts()
+            next_check = float(getattr(self, "_req041_stability_next_check_at", 0.0) or 0.0)
+            if phase in {"S6", "S7", "S8"} and metrics is not None and now >= next_check:
+                local_samples = sum(
+                    int((item.get("local") or {}).get("samples") or 0)
+                    for item in (metrics.snapshot().get("stages") or {}).values()
+                    if isinstance(item, dict)
+                )
+                if local_samples >= 20:
+                    self._req041_stability_next_check_at = now + 60.0
+                    self._req041_schedule_replay()
 
     async def _req041_run_replay_batch(self) -> None:
         worker = getattr(self, "req041_migration_replay", None)
@@ -5540,10 +5558,41 @@ class PrivateCompanionPlugin(
                         "s5": result,
                     })
                 return
+            runtime = getattr(self, "req041_migration_status", None)
+            coordinator = getattr(self, "req041_migration_coordinator", None)
+            outbox = getattr(self, "req041_migration_outbox", None)
+            if isinstance(runtime, dict) and coordinator is not None and outbox is not None:
+                try:
+                    stability_fn = advance_migration_stability
+                except NameError:
+                    from migration_stability import advance_migration_stability as stability_fn
+                control = coordinator.status()
+                scoped = runtime.get("scoped") if isinstance(runtime.get("scoped"), dict) else {}
+                stability = await asyncio.to_thread(
+                    stability_fn,
+                    coordinator=coordinator, outbox=outbox,
+                    migration_epoch=str(control.get("migration_epoch") or ""),
+                    replay_ok=True, scoped_ok=bool(scoped.get("ok")),
+                    memory_bound=bool(runtime.get("memory_bound")),
+                    observability=self.req041_observability,
+                    boot_ref=str(getattr(self, "_req041_runtime_boot_ref", f"boot-{id(self)}")),
+                )
+                control = coordinator.status()
+                runtime.update({"phase": control.get("phase", runtime.get("phase")),
+                                "checkpoint": control.get("checkpoint", runtime.get("checkpoint")),
+                                "stability": stability})
             if int(result.get("count") or 0) > 0 or int(result.get("recovered") or 0) > 0:
                 self._req041_replay_requested = True
 
     async def _req041_initialize_automatic_migration(self) -> None:
+        try:
+            metrics_type = Req041Observability
+        except NameError:  # Standalone migration harnesses load selected methods only.
+            from req041_observability import Req041Observability as metrics_type
+        if not isinstance(getattr(self, "req041_observability", None), metrics_type):
+            self.req041_observability = metrics_type()
+        if not str(getattr(self, "_req041_runtime_boot_ref", "") or ""):
+            self._req041_runtime_boot_ref = f"boot-{id(self)}"
         coordinator = getattr(self, "req041_migration_coordinator", None)
         outbox = getattr(self, "req041_migration_outbox", None)
         if coordinator is None or outbox is None:
@@ -5671,6 +5720,7 @@ class PrivateCompanionPlugin(
                 self.req041_migration_backfill = backfiller
                 self.req041_relationship_store = backfiller.relationships
                 relationship_store = backfiller.relationships
+                relationship_store.set_observability(self.req041_observability)
 
             replay_result: dict[str, Any] = {"status": "skipped", "code": "s5_not_ready"}
             if relationship_store is not None and backfill_result.get("ok"):
@@ -5691,6 +5741,7 @@ class PrivateCompanionPlugin(
                         enable_gap_recovery=True,
                         migration_epoch=epoch,
                         policy_version=policy,
+                        observability=self.req041_observability,
                     )
                     self.req041_migration_replay = replay_worker
                     await asyncio.to_thread(
@@ -5715,6 +5766,7 @@ class PrivateCompanionPlugin(
                             registry_resolver=self._req041_registry_for_person,
                             migration_epoch=epoch,
                             policy_version=policy,
+                            observability=self.req041_observability,
                         )
                         await asyncio.to_thread(
                             coordinator.prune_read_chains, older_than=_now_ts() - 3600
@@ -5775,6 +5827,7 @@ class PrivateCompanionPlugin(
                     ),
                     migration_epoch=epoch,
                     policy_version=policy,
+                    observability=self.req041_observability,
                 )
                 resumer = getattr(self, "_req041_resume_confirmed_person_archives", None)
                 if callable(resumer):
@@ -5828,6 +5881,24 @@ class PrivateCompanionPlugin(
                 "group_reset_resume": group_reset_resume,
                 "persona_reset_resume": persona_reset_resume,
             }
+            try:
+                stability_fn = advance_migration_stability
+            except NameError:
+                from migration_stability import advance_migration_stability as stability_fn
+            stability = await asyncio.to_thread(
+                stability_fn,
+                coordinator=coordinator, outbox=outbox, migration_epoch=epoch,
+                replay_ok=replay_result.get("status") == "ok",
+                scoped_ok=bool(scoped_result.get("ok")), memory_bound=bool(remote.get("ok")),
+                observability=self.req041_observability,
+                boot_ref=self._req041_runtime_boot_ref,
+            )
+            status = coordinator.status()
+            self.req041_migration_status.update({
+                "phase": status.get("phase", self.req041_migration_status.get("phase")),
+                "checkpoint": status.get("checkpoint", self.req041_migration_status.get("checkpoint")),
+                "stability": stability,
+            })
         except Exception as exc:
             status = coordinator.status()
             self.req041_migration_status = {
@@ -5856,6 +5927,7 @@ class PrivateCompanionPlugin(
         relationship_store = RelationshipAccountStore(
             Path(self.data_dir) / "req041_relationship.db",
             active_migration_epoch=epoch,
+            observability=self.req041_observability,
         )
         self.req041_relationship_store = relationship_store
         self.req041_dual_write_producer = MigrationDualWriteProducer(
@@ -5876,6 +5948,7 @@ class PrivateCompanionPlugin(
             enable_gap_recovery=True,
             migration_epoch=epoch,
             policy_version=policy,
+            observability=self.req041_observability,
         )
         self.req041_migration_replay = replay_worker
         await asyncio.to_thread(outbox.set_epoch_state, epoch, "active", checkpoint="fresh_runtime_active")
@@ -5886,6 +5959,7 @@ class PrivateCompanionPlugin(
             registry_resolver=self._req041_registry_for_person,
             migration_epoch=epoch,
             policy_version=policy,
+            observability=self.req041_observability,
         )
 
         remote = {"ok": False, "state": "degraded", "code": "memory_bridge_unavailable"}
@@ -5927,6 +6001,7 @@ class PrivateCompanionPlugin(
                 ),
                 migration_epoch=epoch,
                 policy_version=policy,
+                observability=self.req041_observability,
             )
             scoped_result = await self._req041_sync_scoped_now()
         ready = bool(

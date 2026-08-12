@@ -1028,6 +1028,7 @@ class PrivateCompanionPageApi(
                 "daily_outfit": self._daily_outfit_summary(data),
                 "token_stats": token_stats,
                 "multi_persona": getattr(self.plugin, "_multi_persona_status", lambda: {"enabled": False})(),
+                "req041": self._req041_runtime_summary(),
             }
             if not payload.get("multi_persona", {}).get("enabled"):
                 payload.pop("multi_persona", None)
@@ -1043,6 +1044,69 @@ class PrivateCompanionPageApi(
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取总览失败: {exc}", exc_info=True)
             return self._exception_error("获取总览失败")
+
+    def _req041_runtime_summary(self) -> dict[str, Any]:
+        """Build an aggregate-only migration and isolation status for administrators."""
+        runtime = getattr(self.plugin, "req041_migration_status", None)
+        runtime = runtime if isinstance(runtime, dict) else {}
+        coordinator = getattr(self.plugin, "req041_migration_coordinator", None)
+        outbox = getattr(self.plugin, "req041_migration_outbox", None)
+        control: dict[str, Any] = {}
+        aggregates: dict[str, Any] = {
+            "identities": [], "active_read_leases": 0,
+            "pending": {"total": 0, "reasons": []},
+        }
+        queue: dict[str, Any] = {"backlog": 0, "states": {}}
+        try:
+            if coordinator is not None:
+                control = coordinator.status()
+                summary_getter = getattr(coordinator, "safe_admin_summary", None)
+                if callable(summary_getter):
+                    aggregates = summary_getter()
+            epoch = str(control.get("migration_epoch") or "")
+            queue_getter = getattr(outbox, "safe_admin_summary", None)
+            if epoch and callable(queue_getter):
+                queue = queue_getter(epoch)
+        except Exception:
+            return {
+                "state": "degraded", "phase": "", "code": "admin_summary_unavailable",
+                "checkpoint": "", "required": bool(runtime.get("required")),
+                "migration": aggregates, "outbox": queue,
+                "observability": {}, "config_consistency": {},
+            }
+        state = str(runtime.get("state") or control.get("state") or "unknown")
+        phase = str(runtime.get("phase") or control.get("phase") or "")
+        pending_total = int((aggregates.get("pending") or {}).get("total") or 0)
+        observability = getattr(self.plugin, "req041_observability", None)
+        if observability is not None:
+            observability.migration(
+                state=state, phase=phase, backlog=int(queue.get("backlog") or 0),
+                pending=pending_total,
+                mismatches=int((observability.snapshot().get("counters") or {}).get("migration_mismatch") or 0),
+            )
+            metrics = observability.snapshot()
+        else:
+            metrics = {}
+        allowlist = getattr(self.plugin, "group_relationship_affinity_allowlist", [])
+        allowlist_count = len(allowlist) if isinstance(allowlist, (list, tuple, set, frozenset)) else 0
+        affinity_enabled = bool(getattr(self.plugin, "enable_group_relationship_affinity", False))
+        return {
+            "state": state if state in {"active", "replaying", "degraded", "paused", "complete"} else "unknown",
+            "phase": phase if phase in {"S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"} else "",
+            "code": _single_line(runtime.get("code") or control.get("error_code"), 120),
+            "checkpoint": _single_line(runtime.get("checkpoint") or control.get("checkpoint"), 120),
+            "required": bool(runtime.get("required")),
+            "migration": aggregates,
+            "outbox": queue,
+            "observability": metrics,
+            "config_consistency": {
+                "group_affinity_enabled": affinity_enabled,
+                "group_affinity_allowlist_count": allowlist_count,
+                "group_affinity_effective": bool(affinity_enabled and allowlist_count > 0),
+                "memory_bridge_bound": bool(runtime.get("memory_bound")),
+                "scoped_projection_ready": bool((runtime.get("scoped") or {}).get("ok")),
+            },
+        }
 
     def _token_overview_payload(self, usage: Any, balance_state: Any = None) -> dict[str, Any]:
         if not isinstance(usage, dict):

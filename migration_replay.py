@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from typing import Any
 
 from identity_namespace import build_namespace_context
@@ -40,6 +41,7 @@ class MigrationReplayWorker:
         enable_gap_recovery: bool = False,
         migration_epoch: str,
         policy_version: str,
+        observability: Any = None,
     ) -> None:
         self.outbox = outbox
         self.coordinator = coordinator
@@ -56,6 +58,7 @@ class MigrationReplayWorker:
         self.enable_gap_recovery = bool(enable_gap_recovery)
         self.migration_epoch = str(migration_epoch or "").strip()
         self.policy_version = str(policy_version or "").strip()
+        self.observability = observability
         if not self.migration_epoch or not self.policy_version:
             raise MigrationReplayError("migration_replay_contract_invalid")
 
@@ -523,29 +526,55 @@ class MigrationReplayWorker:
         return results
 
     def run_batch(self, *, limit: int = 100) -> dict[str, Any]:
+        started = time.perf_counter()
         applied: list[dict[str, Any]] = []
         try:
             recovered = self.recover_gaps()
         except Exception as exc:
             code = self._pause_reconciliation(exc)
+            self._observe_batch(started, mismatch=True)
             return {"status": "paused", "applied": applied, "error_code": code}
         for item in self.outbox.pending(self.migration_epoch, limit=limit):
             try:
                 applied.append(self.apply_one(item))
             except Exception as exc:
                 self._fail_closed(item, exc)
+                self._observe_batch(started, mismatch=True)
                 return {"status": "paused", "applied": applied, "error_code": str(exc).split(":", 1)[0]}
         try:
             reconciled = self.reconcile_all()
         except Exception as exc:
             code = self._pause_reconciliation(exc)
+            self._observe_batch(started, mismatch=True)
             return {"status": "paused", "applied": applied, "error_code": code}
         switched = self.switch_ready_identities()
+        self._observe_batch(started, mismatch=False)
         return {
             "status": "ok", "applied": applied, "count": len(applied),
             "recovered": recovered, "resolved_pending": self._last_resolved_pending,
             "reconciled": reconciled, "switched": switched,
         }
+
+    def _observe_batch(self, started: float, *, mismatch: bool) -> None:
+        if self.observability is None:
+            return
+        self.observability.observe(
+            "migration_replay", (time.perf_counter() - started) * 1000.0,
+        )
+        if mismatch:
+            self.observability.increment("migration_mismatch")
+        status = self.coordinator.status()
+        pending = self.coordinator.pending_summary()
+        backlog = sum(
+            self.outbox.backlog_for_stream(stream, self.migration_epoch)
+            for stream in self.outbox.stream_keys(self.migration_epoch)
+        )
+        self.observability.migration(
+            state="paused" if mismatch else str(status.get("state") or "active"),
+            phase=str(status.get("phase") or ""), backlog=backlog,
+            pending=int(pending.get("total") or 0),
+            mismatches=1 if mismatch else 0,
+        )
 
 
 __all__ = ["MigrationReplayError", "MigrationReplayWorker"]

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from typing import Any
 
 from identity_namespace import build_namespace_context
@@ -23,12 +24,14 @@ class MigrationRelationshipReadRouter:
         registry_resolver: Any,
         migration_epoch: str,
         policy_version: str,
+        observability: Any = None,
     ) -> None:
         self.coordinator = coordinator
         self.relationship_store = relationship_store
         self.registry_resolver = registry_resolver if callable(registry_resolver) else None
         self.migration_epoch = str(migration_epoch or "").strip()
         self.policy_version = str(policy_version or "").strip()
+        self.observability = observability
         if self.registry_resolver is None or not self.migration_epoch or not self.policy_version:
             raise MigrationReadError("migration_read_contract_invalid")
 
@@ -55,7 +58,10 @@ class MigrationRelationshipReadRouter:
         kind: str = "private",
         group_id: str = "",
     ) -> dict[str, Any]:
+        started = time.perf_counter()
         if not isinstance(user, dict):
+            if self.observability is not None:
+                self.observability.increment("runtime_error")
             return {"generation": "legacy", "chain_id": "", "user": user, "code": "legacy_user_invalid"}
         person_id = str(user.get("unified_person_id") or "").strip()
         if not person_id:
@@ -84,6 +90,19 @@ class MigrationRelationshipReadRouter:
             view = dict(user)
             if kind == "private":
                 account = self.relationship_store.account(context)
+                comparisons = {
+                    "relationship_role": account["relationship_role"],
+                    "relationship_mode": account["relationship_mode"],
+                    "relationship_score": account["relationship_score"],
+                    "relationship_positive_stage_cap_key": account["relationship_positive_stage_cap_key"],
+                }
+                if any(
+                    key in user and user.get(key) is not None and str(user.get(key)) != str(value)
+                    for key, value in comparisons.items()
+                ):
+                    if self.observability is not None:
+                        self.observability.increment("shadow_read_mismatch")
+                    raise MigrationReadError("migration_read_shadow_mismatch")
                 view.update({
                     "relationship_role": account["relationship_role"],
                     "relationship_mode": account["relationship_mode"],
@@ -101,6 +120,10 @@ class MigrationRelationshipReadRouter:
                     "req041_relationship_stage_key": summary["stage_key"],
                 })
             view["req041_read_generation"] = "new"
+            if self.observability is not None:
+                self.observability.observe(
+                    "permission_profile_relationship", (time.perf_counter() - started) * 1000.0,
+                )
             return {
                 "generation": "new", "chain_id": chain_id,
                 "identity_id": person_id, "user": view, "code": "new_generation",
@@ -111,6 +134,8 @@ class MigrationRelationshipReadRouter:
             if person_id and rolled_back:
                 try:
                     self.coordinator.rollback_identity(person_id, reason_code=code[:80])
+                    if self.observability is not None:
+                        self.observability.increment("identity_rollback")
                 except Exception:
                     pass
             chain_id = locals().get("chain_id", "")

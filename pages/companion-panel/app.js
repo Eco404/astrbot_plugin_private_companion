@@ -10449,6 +10449,7 @@ function renderDashboardLifeDesk(overview = {}) {
     const intensity = overview.proactive_intensity || {};
     const providers = overview.providers || {};
     const platformAdaptation = overview.platform_adaptation || {};
+    const req041 = overview.req041 || {};
     const platformProfiles = Array.isArray(platformAdaptation.profiles) ? platformAdaptation.profiles : [];
     const primaryPlatform = platformProfiles[0] || {};
     const proactiveLimit = intensity.effective?.max_daily_messages ?? privateInfo.max_daily_messages ?? 0;
@@ -10486,6 +10487,15 @@ function renderDashboardLifeDesk(overview = {}) {
           ? "QQ 官方 · 自动适配"
           : (primaryPlatform.label || "自动识别"),
         ready: Boolean(platformAdaptation.auto_detect),
+      },
+      {
+        tab: "troubleshooting",
+        label: "统一身份数据链路",
+        value: req041.phase
+          ? `${req041.phase} · ${Number(req041?.outbox?.backlog || 0)} 条待同步`
+          : "尚未初始化",
+        ready: ["active", "replaying", "complete"].includes(String(req041.state || ""))
+          && Number(req041?.outbox?.backlog || 0) === 0,
       },
     ];
     capabilityRoot.innerHTML = capabilities.map((item) => `
@@ -11406,6 +11416,7 @@ function renderTroubleshooting() {
   const checksEl = $("#troubleshootingChecks");
   const eventsEl = $("#troubleshootingEvents");
   const sqliteEl = $("#troubleshootingSqlite");
+  const req041El = $("#troubleshootingReq041");
   const chainEl = $("#troubleshootingChainTests");
   const injectionsEl = $("#troubleshootingPromptInjections");
   const debounceEl = $("#troubleshootingDebounceTrace");
@@ -11495,14 +11506,47 @@ function renderTroubleshooting() {
   if (faqEl) faqEl.innerHTML = troubleshootingFaqMarkup(data, category);
   const showSqlite = ["all", "reply"].includes(category);
   const showDebounce = ["all", "reply", "proactive"].includes(category);
+  const showReq041 = ["all", "reply"].includes(category);
+  const req041Card = req041El?.closest(".diagnostic-runtime-card");
   const sqliteCard = sqliteEl?.closest(".diagnostic-runtime-card");
   const debounceCard = debounceEl?.closest(".diagnostic-runtime-card");
   if (sqliteCard) sqliteCard.hidden = !showSqlite;
   if (debounceCard) debounceCard.hidden = !showDebounce;
-  if (runtimeStackEl) runtimeStackEl.hidden = !showSqlite && !showDebounce;
+  if (req041Card) req041Card.hidden = !showReq041;
+  if (runtimeStackEl) runtimeStackEl.hidden = !showSqlite && !showDebounce && !showReq041;
+  if (req041El) req041El.innerHTML = troubleshootingReq041Markup(state.overview?.req041 || {});
   if (debounceEl) {
     debounceEl.innerHTML = troubleshootingDebounceTraceMarkup(state.overview?.message_debounce || {});
   }
+}
+
+function troubleshootingReq041Markup(req041 = {}) {
+  const queue = req041.outbox || {};
+  const migration = req041.migration || {};
+  const config = req041.config_consistency || {};
+  const metrics = req041.observability || {};
+  const relationshipCache = metrics?.caches?.relationship || {};
+  const projectionCache = metrics?.caches?.scoped_projection || {};
+  const pending = Number(migration?.pending?.total || 0);
+  const backlog = Number(queue.backlog || 0);
+  const healthy = ["active", "replaying", "complete"].includes(String(req041.state || ""))
+    && backlog === 0 && pending === 0;
+  const hitRateText = (value) => value !== null && value !== undefined && Number.isFinite(Number(value))
+    ? `${Math.round(Number(value) * 100)}%`
+    : "等待样本";
+  const rows = [
+    ["迁移阶段", req041.phase ? `${req041.phase} · ${req041.state || "unknown"}` : "尚未初始化"],
+    ["同步队列", backlog ? `${backlog} 条待同步` : "无积压"],
+    ["待确认身份", pending ? `${pending} 条待处理` : "无待处理"],
+    ["关系缓存", `${hitRateText(relationshipCache.hit_rate)} · P95 ${Number(relationshipCache?.latency_ms?.p95 || 0).toFixed(1)}ms`],
+    ["隔离投影缓存", `${hitRateText(projectionCache.hit_rate)} · P95 ${Number(projectionCache?.latency_ms?.p95 || 0).toFixed(1)}ms`],
+    ["群好感度", config.group_affinity_effective ? `已限 ${Number(config.group_affinity_allowlist_count || 0)} 个测试群` : "关闭或白名单为空"],
+  ];
+  return rows.map(([name, text], index) => `
+    <section class="troubleshooting-sqlite-row ${index === 0 ? (healthy ? "ok" : "warn") : "info"}">
+      <b>${escapeHtml(name)}</b><span>${escapeHtml(text)}</span>
+    </section>
+  `).join("");
 }
 
 function troubleshootingProactiveIntensityMarkup(intensity = {}) {

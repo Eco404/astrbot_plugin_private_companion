@@ -44,8 +44,9 @@ class MigrationRelationshipReadRouterTests(unittest.TestCase):
         self.person_id = created["person_id"]
         self.user = {
             "user_id": "10001", "unified_person_id": self.person_id,
-            "relationship_role": "friend", "relationship_mode": "normal",
-            "relationship_score": 10,
+            "relationship_role": "owner", "relationship_mode": "normal",
+            "relationship_score": 777,
+            "relationship_positive_stage_cap_key": "deeply_bonded",
         }
         self.coordinator.register_identity(self.person_id, assurance="verified")
         self.store = RelationshipAccountStore(
@@ -89,7 +90,7 @@ class MigrationRelationshipReadRouterTests(unittest.TestCase):
         self.assertEqual("new", new_chain["generation"])
         self.assertEqual(777, new_chain["user"]["relationship_score"])
         self.assertEqual("owner", new_chain["user"]["relationship_role"])
-        self.assertEqual(10, self.user["relationship_score"])
+        self.assertEqual(777, self.user["relationship_score"])
         self.assertTrue(self.router.finish(first["chain_id"]))
         self.assertTrue(self.router.finish(new_chain["chain_id"]))
 
@@ -122,6 +123,16 @@ class MigrationRelationshipReadRouterTests(unittest.TestCase):
         status = self.coordinator.identity_status(self.person_id)
         self.assertEqual("legacy_read", status["state"])
         self.assertEqual("legacy", status["read_generation"])
+
+    def test_shadow_value_mismatch_fails_closed_and_rolls_back_identity(self) -> None:
+        self._stabilize()
+        self.coordinator.switch_identity_to_new_read(self.person_id, required_stable_cycles=2)
+        stale = {**self.user, "relationship_score": 10}
+        result = self.router.begin(stale, event_ref="shadow-mismatch")
+        self.assertEqual("legacy", result["generation"])
+        self.assertEqual("migration_read_shadow_mismatch", result["code"])
+        self.assertTrue(result["rolled_back"])
+        self.assertEqual("legacy", self.coordinator.identity_status(self.person_id)["read_generation"])
 
     def test_corrupt_person_pointer_cannot_roll_back_another_identity(self) -> None:
         self._stabilize()

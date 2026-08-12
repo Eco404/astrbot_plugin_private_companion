@@ -596,6 +596,35 @@ class MigrationCoordinator:
         items = [dict(row) for row in rows]
         return {"total": sum(int(item["count"]) for item in items), "reasons": items}
 
+    def safe_admin_summary(self) -> dict[str, Any]:
+        """Return aggregate migration state without identity or source values."""
+        with self._connection() as connection:
+            identity_rows = connection.execute(
+                """SELECT assurance,state,read_generation,COUNT(*) AS count,
+                          SUM(backlog) AS backlog,MAX(stable_cycles) AS max_stable_cycles
+                   FROM migration_identities
+                   GROUP BY assurance,state,read_generation
+                   ORDER BY assurance,state,read_generation"""
+            ).fetchall()
+            lease_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM migration_read_leases"
+            ).fetchone()
+        return {
+            "identities": [
+                {
+                    "assurance": str(row["assurance"]),
+                    "state": str(row["state"]),
+                    "read_generation": str(row["read_generation"]),
+                    "count": int(row["count"] or 0),
+                    "backlog": int(row["backlog"] or 0),
+                    "max_stable_cycles": int(row["max_stable_cycles"] or 0),
+                }
+                for row in identity_rows
+            ],
+            "active_read_leases": int(lease_count["count"] or 0) if lease_count else 0,
+            "pending": self.pending_summary(),
+        }
+
     def reconcile_identity(
         self, identity_id: str, *, source_revision: int, target_revision: int,
         source_hash: str, target_hash: str, backlog: int,

@@ -263,6 +263,31 @@ class MigrationOutbox:
             ).fetchone()
         return dict(row) if row is not None else {}
 
+    def safe_admin_summary(self, migration_epoch: str) -> dict[str, Any]:
+        """Return aggregate queue health; payloads and stream keys stay private."""
+        epoch = _token(migration_epoch)
+        now = float(self._clock())
+        with self._connection() as conn:
+            rows = conn.execute(
+                """SELECT state,COUNT(*) AS count,MIN(created_at) AS oldest_created_at,
+                          MAX(retry_count) AS max_retry_count
+                   FROM outbox WHERE migration_epoch=? GROUP BY state ORDER BY state""",
+                (epoch,),
+            ).fetchall()
+        states = {
+            str(row["state"]): {
+                "count": int(row["count"] or 0),
+                "oldest_age_ms": round(max(0.0, now - float(row["oldest_created_at"] or now)) * 1000.0, 3),
+                "max_retry_count": int(row["max_retry_count"] or 0),
+            }
+            for row in rows
+        }
+        backlog = sum(
+            int(item.get("count") or 0)
+            for state, item in states.items() if state in {"pending", "failed"}
+        )
+        return {"backlog": backlog, "states": states}
+
     def set_epoch_state(self, migration_epoch: str, state: str, *, checkpoint: str | None = None) -> dict[str, Any]:
         epoch = _token(migration_epoch)
         if state not in MIGRATION_STATES:

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import threading
+import time
 from typing import Any, Callable
 
 from identity_namespace import NamespaceContext
@@ -125,6 +126,7 @@ class ScopedProjectionSynchronizer:
         tombstone_identity_scopes: Callable[..., dict[str, Any]] | None = None,
         erase_group_scopes: Callable[..., dict[str, Any]] | None = None,
         erase_persona_scopes: Callable[..., dict[str, Any]] | None = None,
+        observability: Any = None,
     ) -> None:
         self._read = read
         self._list = list_records
@@ -142,10 +144,17 @@ class ScopedProjectionSynchronizer:
         self._state_lock = threading.RLock()
         self._ready_scopes: set[str] = set()
         self._projection_cache: dict[str, dict[str, Any]] = {}
+        self._observability = observability
 
     def mark_dirty(self) -> None:
         with self._state_lock:
+            evicted = len(self._projection_cache)
             self._ready_scopes.clear()
+            self._projection_cache.clear()
+        if evicted and self._observability is not None:
+            self._observability.cache_event(
+                "scoped_projection", "eviction", size=0,
+            )
 
     def is_ready(self, context: NamespaceContext) -> bool:
         with self._state_lock:
@@ -507,6 +516,7 @@ class ScopedProjectionSynchronizer:
         return records, list(contexts.values())
 
     def sync_snapshot(self, snapshot: dict[str, Any], *, source_scope: str = "default") -> dict[str, Any]:
+        started = time.perf_counter()
         records, contexts = self.build_records(snapshot, source_scope=source_scope)
         desired: dict[tuple[str, str], set[str]] = {}
         counts = {"created": 0, "updated": 0, "unchanged": 0, "cleared": 0, "tombstoned": 0, "errors": 0}
@@ -590,6 +600,15 @@ class ScopedProjectionSynchronizer:
                 self._ready_scopes.difference_update(involved_scopes)
                 for scope in involved_scopes:
                     self._projection_cache.pop(scope, None)
+            cache_size = len(self._projection_cache)
+        if self._observability is not None:
+            self._observability.observe(
+                "scoped_sync", (time.perf_counter() - started) * 1000.0, external=True,
+            )
+            self._observability.cache_event(
+                "scoped_projection", "cold_start" if counts["errors"] == 0 else "stale_reject",
+                size=cache_size,
+            )
         return {
             "ok": counts["errors"] == 0,
             "code": "scoped_projection_synced" if counts["errors"] == 0 else "scoped_projection_degraded",
@@ -600,11 +619,24 @@ class ScopedProjectionSynchronizer:
         }
 
     def read_projection(self, context: NamespaceContext) -> dict[str, Any]:
+        started = time.perf_counter()
         scope = context.cache_scope()
         with self._state_lock:
             if scope not in self._ready_scopes:
+                if self._observability is not None:
+                    self._observability.cache_event(
+                        "scoped_projection", "stale_reject", namespace_kind=context.kind,
+                        latency_ms=(time.perf_counter() - started) * 1000.0,
+                        size=len(self._projection_cache),
+                    )
                 return {"ok": False, "code": "scoped_projection_not_reconciled", "fields": {}}
             fields = deepcopy(self._projection_cache.get(scope, {}))
+            cache_size = len(self._projection_cache)
+        if self._observability is not None:
+            self._observability.cache_event(
+                "scoped_projection", "hit", namespace_kind=context.kind,
+                latency_ms=(time.perf_counter() - started) * 1000.0, size=cache_size,
+            )
         return {"ok": True, "code": "scoped_projection_read", "fields": fields}
 
     def archive_identity_scopes(
