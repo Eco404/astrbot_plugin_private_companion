@@ -1196,6 +1196,7 @@ const featureMeta = {
   enable_proactive_only_mode: ["仅保留主动能力", "只让本插件负责主动私聊调度、生成和发送；普通私聊/群聊放行给默认主链或其他插件。"],
   enable_multi_persona_mode: ["多人格支持模式", "按人格隔离资料、日程、状态、日记、用户、群聊和 Token；同一窗口固定使用一个人格，避免串人格。"],
   enable_custom_relationship_stage_policy: ["启用好感度系统", "关闭后不记账、不更新关系或当前互动、不注入关系表达；用户档案和画像仍会更新，已有关系数据会保留。"],
+  enable_group_relationship_affinity: ["测试群贡献好感度", "默认关闭；只允许白名单测试群中明确 @/引用 Bot 且回复成功的正式用户事件按低权重结算。"],
   enable_relationship_content_tiers: ["关系内容尺度", "把日常、含蓄暧昧和成人私密内容纳入同一表达决策；关系阶段只是必要条件，不会自动授权。"],
   enable_auto_user_profile_creation: ["用户档案", "首次收到符合范围的真实消息时自动建立统一用户档案；不会自动授予私聊陪伴或主动联系权限。"],
   enable_mai_style_integration: ["私聊互动策略", "把相处分寸、偏好和本轮接话方式注入回复。"],
@@ -1785,6 +1786,13 @@ const configLabels = {
   owner_exclusive_tone: "主要用户专属基础表达",
   owner_exclusive_address_style: "主要用户专属称呼尺度",
   owner_exclusive_proactive_limit: "主要用户专属主动阶段上限",
+  enable_group_relationship_affinity: "允许测试群贡献统一好感度",
+  group_relationship_affinity_allowlist: "好感度测试群白名单",
+  group_relationship_daily_net_cap: "每人每群每日净变化上限",
+  group_relationship_window_minutes: "群好感度滚动窗口（分钟）",
+  group_relationship_window_absolute_cap: "每人每群窗口绝对量上限",
+  group_relationship_person_daily_absolute_cap: "每人跨群每日绝对量上限",
+  group_relationship_scope_daily_absolute_cap: "每群全体每日绝对量上限",
   relationship_event_window_minutes: "同类事件合并窗口（分钟）",
   relationship_positive_event_cap: "单次正向事件上限",
   relationship_negative_event_cap: "单次负向事件上限",
@@ -2450,6 +2458,13 @@ const configDescriptions = {
   owner_exclusive_tone: "专属关系的长期表达基线；当前互动状态仍可使本轮收敛。",
   owner_exclusive_address_style: "优先沿用双方已确认的专属称呼。",
   owner_exclusive_proactive_limit: "阶段硬上限，实际次数仍取全局、用户、阶段和动态额度的最小值。",
+  enable_group_relationship_affinity: "高风险实验开关，默认关闭；即使开启，空白名单仍表示全部禁止。普通群消息、转发、回流和发送失败永远不计分。",
+  group_relationship_affinity_allowlist: "逐行填写允许试运行的群 ID；空列表不会解释为全部群。",
+  group_relationship_daily_net_cap: "限制同一人在同一群一天内的净变化，正负绝对量还会受下面三层预算约束。",
+  group_relationship_window_minutes: "滚动窗口长度，同一人与同一群在窗口内共享绝对量额度。",
+  group_relationship_window_absolute_cap: "正负变化都占用额度，防止往返刷量。",
+  group_relationship_person_daily_absolute_cap: "同一人在所有测试群的每日绝对变化总额。",
+  group_relationship_scope_daily_absolute_cap: "一个测试群内所有用户的每日绝对变化总额。",
   relationship_event_window_minutes: "同一用户的同类互动在该时间内只按一个关系事件结算，避免连续短消息重复刷分。",
   relationship_positive_event_cap: "单个正向事件最多增加的长期亲密度；最终仍受每日正向增长上限约束。",
   relationship_negative_event_cap: "单个负向事件最多降低的长期亲密度。",
@@ -3123,6 +3138,13 @@ const featureSettingGroups = {
     "owner_exclusive_tone",
     "owner_exclusive_address_style",
     "owner_exclusive_proactive_limit",
+    "enable_group_relationship_affinity",
+    "group_relationship_affinity_allowlist",
+    "group_relationship_daily_net_cap",
+    "group_relationship_window_minutes",
+    "group_relationship_window_absolute_cap",
+    "group_relationship_person_daily_absolute_cap",
+    "group_relationship_scope_daily_absolute_cap",
     "relationship_event_window_minutes",
     "relationship_positive_event_cap",
     "relationship_negative_event_cap",
@@ -3293,6 +3315,11 @@ const featureSettingSections = {
       title: "关系账本与自然回落",
       note: "所有自动增减统一去重、限幅并记入账本；回落只让正分向 0 靠近。",
       keys: ["relationship_event_window_minutes", "relationship_positive_event_cap", "relationship_negative_event_cap", "relationship_positive_daily_cap", "relationship_decay_grace_days", "relationship_decay_early_per_day", "relationship_decay_middle_per_day", "relationship_decay_late_per_day"],
+    },
+    {
+      title: "测试群低权重结算",
+      note: "默认关闭且必须填写测试群；只在 Bot 确认回复后预留预算，再沿耐崩溃统一账本链结算。",
+      keys: ["enable_group_relationship_affinity", "group_relationship_affinity_allowlist", "group_relationship_daily_net_cap", "group_relationship_window_minutes", "group_relationship_window_absolute_cap", "group_relationship_person_daily_absolute_cap", "group_relationship_scope_daily_absolute_cap"],
     },
     {
       title: "互动状态事件",
@@ -4071,6 +4098,13 @@ const featureSettingTypes = {
   adult_content_require_affectionate: { type: "checkbox" },
   ADULT_CONTENT_PROVIDER_ID: { type: "provider" },
   owner_exclusive_proactive_limit: { type: "number", min: 0, max: 30, step: 1 },
+  enable_group_relationship_affinity: { type: "checkbox" },
+  group_relationship_affinity_allowlist: { type: "textarea" },
+  group_relationship_daily_net_cap: { type: "number", min: 0, max: 20, step: 1 },
+  group_relationship_window_minutes: { type: "number", min: 1, max: 1440, step: 1 },
+  group_relationship_window_absolute_cap: { type: "number", min: 0, max: 20, step: 1 },
+  group_relationship_person_daily_absolute_cap: { type: "number", min: 0, max: 120, step: 1 },
+  group_relationship_scope_daily_absolute_cap: { type: "number", min: 0, max: 1000, step: 1 },
   relationship_event_window_minutes: { type: "number", min: 1, max: 1440, step: 1 },
   relationship_positive_event_cap: { type: "number", min: 1, max: 30, step: 1 },
   relationship_negative_event_cap: { type: "number", min: 1, max: 60, step: 1 },
@@ -10415,6 +10449,7 @@ function renderDashboardLifeDesk(overview = {}) {
     const intensity = overview.proactive_intensity || {};
     const providers = overview.providers || {};
     const platformAdaptation = overview.platform_adaptation || {};
+    const req041 = overview.req041 || {};
     const platformProfiles = Array.isArray(platformAdaptation.profiles) ? platformAdaptation.profiles : [];
     const primaryPlatform = platformProfiles[0] || {};
     const proactiveLimit = intensity.effective?.max_daily_messages ?? privateInfo.max_daily_messages ?? 0;
@@ -10452,6 +10487,15 @@ function renderDashboardLifeDesk(overview = {}) {
           ? "QQ 官方 · 自动适配"
           : (primaryPlatform.label || "自动识别"),
         ready: Boolean(platformAdaptation.auto_detect),
+      },
+      {
+        tab: "troubleshooting",
+        label: "统一身份数据链路",
+        value: req041.phase
+          ? `${req041.phase} · ${Number(req041?.outbox?.backlog || 0)} 条待同步`
+          : "尚未初始化",
+        ready: ["active", "replaying", "complete"].includes(String(req041.state || ""))
+          && Number(req041?.outbox?.backlog || 0) === 0,
       },
     ];
     capabilityRoot.innerHTML = capabilities.map((item) => `
@@ -11372,6 +11416,7 @@ function renderTroubleshooting() {
   const checksEl = $("#troubleshootingChecks");
   const eventsEl = $("#troubleshootingEvents");
   const sqliteEl = $("#troubleshootingSqlite");
+  const req041El = $("#troubleshootingReq041");
   const chainEl = $("#troubleshootingChainTests");
   const injectionsEl = $("#troubleshootingPromptInjections");
   const debounceEl = $("#troubleshootingDebounceTrace");
@@ -11461,14 +11506,47 @@ function renderTroubleshooting() {
   if (faqEl) faqEl.innerHTML = troubleshootingFaqMarkup(data, category);
   const showSqlite = ["all", "reply"].includes(category);
   const showDebounce = ["all", "reply", "proactive"].includes(category);
+  const showReq041 = ["all", "reply"].includes(category);
+  const req041Card = req041El?.closest(".diagnostic-runtime-card");
   const sqliteCard = sqliteEl?.closest(".diagnostic-runtime-card");
   const debounceCard = debounceEl?.closest(".diagnostic-runtime-card");
   if (sqliteCard) sqliteCard.hidden = !showSqlite;
   if (debounceCard) debounceCard.hidden = !showDebounce;
-  if (runtimeStackEl) runtimeStackEl.hidden = !showSqlite && !showDebounce;
+  if (req041Card) req041Card.hidden = !showReq041;
+  if (runtimeStackEl) runtimeStackEl.hidden = !showSqlite && !showDebounce && !showReq041;
+  if (req041El) req041El.innerHTML = troubleshootingReq041Markup(state.overview?.req041 || {});
   if (debounceEl) {
     debounceEl.innerHTML = troubleshootingDebounceTraceMarkup(state.overview?.message_debounce || {});
   }
+}
+
+function troubleshootingReq041Markup(req041 = {}) {
+  const queue = req041.outbox || {};
+  const migration = req041.migration || {};
+  const config = req041.config_consistency || {};
+  const metrics = req041.observability || {};
+  const relationshipCache = metrics?.caches?.relationship || {};
+  const projectionCache = metrics?.caches?.scoped_projection || {};
+  const pending = Number(migration?.pending?.total || 0);
+  const backlog = Number(queue.backlog || 0);
+  const healthy = ["active", "replaying", "complete"].includes(String(req041.state || ""))
+    && backlog === 0 && pending === 0;
+  const hitRateText = (value) => value !== null && value !== undefined && Number.isFinite(Number(value))
+    ? `${Math.round(Number(value) * 100)}%`
+    : "等待样本";
+  const rows = [
+    ["迁移阶段", req041.phase ? `${req041.phase} · ${req041.state || "unknown"}` : "尚未初始化"],
+    ["同步队列", backlog ? `${backlog} 条待同步` : "无积压"],
+    ["待确认身份", pending ? `${pending} 条待处理` : "无待处理"],
+    ["关系缓存", `${hitRateText(relationshipCache.hit_rate)} · P95 ${Number(relationshipCache?.latency_ms?.p95 || 0).toFixed(1)}ms`],
+    ["隔离投影缓存", `${hitRateText(projectionCache.hit_rate)} · P95 ${Number(projectionCache?.latency_ms?.p95 || 0).toFixed(1)}ms`],
+    ["群好感度", config.group_affinity_effective ? `已限 ${Number(config.group_affinity_allowlist_count || 0)} 个测试群` : "关闭或白名单为空"],
+  ];
+  return rows.map(([name, text], index) => `
+    <section class="troubleshooting-sqlite-row ${index === 0 ? (healthy ? "ok" : "warn") : "info"}">
+      <b>${escapeHtml(name)}</b><span>${escapeHtml(text)}</span>
+    </section>
+  `).join("");
 }
 
 function troubleshootingProactiveIntensityMarkup(intensity = {}) {
@@ -14694,7 +14772,7 @@ function renderRelationshipStatus(detail) {
   return `
     <section class="companion-intimacy-card">
       <div class="companion-intimacy-head">
-        <div><span class="relationship-kicker">长期好感度</span><h3>关系阶段与当前相处状态</h3><p>${escapeHtml(exclusive ? "主要用户专属固定关系，不参与自动增减或自然回落。" : "上方是长期关系阶段与分数；下方是这一刻的七档互动语气，两者共同影响主动陪伴。")}</p></div>
+        <div><span class="relationship-kicker">长期好感度</span><h3>亲密度与互动表达</h3><p>${escapeHtml(exclusive ? "主要用户专属固定关系，不参与自动增减或自然回落。" : "上方是长期关系阶段与分数；下方是这一刻的七档互动语气，两者共同影响主动陪伴。")}</p></div>
         <div class="companion-intimacy-current"><strong>${escapeHtml(exclusive ? (ownerProjection.label || "专属联结") : (phase.label || "初识"))}</strong><span>${exclusive ? "固定" : escapeHtml(value)}</span></div>
       </div>
       ${relationshipStageBar(stages, currentKey, value, isOwner)}
@@ -14787,7 +14865,7 @@ async function renderUserDetail(forceFetch = false) {
     </header>
     <div class="user-detail-summary"><span class="badge ${detail.proactive_private_enabled ? "ok" : "off"}">${detail.proactive_private_enabled ? "主动权限已开启" : "主动权限未开启"}</span><span class="muted">最近互动 ${escapeHtml(detail.last_seen || "暂无")}</span></div>
     <nav class="user-detail-tabs" role="tablist" aria-label="用户详情视图">
-      ${[["overview","概览"],["relationship","关系"],["proactive","主动陪伴"],["memory","记忆与学习"],["diagnostics","诊断"]].map(([key,label]) => `<button type="button" role="tab" data-user-detail-view="${key}" aria-selected="${state.userDetailView === key ? "true" : "false"}" class="${state.userDetailView === key ? "is-active" : ""}">${label}</button>`).join("")}
+      ${[["overview","概览"],["identity","身份与隔离"],["relationship","关系"],["proactive","主动陪伴"],["memory","记忆与学习"],["diagnostics","诊断"]].map(([key,label]) => `<button type="button" role="tab" data-user-detail-view="${key}" aria-selected="${state.userDetailView === key ? "true" : "false"}" class="${state.userDetailView === key ? "is-active" : ""}">${label}</button>`).join("")}
     </nav>
     <section class="user-detail-view ${state.userDetailView === "overview" ? "is-active" : "is-hidden"}" data-user-detail-panel="overview">
       ${renderUserViewOverview("用户概览", "集中查看身份、最近互动和仍需延续的对话线索。", [["关系阶段", relationshipLabel], ["今日主动", `${detail.sent_today || 0} / ${proactiveLimitLabel}`], ["未完话头", String(openLoopCount)]])}
@@ -14811,6 +14889,10 @@ async function renderUserDetail(forceFetch = false) {
     </div>
       ${detailBlock("最近对话", "", [["用户消息", detail.last_user_message || ""], ["陪伴回复", detail.last_companion_message || ""]])}
       ${renderOpenLoopBlock(detail)}
+    </section>
+    <section class="user-detail-view ${state.userDetailView === "identity" ? "is-active" : "is-hidden"}" data-user-detail-panel="identity">
+      ${renderUserViewOverview("身份与隔离", "确认同一人物、统一关系账户与分域记忆是否处于安全状态。", [["身份", identityAssuranceLabel(detail.identity_admin?.identity_assurance)], ["读取", detail.identity_admin?.migration?.read_generation === "new" ? "统一账户" : "兼容旧数据"], ["私聊域", detail.identity_admin?.domains?.private?.status === "ready" ? "已就绪" : "对账中"]])}
+      ${renderUnifiedIdentityPanel(detail)}
     </section>
     <section class="user-detail-view ${state.userDetailView === "relationship" ? "is-active" : "is-hidden"}" data-user-detail-panel="relationship">
       ${renderUserViewOverview("关系与互动", "分别管理长期关系阶段和当前互动语气，避免把短期情绪误当成长期关系。", [["长期阶段", relationshipLabel], ["当前互动", currentInteractionLabel], ["关系节点", detail.worldbook_member ? "已登记" : "未登记"]])}
@@ -14878,6 +14960,102 @@ function renderUnifiedProfileCapabilityPanel(detail) {
       <header class="detail-block-head"><div><h2>统一档案与主动权限</h2><p>普通私聊始终可用；主动联系仍需管理员单独开启。</p></div><span class="badge ${proactiveEnabled ? "ok" : "off"}">${escapeHtml(proactiveEnabled ? "主动已授权" : "主动未授权")}</span></header>
       <dl><dt>统一人物</dt><dd>${escapeHtml(personId || "等待精确身份投影")}</dd><dt>主动陪伴</dt><dd>${escapeHtml(effectiveProactive ? "可在既有日程和安全门内执行" : "关闭")}</dd><dt>画像实际模式</dt><dd>${escapeHtml(portraitModeLabel(effectivePortraitMode))}</dd></dl>
     </section>
+  `;
+}
+
+function identityAssuranceLabel(value) {
+  return {
+    explicit_linked: "管理员明确关联",
+    verified: "已核验",
+    observed: "仅观察",
+    unverified: "未核验",
+  }[String(value || "")] || "待确认";
+}
+
+function identityProfileStatusLabel(value) {
+  return { active: "有效", pending: "待确认", deleted: "已归档" }[String(value || "")] || "未知";
+}
+
+function maskedPersonReference(value) {
+  const text = String(value || "");
+  if (!text) return "尚未建立";
+  return text.length <= 14 ? text : `${text.slice(0, 10)}…${text.slice(-4)}`;
+}
+
+function identityDomainText(domain, unit = "域") {
+  const value = domain && typeof domain === "object" ? domain : {};
+  const scopes = Number(value.scope_count || 0);
+  const records = Number(value.record_count || 0);
+  const ready = Number(value.ready_scope_count || 0);
+  if (value.status === "unavailable") return "服务未就绪";
+  if (value.status === "degraded") return "统计失败，已安全降级";
+  if (!scopes) return `0 个${unit} · 暂无记录`;
+  return `${scopes} 个${unit} · ${records} 条记录 · ${ready}/${scopes} 已就绪`;
+}
+
+function identityPendingGuidance(pending) {
+  const value = pending && typeof pending === "object" ? pending : {};
+  const reason = String(value.reason_code || "");
+  if (value.state === "unavailable") {
+    return { title: "迁移服务暂不可用", detail: "当前继续读取旧资料；服务恢复后再检查，不会自动猜测身份。", tone: "off" };
+  }
+  if (value.state === "degraded") {
+    return { title: "待确认状态读取失败", detail: "当前继续读取旧资料；请稍后刷新，不要手工合并不确定的账号。", tone: "off" };
+  }
+  if (value.found && value.state === "dismissed") {
+    return { title: "已暂不处理这条身份异常", detail: "旧资料仍保持隔离和可读。后续精确真实消息仍可安全认领，也可手动重新加入审核队列。", tone: "off" };
+  }
+  if (value.found && reason === "identity_link_missing") {
+    return { title: "等待精确身份事件", detail: "此旧档案仍可读取。用户下一次通过已核验平台身份真实发言后，系统会自动认领并对账，无需手工搬数据。", tone: "warn" };
+  }
+  if (value.found) {
+    return { title: "身份数据需要复核", detail: "系统发现旧资料不满足安全合并条件，因此保持隔离和旧数据读取。请等待精确真实事件，或使用后续的受控重新关联流程。", tone: "warn" };
+  }
+  return { title: "等待首次精确消息", detail: "尚未发现可安全认领的身份。系统不会按昵称、群名片或模糊 ID 自动合并。", tone: "off" };
+}
+
+function renderUnifiedIdentityPanel(detail) {
+  const identity = detail?.identity_admin && typeof detail.identity_admin === "object" ? detail.identity_admin : {};
+  const migration = identity.migration && typeof identity.migration === "object" ? identity.migration : {};
+  const domains = identity.domains && typeof identity.domains === "object" ? identity.domains : {};
+  const lifecycle = identity.lifecycle && typeof identity.lifecycle === "object" ? identity.lifecycle : {};
+  const linked = Boolean(identity.linked);
+  const pendingGuidance = identityPendingGuidance(identity.pending);
+  const generation = migration.read_generation === "new" ? "统一账户" : "兼容旧数据";
+  const privateDomain = identityDomainText(domains.private, "私聊域");
+  const updatedAt = identity.updated_at ? new Date(identity.updated_at).toLocaleString() : "暂无";
+  return `
+    <section class="detail-block unified-profile-capabilities">
+      <header class="detail-block-head"><div><h2>统一身份档案</h2><p>人物与好感度统一；私聊、群成员和不同群的记忆仍按作用域隔离。</p></div><span class="badge ${linked && identity.profile_status === "active" ? "ok" : "off"}">${escapeHtml(identityProfileStatusLabel(identity.profile_status))}</span></header>
+      <dl>
+        <dt>人物引用</dt><dd class="mono">${escapeHtml(maskedPersonReference(identity.person_id))}</dd>
+        <dt>身份可信度</dt><dd>${escapeHtml(identityAssuranceLabel(identity.identity_assurance))}</dd>
+        <dt>当前账号</dt><dd>${escapeHtml(identity.current_identity_linked ? "已精确关联" : (identity.current_identity_detached ? "已解绑，可安全恢复" : "等待自动认领"))}</dd>
+        <dt>身份数量</dt><dd>${escapeHtml(`${Number(identity.active_identity_count || 0)} 个有效 · ${Number(identity.detached_identity_count || 0)} 个已解绑`)}</dd>
+        <dt>档案版本</dt><dd>${escapeHtml(identity.projection_revision ? `r${identity.projection_revision}` : "-")} · ${escapeHtml(updatedAt)}</dd>
+        <dt>读取代际</dt><dd>${escapeHtml(generation)} · ${escapeHtml(migration.state || "pending")}</dd>
+      </dl>
+    </section>
+    <section class="detail-block">
+      <header class="detail-block-head"><div><h2>数据隔离状态</h2><p>这里只显示边界和就绪状态，不显示聊天原文、群号或底层身份键。</p></div></header>
+      <dl>
+        <dt>私聊画像 / 记忆 / 学习</dt><dd>${escapeHtml(privateDomain)}</dd>
+        <dt>群成员记忆</dt><dd>${escapeHtml(identityDomainText(domains.group_member, "群域"))}</dd>
+        <dt>群共享记忆</dt><dd>${escapeHtml(identityDomainText(domains.group_shared, "群域"))}</dd>
+        <dt>迁移积压</dt><dd>${escapeHtml(String(Number(migration.backlog || 0)))} · 稳定周期 ${escapeHtml(String(Number(migration.stable_cycles || 0)))}</dd>
+      </dl>
+    </section>
+    ${linked ? `<section class="detail-block">
+      <header class="detail-block-head"><div><h2>身份生命周期</h2><p>危险操作先生成影响预览，再次点击才会执行；失败时保留当前有效数据。</p></div></header>
+      <div class="toolbar user-danger-actions">
+        ${lifecycle.can_relink_current ? '<button type="button" data-identity-action="relink" class="secondary-button">预览恢复当前账号</button>' : ""}
+        ${lifecycle.can_unlink_current ? '<button type="button" data-identity-action="unlink" class="secondary-button">预览解绑当前账号</button>' : ""}
+        ${lifecycle.can_archive ? '<button type="button" data-identity-action="archive" class="danger">预览归档统一人物</button>' : ""}
+        ${lifecycle.can_purge ? '<button type="button" data-identity-action="purge" class="danger">预览永久删除</button>' : ""}
+      </div>
+      <div data-identity-lifecycle-preview class="notice-box" role="status" aria-live="polite" hidden></div>
+      ${!lifecycle.can_unlink_current && lifecycle.can_archive ? '<p class="muted">当前是唯一或主身份，不能直接拆分；如需移除，请使用统一人物归档。</p>' : ""}
+    </section>` : `<section class="detail-block"><header class="detail-block-head"><div><h2>${escapeHtml(pendingGuidance.title)}</h2><p>${escapeHtml(pendingGuidance.detail)}</p></div><span class="badge ${escapeHtml(pendingGuidance.tone)}">安全待确认</span></header><p class="muted">当前页面不会按昵称或模糊 ID 猜测合并。“暂不处理”只移出审核队列，不删除旧资料，不阻断未来精确消息认领。</p>${identity.pending?.found && ["pending", "dismissed"].includes(String(identity.pending?.state || "")) ? `<div class="toolbar"><button type="button" class="secondary-button" data-pending-identity-action="${identity.pending.state === "dismissed" ? "restore" : "dismiss"}">${identity.pending.state === "dismissed" ? "重新加入审核" : "暂不处理"}</button></div>` : ""}</section>`}
   `;
 }
 
@@ -15255,7 +15433,7 @@ function renderOpenLoopBlock(detail) {
 }
 
 function expressionLibrarySourceText(item) {
-  const kind = item?.source_kind_label || (item?.source_type === "group" ? "群聊" : "私聊");
+  const kind = item?.source_kind_label || (item?.source_type === "persona" ? "人格全局" : (item?.source_type === "group" ? "群聊" : "私聊"));
   const name = item?.source_name || item?.source_id || "未知来源";
   const id = item?.source_id || "";
   return `${kind} ${name} ${id}`.trim();
@@ -15441,7 +15619,7 @@ function renderExpressionLibraryView() {
   const library = state.expressionLibrary;
   if (!root || !library) return;
   renderLearningSummary();
-  const filter = ["all", "private", "group"].includes(state.expressionLibraryFilter)
+  const filter = ["all", "private", "group", "persona"].includes(state.expressionLibraryFilter)
     ? state.expressionLibraryFilter
     : "all";
   const type = ["all", "style", "grammar"].includes(state.expressionLibraryType)
@@ -15479,7 +15657,7 @@ function renderExpressionLibraryView() {
         <div class="expression-library-filter-block">
           <span>来源</span>
           <div class="expression-library-segments" role="group" aria-label="筛选表达来源类型">
-            ${[["all", "全部"], ["private", "私聊"], ["group", "群聊"]].map(([value, label]) => `
+            ${[["all", "全部"], ["private", "私聊"], ["group", "群聊"], ["persona", "人格全局"]].map(([value, label]) => `
               <button type="button" class="${filter === value ? "is-active" : ""}" data-expression-library-filter="${value}" aria-pressed="${filter === value}">${label}</button>
             `).join("")}
           </div>
@@ -15574,7 +15752,7 @@ function renderExpressionLibraryView() {
 }
 
 function expressionShareGroups(scope = "current") {
-  const groups = expressionRuleGroups(state.expressionLibrary, false);
+  const groups = expressionRuleGroups(state.expressionLibrary, false).filter((item) => item?.source_type !== "persona");
   if (scope === "all") return groups;
   const filter = ["all", "private", "group"].includes(state.expressionLibraryFilter)
     ? state.expressionLibraryFilter
@@ -15816,6 +15994,8 @@ async function applyExpressionImport(button) {
       package: state.expressionImportPack,
       ...target,
       destination,
+      expected_scope_revision: Number(state.expressionImportPreview?.target_scope_revision || 0),
+      preview_signature: state.expressionImportPreview?.preview_signature || "",
     });
     state.expressionLibrary = result;
     state.expressionImportPack = null;
@@ -16098,6 +16278,8 @@ function renderExpressionReviewWorkspace() {
             source_type: rule?.source_type || "",
             source_id: rule?.source_id || "",
             rule_family_id: rule?.family_id || rule?.id || "",
+            expected_scope_revision: Number(rule?.scope_revision || 0),
+            expected_item_revisions: rule?.item_revisions || {},
           })),
         }),
         action === "batch_approve_rule_groups" ? `已批量通过 ${selected.length} 组表达` : `已批量拒绝 ${selected.length} 组表达`,
@@ -16246,7 +16428,7 @@ function expressionRuleGroupEditor(group, pending = false) {
   return `
     <details class="expression-rule-editor">
       <summary>编辑规则内容</summary>
-      <form data-expression-rule-editor data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" data-expression-rule-storage="${pending ? "pending" : "learned"}">
+      <form data-expression-rule-editor data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" data-expression-rule-storage="${pending ? "pending" : "learned"}" data-expression-scope-revision="${escapeHtml(group?.scope_revision || 0)}" data-expression-item-revisions="${escapeHtml(JSON.stringify(group?.item_revisions || {}))}">
         <div class="expression-rule-editor-basics">
           <label>
             <span>规则名称</span>
@@ -16285,6 +16467,7 @@ function expressionRuleGroupItem(ruleGroup, pending = false, evidenceOpen = fals
   const examples = Array.isArray(group?.evidence_examples) ? group.evidence_examples.filter(Boolean) : [];
   const signals = Array.isArray(group?.signals) ? group.signals.filter(Boolean) : [];
   const familyId = group?.family_id || group?.id || "";
+  const revisionAttrs = `data-expression-scope-revision="${escapeHtml(group?.scope_revision || 0)}" data-expression-item-revisions="${escapeHtml(JSON.stringify(group?.item_revisions || {}))}"`;
   const signalTags = signals.length ? `<div class="expression-rule-tags" aria-label="召回标签">${signals.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : "";
   const evidenceDetails = examples.length ? `
     <details class="expression-rule-evidence" ${evidenceOpen ? "open" : ""}>
@@ -16292,7 +16475,9 @@ function expressionRuleGroupItem(ruleGroup, pending = false, evidenceOpen = fals
       <div>${examples.map((item) => `<blockquote>${escapeHtml(item)}</blockquote>`).join("")}</div>
     </details>
   ` : "";
-  const deleteAction = `<div class="expression-rule-actions"><button type="button" class="danger-outline" data-expression-action="delete_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}">删除规则组</button></div>`;
+  const isPersonaGlobal = group?.source_type === "persona";
+  const promoteAction = isPersonaGlobal ? "" : `<button type="button" data-expression-action="promote_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" ${revisionAttrs}>提升为当前人格全局</button>`;
+  const deleteAction = `<div class="expression-rule-actions">${promoteAction}<button type="button" class="danger-outline" data-expression-action="delete_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" ${revisionAttrs}>${isPersonaGlobal ? "撤销全局规则组" : "删除规则组"}</button></div>`;
   return `
     <article class="expression-rule-item expression-rule-group-item ${pending ? "is-pending" : "is-approved"} ${needsReview ? "needs-review" : ""}">
       <div class="expression-rule-head">
@@ -16317,8 +16502,8 @@ function expressionRuleGroupItem(ruleGroup, pending = false, evidenceOpen = fals
         ${evidenceDetails}
         ${expressionRuleGroupEditor(group, true)}
         <div class="expression-rule-actions">
-          <button type="button" data-expression-action="approve_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}">${needsReview ? "重新通过整组" : "通过并启用整组"}</button>
-          <button type="button" class="danger-outline" data-expression-action="reject_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}">拒绝整组</button>
+          <button type="button" data-expression-action="approve_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" ${revisionAttrs}>${needsReview ? "重新通过整组" : "通过并启用整组"}</button>
+          <button type="button" class="danger-outline" data-expression-action="reject_rule_group" data-expression-source-type="${escapeHtml(group?.source_type || "private")}" data-expression-source-id="${escapeHtml(group?.source_id || "")}" data-expression-rule-family-id="${escapeHtml(familyId)}" ${revisionAttrs}>拒绝整组</button>
         </div>
       ` : `
         <details class="expression-rule-details">
@@ -16390,7 +16575,7 @@ function expressionRuleContext(rule) {
 }
 
 function expressionSourceBadge(item, compact = false) {
-  const kind = item?.source_kind_label || (item?.source_type === "group" ? "群聊" : "私聊");
+  const kind = item?.source_kind_label || (item?.source_type === "persona" ? "人格全局" : (item?.source_type === "group" ? "群聊" : "私聊"));
   const name = item?.source_name || item?.source_id || "未知来源";
   const id = item?.source_id || "";
   if (compact) {
@@ -16429,6 +16614,8 @@ function expressionSampleItem(item, index, pending) {
   const patternStatus = item?.source_type === "group"
     ? `<span class="badge ${item?.observation_status === "supported" ? "ok" : ""}">${item?.observation_status === "supported" ? "重复证据" : "单次观察"}</span>`
     : "";
+  const itemRevisions = item?.id ? { [item.id]: Number(item?.item_revision || 0) } : {};
+  const revisionAttrs = `data-expression-scope-revision="${escapeHtml(item?.scope_revision || 0)}" data-expression-item-revisions="${escapeHtml(JSON.stringify(itemRevisions))}"`;
   return `
     <article class="expression-observation-item ${pending ? "is-pending" : "is-archived"}">
       <div class="expression-observation-main">
@@ -16442,8 +16629,8 @@ function expressionSampleItem(item, index, pending) {
         ${expressionSourceBadge(item)}
       </div>
       <div class="expression-observation-actions">
-        ${pending ? `<button type="button" data-expression-action="approve" data-expression-source-type="${escapeHtml(item?.source_type || "private")}" data-expression-source-id="${escapeHtml(item?.source_id || "")}" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(sourceIndex)}">保留素材</button>` : ""}
-        <button type="button" class="danger-outline" data-expression-action="${pending ? "reject" : "delete_sample"}" data-expression-source-type="${escapeHtml(item?.source_type || "private")}" data-expression-source-id="${escapeHtml(item?.source_id || "")}" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(sourceIndex)}">删除</button>
+        ${pending ? `<button type="button" data-expression-action="approve" data-expression-source-type="${escapeHtml(item?.source_type || "private")}" data-expression-source-id="${escapeHtml(item?.source_id || "")}" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(sourceIndex)}" ${revisionAttrs}>保留素材</button>` : ""}
+        <button type="button" class="danger-outline" data-expression-action="${pending ? "reject" : "delete_sample"}" data-expression-source-type="${escapeHtml(item?.source_type || "private")}" data-expression-source-id="${escapeHtml(item?.source_id || "")}" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(sourceIndex)}" ${revisionAttrs}>删除</button>
       </div>
     </article>
   `;
@@ -16484,6 +16671,39 @@ function bindExpressionLibraryActions(library, root) {
       if (action === "delete_sample" && !requireSecondClick(button, `expression-delete:${sourceType}:${sourceId}:${button.dataset.expressionSampleId || button.dataset.expressionSampleIndex || ""}`, "再次点击删除这条观察素材", "再次点击删除")) return;
       if (action === "delete_rule" && !requireSecondClick(button, `expression-rule-delete:${sourceType}:${sourceId}:${button.dataset.expressionRuleId || ""}`, "再次点击删除这条表达规则", "再次点击删除")) return;
       if (action === "delete_rule_group" && !requireSecondClick(button, `expression-rule-group-delete:${sourceType}:${sourceId}:${button.dataset.expressionRuleFamilyId || ""}`, "再次点击删除整个规则组", "再次点击删除整组")) return;
+      if (action === "promote_rule_group") {
+        const preview = button._globalPromotionPreview;
+        const basePayload = {
+          source_type: sourceType,
+          source_id: sourceId,
+          expression_action: action,
+          rule_family_id: button.dataset.expressionRuleFamilyId || "",
+          expected_scope_revision: Number(button.dataset.expressionScopeRevision || 0),
+          expected_item_revisions: JSON.parse(button.dataset.expressionItemRevisions || "{}"),
+        };
+        if (!preview) {
+          const operationId = identityOperationId("promote-expression");
+          const response = await runAction(
+            () => postJson("/expression-library/update", { ...basePayload, operation_id: operationId, dry_run: true }),
+            "全局影响预览已生成，请再次点击确认", button, { reload: false },
+          );
+          const promotion = response?.promotion;
+          if (!promotion?.ok) return;
+          button._globalPromotionPreview = {
+            operationId,
+            confirmationToken: String(promotion.confirmation_token || ""),
+          };
+          button.textContent = `确认提升 ${Number(promotion.rule_count || 0)} 条规则`;
+          return;
+        }
+        await applyExpressionLibraryMutation({
+          ...basePayload,
+          operation_id: preview.operationId,
+          confirmation_token: preview.confirmationToken,
+          dry_run: false,
+        }, button, "已提升为当前人格全局规则");
+        return;
+      }
       await applyExpressionLibraryMutation(
         {
           source_type: sourceType,
@@ -16493,6 +16713,8 @@ function bindExpressionLibraryActions(library, root) {
           rule_id: button.dataset.expressionRuleId || "",
           rule_family_id: button.dataset.expressionRuleFamilyId || "",
           sample_index: Number(button.dataset.expressionSampleIndex || -1),
+          expected_scope_revision: Number(button.dataset.expressionScopeRevision || 0),
+          expected_item_revisions: JSON.parse(button.dataset.expressionItemRevisions || "{}"),
         },
         button,
         action === "approve" ? "已保留观察素材" : (
@@ -16528,10 +16750,147 @@ function bindExpressionLibraryActions(library, root) {
           avoid: String(data.get("avoid") || "").trim(),
           style_rule: component("style"),
           grammar_rule: component("grammar"),
+          expected_scope_revision: Number(form.dataset.expressionScopeRevision || 0),
+          expected_item_revisions: JSON.parse(form.dataset.expressionItemRevisions || "{}"),
         },
         submitButton,
         "已保存表达规则组",
       );
+    });
+  });
+}
+
+function identityOperationId(action) {
+  const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `page-${action}-${random}`.slice(0, 120);
+}
+
+function identityLifecyclePreviewHtml(action, result) {
+  const value = result && typeof result === "object" ? result : {};
+  const impact = value.impact && typeof value.impact === "object" ? value.impact : {};
+  if (action === "archive") {
+    return `
+      <b>归档影响预览</b>
+      <ul>
+        <li>${Number(value.active_identity_count || 0)} 个有效账号会解除关联并建立防重连标记；已解绑账号也会被锁定。</li>
+        <li>该人物的私聊域与各群成员域投影会被擦除；群共享记忆不归个人所有，不随之删除。</li>
+        <li>统一好感度账户会停用，${Number(value.group_overlay_count || 0)} 个群场景补充会移除，${Number(impact.migration_stream_count || 0)} 条迁移流会退役。</li>
+      </ul>
+      <p class="migration-warn">当前版本尚无自动恢复归档的全链路。7 天只是防止继续永久删除的保留期，不是可一键恢复窗口。</p>
+    `;
+  }
+  if (action === "purge") {
+    const eligible = value.eligible_at ? new Date(value.eligible_at) : null;
+    const eligibleText = eligible && Number.isFinite(eligible.getTime()) ? eligible.toLocaleString() : "";
+    if (value.code === "archive_retention_active") {
+      return `<b>仍在保留期</b><p>永久删除尚未开放${eligibleText ? `，最早可于 ${escapeHtml(eligibleText)} 再次预览` : ""}。当前归档标记保持不变。</p>`;
+    }
+    return `
+      <b>永久删除影响预览</b>
+      <ul>
+        <li>${Number(value.detached_identity_count || 0)} 个已解绑账号记录与 ${Number(value.binding_checkpoint_count || 0)} 个绑定检查点会被删除。</li>
+        <li>只按精确归属清理旧资料、已退役迁移流和统一人物主记录；不使用昵称或文本模糊匹配。</li>
+      </ul>
+      <p class="migration-warn">执行后页面和启动续执都无法恢复；仅在确认不再需要该人物资料时继续。</p>
+    `;
+  }
+  return `<b>${action === "relink" ? "恢复关联预览" : "解绑预览"}</b><p>只处理当前精确账号；人物关系账户与其他账号保持不变。</p>`;
+}
+
+function bindUnifiedIdentityActions(detail, refreshSelectedUserDetail) {
+  document.querySelectorAll("[data-identity-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = String(button.dataset.identityAction || "");
+      const personId = String(detail?.identity_admin?.person_id || detail?.unified_person_id || "");
+      if (!personId || !["relink", "unlink", "archive", "purge"].includes(action)) return;
+      const endpoint = action === "relink" ? "/user/identity/link" : (action === "unlink" ? "/user/identity/unlink" : (action === "archive" ? "/user/identity/archive" : "/user/identity/delete"));
+      const previewPanel = button.closest(".detail-block")?.querySelector("[data-identity-lifecycle-preview]");
+      const preview = button._identityLifecyclePreview;
+      if (!preview) {
+        const operationId = identityOperationId(action);
+        const body = { person_id: personId, operation_id: operationId, dry_run: true };
+        if (["relink", "unlink"].includes(action)) body.user_id = detail.user_id;
+        const response = await runAction(
+          () => postJson(endpoint, body),
+          "影响预览已生成，请核对后再次点击",
+          button,
+          { reload: false },
+        );
+        const result = response?.result;
+        if (action === "purge" && result?.code === "archive_retention_active") {
+          if (previewPanel) {
+            previewPanel.innerHTML = identityLifecyclePreviewHtml(action, result);
+            previewPanel.hidden = false;
+          }
+          showToast("仍在归档保留期，尚不能永久删除", "error");
+          return;
+        }
+        if (!result || result.ok !== true) {
+          showToast(action === "unlink" ? "该身份不能安全自动拆分，需要保留或归档统一人物" : (action === "relink" ? "当前账号没有可安全恢复的精确身份" : "未能生成安全预览"), "error");
+          return;
+        }
+        button._identityLifecyclePreview = {
+          operationId,
+          confirmationToken: String(result.confirmation_token || ""),
+        };
+        if (previewPanel) {
+          previewPanel.innerHTML = identityLifecyclePreviewHtml(action, result);
+          previewPanel.hidden = false;
+        }
+        const count = Number(result.active_identity_count ?? result.detached_identity_count ?? 0);
+        button.textContent = action === "relink"
+          ? `确认恢复（当前 ${Number(result.active_identity_count || 0)} 个有效身份）`
+          : action === "unlink"
+          ? `确认解绑（${Number(result.replayable_event_count || 0)} 条可回放事件）`
+          : (action === "archive" ? `确认归档（${count} 个身份）` : `确认永久删除（${count} 个身份）`);
+        return;
+      }
+      const body = {
+        person_id: personId,
+        operation_id: preview.operationId,
+        confirmation_token: preview.confirmationToken,
+        dry_run: false,
+      };
+      if (["relink", "unlink"].includes(action)) body.user_id = detail.user_id;
+      const response = await runAction(
+        () => postJson(endpoint, body),
+        action === "relink" ? "当前账号已恢复关联" : (action === "unlink" ? "当前账号已解绑" : (action === "archive" ? "统一人物已归档" : "统一人物已永久删除")),
+        button,
+        { reload: false },
+      );
+      if (!response?.result?.ok) return;
+      button._identityLifecyclePreview = null;
+      delete state.userDetailCache[detail.user_id];
+      if (action === "purge") {
+        state.selectedUserId = "";
+        await loadAll();
+        return;
+      }
+      await refreshSelectedUserDetail();
+    });
+  });
+}
+
+function bindPendingIdentityActions(detail, refreshSelectedUserDetail) {
+  document.querySelectorAll("[data-pending-identity-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = String(button.dataset.pendingIdentityAction || "");
+      if (!detail?.user_id || !["dismiss", "restore"].includes(action)) return;
+      if (!requireSecondClick(
+        button,
+        `pending-identity:${detail.user_id}:${action}`,
+        action === "dismiss" ? "再次点击暂不处理；旧资料不会删除" : "再次点击重新加入审核",
+        action === "dismiss" ? "再次点击暂不处理" : "再次点击恢复审核",
+      )) return;
+      const response = await runAction(
+        () => postJson("/user/identity/pending", { user_id: detail.user_id, action }),
+        action === "dismiss" ? "已移出待处理队列，旧资料保持不变" : "已重新加入待处理队列",
+        button,
+        { reload: false },
+      );
+      if (!response?.result?.ok) return;
+      delete state.userDetailCache[detail.user_id];
+      await refreshSelectedUserDetail();
     });
   });
 }
@@ -16543,6 +16902,8 @@ function bindUserActions(detail) {
       await renderUserDetail(true);
     }
   };
+  bindUnifiedIdentityActions(detail, refreshSelectedUserDetail);
+  bindPendingIdentityActions(detail, refreshSelectedUserDetail);
   $("#relationshipStageForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const selectedKey = String(new FormData(event.currentTarget).get("relationship_stage_key") || "");
@@ -16551,6 +16912,14 @@ function bindUserActions(detail) {
       showToast("专属联结只允许主要用户使用", "error");
       return;
     }
+    const currentStageKey = detail.relationship_mode === "owner_exclusive"
+      ? "owner_exclusive"
+      : String(detail?.relationship_intimacy?.phase?.key || "");
+    if (selectedKey !== currentStageKey && !requireSecondClick(
+      event.submitter,
+      `relationship-stage:${detail.user_id}:${selectedKey}`,
+      selectedKey === "owner_exclusive" ? "再次点击确认冻结主要用户的自动好感度" : "再次点击确认切换长期关系阶段",
+    )) return;
     const stages = normalizedRelationshipStages(detail?.relationship_intimacy?.stages);
     const stage = stages.find((item) => item.key === selectedKey);
     const body = {
@@ -16623,6 +16992,11 @@ function bindUserActions(detail) {
       showToast("请先把专属联结切换为一个普通关系阶段，再修改关系角色", "error");
       return;
     }
+    if (selectedRole !== detail.relationship_role && !requireSecondClick(
+      event.submitter,
+      `relationship-role:${detail.user_id}:${selectedRole}`,
+      selectedRole === "owner" ? "再次点击确认授予主要用户关系角色" : "再次点击确认移除主要用户关系角色",
+    )) return;
     const body = {
       user_id: detail.user_id,
       nickname: form.get("nickname"),
@@ -24895,6 +25269,13 @@ function featureRelatedSettings(key) {
       owner_exclusive_tone: "温暖、亲近、稳定",
       owner_exclusive_address_style: "优先使用已确认的专属称呼",
       owner_exclusive_proactive_limit: 6,
+      enable_group_relationship_affinity: false,
+      group_relationship_affinity_allowlist: [],
+      group_relationship_daily_net_cap: 2,
+      group_relationship_window_minutes: 30,
+      group_relationship_window_absolute_cap: 1,
+      group_relationship_person_daily_absolute_cap: 4,
+      group_relationship_scope_daily_absolute_cap: 20,
       relationship_event_window_minutes: 30,
       relationship_positive_event_cap: 4,
       relationship_negative_event_cap: 12,

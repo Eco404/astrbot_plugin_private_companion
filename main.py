@@ -147,6 +147,26 @@ from .person_context_contract import (
     contract_self_check as person_contract_self_check,
 )
 from .unified_person_registry import UnifiedPersonRegistry
+from .migration_backfill import MigrationBackfill, legacy_pending_reference
+from .migration_dual_write import MigrationDualWriteProducer
+from .migration_replay import MigrationReplayWorker
+from .migration_read_router import MigrationRelationshipReadRouter
+from .migration_stability import advance_migration_stability
+from .migration_source_inspector import inspect_migration_sources
+from .relationship_account_store import RelationshipAccountStore
+from .req041_observability import Req041Observability
+from .relationship_affinity_runtime import (
+    admit_confirmed_group_affinity,
+    normalize_group_allowlist,
+    prepare_group_affinity_candidate,
+)
+from .identity_namespace import AssurancePolicy, NamespaceContext
+from .migration_scoped_projection import (
+    ScopedProjectionSynchronizer,
+    scoped_group_ref,
+    scoped_persona_ref,
+)
+from .scoped_runtime_view import overlay_group_runtime_view, overlay_private_runtime_view
 from .unified_profile_contract import (
     build_person_ref as req036_build_person_ref,
     build_profile_dto as req036_build_profile_dto,
@@ -485,9 +505,16 @@ class PrivateCompanionExtensionAPI:
         """Expose bounded identity and relationship context to the device plugin."""
         plugin = self._plugin
         normalized = _single_line(user_id, 120)
-        users = plugin.data.get("users") if isinstance(plugin.data, dict) else None
-        user = users.get(normalized) if isinstance(users, dict) else None
-        user = user if isinstance(user, dict) else {}
+        binder = getattr(plugin, "_req041_reality_private_binding", None)
+        binding = binder(normalized, purpose="memory_read") if callable(binder) else None
+        if callable(binder):
+            user = binding.get("user") if isinstance(binding, dict) and binding.get("ok") is True else {}
+            identity_ready = bool(user)
+        else:
+            users = plugin.data.get("users") if isinstance(plugin.data, dict) else None
+            user = users.get(normalized) if isinstance(users, dict) else None
+            user = user if isinstance(user, dict) else {}
+            identity_ready = bool(user)
         admin_checker = getattr(plugin, "_is_configured_admin_user_id", None)
         owner_getter = getattr(plugin, "_relationship_owner_user_ids", None)
         owners = set(owner_getter() if callable(owner_getter) else ())
@@ -501,6 +528,7 @@ class PrivateCompanionExtensionAPI:
         return {
             "user_id": normalized,
             "exists": bool(user),
+            "identity_ready": identity_ready,
             "is_admin": bool(callable(admin_checker) and admin_checker(normalized)),
             "is_primary_user": is_primary_user,
             "eligible": bool(
@@ -1877,6 +1905,33 @@ class PrivateCompanionPlugin(
             result.insert(0, primary)
         return result
 
+    def _req041_update_unified_profile_facts(
+        self,
+        user: dict[str, Any],
+        changes: dict[str, Any],
+        *,
+        operation_id: str = "",
+        actor_id: str = "companion",
+        schedule_save: bool = False,
+    ) -> dict[str, Any]:
+        if not isinstance(user, dict) or not isinstance(changes, dict) or not changes:
+            return {"ok": False, "state": "skipped", "code": "profile_fact_update_skipped"}
+        person_id = _single_line(user.get("unified_person_id"), 80)
+        if not person_id:
+            return {"ok": False, "state": "skipped", "code": "profile_identity_pending"}
+        result = self._active_unified_person_registry().update_identity_profile_facts(
+            person_id,
+            changes,
+            operation_id=(
+                _single_line(operation_id, 120)
+                or f"req041-profile-{uuid.uuid4().hex}"
+            ),
+            actor_id=actor_id,
+        )
+        if result.get("ok") and result.get("changed") and schedule_save:
+            self._schedule_data_save()
+        return result
+
     def _persona_profile_path(self, persona_id: str) -> Path:
         return Path(self._persona_profiles_dir) / self._persona_profile_filename(persona_id)
 
@@ -1978,8 +2033,10 @@ class PrivateCompanionPlugin(
         persona_id: Any = "",
         *,
         rebuild_today: bool = True,
+        operation_id: str = "",
+        _force_default_store: bool = False,
     ) -> dict[str, Any]:
-        multi_enabled = bool(getattr(self, "enable_multi_persona_mode", False))
+        multi_enabled = bool(getattr(self, "enable_multi_persona_mode", False)) and not _force_default_store
         requested = self._sanitize_persona_id(persona_id)
         active = self._sanitize_persona_id(self._active_persona_scope())
         pid = ""
@@ -2005,8 +2062,62 @@ class PrivateCompanionPlugin(
         generation = 1
         try:
             await self._flush_scheduled_data_save()
+            scoped_reset: dict[str, Any] = {
+                "ok": True, "state": "not_required", "code": "scoped_persona_erase_not_required",
+            }
+            synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+            migration_status = getattr(self, "req041_migration_status", None)
+            if synchronizer is None and isinstance(migration_status, dict) and (
+                migration_status.get("required") or migration_status.get("scoped_required")
+            ):
+                return {"ok": False, "message": "人格分域清理暂不可用", "code": "scoped_persona_erase_unavailable"}
+            if synchronizer is not None:
+                persona_ref = scoped_persona_ref(pid)
+                async with self._data_lock:
+                    group_sagas = self.data.get("_req041_group_reset_sagas")
+                    if isinstance(group_sagas, dict) and group_sagas:
+                        return {
+                            "ok": False, "message": "存在未完成的群删除事务，请等待恢复完成后再重置人格",
+                            "code": "group_reset_in_progress",
+                        }
+                    marker = self.data.get("_req041_persona_reset_saga")
+                    if marker is not None and not isinstance(marker, dict):
+                        return {"ok": False, "message": "人格重置恢复记录损坏", "code": "persona_reset_saga_invalid"}
+                    clean_operation = _single_line(operation_id, 120)
+                    if isinstance(marker, dict):
+                        marker_operation = _single_line(marker.get("operation_id"), 120)
+                        if (
+                            marker.get("state") != "confirmed"
+                            or _single_line(marker.get("persona_id"), 80) != persona_ref
+                            or (clean_operation and clean_operation != marker_operation)
+                            or not marker_operation
+                        ):
+                            return {"ok": False, "message": "人格重置恢复记录冲突", "code": "persona_reset_saga_conflict"}
+                        clean_operation = marker_operation
+                    else:
+                        clean_operation = clean_operation or "req041-persona-reset-" + uuid.uuid4().hex
+                        self.data["_req041_persona_reset_saga"] = {
+                            "operation_id": clean_operation,
+                            "persona_id": persona_ref,
+                            "source_persona_id": pid,
+                            "state": "confirmed",
+                            "created_at": _now_ts(),
+                        }
+                        self._req041_persist_archive_saga_locked()
+                scoped_reset = self._req041_erase_scoped_persona_data(
+                    pid, operation_id=clean_operation,
+                )
+                if not scoped_reset.get("ok"):
+                    return {
+                        "ok": False,
+                        "message": "人格分域清理失败，已保留本地资料并将在启动时重试",
+                        "code": str(scoped_reset.get("code") or "scoped_persona_erase_failed")[:120],
+                        "operation_id": clean_operation,
+                    }
             async with self._data_lock:
                 previous = deepcopy(self.data)
+                backup_snapshot = deepcopy(previous)
+                backup_snapshot.pop("_req041_persona_reset_saga", None)
                 lifecycle = previous.get("persona_lifecycle")
                 if not isinstance(lifecycle, dict):
                     lifecycle = {}
@@ -2018,7 +2129,7 @@ class PrivateCompanionPlugin(
                 except (TypeError, ValueError):
                     previous_generation = 1
                 generation = previous_generation + 1
-                backup_path = self._write_persona_reset_backup_sync(pid, previous)
+                backup_path = self._write_persona_reset_backup_sync(pid, backup_snapshot)
 
                 replacement = self._new_store()
                 ensure_defaults = getattr(self, "_ensure_store_defaults", None)
@@ -2089,7 +2200,10 @@ class PrivateCompanionPlugin(
                 "state": state,
                 "plan": plan,
                 "rebuild_error": rebuild_error,
-                "external_memory_preserved": True,
+                "external_memory_preserved": synchronizer is None,
+                "non_req041_external_memory_preserved": True,
+                "scoped_memory_reset": bool(synchronizer is not None and scoped_reset.get("ok")),
+                "scoped_cleanup": scoped_reset,
             }
         finally:
             if token is not None:
@@ -2810,6 +2924,8 @@ class PrivateCompanionPlugin(
         initialize_plugin_config(self, config)
         initialize_plugin_runtime(self)
         initialize_plugin_post_runtime_state(self, config)
+        self.req041_observability = Req041Observability()
+        self._req041_runtime_boot_ref = f"boot-{id(self)}"
 
     async def _pull_body_monitor_candidates(self) -> dict[str, Any]:
         integration = getattr(self, "_body_monitor_integration", None)
@@ -3040,12 +3156,94 @@ class PrivateCompanionPlugin(
         profile: dict[str, Any] | None = None,
         operation_id: str = "",
     ) -> dict[str, Any]:
-        return self._active_unified_person_registry().create_or_link(
+        registry = self._active_unified_person_registry()
+        result = registry.create_or_link(
             identity,
             profile=profile,
             operation_id=operation_id,
             actor_id="companion",
         )
+        self._req041_emit_identity_dual_write(
+            result,
+            action="create",
+            operation_id=operation_id,
+            registry=registry,
+        )
+        return result
+
+    def _req041_emit_identity_dual_write(
+        self,
+        result: dict[str, Any],
+        *,
+        action: str,
+        operation_id: str,
+        registry: UnifiedPersonRegistry | None = None,
+    ) -> dict[str, Any]:
+        producer = getattr(self, "req041_dual_write_producer", None)
+        if producer is None:
+            return {"status": "skipped", "code": "dual_write_not_active"}
+        active_registry = registry if isinstance(registry, UnifiedPersonRegistry) else self._active_unified_person_registry()
+        try:
+            return producer.emit_identity_change(
+                registry=active_registry,
+                result=result,
+                action=action,
+                operation_id=operation_id,
+            )
+        except Exception as exc:
+            producer.fail_closed("identity_dual_write_failed")
+            migration_status = getattr(self, "req041_migration_status", None)
+            if isinstance(migration_status, dict):
+                migration_status.update({
+                    "state": "paused",
+                    "code": "identity_dual_write_failed",
+                    "dual_write": "failed",
+                })
+            logger.warning(
+                "[PrivateCompanion] REQ-041 身份双写失败，已暂停新读切换并保留 legacy 写入: %s",
+                _single_line(exc, 160),
+            )
+            return {"status": "failed", "code": "identity_dual_write_failed"}
+
+    def _req041_emit_relationship_snapshot(
+        self,
+        user: dict[str, Any],
+        *,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        producer = getattr(self, "req041_dual_write_producer", None)
+        if producer is None:
+            return {"status": "skipped", "code": "dual_write_not_active"}
+        try:
+            try:
+                source_revision = max(0, int(user.get("req041_relationship_source_revision") or 0)) + 1
+            except (TypeError, ValueError, OverflowError):
+                source_revision = 1
+            scope = self._unified_persona_domain()
+            emitted = producer.emit_relationship_snapshot(
+                registry=self._active_unified_person_registry(),
+                user=user,
+                reason_code=reason_code,
+                source_scope=scope or "default",
+                source_revision=source_revision,
+            )
+            if int(emitted.get("source_revision") or 0) > 0:
+                user["req041_relationship_source_revision"] = int(emitted["source_revision"])
+            return emitted
+        except Exception as exc:
+            producer.fail_closed("relationship_snapshot_dual_write_failed")
+            migration_status = getattr(self, "req041_migration_status", None)
+            if isinstance(migration_status, dict):
+                migration_status.update({
+                    "state": "paused",
+                    "code": "relationship_snapshot_dual_write_failed",
+                    "dual_write": "failed",
+                })
+            logger.warning(
+                "[PrivateCompanion] REQ-041 关系快照双写失败，已暂停新读切换并保留 legacy 写入: %s",
+                _single_line(exc, 160),
+            )
+            return {"status": "failed", "code": "relationship_snapshot_dual_write_failed"}
 
     def get_unified_person_projection(self, person_id: str) -> dict[str, Any] | None:
         return self._active_unified_person_registry().read_projection(person_id)
@@ -3337,7 +3535,15 @@ class PrivateCompanionPlugin(
                 event,
                 operation_id=f"req036.{source}:{str(resolution.get('identity_key') or '')[-24:]}",
                 profile={
-                    "display_name": _single_line(profile.get("nickname"), 80),
+                    "display_name": (
+                        _single_line(profile.get("nickname"), 80) if not group_id else ""
+                    ),
+                    "preferred_address": (
+                        _single_line(profile.get("nickname"), 40) if not group_id else ""
+                    ),
+                    "style": _single_line(profile.get("style"), 40) if not group_id else "",
+                    "profile_origin": _single_line(profile.get("profile_origin"), 60),
+                    "auto_profile_created": bool(profile.get("auto_profile_created", False)),
                     "affinity_score": _safe_int(profile.get("relationship_score"), 0, -1200, 1200),
                     "owner_mode": "owner" if _single_line(profile.get("relationship_role"), 40) == "owner" else "not_owner",
                     "relation_policy_id": _single_line(profile.get("relationship_mode"), 40) or "default_friend",
@@ -3353,6 +3559,26 @@ class PrivateCompanionPlugin(
         if isinstance(user, dict) and person_id:
             user["unified_person_id"] = person_id
             user["unified_profile_projection_revision"] = int(projection.get("projection_revision") or 1)
+            if not group_id:
+                private_facts = {
+                    "style": _single_line(user.get("style"), 40),
+                    "profile_origin": _single_line(user.get("profile_origin"), 60),
+                    "auto_profile_created": bool(user.get("auto_profile_created", False)),
+                }
+                private_name = _single_line(user.get("nickname"), 80)
+                if private_name:
+                    private_facts["display_name"] = private_name
+                    private_facts["preferred_address"] = private_name[:40]
+                fact_signature = hashlib.sha256(
+                    json.dumps(private_facts, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest()[:32]
+                self._req041_update_unified_profile_facts(
+                    user,
+                    private_facts,
+                    operation_id=f"req041-private-profile-observation-{person_id[-16:]}-{fact_signature}",
+                    actor_id="private_observation",
+                    schedule_save=True,
+                )
         group_scope = ""
         if group_id and person_id:
             platform = _single_line(identity.get("subject_namespace"), 80).split(":", 1)[0]
@@ -3382,6 +3608,26 @@ class PrivateCompanionPlugin(
                 source_fingerprint,
                 operation_id=f"req036.source:{source}:{source_fingerprint[:24]}",
             )
+        portrait_namespace_getter = getattr(self, "_req041_scoped_context_for_user", None)
+        if callable(portrait_namespace_getter) and isinstance(user, dict):
+            try:
+                portrait_namespace = portrait_namespace_getter(
+                    user,
+                    kind="group_member" if group_id else "private",
+                    group_id=group_id,
+                    purpose="profile_read",
+                )
+            except Exception:
+                portrait_namespace = None
+            if isinstance(portrait_namespace, NamespaceContext) and not portrait_namespace.errors():
+                try:
+                    setattr(
+                        event,
+                        "private_companion_namespace_context",
+                        portrait_namespace.to_dict(),
+                    )
+                except Exception:
+                    pass
         dto = req036_build_profile_dto(
             person_ref=req036_build_person_ref(projection),
             identity_summary={"display_name": _single_line((user or {}).get("nickname"), 80)},
@@ -3579,6 +3825,9 @@ class PrivateCompanionPlugin(
             scope=scope,
             purpose="summarize_to_subject",
         )
+        namespace_context = getattr(event, "private_companion_namespace_context", None)
+        if isinstance(namespace_context, dict):
+            request["namespace_context"] = dict(namespace_context)
         bridge = self._memory_companion_bridge()
         reader = getattr(bridge, "read_unified_profile_portrait", None) if bridge is not None else None
         if not callable(reader):
@@ -3634,6 +3883,13 @@ class PrivateCompanionPlugin(
                 scope="private",
                 purpose="summarize_to_subject",
             )
+            namespace_getter = getattr(self, "_req041_scoped_context_for_user", None)
+            if callable(namespace_getter):
+                namespace_context = namespace_getter(
+                    source, kind="private", purpose="profile_read"
+                )
+                if isinstance(namespace_context, NamespaceContext) and not namespace_context.errors():
+                    request["namespace_context"] = namespace_context.to_dict()
             portrait = portrait_reader(request, limit=3)
             if asyncio.iscoroutine(portrait) or hasattr(portrait, "__await__"):
                 portrait = await portrait
@@ -4033,6 +4289,1862 @@ class PrivateCompanionPlugin(
         except Exception as exc:
             logger.warning("[PrivateCompanion] 修复热更新残留回调绑定失败: %s", _single_line(exc, 160))
 
+    def _req041_migration_source_files(self) -> list[Path]:
+        candidates: list[Path] = []
+        if str(getattr(self, "storage_backend", "json") or "json").lower() == "sqlite":
+            candidates.append(Path(str(getattr(self, "storage_sqlite_effective_path", "") or "")))
+        else:
+            candidates.append(Path(str(getattr(self, "data_file", "") or "")))
+        profiles = Path(str(getattr(self, "_persona_profiles_dir", "") or ""))
+        if profiles.is_dir():
+            candidates.extend(sorted(profiles.glob("*.json")))
+        result: list[Path] = []
+        for candidate in candidates:
+            try:
+                if candidate and candidate.is_file() and not candidate.is_symlink():
+                    result.append(candidate)
+            except OSError:
+                continue
+        return result
+
+    def _req041_compatibility_snapshot(self) -> dict[str, Any]:
+        return {
+            "auto_profile_creation": bool(getattr(self, "enable_auto_user_profile_creation", False)),
+            "private_access_policy": {
+                "passive_private_default": "legacy_effective",
+                "configured_targets_default": bool(getattr(self, "default_enable_configured_targets", False)),
+            },
+            "proactive_policy": {
+                "proactive_only": bool(getattr(self, "enable_proactive_only_mode", False)),
+                "intensity": _single_line(getattr(self, "proactive_intensity_preset", "off"), 40) or "off",
+            },
+            "tool_policy": {
+                "photo": bool(getattr(self, "enable_photo_text_action", False)),
+                "screen": bool(getattr(self, "enable_screen_glance_action", False)),
+                "poke": bool(getattr(self, "enable_poke_action", False)),
+                "voice": bool(getattr(self, "enable_voice_action", False)),
+            },
+            "content_policy": {
+                "relationship_tiers": bool(getattr(self, "enable_relationship_content_tiers", False)),
+            },
+            "owner_policy": {
+                "configured_target": _single_line(getattr(self, "target_user_id", ""), 80) != "",
+                "normal_cap_exempt": True,
+                "exclusive_mode_frozen": True,
+            },
+            "relationship_policy": {
+                "enabled": bool(getattr(self, "enable_custom_relationship_stage_policy", False)),
+                "positive_cap": _single_line(
+                    getattr(self, "relationship_positive_stage_cap_key", "deeply_bonded"), 40
+                ) or "deeply_bonded",
+                "group_ordinary_delta": 0,
+            },
+        }
+
+    def _req041_registry_for_person(self, person_id: str) -> UnifiedPersonRegistry | None:
+        """Locate exactly one persona-scoped registry for a stable person id."""
+        stores: list[dict[str, Any]] = []
+        default_data = getattr(self, "_data_default", None)
+        if not isinstance(default_data, dict):
+            default_data = self.data if isinstance(getattr(self, "data", None), dict) else None
+        if isinstance(default_data, dict):
+            stores.append(default_data)
+        profiles = getattr(self, "_persona_data_profiles", {})
+        if isinstance(profiles, dict):
+            for profile_data in profiles.values():
+                if isinstance(profile_data, dict) and all(profile_data is not item for item in stores):
+                    stores.append(profile_data)
+        matches = [
+            UnifiedPersonRegistry(store)
+            for store in stores
+            if UnifiedPersonRegistry(store).read_projection(person_id) is not None
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _req041_legacy_relationship_state(self, person_id: str) -> dict[str, Any] | None:
+        """Read exactly one live legacy authority row for S5 reconciliation."""
+        stores: list[dict[str, Any]] = []
+        default_data = getattr(self, "_data_default", None)
+        if not isinstance(default_data, dict):
+            default_data = self.data if isinstance(getattr(self, "data", None), dict) else None
+        if isinstance(default_data, dict):
+            stores.append(default_data)
+        profiles = getattr(self, "_persona_data_profiles", {})
+        if isinstance(profiles, dict):
+            for profile_data in profiles.values():
+                if isinstance(profile_data, dict) and all(profile_data is not item for item in stores):
+                    stores.append(profile_data)
+        matches: list[dict[str, Any]] = []
+        for store in stores:
+            registry = UnifiedPersonRegistry(store)
+            users = store.get("users") if isinstance(store.get("users"), dict) else {}
+            for legacy_key, user in users.items():
+                if not isinstance(user, dict) or user.get("unified_person_id") != person_id:
+                    continue
+                subject = _single_line(
+                    user.get("identity_subject_id") or user.get("user_id") or legacy_key, 160
+                )
+                if not subject or not registry.matches_person_subject(person_id, subject):
+                    continue
+                try:
+                    score = int(user.get("relationship_score", 0))
+                    totals = user.get("relationship_daily_totals")
+                    totals = totals if isinstance(totals, dict) else {}
+                    positive = int(totals.get("positive", 0))
+                    negative = int(totals.get("negative", 0))
+                    effective = float(user.get("relationship_last_effective_at") or 0.0)
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                if (
+                    any(isinstance(value, bool) for value in (user.get("relationship_score"), totals.get("positive"), totals.get("negative")))
+                    or not -1200 <= score <= 1200 or not 0 <= positive <= 120
+                    or not -180 <= negative <= 0 or not math.isfinite(effective) or effective < 0
+                ):
+                    return None
+                role = "owner" if str(user.get("relationship_role") or "").strip().lower() == "owner" else "friend"
+                mode = (
+                    "owner_exclusive"
+                    if role == "owner" and str(user.get("relationship_mode") or "").strip().lower() == "owner_exclusive"
+                    else "normal"
+                )
+                matches.append({
+                    "relationship_role": role,
+                    "relationship_mode": mode,
+                    "relationship_score": score,
+                    "positive_stage_cap_key": normalize_relationship_positive_stage_cap_key(
+                        user.get("relationship_positive_stage_cap_key")
+                    ),
+                    "daily_totals": {
+                        "day": _single_line(totals.get("day"), 16),
+                        "positive": positive,
+                        "negative": negative,
+                    },
+                    "last_effective_at": effective,
+                })
+        return matches[0] if len(matches) == 1 else None
+
+    def _req041_resolve_legacy_pending_for_person(self, person_id: str) -> int:
+        """Resolve one S4 opaque pending row only after S5 proves exact parity."""
+        coordinator = getattr(self, "req041_migration_coordinator", None)
+        status = coordinator.status() if coordinator is not None else {}
+        epoch = _single_line(status.get("migration_epoch"), 128) if isinstance(status, dict) else ""
+        if not epoch:
+            return 0
+        scoped_stores: list[tuple[str, dict[str, Any]]] = []
+        default_data = getattr(self, "_data_default", None)
+        if not isinstance(default_data, dict):
+            default_data = self.data if isinstance(getattr(self, "data", None), dict) else None
+        if isinstance(default_data, dict):
+            scoped_stores.append(("default", default_data))
+        profiles = getattr(self, "_persona_data_profiles", {})
+        if isinstance(profiles, dict):
+            for persona_id, profile_data in profiles.items():
+                if not isinstance(profile_data, dict):
+                    continue
+                scope_hash = hashlib.sha256(str(persona_id).encode("utf-8")).hexdigest()[:24]
+                scoped_stores.append((f"persona:{scope_hash}", profile_data))
+        matches: list[tuple[str, str]] = []
+        for source_scope, store in scoped_stores:
+            registry = UnifiedPersonRegistry(store)
+            users = store.get("users") if isinstance(store.get("users"), dict) else {}
+            for legacy_key, user in users.items():
+                if not isinstance(user, dict) or user.get("unified_person_id") != person_id:
+                    continue
+                subject = _single_line(
+                    user.get("identity_subject_id") or user.get("user_id") or legacy_key, 160
+                )
+                if subject and registry.matches_person_subject(person_id, subject):
+                    matches.append((source_scope, str(legacy_key)))
+        if len(matches) != 1:
+            return 0
+        source_scope, legacy_key = matches[0]
+        reference = legacy_pending_reference(epoch, source_scope, legacy_key)
+        return int(bool(coordinator.resolve_pending(reference)))
+
+    def _req041_schedule_replay(self) -> None:
+        worker = getattr(self, "req041_migration_replay", None)
+        if worker is None:
+            return
+        self._req041_replay_requested = True
+        task = getattr(self, "_req041_replay_task", None)
+        if task is not None and not task.done():
+            return
+        try:
+            self._req041_replay_task = asyncio.get_running_loop().create_task(
+                self._req041_run_replay_batch(), name="req041-shadow-replay"
+            )
+            self._req041_replay_task.add_done_callback(self._req041_replay_finished)
+        except RuntimeError:
+            raise RuntimeError("migration_replay_loop_unavailable")
+
+    def _req041_legacy_snapshots_locked(self) -> list[tuple[str, dict[str, Any]]]:
+        snapshots: list[tuple[str, dict[str, Any]]] = []
+        default_data = getattr(self, "_data_default", None)
+        if not isinstance(default_data, dict):
+            default_data = self.data if isinstance(getattr(self, "data", None), dict) else {}
+        snapshots.append(("default", deepcopy(default_data)))
+        profiles = getattr(self, "_persona_data_profiles", {})
+        if isinstance(profiles, dict):
+            for persona_id, profile_data in profiles.items():
+                if not isinstance(profile_data, dict):
+                    continue
+                scope_hash = hashlib.sha256(str(persona_id).encode("utf-8")).hexdigest()[:24]
+                snapshots.append((f"persona:{scope_hash}", deepcopy(profile_data)))
+        return snapshots
+
+    async def _req041_sync_scoped_now(self) -> dict[str, Any]:
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            return {"ok": False, "code": "scoped_projection_not_initialized", "scopes": []}
+        synchronizer.mark_dirty()
+        async with self._data_lock:
+            snapshots = self._req041_legacy_snapshots_locked()
+        results: list[dict[str, Any]] = []
+        for source_scope, snapshot in snapshots:
+            results.append(await asyncio.to_thread(
+                synchronizer.sync_snapshot, snapshot, source_scope=source_scope
+            ))
+        ok = all(item.get("ok") is True for item in results)
+        summary = {
+            "ok": ok,
+            "code": "scoped_projection_synced" if ok else "scoped_projection_degraded",
+            "scopes": results,
+            "records": sum(int(item.get("records") or 0) for item in results),
+            "errors": sum(int(item.get("errors") or 0) for item in results),
+        }
+        self.req041_scoped_projection_status = summary
+        return summary
+
+    async def _req041_run_scoped_sync(self) -> None:
+        while bool(getattr(self, "_req041_scoped_sync_requested", False)):
+            self._req041_scoped_sync_requested = False
+            result = await self._req041_sync_scoped_now()
+            if result.get("ok") is not True:
+                status = getattr(self, "req041_migration_status", None)
+                if isinstance(status, dict):
+                    status.update({"state": "degraded", "code": "scoped_projection_degraded", "scoped": result})
+                return
+
+    def _req041_scoped_sync_finished(self, task: Any) -> None:
+        self._req041_scoped_sync_task = None
+        if not task.cancelled():
+            try:
+                error = task.exception()
+            except Exception:
+                error = None
+            if error is not None:
+                self.req041_scoped_projection_status = {
+                    "ok": False, "code": _single_line(error, 120) or "scoped_projection_exception"
+                }
+        if bool(getattr(self, "_req041_scoped_sync_requested", False)):
+            self._req041_schedule_scoped_sync()
+
+    def _req041_schedule_scoped_sync(self) -> None:
+        if getattr(self, "req041_scoped_projection_sync", None) is None:
+            return
+        self.req041_scoped_projection_sync.mark_dirty()
+        stop_event = getattr(self, "_stop_event", None)
+        if stop_event is not None and callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
+            return
+        self._req041_scoped_sync_requested = True
+        task = getattr(self, "_req041_scoped_sync_task", None)
+        if isinstance(task, asyncio.Task) and not task.done():
+            return
+        try:
+            task = asyncio.get_running_loop().create_task(
+                self._req041_run_scoped_sync(), name="req041-scoped-projection-sync"
+            )
+        except RuntimeError:
+            return
+        self._req041_scoped_sync_task = task
+        task.add_done_callback(self._req041_scoped_sync_finished)
+
+    def _req041_scoped_context_for_user(
+        self,
+        user: dict[str, Any],
+        *,
+        kind: str = "private",
+        group_id: str = "",
+        purpose: str = "memory_read",
+    ) -> NamespaceContext | None:
+        if not isinstance(user, dict):
+            return None
+        person_id = str(user.get("unified_person_id") or "").strip()
+        subject = str(user.get("identity_subject_id") or user.get("user_id") or "").strip()
+        if not person_id or not subject:
+            return None
+        registry = self._active_unified_person_registry()
+        if not registry.matches_person_subject(person_id, subject):
+            return None
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            return None
+        active_persona = self._active_persona_scope()
+        persona_id = scoped_persona_ref(active_persona)
+        safe_group = scoped_group_ref(persona_id, group_id) if kind == "group_member" else ""
+        resolution = registry.formal_namespace_for_person(
+            person_id, kind=kind, group_id=safe_group,
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+            purpose=purpose,
+        )
+        raw = resolution.get("context") if isinstance(resolution, dict) else None
+        if not resolution.get("ok") or not isinstance(raw, dict):
+            return None
+        context = NamespaceContext(
+            kind=kind, persona_id=persona_id, identity_id=person_id, group_id=safe_group,
+            assurance=str(raw.get("assurance") or "verified"),
+            profile_status=str(raw.get("profile_status") or "active"),
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        return context if not context.errors() else None
+
+    def _req041_scoped_private_context_for_person(
+        self,
+        person_id: str,
+        *,
+        purpose: str = "memory_write",
+    ) -> NamespaceContext | None:
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            return None
+        clean_person = _single_line(person_id, 80)
+        if not clean_person:
+            return None
+        registry = self._active_unified_person_registry()
+        resolution = registry.formal_namespace_for_person(
+            clean_person, kind="private",
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+            purpose=purpose,
+        )
+        raw = resolution.get("context") if isinstance(resolution, dict) else None
+        if not resolution.get("ok") or not isinstance(raw, dict):
+            return None
+        context = NamespaceContext(
+            kind="private", persona_id=scoped_persona_ref(self._active_persona_scope()),
+            identity_id=clean_person, group_id="",
+            assurance=str(raw.get("assurance") or "verified"), profile_status="active",
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        return context if not context.errors() else None
+
+    @staticmethod
+    def _req041_person_private_aux_key(person_id: str) -> str:
+        """Return a stable opaque key for persona-local person-private helpers."""
+        clean_person = str(person_id or "").strip()
+        if not clean_person:
+            return ""
+        digest = hashlib.sha256(f"req041-person-private-aux:{clean_person}".encode("utf-8")).hexdigest()
+        return f"person:{digest}"
+
+    def _req041_reality_private_binding(
+        self,
+        user_id: Any,
+        *,
+        purpose: str = "memory_read",
+    ) -> dict[str, Any]:
+        """Resolve one mobile/reality operation to a reconciled private person scope."""
+        normalized = _single_line(user_id, 120)
+        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else None
+        user = users.get(normalized) if normalized and isinstance(users, dict) else None
+        if not isinstance(user, dict):
+            return {"ok": False, "code": "private_user_not_managed"}
+        context = self._req041_scoped_context_for_user(user, kind="private", purpose=purpose)
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if context is None or synchronizer is None:
+            return {"ok": False, "code": "formal_private_identity_required"}
+        projection = synchronizer.read_projection(context)
+        if not isinstance(projection, dict) or projection.get("ok") is not True:
+            return {
+                "ok": False,
+                "code": str(projection.get("code") or "scoped_projection_not_reconciled")[:120]
+                if isinstance(projection, dict) else "scoped_projection_not_reconciled",
+            }
+        person_id = _single_line(getattr(context, "identity_id", ""), 80)
+        store_key = self._req041_person_private_aux_key(person_id)
+        if not person_id or not store_key:
+            return {"ok": False, "code": "formal_private_identity_required"}
+        snapshot = self._req041_relationship_snapshot_view(
+            user, source=f"reality_{_single_line(purpose, 40) or 'memory'}",
+        )
+        return {
+            "ok": True,
+            "code": "formal_private_identity_bound",
+            "context": context,
+            "person_id": person_id,
+            "store_key": store_key,
+            "subject_ref": store_key,
+            "user": snapshot if isinstance(snapshot, dict) else user,
+        }
+
+    def _req041_erase_person_private_auxiliary_locked(
+        self,
+        person_id: str,
+        subjects: list[str] | tuple[str, ...] = (),
+    ) -> dict[str, int]:
+        """Erase canonical and exact legacy auxiliary nodes for one person."""
+        canonical = self._req041_person_private_aux_key(person_id)
+        keys = {canonical} if canonical else set()
+        keys.update(_single_line(item, 160) for item in subjects if _single_line(item, 160))
+        counts = {"place_cognitive_maps": 0, "reality_touch_outputs": 0}
+        for root_name in tuple(counts):
+            root = self.data.get(root_name) if isinstance(self.data, dict) else None
+            if not isinstance(root, dict):
+                continue
+            for key in keys:
+                if key in root:
+                    root.pop(key, None)
+                    counts[root_name] += 1
+        return counts
+
+    def _req041_scoped_group_context(
+        self,
+        group_id: str,
+        *,
+        purpose: str = "rule_write",
+    ) -> NamespaceContext | None:
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        raw_group = _single_line(group_id, 160)
+        if synchronizer is None or not raw_group:
+            return None
+        persona_id = scoped_persona_ref(self._active_persona_scope())
+        context = NamespaceContext(
+            kind="group_shared", persona_id=persona_id, identity_id="",
+            group_id=scoped_group_ref(persona_id, raw_group), assurance="verified",
+            profile_status="active", policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        policy = AssurancePolicy()
+        decision = policy.authorize(context, purpose)
+        return context if decision.allowed and not context.errors() else None
+
+    def _req041_persona_global_context(
+        self, *, purpose: str = "rule_read"
+    ) -> NamespaceContext | None:
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            return None
+        context = NamespaceContext(
+            kind="persona_global", persona_id=scoped_persona_ref(self._active_persona_scope()),
+            identity_id="", group_id="", assurance="verified", profile_status="active",
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        decision = AssurancePolicy().authorize(context, purpose)
+        return context if decision.allowed and not context.errors() else None
+
+    def _req041_erase_scoped_group_data(
+        self,
+        group_id: str,
+        *,
+        operation_id: str = "",
+        persona_id: str = "",
+    ) -> dict[str, Any]:
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            status = getattr(self, "req041_migration_status", None)
+            if isinstance(status, dict) and (status.get("required") or status.get("scoped_required")):
+                return {"ok": False, "state": "degraded", "code": "scoped_group_erase_unavailable"}
+            return {"ok": True, "state": "not_required", "code": "scoped_group_erase_not_required", "count": 0}
+        raw_group = _single_line(group_id, 160)
+        safe_persona = _single_line(persona_id, 80) or scoped_persona_ref(self._active_persona_scope())
+        group_ref = scoped_group_ref(safe_persona, raw_group)
+        context = NamespaceContext(
+            kind="group_shared", persona_id=safe_persona, identity_id="", group_id=group_ref,
+            assurance="verified", profile_status="active",
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        if not raw_group or context.errors():
+            return {"ok": False, "state": "rejected", "code": "scoped_group_erase_context_invalid"}
+        clean_operation = _single_line(operation_id, 120) or "req041-group-reset-" + uuid.uuid4().hex
+        return synchronizer.erase_group_scopes(
+            context, operation_id=clean_operation, reason_code="group_reset",
+        )
+
+    def _req041_erase_scoped_persona_data(
+        self,
+        persona_id: str,
+        *,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            status = getattr(self, "req041_migration_status", None)
+            if isinstance(status, dict) and (status.get("required") or status.get("scoped_required")):
+                return {"ok": False, "state": "degraded", "code": "scoped_persona_erase_unavailable"}
+            return {"ok": True, "state": "not_required", "code": "scoped_persona_erase_not_required"}
+        persona_ref = scoped_persona_ref(persona_id)
+        context = NamespaceContext(
+            kind="persona_global", persona_id=persona_ref, identity_id="", group_id="",
+            assurance="verified", profile_status="active",
+            policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        clean_operation = _single_line(operation_id, 120)
+        if not clean_operation or context.errors():
+            return {"ok": False, "state": "rejected", "code": "scoped_persona_erase_context_invalid"}
+        return synchronizer.erase_persona_scopes(
+            context, operation_id=clean_operation, reason_code="persona_reset",
+        )
+
+    def _req041_group_reset_sagas_locked(self) -> dict[str, dict[str, Any]]:
+        sagas = self.data.get("_req041_group_reset_sagas")
+        if not isinstance(sagas, dict):
+            sagas = {}
+            self.data["_req041_group_reset_sagas"] = sagas
+        return sagas
+
+    def _req041_finalize_group_reset_locked(self, group_id: str) -> dict[str, Any]:
+        normalize = getattr(self, "_normalize_group_identity_id", None)
+
+        def normalized(value: Any) -> str:
+            if callable(normalize):
+                return _single_line(normalize(value), 160)
+            return _single_line(value, 160)
+
+        clean_group = normalized(group_id)
+        groups = self.data.get("groups")
+        if not isinstance(groups, dict):
+            groups = {}
+            self.data["groups"] = groups
+        matching_keys = [key for key in groups if normalized(key) == clean_group]
+        for key in matching_keys:
+            groups.pop(key, None)
+
+        changed: dict[str, list[str]] = {}
+        for key in (
+            "group_whitelist_ids", "group_blacklist_ids",
+            "expression_group_learning_source_ids", "expression_group_application_ids",
+        ):
+            old_values = list(getattr(self, key, []) or [])
+            new_values = [
+                str(item).strip() for item in old_values
+                if str(item).strip() and normalized(item) != clean_group
+            ]
+            setattr(self, key, new_values)
+            _set_into_config(self.config, key, new_values)
+            if new_values != old_values:
+                changed[key] = new_values
+        refresher = getattr(self, "_refresh_expression_voice_profile", None)
+        if callable(refresher):
+            refresher()
+        return {
+            "removed_group": bool(matching_keys),
+            "removed_whitelist": "group_whitelist_ids" in changed,
+            "removed_blacklist": "group_blacklist_ids" in changed,
+            "removed_expression_scope": bool(
+                {"expression_group_learning_source_ids", "expression_group_application_ids"} & changed.keys()
+            ),
+        }
+
+    async def reset_group_scoped_data(
+        self,
+        group_id: str,
+        *,
+        operation_id: str = "",
+    ) -> dict[str, Any]:
+        """Durably reset a group remotely before removing its legacy/config sources."""
+        normalize = getattr(self, "_normalize_group_identity_id", None)
+        clean_group = _single_line(normalize(group_id) if callable(normalize) else group_id, 160)
+        if not clean_group:
+            return {"ok": False, "state": "invalid", "code": "scoped_group_erase_context_invalid"}
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
+            status = getattr(self, "req041_migration_status", None)
+            if isinstance(status, dict) and (status.get("required") or status.get("scoped_required")):
+                return {"ok": False, "state": "degraded", "code": "scoped_group_erase_unavailable"}
+            return {"ok": True, "state": "not_required", "code": "scoped_group_erase_not_required"}
+
+        async with self._data_lock:
+            sagas = self._req041_group_reset_sagas_locked()
+            persona_reset = self.data.get("_req041_persona_reset_saga")
+            if isinstance(persona_reset, dict) and persona_reset.get("state") == "confirmed":
+                return {"ok": False, "state": "rejected", "code": "persona_reset_in_progress"}
+            clean_operation = _single_line(operation_id, 120)
+            saga = sagas.get(clean_operation) if clean_operation else None
+            if saga is not None and not isinstance(saga, dict):
+                return {"ok": False, "state": "rejected", "code": "group_reset_saga_invalid"}
+            current_persona = scoped_persona_ref(self._active_persona_scope())
+            if saga is None:
+                matches = [
+                    item for item in sagas.values()
+                    if isinstance(item, dict)
+                    and item.get("state") in {"confirmed", "config_pending"}
+                    and _single_line(item.get("group_id"), 160) == clean_group
+                    and _single_line(item.get("persona_id"), 80) == current_persona
+                ]
+                if len(matches) > 1:
+                    return {"ok": False, "state": "rejected", "code": "group_reset_saga_conflict"}
+                saga = matches[0] if matches else None
+            if saga is None:
+                clean_operation = clean_operation or "req041-group-reset-" + uuid.uuid4().hex
+                saga = {
+                    "operation_id": clean_operation,
+                    "group_id": clean_group,
+                    "persona_id": current_persona,
+                    "state": "confirmed",
+                    "created_at": _now_ts(),
+                }
+                sagas[clean_operation] = saga
+                self._req041_persist_archive_saga_locked()
+            else:
+                clean_operation = _single_line(saga.get("operation_id"), 120)
+                if (
+                    not clean_operation or sagas.get(clean_operation) is not saga
+                    or _single_line(saga.get("group_id"), 160) != clean_group
+                    or saga.get("state") not in {"confirmed", "config_pending"}
+                ):
+                    return {"ok": False, "state": "rejected", "code": "group_reset_saga_invalid"}
+            safe_persona = _single_line(saga.get("persona_id"), 80)
+
+        remote = self._req041_erase_scoped_group_data(
+            clean_group, operation_id=clean_operation, persona_id=safe_persona,
+        )
+        if not remote.get("ok"):
+            return {
+                "ok": False, "state": "confirmed",
+                "code": str(remote.get("code") or "scoped_group_erase_failed")[:120],
+                "operation_id": clean_operation,
+            }
+
+        async with self._data_lock:
+            saga = self._req041_group_reset_sagas_locked().get(clean_operation)
+            if not isinstance(saga, dict):
+                return {"ok": False, "state": "rejected", "code": "group_reset_saga_missing"}
+            local = self._req041_finalize_group_reset_locked(clean_group)
+            saga["state"] = "config_pending"
+            saga["remote_receipt"] = {
+                "code": str(remote.get("code") or "")[:120],
+                "count": int(remote.get("count") or 0),
+                "namespace_count": int(remote.get("namespace_count") or 0),
+            }
+            saga["local_result"] = deepcopy(local)
+            self._req041_persist_archive_saga_locked()
+
+        config_saved = await self._save_config_if_possible()
+        if not config_saved:
+            return {
+                "ok": False, "state": "config_pending", "code": "group_reset_config_save_failed",
+                "operation_id": clean_operation, **local, "scoped_cleanup": remote,
+            }
+        async with self._data_lock:
+            self._req041_group_reset_sagas_locked().pop(clean_operation, None)
+            if not self.data.get("_req041_group_reset_sagas"):
+                self.data.pop("_req041_group_reset_sagas", None)
+            self._req041_persist_archive_saga_locked()
+        return {
+            "ok": True, "state": "completed", "code": "group_reset_completed",
+            "operation_id": clean_operation, "config_saved": True,
+            **local, "scoped_cleanup": remote,
+        }
+
+    async def _req041_resume_confirmed_group_resets(self) -> dict[str, Any]:
+        async with self._data_lock:
+            pending = [
+                deepcopy(saga) for saga in self._req041_group_reset_sagas_locked().values()
+                if isinstance(saga, dict) and saga.get("state") in {"confirmed", "config_pending"}
+            ][:32]
+        completed = 0
+        errors: list[str] = []
+        for saga in pending:
+            result = await self.reset_group_scoped_data(
+                str(saga.get("group_id") or ""),
+                operation_id=str(saga.get("operation_id") or ""),
+            )
+            if result.get("ok") and result.get("state") == "completed":
+                completed += 1
+            else:
+                errors.append(str(result.get("code") or "group_reset_resume_failed")[:120])
+        return {
+            "ok": not errors,
+            "code": "group_reset_resume_complete" if not errors else "group_reset_resume_degraded",
+            "pending": len(pending), "completed": completed,
+            "error_codes": sorted(set(errors))[:16],
+        }
+
+    async def _req041_resume_confirmed_persona_resets(self) -> dict[str, Any]:
+        pending: list[dict[str, str]] = []
+        async with self._data_lock:
+            default_data = getattr(self, "_data_default", None)
+            default_marker = (
+                default_data.get("_req041_persona_reset_saga")
+                if isinstance(default_data, dict) else None
+            )
+            if isinstance(default_marker, dict) and default_marker.get("state") == "confirmed":
+                pending.append({
+                    "persona_id": "",
+                    "operation_id": str(default_marker.get("operation_id") or ""),
+                    "force_default": "1",
+                })
+            profiles = getattr(self, "_persona_data_profiles", None)
+            if isinstance(profiles, dict):
+                for raw_persona, profile in profiles.items():
+                    marker = profile.get("_req041_persona_reset_saga") if isinstance(profile, dict) else None
+                    if isinstance(marker, dict) and marker.get("state") == "confirmed":
+                        pending.append({
+                            "persona_id": str(raw_persona or ""),
+                            "operation_id": str(marker.get("operation_id") or ""),
+                            "force_default": "0",
+                        })
+        completed = 0
+        errors: list[str] = []
+        for saga in pending[:32]:
+            result = await self._reset_current_persona_store(
+                saga["persona_id"], rebuild_today=False,
+                operation_id=saga["operation_id"],
+                _force_default_store=saga["force_default"] == "1",
+            )
+            if result.get("ok"):
+                completed += 1
+            else:
+                errors.append(str(result.get("code") or "persona_reset_resume_failed")[:120])
+        return {
+            "ok": not errors,
+            "code": "persona_reset_resume_complete" if not errors else "persona_reset_resume_degraded",
+            "pending": min(len(pending), 32), "completed": completed,
+            "error_codes": sorted(set(errors))[:16],
+        }
+
+    def _req041_persist_archive_saga_locked(self) -> None:
+        """Durably persist a destructive saga before any cross-store write."""
+        active_persona = str(self._active_persona_scope() or "")
+        if bool(getattr(self, "enable_multi_persona_mode", False)) and active_persona:
+            self._write_persona_data_snapshot_sync(active_persona, deepcopy(self.data))
+            return
+        self._save_data_now_sync()
+
+    async def archive_unified_person(
+        self,
+        person_id: str,
+        *,
+        operation_id: str,
+        confirmation_token: str = "",
+        dry_run: bool = True,
+        actor_id: str = "page_administrator",
+        reason_code: str = "person_archive",
+    ) -> dict[str, Any]:
+        """Run the request-bound, resumable person archive saga."""
+        clean_person = _single_line(person_id, 80)
+        clean_operation = _single_line(operation_id, 120)
+        if not clean_person or not clean_operation or type(dry_run) is not bool:
+            return {"ok": False, "state": "invalid", "code": "invalid_request"}
+        async with self._data_lock:
+            registry = self._active_unified_person_registry()
+            prepared = registry.prepare_person_archive(
+                clean_person, operation_id=clean_operation,
+                actor_id=actor_id, reason_code=reason_code,
+            )
+            if not prepared.get("ok"):
+                return prepared
+            self._req041_persist_archive_saga_locked()
+            if prepared.get("code") == "person_archived":
+                subjects = registry.archived_identity_subjects(clean_person)
+                removed = self._req041_erase_person_private_auxiliary_locked(clean_person, subjects)
+                if sum(removed.values()) > 0:
+                    self._req041_persist_archive_saga_locked()
+                return prepared
+            if dry_run:
+                return prepared
+            if not confirmation_token or confirmation_token != prepared.get("confirmation_token"):
+                return {
+                    "ok": False, "state": "prepared", "code": "archive_confirmation_mismatch",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            confirmed = registry.confirm_person_archive(
+                clean_person, clean_operation, confirmation_token,
+                actor_id=actor_id, reason_code=reason_code,
+            )
+            if not confirmed.get("ok"):
+                return confirmed
+            self._req041_persist_archive_saga_locked()
+            context = self._req041_scoped_private_context_for_person(clean_person)
+            synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+            relationship_store = getattr(self, "req041_relationship_store", None)
+            outbox = getattr(self, "req041_migration_outbox", None)
+            if context is None or synchronizer is None:
+                return {
+                    "ok": False, "state": "prepared", "code": "scoped_identity_archive_unavailable",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            if relationship_store is None or not callable(getattr(relationship_store, "tombstone_account", None)):
+                synchronizer.mark_dirty()
+                return {
+                    "ok": False, "state": "prepared", "code": "relationship_archive_unavailable",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            if outbox is None or not callable(getattr(outbox, "retire_streams", None)):
+                synchronizer.mark_dirty()
+                return {
+                    "ok": False, "state": "prepared", "code": "archive_outbox_unavailable",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            try:
+                stream_receipt = outbox.retire_streams(
+                    [f"identity:{clean_person}", f"relationship:{clean_person}"],
+                    synchronizer.migration_epoch,
+                    operation_id=f"req041-streams-{clean_operation}", reason_code=reason_code,
+                )
+            except Exception as exc:
+                synchronizer.mark_dirty()
+                return {
+                    "ok": False, "state": "prepared",
+                    "code": _single_line(exc, 120) or "archive_stream_retirement_failed",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            scoped_receipt = synchronizer.archive_identity_scopes(
+                context, operation_id=f"req041-scoped-{clean_operation}", reason_code=reason_code,
+            )
+            if not scoped_receipt.get("ok"):
+                return {
+                    "ok": False, "state": "prepared",
+                    "code": str(scoped_receipt.get("code") or "scoped_identity_archive_failed")[:120],
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            try:
+                relationship_receipt = relationship_store.tombstone_account(
+                    context, operation_id=f"req041-relationship-{clean_operation}",
+                    reason_code=reason_code, actor="administrator",
+                )
+            except Exception as exc:
+                return {
+                    "ok": False, "state": "prepared",
+                    "code": _single_line(exc, 120) or "relationship_archive_failed",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            legacy_subjects = [
+                _single_line(item.get("identity_subject_id") or item.get("user_id"), 160)
+                for item in (self.data.get("users") or {}).values()
+                if isinstance(item, dict)
+                and _single_line(item.get("unified_person_id"), 80) == clean_person
+            ] if isinstance(self.data.get("users"), dict) else []
+            auxiliary_counts = self._req041_erase_person_private_auxiliary_locked(
+                clean_person, legacy_subjects,
+            )
+            result = registry.finalize_person_archive(
+                clean_person, clean_operation, confirmation_token,
+                scoped_receipt, relationship_receipt, stream_receipt,
+                actor_id=actor_id, reason_code=reason_code,
+            )
+            if result.get("changed"):
+                result["auxiliary_removed_record_count"] = sum(auxiliary_counts.values())
+                coordinator = getattr(self, "req041_migration_coordinator", None)
+                rollback = getattr(coordinator, "rollback_identity", None)
+                if callable(rollback):
+                    rollback(clean_person, reason_code="person_archived")
+                self._req041_persist_archive_saga_locked()
+            return result
+
+    async def _req041_resume_confirmed_person_archives(self) -> dict[str, Any]:
+        registry = self._active_unified_person_registry()
+        pending = registry.confirmed_person_archives(limit=32)
+        completed = 0
+        errors: list[str] = []
+        for saga in pending:
+            result = await self.archive_unified_person(
+                saga["person_id"], operation_id=saga["operation_id"],
+                confirmation_token=saga["confirmation_token"], dry_run=False,
+                actor_id=saga["actor_id"], reason_code=saga["reason_code"],
+            )
+            if result.get("ok") and result.get("code") == "person_archived":
+                completed += 1
+            else:
+                errors.append(str(result.get("code") or "person_archive_resume_failed")[:120])
+        return {
+            "ok": not errors,
+            "code": "person_archive_resume_complete" if not errors else "person_archive_resume_degraded",
+            "pending": len(pending), "completed": completed,
+            "error_codes": sorted(set(errors))[:16],
+        }
+
+    def _req041_purge_legacy_person_locked(
+        self, person_id: str, subjects: list[str]
+    ) -> dict[str, int]:
+        """Remove only exact identity-owned legacy nodes; never fuzzy-search text."""
+        clean_person = _single_line(person_id, 80)
+        subject_set = {_single_line(item, 160) for item in subjects if _single_line(item, 160)}
+        counts = {"mapping_entries": 0, "list_entries": 0, "records": 0}
+        identity_fields = {
+            "user_id", "identity_subject_id", "platform_subject_id", "sender_id", "member_id",
+            "linked_qq_user_id", "target_user_id", "qq_user_id",
+        }
+
+        def owned(value: Any) -> bool:
+            if not isinstance(value, dict):
+                return False
+            if str(value.get("unified_person_id") or "").strip() == clean_person:
+                return True
+            return any(
+                str(value.get(field) or "").strip() in subject_set
+                for field in identity_fields
+                if value.get(field) not in (None, "")
+            )
+
+        def scrub(value: Any, *, depth: int = 0) -> Any:
+            if depth > 10:
+                return value
+            if isinstance(value, dict):
+                for key in list(value):
+                    item = value[key]
+                    if str(key) in subject_set or owned(item):
+                        value.pop(key, None)
+                        counts["mapping_entries"] += 1
+                        counts["records"] += 1
+                        continue
+                    value[key] = scrub(item, depth=depth + 1)
+                return value
+            if isinstance(value, list):
+                kept: list[Any] = []
+                for item in value:
+                    if owned(item):
+                        counts["list_entries"] += 1
+                        counts["records"] += 1
+                    else:
+                        kept.append(scrub(item, depth=depth + 1))
+                value[:] = kept
+            return value
+
+        for key in list(self.data):
+            if key == "unified_person":
+                continue
+            self.data[key] = scrub(self.data[key])
+        return counts
+
+    async def purge_unified_person(
+        self,
+        person_id: str,
+        *,
+        operation_id: str,
+        confirmation_token: str = "",
+        dry_run: bool = True,
+        actor_id: str = "page_administrator",
+        reason_code: str = "person_delete",
+    ) -> dict[str, Any]:
+        clean_person = _single_line(person_id, 80)
+        clean_operation = _single_line(operation_id, 120)
+        if not clean_person or not clean_operation or type(dry_run) is not bool:
+            return {"ok": False, "state": "invalid", "code": "invalid_request"}
+        async with self._data_lock:
+            registry = self._active_unified_person_registry()
+            prepared = registry.prepare_person_purge(
+                clean_person, operation_id=clean_operation,
+                actor_id=actor_id, reason_code=reason_code,
+            )
+            if not prepared.get("ok"):
+                return prepared
+            self._req041_persist_archive_saga_locked()
+            if prepared.get("code") == "person_purged":
+                return prepared
+            if dry_run:
+                return prepared
+            if not confirmation_token or confirmation_token != prepared.get("confirmation_token"):
+                return {
+                    "ok": False, "state": "prepared", "code": "purge_confirmation_mismatch",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            confirmed = registry.confirm_person_purge(
+                clean_person, clean_operation, confirmation_token,
+                actor_id=actor_id, reason_code=reason_code,
+            )
+            if not confirmed.get("ok"):
+                return confirmed
+            self._req041_persist_archive_saga_locked()
+            subjects = registry.archived_identity_subjects(clean_person)
+            if int(prepared.get("detached_identity_count") or 0) > 0 and not subjects:
+                return {
+                    "ok": False, "state": "confirmed", "code": "purge_identity_subjects_invalid",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            outbox = getattr(self, "req041_migration_outbox", None)
+            synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+            if outbox is None or synchronizer is None or not callable(getattr(outbox, "purge_retired_streams", None)):
+                return {
+                    "ok": False, "state": "confirmed", "code": "purge_outbox_unavailable",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            try:
+                outbox_receipt = outbox.purge_retired_streams(
+                    [f"identity:{clean_person}", f"relationship:{clean_person}"],
+                    synchronizer.migration_epoch,
+                    operation_id=f"req041-purge-streams-{clean_operation}", reason_code=reason_code,
+                )
+            except Exception as exc:
+                return {
+                    "ok": False, "state": "confirmed",
+                    "code": _single_line(exc, 120) or "purge_outbox_failed",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            auxiliary_counts = self._req041_erase_person_private_auxiliary_locked(clean_person, subjects)
+            legacy_counts = self._req041_purge_legacy_person_locked(clean_person, subjects)
+            result = registry.finalize_person_purge(
+                clean_person, clean_operation, confirmation_token, outbox_receipt,
+                actor_id=actor_id, reason_code=reason_code,
+            )
+            if result.get("changed"):
+                result["legacy_removed_record_count"] = int(legacy_counts.get("records") or 0)
+                result["auxiliary_removed_record_count"] = sum(auxiliary_counts.values())
+                self._req041_persist_archive_saga_locked()
+            return result
+
+    async def _req041_resume_confirmed_person_purges(self) -> dict[str, Any]:
+        registry = self._active_unified_person_registry()
+        pending = registry.confirmed_person_purges(limit=32)
+        completed = 0
+        errors: list[str] = []
+        for saga in pending:
+            result = await self.purge_unified_person(
+                saga["person_id"], operation_id=saga["operation_id"],
+                confirmation_token=saga["confirmation_token"], dry_run=False,
+                actor_id=saga["actor_id"], reason_code=saga["reason_code"],
+            )
+            if result.get("ok") and result.get("code") == "person_purged":
+                completed += 1
+            else:
+                errors.append(str(result.get("code") or "person_purge_resume_failed")[:120])
+        return {
+            "ok": not errors,
+            "code": "person_purge_resume_complete" if not errors else "person_purge_resume_degraded",
+            "pending": len(pending), "completed": completed,
+            "error_codes": sorted(set(errors))[:16],
+        }
+
+    def _req041_scoped_private_read_view(self, event: Any, user: dict[str, Any]) -> dict[str, Any]:
+        existing = getattr(event, "req041_scoped_private_read_view", None)
+        if isinstance(existing, dict):
+            return existing
+        view = dict(user) if isinstance(user, dict) else user
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        context = self._req041_scoped_context_for_user(user, kind="private")
+        if synchronizer is None or context is None:
+            return view
+        projection = synchronizer.read_projection(context)
+        if not isinstance(projection, dict) or projection.get("ok") is not True:
+            if isinstance(view, dict):
+                view["req041_scoped_read_generation"] = "new_unavailable"
+                try:
+                    setattr(event, "req041_scoped_private_read_view", view)
+                except Exception:
+                    pass
+            return view
+        persona_context = self._req041_persona_global_context(purpose="rule_read")
+        persona_projection = (
+            synchronizer.read_projection(persona_context) if persona_context is not None else None
+        )
+        view = overlay_private_runtime_view(view, projection, persona_projection)
+        if not isinstance(view, dict) or view.get("req041_scoped_read_generation") != "new":
+            return view
+        try:
+            setattr(event, "req041_scoped_private_read_view", view)
+        except Exception:
+            pass
+        return view
+
+    def _req041_scoped_group_read_view(
+        self,
+        event: Any,
+        *,
+        group_id: str,
+        group: dict[str, Any],
+        sender_id: str,
+        relationship_user: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        existing = getattr(event, "req041_scoped_group_read_view", None)
+        if isinstance(existing, dict):
+            return existing
+        view = deepcopy(group) if isinstance(group, dict) else group
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None or not isinstance(view, dict):
+            return view
+        persona_id = scoped_persona_ref(self._active_persona_scope())
+        safe_group = scoped_group_ref(persona_id, group_id)
+        shared = NamespaceContext(
+            kind="group_shared", persona_id=persona_id, identity_id="", group_id=safe_group,
+            assurance="verified", profile_status="active", policy_version=synchronizer.policy_version,
+            migration_epoch=synchronizer.migration_epoch,
+        )
+        shared_projection = synchronizer.read_projection(shared)
+        persona_context = self._req041_persona_global_context(purpose="rule_read")
+        persona_projection = (
+            synchronizer.read_projection(persona_context) if persona_context is not None else None
+        )
+        member_projection = None
+        member_context = self._req041_scoped_context_for_user(
+            relationship_user or {}, kind="group_member", group_id=group_id, purpose="profile_read"
+        )
+        if member_context is not None:
+            member_projection = synchronizer.read_projection(member_context)
+        if not isinstance(shared_projection, dict) or shared_projection.get("ok") is not True:
+            view["req041_scoped_read_generation"] = "new_unavailable"
+            try:
+                setattr(event, "req041_scoped_group_read_view", view)
+            except Exception:
+                pass
+            return view
+        view = overlay_group_runtime_view(
+            view, shared_projection, sender_id=sender_id, member_projection=member_projection,
+            persona_projection=persona_projection,
+        )
+        if not isinstance(view, dict) or view.get("req041_scoped_read_generation") != "new":
+            return view
+        view["req041_scoped_read_generation"] = "new"
+        try:
+            setattr(event, "req041_scoped_group_read_view", view)
+        except Exception:
+            pass
+        return view
+
+    def _req041_replay_finished(self, _task: Any) -> None:
+        self._req041_replay_task = None
+        if bool(getattr(self, "_req041_replay_requested", False)):
+            try:
+                self._req041_schedule_replay()
+            except RuntimeError:
+                status = getattr(self, "req041_migration_status", None)
+                if isinstance(status, dict):
+                    status.update({"state": "paused", "code": "migration_replay_loop_unavailable"})
+
+    def _req041_relationship_read_view(
+        self,
+        event: Any,
+        user: dict[str, Any],
+        *,
+        kind: str = "private",
+        group_id: str = "",
+    ) -> dict[str, Any]:
+        existing = getattr(event, "req041_relationship_read_view", None)
+        if isinstance(existing, dict):
+            return existing
+        router = getattr(self, "req041_relationship_read_router", None)
+        if router is None or not isinstance(user, dict):
+            return user
+        event_ref = self._event_message_id(event)
+        if not event_ref:
+            event_ref = f"{getattr(event, 'unified_msg_origin', '')}:{uuid.uuid4().hex}"
+        result = router.begin(user, event_ref=event_ref, kind=kind, group_id=group_id)
+        view = result.get("user") if isinstance(result.get("user"), dict) else user
+        try:
+            setattr(event, "req041_relationship_read_view", view)
+            setattr(event, "req041_read_chain_id", str(result.get("chain_id") or ""))
+            setattr(event, "req041_read_generation", str(result.get("generation") or "legacy"))
+            setattr(event, "req041_read_identity_id", str(result.get("identity_id") or ""))
+        except Exception:
+            pass
+        return view
+
+    def _req041_relationship_snapshot_view(
+        self,
+        user: dict[str, Any],
+        *,
+        source: str,
+    ) -> dict[str, Any]:
+        """Take one short-lived private relationship view for background decisions."""
+        if not isinstance(user, dict):
+            return user
+        relationship_view = user
+        router = getattr(self, "req041_relationship_read_router", None)
+        if router is not None and user.get("req041_read_generation") != "new":
+            result = router.begin(
+                user,
+                event_ref=f"snapshot:{_single_line(source, 60) or 'relationship'}:{uuid.uuid4().hex}",
+                kind="private",
+            )
+            chain_id = str(result.get("chain_id") or "")
+            try:
+                relationship_view = (
+                    result.get("user") if isinstance(result.get("user"), dict) else user
+                )
+            finally:
+                if chain_id:
+                    try:
+                        router.finish(chain_id)
+                    except Exception:
+                        pass
+        scoped_getter = getattr(self, "_req041_scoped_private_read_view", None)
+        return (
+            scoped_getter(None, relationship_view)
+            if callable(scoped_getter) else relationship_view
+        )
+
+    def _req041_group_sender_is_human(self, event: AstrMessageEvent) -> bool:
+        if not self._event_is_inbound_chat_message(event):
+            return False
+        sender_id = self._event_sender_id(event)
+        self_id = self._event_self_id(event)
+        if not sender_id or (self_id and sender_id == self_id):
+            return False
+        raw = self._event_raw_payload(event)
+        sender = raw.get("sender") if isinstance(raw.get("sender"), dict) else {}
+        message_obj = getattr(event, "message_obj", None)
+        message_sender = getattr(message_obj, "sender", None) if message_obj is not None else None
+
+        def field(owner: Any, name: str) -> Any:
+            if isinstance(owner, dict):
+                return owner.get(name)
+            try:
+                return getattr(owner, name, None)
+            except Exception:
+                return None
+
+        for owner in (raw, sender, message_sender):
+            if owner is None:
+                continue
+            for key in ("is_bot", "bot", "is_system", "system"):
+                value = field(owner, key)
+                if value is True or str(value or "").strip().lower() in {"1", "true", "yes", "bot", "system"}:
+                    return False
+            role = str(field(owner, "role") or field(owner, "sender_type") or "").strip().lower()
+            if role in {"assistant", "bot", "system", "service"}:
+                return False
+        return True
+
+    def _req041_prepare_group_affinity_candidate(
+        self,
+        event: AstrMessageEvent,
+        *,
+        group_id: str,
+        relationship_user: dict[str, Any] | None,
+        scene_trigger: str,
+        forwarded: bool,
+    ) -> dict[str, Any] | None:
+        if (
+            not isinstance(relationship_user, dict)
+            or str(getattr(event, "req041_read_generation", "") or "") != "new"
+            or getattr(self, "req041_dual_write_producer", None) is None
+            or getattr(self, "req041_migration_replay", None) is None
+            or getattr(self, "req041_relationship_store", None) is None
+            or not bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+        ):
+            return None
+        direction = "at_bot" if scene_trigger == "at_bot" else "reply_bot" if scene_trigger == "reply_bot" else ""
+        context = self._req041_scoped_context_for_user(
+            relationship_user,
+            kind="group_member",
+            group_id=group_id,
+            purpose="relationship_write",
+        )
+        if context is None:
+            return None
+        candidate = prepare_group_affinity_candidate(
+            context,
+            raw_group_id=group_id,
+            allowlist=getattr(self, "group_relationship_affinity_allowlist", ()),
+            enabled=bool(getattr(self, "enable_group_relationship_affinity", False)),
+            inbound_event_id=self._event_message_id(event),
+            directed_by=direction,
+            legacy_user_key=str(relationship_user.get("user_id") or ""),
+            inbound=self._event_is_inbound_chat_message(event),
+            human_sender=self._req041_group_sender_is_human(event),
+            forwarded=bool(forwarded),
+            echo=False,
+            historical=False,
+        )
+        if isinstance(candidate, dict):
+            setattr(event, "req041_group_affinity_candidate", candidate)
+        return candidate
+
+    async def _req041_settle_confirmed_group_affinity(self, event: AstrMessageEvent) -> None:
+        candidate = getattr(event, "req041_group_affinity_candidate", None)
+        if not isinstance(candidate, dict) or bool(candidate.get("settled")):
+            return
+        if not self._reaction_expression_primary_reply_confirmed(
+            event, require_segmented_complete=True,
+        ):
+            return
+        live_allowlist = normalize_group_allowlist(
+            getattr(self, "group_relationship_affinity_allowlist", ())
+        )
+        if (
+            not bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            or not bool(getattr(self, "enable_group_relationship_affinity", False))
+            or str(candidate.get("raw_group_id") or "") not in live_allowlist
+        ):
+            candidate["settled"] = True
+            candidate["result_code"] = "group_affinity_config_revoked"
+            return
+        store = getattr(self, "req041_relationship_store", None)
+        if not isinstance(store, RelationshipAccountStore):
+            return
+        admission = await asyncio.to_thread(
+            admit_confirmed_group_affinity,
+            candidate,
+            store,
+            reply_succeeded=True,
+            requested_delta=4,
+            group_daily_net_cap=int(getattr(self, "group_relationship_daily_net_cap", 2)),
+            group_window_seconds=int(getattr(self, "group_relationship_window_minutes", 30)) * 60,
+            group_window_absolute_cap=int(getattr(self, "group_relationship_window_absolute_cap", 1)),
+            group_person_daily_absolute_cap=int(
+                getattr(self, "group_relationship_person_daily_absolute_cap", 4)
+            ),
+            group_scope_daily_absolute_cap=int(
+                getattr(self, "group_relationship_scope_daily_absolute_cap", 20)
+            ),
+            group_event_cap=4,
+        )
+        if admission is None:
+            return
+        candidate["settled"] = True
+        candidate["result_code"] = admission.code
+        if admission.admitted_delta == 0:
+            return
+        context = NamespaceContext(**candidate.get("context", {}))
+        user_key = str(candidate.get("legacy_user_key") or "")
+        async with self._data_lock:
+            users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+            user = users.get(user_key) if isinstance(users, dict) else None
+            if (
+                not isinstance(user, dict)
+                or str(user.get("unified_person_id") or "") != context.identity_id
+            ):
+                candidate["settled"] = False
+                raise RuntimeError("group_affinity_legacy_subject_mismatch")
+            result = self._apply_relationship_event(
+                user,
+                admission.admitted_delta,
+                reason_code="direct_group_interaction",
+                event_id=admission.event_id,
+                now=_now_ts(),
+                req041_group_admission_event_id=admission.event_id,
+            )
+            candidate["legacy_result_code"] = str(result.get("code") or "")
+            if result.get("changed"):
+                self._schedule_data_save()
+
+    @filter.after_message_sent(priority=-105000)
+    @_multi_persona_event_context
+    async def settle_req041_group_affinity_after_send(
+        self, event: AstrMessageEvent, *args, **kwargs
+    ) -> None:
+        if self is None or not self.enabled:
+            return
+        try:
+            await self._req041_settle_confirmed_group_affinity(event)
+        except Exception as exc:
+            status = getattr(self, "req041_migration_status", None)
+            if isinstance(status, dict):
+                status.update({"state": "degraded", "code": "group_affinity_settlement_failed"})
+            logger.warning(
+                "[PrivateCompanion] REQ-041 群好感度结算失败，已保持事件可重放: %s",
+                _single_line(exc, 160),
+            )
+
+    @filter.after_message_sent(priority=-110000)
+    @_multi_persona_event_context
+    async def finish_req041_read_chain(self, event: AstrMessageEvent, *args, **kwargs) -> None:
+        router = getattr(self, "req041_relationship_read_router", None)
+        chain_id = str(getattr(event, "req041_read_chain_id", "") or "")
+        if router is not None and chain_id:
+            try:
+                await asyncio.to_thread(router.finish, chain_id)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] REQ-041 读链清理失败: %s", _single_line(exc, 120))
+            try:
+                setattr(event, "req041_read_chain_id", "")
+            except Exception:
+                pass
+            status = getattr(self, "req041_migration_status", None)
+            metrics = getattr(self, "req041_observability", None)
+            phase = str((status or {}).get("phase") or "") if isinstance(status, dict) else ""
+            now = _now_ts()
+            next_check = float(getattr(self, "_req041_stability_next_check_at", 0.0) or 0.0)
+            if phase in {"S6", "S7", "S8"} and metrics is not None and now >= next_check:
+                local_samples = sum(
+                    int((item.get("local") or {}).get("samples") or 0)
+                    for item in (metrics.snapshot().get("stages") or {}).values()
+                    if isinstance(item, dict)
+                )
+                if local_samples >= 20:
+                    self._req041_stability_next_check_at = now + 60.0
+                    self._req041_schedule_replay()
+
+    async def _req041_run_replay_batch(self) -> None:
+        worker = getattr(self, "req041_migration_replay", None)
+        if worker is None:
+            return
+        while bool(getattr(self, "_req041_replay_requested", False)):
+            self._req041_replay_requested = False
+            result = await asyncio.to_thread(worker.run_batch)
+            if result.get("status") == "paused":
+                status = getattr(self, "req041_migration_status", None)
+                if isinstance(status, dict):
+                    status.update({
+                        "state": "paused",
+                        "code": str(result.get("error_code") or "migration_replay_failed")[:120],
+                        "s5": result,
+                    })
+                return
+            runtime = getattr(self, "req041_migration_status", None)
+            coordinator = getattr(self, "req041_migration_coordinator", None)
+            outbox = getattr(self, "req041_migration_outbox", None)
+            if isinstance(runtime, dict) and coordinator is not None and outbox is not None:
+                try:
+                    stability_fn = advance_migration_stability
+                except NameError:
+                    from migration_stability import advance_migration_stability as stability_fn
+                control = coordinator.status()
+                scoped = runtime.get("scoped") if isinstance(runtime.get("scoped"), dict) else {}
+                stability = await asyncio.to_thread(
+                    stability_fn,
+                    coordinator=coordinator, outbox=outbox,
+                    migration_epoch=str(control.get("migration_epoch") or ""),
+                    replay_ok=True, scoped_ok=bool(scoped.get("ok")),
+                    memory_bound=bool(runtime.get("memory_bound")),
+                    observability=self.req041_observability,
+                    boot_ref=str(getattr(self, "_req041_runtime_boot_ref", f"boot-{id(self)}")),
+                )
+                control = coordinator.status()
+                runtime.update({"phase": control.get("phase", runtime.get("phase")),
+                                "checkpoint": control.get("checkpoint", runtime.get("checkpoint")),
+                                "stability": stability})
+            if int(result.get("count") or 0) > 0 or int(result.get("recovered") or 0) > 0:
+                self._req041_replay_requested = True
+
+    async def _req041_initialize_automatic_migration(self) -> None:
+        try:
+            metrics_type = Req041Observability
+        except NameError:  # Standalone migration harnesses load selected methods only.
+            from req041_observability import Req041Observability as metrics_type
+        if not isinstance(getattr(self, "req041_observability", None), metrics_type):
+            self.req041_observability = metrics_type()
+        if not str(getattr(self, "_req041_runtime_boot_ref", "") or ""):
+            self._req041_runtime_boot_ref = f"boot-{id(self)}"
+        coordinator = getattr(self, "req041_migration_coordinator", None)
+        outbox = getattr(self, "req041_migration_outbox", None)
+        if coordinator is None or outbox is None:
+            self.req041_migration_status = {
+                "required": False, "state": "degraded", "code": "migration_runtime_unavailable"
+            }
+            return
+        sources = self._req041_migration_source_files()
+        presence_getter = getattr(self, "_memory_companion_presence", None)
+        try:
+            presence = presence_getter() if callable(presence_getter) else {}
+        except Exception:
+            presence = {}
+        memory_version = _single_line((presence or {}).get("version"), 32) or "not-detected"
+        companion_version = _single_line((getattr(self, "plugin_identity", {}) or {}).get("version"), 32) or "unknown"
+        try:
+            current_status = coordinator.status()
+            is_fresh_runtime = current_status.get("source_schema_version") == "req041-fresh-v1"
+            if not sources and not current_status:
+                current_status = await asyncio.to_thread(
+                    coordinator.initialize_fresh_runtime,
+                    policy_version="req041-v1",
+                    target_schema_version="req041-v1",
+                    companion_version=companion_version,
+                    memory_version=memory_version,
+                )
+                is_fresh_runtime = True
+            if is_fresh_runtime:
+                await self._req041_initialize_fresh_scoped_runtime(current_status)
+                return
+            async with self._data_lock:
+                source_inventory = await asyncio.to_thread(
+                    inspect_migration_sources,
+                    self.data_dir,
+                    sources,
+                )
+                status = await asyncio.to_thread(
+                    coordinator.start_or_resume,
+                    source_files=sources,
+                    policy_version="req041-v1",
+                    source_schema_version=source_inventory["source_schema_version"],
+                    target_schema_version="req041-v1",
+                    companion_version=companion_version,
+                    memory_version=memory_version,
+                    source_inventory=source_inventory,
+                )
+            if status.get("phase") == "S1" and status.get("state") != "paused":
+                await asyncio.to_thread(coordinator.capture_compatibility, self._req041_compatibility_snapshot())
+                status = coordinator.status()
+            epoch = str(status.get("migration_epoch") or "")
+            policy = str(status.get("policy_version") or "")
+            await asyncio.to_thread(outbox.begin_epoch, epoch, policy_version=policy)
+            self.req041_dual_write_producer = MigrationDualWriteProducer(
+                outbox=outbox,
+                coordinator=coordinator,
+                migration_epoch=epoch,
+                policy_version=policy,
+                on_enqueued=self._req041_schedule_replay,
+            )
+            if status.get("state") == "paused":
+                self.req041_migration_status = {
+                    "required": True, "state": "paused", "code": status.get("error_code") or "migration_paused",
+                    "phase": status.get("phase", "S0"), "dual_write": "capturing_while_paused",
+                }
+                return
+            if status.get("phase") == "S2":
+                status = await asyncio.to_thread(coordinator.transition, "S3", checkpoint="durable_outbox_active")
+
+            backfill_result: dict[str, Any] = {"ok": True, "code": "s4_not_required"}
+            if status.get("phase") in {"S3", "S4"}:
+                try:
+                    async with self._data_lock:
+                        legacy_snapshots = self._req041_legacy_snapshots_locked()
+                    backfiller = await asyncio.to_thread(
+                        MigrationBackfill,
+                        coordinator=coordinator,
+                        relationship_path=Path(self.data_dir) / "req041_relationship.db",
+                        migration_epoch=epoch,
+                        policy_version=policy,
+                        outbox=outbox,
+                    )
+                    backfill_counts: dict[str, Any] = {
+                        "phase": status.get("phase", "S3"), "migrated": 0, "idempotent": 0,
+                        "pending": 0, "conflicts": 0, "formal_identities": 0, "legacy_users": 0,
+                        "identity_baselines": 0,
+                        "source_scopes": len(legacy_snapshots),
+                    }
+                    for source_scope, legacy_snapshot in legacy_snapshots:
+                        scoped_counts = await asyncio.to_thread(
+                            backfiller.run,
+                            legacy_snapshot,
+                            source_scope=source_scope,
+                        )
+                        backfill_counts["phase"] = scoped_counts["phase"]
+                        for count_key in (
+                            "migrated", "idempotent", "pending", "conflicts",
+                            "formal_identities", "legacy_users",
+                            "identity_baselines",
+                        ):
+                            backfill_counts[count_key] += int(scoped_counts[count_key])
+                    self.req041_migration_backfill = backfiller
+                    self.req041_relationship_store = backfiller.relationships
+                    backfill_result = {"ok": True, "code": "s4_shadow_backfilled", **backfill_counts}
+                    status = coordinator.status()
+                except Exception as backfill_exc:
+                    backfill_result = {
+                        "ok": False,
+                        "code": _single_line(backfill_exc, 120) or "s4_backfill_failed",
+                    }
+                    logger.warning(
+                        "[PrivateCompanion] REQ-041 S4 Shadow 回填失败，继续使用 legacy 路径: %s",
+                        _single_line(backfill_exc, 160),
+                    )
+
+            relationship_store = getattr(self, "req041_relationship_store", None)
+            if relationship_store is None and status.get("phase") in {"S4", "S5", "S6", "S7", "S8", "S9"}:
+                backfiller = await asyncio.to_thread(
+                    MigrationBackfill,
+                    coordinator=coordinator,
+                    relationship_path=Path(self.data_dir) / "req041_relationship.db",
+                    migration_epoch=epoch,
+                    policy_version=policy,
+                    outbox=outbox,
+                )
+                self.req041_migration_backfill = backfiller
+                self.req041_relationship_store = backfiller.relationships
+                relationship_store = backfiller.relationships
+                relationship_store.set_observability(self.req041_observability)
+
+            replay_result: dict[str, Any] = {"status": "skipped", "code": "s5_not_ready"}
+            if relationship_store is not None and backfill_result.get("ok"):
+                if status.get("phase") == "S4":
+                    status = await asyncio.to_thread(
+                        coordinator.transition, "S5", checkpoint="ordered_shadow_replay_active"
+                    )
+                if status.get("phase") in {"S5", "S6", "S7", "S8", "S9"}:
+                    active_registry = self._active_unified_person_registry()
+                    replay_worker = MigrationReplayWorker(
+                        outbox=outbox,
+                        coordinator=coordinator,
+                        relationship_store=relationship_store,
+                        registry=active_registry,
+                        registry_resolver=self._req041_registry_for_person,
+                        legacy_relationship_resolver=self._req041_legacy_relationship_state,
+                        legacy_pending_resolver=self._req041_resolve_legacy_pending_for_person,
+                        enable_gap_recovery=True,
+                        migration_epoch=epoch,
+                        policy_version=policy,
+                        observability=self.req041_observability,
+                    )
+                    self.req041_migration_replay = replay_worker
+                    await asyncio.to_thread(
+                        outbox.set_epoch_state, epoch, "replaying", checkpoint="s5_replay_batch"
+                    )
+                    replay_result = await asyncio.to_thread(replay_worker.run_batch)
+                    if replay_result.get("status") == "ok" and status.get("phase") == "S5":
+                        status = await asyncio.to_thread(
+                            coordinator.transition, "S6", checkpoint="per_identity_relationship_cutover_enabled"
+                        )
+                        replay_result = await asyncio.to_thread(replay_worker.run_batch)
+                    if replay_result.get("status") == "ok":
+                        await asyncio.to_thread(
+                            outbox.set_epoch_state, epoch, "active", checkpoint="s5_reconciled"
+                        )
+                    else:
+                        status = coordinator.status()
+                    if replay_result.get("status") == "ok":
+                        self.req041_relationship_read_router = MigrationRelationshipReadRouter(
+                            coordinator=coordinator,
+                            relationship_store=relationship_store,
+                            registry_resolver=self._req041_registry_for_person,
+                            migration_epoch=epoch,
+                            policy_version=policy,
+                            observability=self.req041_observability,
+                        )
+                        await asyncio.to_thread(
+                            coordinator.prune_read_chains, older_than=_now_ts() - 3600
+                        )
+
+            remote = {"ok": False, "state": "degraded", "code": "memory_bridge_unavailable"}
+            bridge_getter = getattr(self, "_memory_companion_bridge", None)
+            bridge = bridge_getter() if callable(bridge_getter) else None
+            binder = getattr(self, "_memory_companion_bind_namespace_epoch", None)
+            if bridge is not None and callable(binder):
+                remote = binder(
+                    bridge,
+                    operation_id=f"req041-bind-{epoch}",
+                    migration_epoch=epoch,
+                    policy_version=policy,
+                )
+            scoped_result: dict[str, Any] = {
+                "ok": False, "code": "namespace_scoped_api_not_bound", "scopes": []
+            }
+            archive_resume: dict[str, Any] = {
+                "ok": True, "code": "person_archive_resume_not_required",
+                "pending": 0, "completed": 0, "error_codes": [],
+            }
+            purge_resume: dict[str, Any] = {
+                "ok": True, "code": "person_purge_resume_not_required",
+                "pending": 0, "completed": 0, "error_codes": [],
+            }
+            group_reset_resume: dict[str, Any] = {
+                "ok": True, "code": "group_reset_resume_not_required",
+                "pending": 0, "completed": 0, "error_codes": [],
+            }
+            persona_reset_resume: dict[str, Any] = {
+                "ok": True, "code": "persona_reset_resume_not_required",
+                "pending": 0, "completed": 0, "error_codes": [],
+            }
+            if remote.get("ok") and bridge is not None:
+                self.req041_scoped_projection_sync = ScopedProjectionSynchronizer(
+                    read=lambda namespace, **kwargs: self._memory_companion_read_scoped_record(
+                        bridge, namespace, **kwargs
+                    ),
+                    list_records=lambda namespace, **kwargs: self._memory_companion_list_scoped_records(
+                        bridge, namespace, **kwargs
+                    ),
+                    upsert=lambda namespace, **kwargs: self._memory_companion_upsert_scoped_record(
+                        bridge, namespace, **kwargs
+                    ),
+                    tombstone=lambda namespace, **kwargs: self._memory_companion_tombstone_scoped_record(
+                        bridge, namespace, **kwargs
+                    ),
+                    tombstone_identity_scopes=lambda namespace, **kwargs: self._memory_companion_tombstone_scoped_identity_scopes(
+                        bridge, namespace, **kwargs
+                    ),
+                    erase_group_scopes=lambda namespace, **kwargs: self._memory_companion_erase_scoped_group_scopes(
+                        bridge, namespace, **kwargs
+                    ),
+                    erase_persona_scopes=lambda namespace, **kwargs: self._memory_companion_erase_scoped_persona_scopes(
+                        bridge, namespace, **kwargs
+                    ),
+                    migration_epoch=epoch,
+                    policy_version=policy,
+                    observability=self.req041_observability,
+                )
+                resumer = getattr(self, "_req041_resume_confirmed_person_archives", None)
+                if callable(resumer):
+                    archive_resume = await resumer()
+                purge_resumer = getattr(self, "_req041_resume_confirmed_person_purges", None)
+                if archive_resume.get("ok") and callable(purge_resumer):
+                    purge_resume = await purge_resumer()
+                group_resumer = getattr(self, "_req041_resume_confirmed_group_resets", None)
+                if archive_resume.get("ok") and purge_resume.get("ok") and callable(group_resumer):
+                    group_reset_resume = await group_resumer()
+                persona_resumer = getattr(self, "_req041_resume_confirmed_persona_resets", None)
+                if (
+                    archive_resume.get("ok") and purge_resume.get("ok")
+                    and group_reset_resume.get("ok") and callable(persona_resumer)
+                ):
+                    persona_reset_resume = await persona_resumer()
+                if archive_resume.get("ok") and purge_resume.get("ok") and group_reset_resume.get("ok") and persona_reset_resume.get("ok"):
+                    scoped_result = await self._req041_sync_scoped_now()
+                else:
+                    scoped_result = {
+                        "ok": False, "code": "lifecycle_resume_degraded", "scopes": [],
+                    }
+            self.req041_migration_status = {
+                "required": True,
+                "state": "active" if remote.get("ok") and archive_resume.get("ok") and purge_resume.get("ok") and group_reset_resume.get("ok") and persona_reset_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok" else (
+                    "paused" if status.get("state") == "paused" else "degraded"
+                ),
+                "code": (
+                    "migration_shadow_active"
+                    if remote.get("ok") and archive_resume.get("ok") and purge_resume.get("ok") and group_reset_resume.get("ok") and persona_reset_resume.get("ok") and scoped_result.get("ok") and backfill_result.get("ok") and replay_result.get("status") == "ok"
+                    else str(
+                        backfill_result.get("code") if not backfill_result.get("ok")
+                        else replay_result.get("error_code") if replay_result.get("status") == "paused"
+                        else archive_resume.get("code") if not archive_resume.get("ok")
+                        else purge_resume.get("code") if not purge_resume.get("ok")
+                        else group_reset_resume.get("code") if not group_reset_resume.get("ok")
+                        else persona_reset_resume.get("code") if not persona_reset_resume.get("ok")
+                        else scoped_result.get("code") if remote.get("ok") and not scoped_result.get("ok")
+                        else remote.get("code") or "migration_degraded"
+                    )[:120]
+                ),
+                "phase": status.get("phase", "S5"),
+                "memory_bound": bool(remote.get("ok")),
+                "checkpoint": status.get("checkpoint", ""),
+                "s4": backfill_result,
+                "s5": replay_result,
+                "dual_write": "capturing",
+                "scoped": scoped_result,
+                "archive_resume": archive_resume,
+                "purge_resume": purge_resume,
+                "group_reset_resume": group_reset_resume,
+                "persona_reset_resume": persona_reset_resume,
+            }
+            try:
+                stability_fn = advance_migration_stability
+            except NameError:
+                from migration_stability import advance_migration_stability as stability_fn
+            stability = await asyncio.to_thread(
+                stability_fn,
+                coordinator=coordinator, outbox=outbox, migration_epoch=epoch,
+                replay_ok=replay_result.get("status") == "ok",
+                scoped_ok=bool(scoped_result.get("ok")), memory_bound=bool(remote.get("ok")),
+                observability=self.req041_observability,
+                boot_ref=self._req041_runtime_boot_ref,
+            )
+            status = coordinator.status()
+            self.req041_migration_status.update({
+                "phase": status.get("phase", self.req041_migration_status.get("phase")),
+                "checkpoint": status.get("checkpoint", self.req041_migration_status.get("checkpoint")),
+                "stability": stability,
+            })
+        except Exception as exc:
+            status = coordinator.status()
+            self.req041_migration_status = {
+                "required": bool(status),
+                "state": "paused" if status.get("state") == "paused" else "degraded",
+                "code": _single_line(exc, 120) or "migration_startup_failed",
+                "phase": status.get("phase", "S0") if status else "S0",
+            }
+            logger.warning(
+                "[PrivateCompanion] REQ-041 自动迁移启动失败，继续使用官方 legacy 路径: %s",
+                _single_line(exc, 160),
+            )
+
+    async def _req041_initialize_fresh_scoped_runtime(
+        self,
+        status: dict[str, Any],
+    ) -> None:
+        """Bring a source-free install directly into the normal scoped runtime."""
+        coordinator = self.req041_migration_coordinator
+        outbox = self.req041_migration_outbox
+        epoch = _single_line(status.get("migration_epoch"), 128)
+        policy = _single_line(status.get("policy_version"), 64)
+        if not epoch or not policy:
+            raise RuntimeError("fresh_runtime_contract_invalid")
+        await asyncio.to_thread(outbox.begin_epoch, epoch, policy_version=policy)
+        relationship_store = RelationshipAccountStore(
+            Path(self.data_dir) / "req041_relationship.db",
+            active_migration_epoch=epoch,
+            observability=self.req041_observability,
+        )
+        self.req041_relationship_store = relationship_store
+        self.req041_dual_write_producer = MigrationDualWriteProducer(
+            outbox=outbox,
+            coordinator=coordinator,
+            migration_epoch=epoch,
+            policy_version=policy,
+            on_enqueued=self._req041_schedule_replay,
+        )
+        replay_worker = MigrationReplayWorker(
+            outbox=outbox,
+            coordinator=coordinator,
+            relationship_store=relationship_store,
+            registry=self._active_unified_person_registry(),
+            registry_resolver=self._req041_registry_for_person,
+            legacy_relationship_resolver=self._req041_legacy_relationship_state,
+            legacy_pending_resolver=self._req041_resolve_legacy_pending_for_person,
+            enable_gap_recovery=True,
+            migration_epoch=epoch,
+            policy_version=policy,
+            observability=self.req041_observability,
+        )
+        self.req041_migration_replay = replay_worker
+        await asyncio.to_thread(outbox.set_epoch_state, epoch, "active", checkpoint="fresh_runtime_active")
+        replay_result = await asyncio.to_thread(replay_worker.run_batch)
+        self.req041_relationship_read_router = MigrationRelationshipReadRouter(
+            coordinator=coordinator,
+            relationship_store=relationship_store,
+            registry_resolver=self._req041_registry_for_person,
+            migration_epoch=epoch,
+            policy_version=policy,
+            observability=self.req041_observability,
+        )
+
+        remote = {"ok": False, "state": "degraded", "code": "memory_bridge_unavailable"}
+        bridge_getter = getattr(self, "_memory_companion_bridge", None)
+        bridge = bridge_getter() if callable(bridge_getter) else None
+        binder = getattr(self, "_memory_companion_bind_namespace_epoch", None)
+        if bridge is not None and callable(binder):
+            remote = binder(
+                bridge,
+                operation_id=f"req041-bind-{epoch}",
+                migration_epoch=epoch,
+                policy_version=policy,
+            )
+        scoped_result: dict[str, Any] = {
+            "ok": False, "code": "namespace_scoped_api_not_bound", "scopes": []
+        }
+        if remote.get("ok") and bridge is not None:
+            self.req041_scoped_projection_sync = ScopedProjectionSynchronizer(
+                read=lambda namespace, **kwargs: self._memory_companion_read_scoped_record(
+                    bridge, namespace, **kwargs
+                ),
+                list_records=lambda namespace, **kwargs: self._memory_companion_list_scoped_records(
+                    bridge, namespace, **kwargs
+                ),
+                upsert=lambda namespace, **kwargs: self._memory_companion_upsert_scoped_record(
+                    bridge, namespace, **kwargs
+                ),
+                tombstone=lambda namespace, **kwargs: self._memory_companion_tombstone_scoped_record(
+                    bridge, namespace, **kwargs
+                ),
+                tombstone_identity_scopes=lambda namespace, **kwargs: self._memory_companion_tombstone_scoped_identity_scopes(
+                    bridge, namespace, **kwargs
+                ),
+                erase_group_scopes=lambda namespace, **kwargs: self._memory_companion_erase_scoped_group_scopes(
+                    bridge, namespace, **kwargs
+                ),
+                erase_persona_scopes=lambda namespace, **kwargs: self._memory_companion_erase_scoped_persona_scopes(
+                    bridge, namespace, **kwargs
+                ),
+                migration_epoch=epoch,
+                policy_version=policy,
+                observability=self.req041_observability,
+            )
+            scoped_result = await self._req041_sync_scoped_now()
+        ready = bool(
+            remote.get("ok")
+            and scoped_result.get("ok")
+            and replay_result.get("status") == "ok"
+        )
+        self.req041_migration_status = {
+            "required": False,
+            "scoped_required": True,
+            "state": "active" if ready else "degraded",
+            "code": "fresh_scoped_runtime_active" if ready else str(
+                replay_result.get("error_code")
+                if replay_result.get("status") != "ok"
+                else scoped_result.get("code") if remote.get("ok")
+                else remote.get("code") or "fresh_scoped_runtime_degraded"
+            )[:120],
+            "phase": "S9",
+            "memory_bound": bool(remote.get("ok")),
+            "checkpoint": status.get("checkpoint", "fresh_runtime_initialized"),
+            "dual_write": "capturing",
+            "s5": replay_result,
+            "scoped": scoped_result,
+        }
+
     async def initialize(self):
         self._repair_private_companion_handler_bindings()
         if getattr(self, "_legacy_enabled_config_disabled", False):
@@ -4080,6 +6192,10 @@ class PrivateCompanionPlugin(
                 needs_startup_save = True
         if needs_startup_save:
             self._schedule_data_save(delay=0.5)
+        self._create_startup_background_task(
+            "req041_automatic_migration",
+            self._req041_initialize_automatic_migration,
+        )
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._scheduler_loop())
             logger.info("[PrivateCompanion] 主动消息循环已启动")
@@ -4371,6 +6487,15 @@ class PrivateCompanionPlugin(
         global _private_companion_plugin
         self._stop_event.set()
         await self._cancel_lifecycle_background_tasks()
+        invalidate_bridge = getattr(self, "_memory_companion_invalidate_bridge_cache", None)
+        if callable(invalidate_bridge):
+            invalidate_bridge()
+        scoped_sync = getattr(self, "req041_scoped_projection_sync", None)
+        if scoped_sync is not None:
+            mark_dirty = getattr(scoped_sync, "mark_dirty", None)
+            if callable(mark_dirty):
+                mark_dirty()
+        self.req041_scoped_projection_sync = None
 
         runtime_bridge = getattr(self, "_proactive_chat_runtime_bridge", None)
         if runtime_bridge is not None:
@@ -4406,6 +6531,12 @@ class PrivateCompanionPlugin(
         self._passive_input_status_tasks.clear()
         startup_task = getattr(self, "_startup_maintenance_task", None)
         await cancel_task(startup_task, "startup_maintenance")
+        replay_task = getattr(self, "_req041_replay_task", None)
+        self._req041_replay_requested = False
+        await cancel_task(replay_task, "req041_shadow_replay")
+        scoped_task = getattr(self, "_req041_scoped_sync_task", None)
+        self._req041_scoped_sync_requested = False
+        await cancel_task(scoped_task, "req041_scoped_projection_sync")
         startup_background_tasks = list(getattr(self, "_startup_background_tasks", {}).items())
         for label, task in startup_background_tasks:
             await cancel_task(task, f"startup_{label}")
@@ -10550,9 +12681,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         else:
             return "", False, "unchanged_light" if lightweight else "unchanged"
 
-        reply_policy = self._private_passive_state_reply_policy_prompt()
         if reason == "continuity_anchor":
-            state_text = state_text[: 300 - len(reply_policy) - 1].rstrip()
+            reply_policy = "\n".join([
+                "【私聊被动回复策略】",
+                "先自然回应用户当前表达；主动提供一处与 Bot 自身有关的具体细节；不要逐项汇报状态；不要把回复写成连续盘问；整次回复最多提出一个问题；没有必要时可以不提问。",
+            ])
+            state_text = state_text[: max(0, 300 - len(reply_policy) - 1)].rstrip()
+        else:
+            reply_policy = self._private_passive_state_reply_policy_prompt()
         return f"{state_text}\n{reply_policy}", state_changed, reason
 
     async def _append_group_active_period_boundary_to_request(
@@ -14289,8 +16425,24 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 loop_text = self._format_open_loops_for_prompt(user) or "暂无未完成约定。"
                 response = f"当前对话片段：\n{episode_text}\n\n未完话头：\n{loop_text}"
             elif action in {"话头删除", "删除话头", "未完话头删除", "删除未完话头"}:
-                response = self._remove_open_loop_entry(user, value)
-                self._save_data_sync()
+                memory_managed = self._req041_private_memory_managed()
+                memory_revision = (
+                    self._req041_prepare_authoritative_private_memory(user)
+                    if memory_managed else None
+                )
+                if memory_managed and memory_revision is None:
+                    response = "权威私聊记忆暂不可写，请稍后重试。"
+                else:
+                    response = self._remove_open_loop_entry(user, value)
+                    committed = not memory_managed or self._req041_commit_authoritative_private_memory(
+                        user,
+                        expected_revision=memory_revision,
+                        operation_id="req041-command-open-loop:" + uuid.uuid4().hex,
+                    )
+                    if committed:
+                        self._save_data_sync()
+                    else:
+                        response = "记忆已发生并发变更，请重试。"
             elif action in {"长期记忆", "livingmemory", "lmem", "向量记忆"}:
                 response = self._format_livingmemory_status()
             elif action in {"日记", "bot日记", "小记"}:
@@ -14668,6 +16820,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     @_multi_persona_event_context
     async def on_private_message(self, event: AstrMessageEvent, *args, **kwargs):
+        if await self._handle_private_message_preflight(event):
+            return
+        return await handle_private_message(self, event, *args, **kwargs)
+
+    async def _handle_private_message_preflight(self, event: AstrMessageEvent) -> bool:
         feedback_handler = getattr(self, "_maybe_handle_wakeup_feedback", None)
         feedback_text = str(getattr(event, "message_str", "") or "")
         is_companion_command = feedback_text.lstrip().startswith(("陪伴", "/陪伴", "私聊陪伴", "主动陪伴"))
@@ -14691,7 +16848,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if confirmation_reply:
                 await self._reply(event, confirmation_reply)
                 event.stop_event()
-                return
+                return True
         if callable(feedback_handler) and not is_companion_command:
             raw_user_id = str(event.get_sender_id() or "").strip()
             normalizer = getattr(self, "_canonical_private_user_id", None)
@@ -14704,8 +16861,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 user,
                 feedback_text,
             ):
-                return
-        return await handle_private_message(self, event, *args, **kwargs)
+                return True
+        return False
 
     def _record_c3_inbound_activity(
         self,

@@ -11,11 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_adapter():
-    astrbot = types.ModuleType("astrbot")
-    api = types.ModuleType("astrbot.api")
-    api.logger = types.SimpleNamespace(debug=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None)
-    sys.modules.setdefault("astrbot", astrbot)
-    sys.modules.setdefault("astrbot.api", api)
+    try:
+        import astrbot.api  # noqa: F401
+    except ImportError:
+        astrbot = types.ModuleType("astrbot")
+        api = types.ModuleType("astrbot.api")
+        api.logger = types.SimpleNamespace(debug=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None)
+        sys.modules.setdefault("astrbot", astrbot)
+        sys.modules.setdefault("astrbot.api", api)
     package_name = "emotion_e2_bridge_capability"
     package = types.ModuleType(package_name)
     package.__path__ = [str(ROOT)]
@@ -77,7 +80,7 @@ class EmotionE2BridgeCapabilityTests(unittest.IsolatedAsyncioTestCase):
 
         await host._memory_companion_record_emotion_event(event)
 
-        self.assertIs(bridge.registered, type(host))
+        self.assertIs(bridge.registered, host)
         self.assertEqual(
             {
                 "bot_id": "bot-1",

@@ -68,6 +68,12 @@ from .helpers import _flat_get, _normalize_timezone_name, _normalize_timezone_se
 from .reference_asset_gate import ReferenceAssetGate
 from .owned_reaction_asset_catalog import MAX_ASSET_BYTES, OwnedReactionAssetCatalog
 from .companion_interaction_expression import current_interaction_projection, normalize_normal_interaction_band_cap
+from .expression_scope_ownership import (
+    ExpressionScopeError,
+    bind_expression_item,
+    bind_expression_profile,
+    validate_expression_scope_binding,
+)
 from .relationship_ledger import (
     migrate_legacy_relationship_score,
     migrate_relationship_positive_stage_cap,
@@ -699,8 +705,11 @@ class PrivateCompanionPageApi(
             ("/user", self.get_user, ["GET"], "Private Companion Page user detail"),
             ("/user/update", self.update_user, ["POST"], "Private Companion Page update user"),
             ("/user/delete", self.delete_user, ["POST"], "Private Companion Page delete user"),
-            ("/user/identity/link", self.link_unified_identity, ["POST"], "Private Companion Page explicit unified identity link"),
+            ("/user/identity/link", self.link_unified_identity, ["POST"], "Private Companion Page detached identity relink preview/apply"),
             ("/user/identity/unlink", self.unlink_unified_identity, ["POST"], "Private Companion Page unified identity unlink preview/apply"),
+            ("/user/identity/archive", self.archive_unified_person, ["POST"], "Private Companion Page unified person archive preview/apply"),
+            ("/user/identity/delete", self.delete_unified_person, ["POST"], "Private Companion Page archived person physical purge preview/apply"),
+            ("/user/identity/pending", self.update_pending_identity_review, ["POST"], "Private Companion Page defer/restore pending identity review"),
             ("/user/identity/merge-preview", self.preview_unified_identity_merge, ["POST"], "Private Companion Page unified person merge preview"),
             ("/groups", self.list_groups, ["GET"], "Private Companion Page groups"),
             ("/group", self.get_group, ["GET"], "Private Companion Page group detail"),
@@ -1020,6 +1029,7 @@ class PrivateCompanionPageApi(
                 "daily_outfit": self._daily_outfit_summary(data),
                 "token_stats": token_stats,
                 "multi_persona": getattr(self.plugin, "_multi_persona_status", lambda: {"enabled": False})(),
+                "req041": self._req041_runtime_summary(),
             }
             if not payload.get("multi_persona", {}).get("enabled"):
                 payload.pop("multi_persona", None)
@@ -1035,6 +1045,69 @@ class PrivateCompanionPageApi(
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取总览失败: {exc}", exc_info=True)
             return self._exception_error("获取总览失败")
+
+    def _req041_runtime_summary(self) -> dict[str, Any]:
+        """Build an aggregate-only migration and isolation status for administrators."""
+        runtime = getattr(self.plugin, "req041_migration_status", None)
+        runtime = runtime if isinstance(runtime, dict) else {}
+        coordinator = getattr(self.plugin, "req041_migration_coordinator", None)
+        outbox = getattr(self.plugin, "req041_migration_outbox", None)
+        control: dict[str, Any] = {}
+        aggregates: dict[str, Any] = {
+            "identities": [], "active_read_leases": 0,
+            "pending": {"total": 0, "reasons": []},
+        }
+        queue: dict[str, Any] = {"backlog": 0, "states": {}}
+        try:
+            if coordinator is not None:
+                control = coordinator.status()
+                summary_getter = getattr(coordinator, "safe_admin_summary", None)
+                if callable(summary_getter):
+                    aggregates = summary_getter()
+            epoch = str(control.get("migration_epoch") or "")
+            queue_getter = getattr(outbox, "safe_admin_summary", None)
+            if epoch and callable(queue_getter):
+                queue = queue_getter(epoch)
+        except Exception:
+            return {
+                "state": "degraded", "phase": "", "code": "admin_summary_unavailable",
+                "checkpoint": "", "required": bool(runtime.get("required")),
+                "migration": aggregates, "outbox": queue,
+                "observability": {}, "config_consistency": {},
+            }
+        state = str(runtime.get("state") or control.get("state") or "unknown")
+        phase = str(runtime.get("phase") or control.get("phase") or "")
+        pending_total = int((aggregates.get("pending") or {}).get("total") or 0)
+        observability = getattr(self.plugin, "req041_observability", None)
+        if observability is not None:
+            observability.migration(
+                state=state, phase=phase, backlog=int(queue.get("backlog") or 0),
+                pending=pending_total,
+                mismatches=int((observability.snapshot().get("counters") or {}).get("migration_mismatch") or 0),
+            )
+            metrics = observability.snapshot()
+        else:
+            metrics = {}
+        allowlist = getattr(self.plugin, "group_relationship_affinity_allowlist", [])
+        allowlist_count = len(allowlist) if isinstance(allowlist, (list, tuple, set, frozenset)) else 0
+        affinity_enabled = bool(getattr(self.plugin, "enable_group_relationship_affinity", False))
+        return {
+            "state": state if state in {"active", "replaying", "degraded", "paused", "complete"} else "unknown",
+            "phase": phase if phase in {"S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"} else "",
+            "code": _single_line(runtime.get("code") or control.get("error_code"), 120),
+            "checkpoint": _single_line(runtime.get("checkpoint") or control.get("checkpoint"), 120),
+            "required": bool(runtime.get("required")),
+            "migration": aggregates,
+            "outbox": queue,
+            "observability": metrics,
+            "config_consistency": {
+                "group_affinity_enabled": affinity_enabled,
+                "group_affinity_allowlist_count": allowlist_count,
+                "group_affinity_effective": bool(affinity_enabled and allowlist_count > 0),
+                "memory_bridge_bound": bool(runtime.get("memory_bound")),
+                "scoped_projection_ready": bool((runtime.get("scoped") or {}).get("ok")),
+            },
+        }
 
     def _token_overview_payload(self, usage: Any, balance_state: Any = None) -> dict[str, Any]:
         if not isinstance(usage, dict):
@@ -4623,6 +4696,7 @@ class PrivateCompanionPageApi(
                     provider_payload = self._expand_provider_overwrite_bundle(str(mode_value), provider_payload)
                 changed.update(provider_payload)
             storage_changed = bool({"storage_backend", "storage_sqlite_path"} & set(changed))
+            req041_config_snapshot = self._req041_config_runtime_snapshot(changed)
             apply_overrides = dict(changed)
             apply_overrides["__defer_relationship_data_save"] = True
             if storage_changed:
@@ -4691,15 +4765,35 @@ class PrivateCompanionPageApi(
             if changed:
                 try:
                     config_saved = await self._save_config_if_possible()
-                except Exception:
+                except Exception as save_exc:
+                    if req041_config_snapshot:
+                        rollback_saved = await self._rollback_req041_config_runtime(req041_config_snapshot)
+                        if not rollback_saved:
+                            raise RuntimeError(
+                                "配置写入失败，REQ-041 运行值已恢复，但旧配置重新持久化失败"
+                            ) from save_exc
                     if apply_overrides.get("__relationship_profile_transaction"):
                         await self._rollback_relationship_config_transaction(apply_overrides)
                     raise
                 if apply_overrides.get("__relationship_profile_transaction"):
                     if not config_saved:
+                        if req041_config_snapshot:
+                            rollback_saved = await self._rollback_req041_config_runtime(req041_config_snapshot)
+                            if not rollback_saved:
+                                raise RuntimeError(
+                                    "配置保存失败，REQ-041 运行值已恢复，但旧配置重新持久化失败"
+                                )
                         await self._rollback_relationship_config_transaction(apply_overrides)
-                        raise RuntimeError("配置保存失败，关系配置及人格资料已回滚")
-                    apply_overrides.pop("__relationship_profile_transaction", None)
+                        raise RuntimeError("配置保存失败，关系配置、人格资料及 REQ-041 关键运行值已回滚")
+                    else:
+                        apply_overrides.pop("__relationship_profile_transaction", None)
+                if not config_saved and req041_config_snapshot:
+                    rollback_saved = await self._rollback_req041_config_runtime(req041_config_snapshot)
+                    if not rollback_saved:
+                        raise RuntimeError(
+                            "配置保存失败，REQ-041 运行值已恢复，但旧配置重新持久化失败"
+                        )
+                    raise RuntimeError("配置保存失败，REQ-041 关键运行值已回滚")
             overview = await self.get_overview()
             if self._is_http_error_response(overview):
                 return overview
@@ -4711,11 +4805,12 @@ class PrivateCompanionPageApi(
                 data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
                 features = data.get("features") if isinstance(data.get("features"), dict) else {}
                 settings = data.get("settings") if isinstance(data.get("settings"), dict) else {}
-                for key, value in changed.items():
-                    if key in self._allowed_feature_keys():
-                        features[key] = self._normalize_bool_value(value)
-                    if key in self._allowed_setting_keys():
-                        settings[key] = value
+                if config_saved:
+                    for key, value in changed.items():
+                        if key in self._allowed_feature_keys():
+                            features[key] = self._normalize_bool_value(value)
+                        if key in self._allowed_setting_keys():
+                            settings[key] = value
             return overview
         except CatalogValidationError as exc:
             detail = next(
@@ -4736,6 +4831,48 @@ class PrivateCompanionPageApi(
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新设置失败: {exc}", exc_info=True)
             return self._exception_error(str(exc))
+
+    def _req041_config_runtime_snapshot(self, changed: dict[str, Any]) -> dict[str, Any]:
+        """Snapshot only identity/relationship isolation controls before hot apply."""
+        critical = {
+            "enable_auto_user_profile_creation",
+            "portrait_global_mode",
+            "auto_profile_platforms",
+            "owner_group_relationship_projection",
+            "owner_group_interaction_projection",
+            "enable_group_relationship_affinity",
+            "group_relationship_affinity_allowlist",
+            "group_relationship_daily_net_cap",
+            "group_relationship_window_minutes",
+            "group_relationship_window_absolute_cap",
+            "group_relationship_person_daily_absolute_cap",
+            "group_relationship_scope_daily_absolute_cap",
+            "relationship_event_window_minutes",
+            "relationship_positive_event_cap",
+            "relationship_negative_event_cap",
+            "relationship_positive_daily_cap",
+        }
+        snapshot: dict[str, Any] = {}
+        getter = getattr(self, "_config_get_raw", None)
+        for key in sorted(critical & set(changed)):
+            if hasattr(self.plugin, key):
+                snapshot[key] = deepcopy(getattr(self.plugin, key))
+            elif callable(getter):
+                snapshot[key] = deepcopy(getter(key, None))
+        return snapshot
+
+    async def _rollback_req041_config_runtime(self, snapshot: dict[str, Any]) -> bool:
+        """Restore runtime and config object, then durably save the old values."""
+        for key, value in snapshot.items():
+            self._apply_config_value(key, deepcopy(value))
+        try:
+            return bool(await self._save_config_if_possible())
+        except Exception as exc:
+            logger.error(
+                "[PrivateCompanionPage] REQ-041 配置回滚持久化失败: %s",
+                self._single_line(exc, 160),
+            )
+            return False
 
     async def swap_image_api_settings(self) -> dict[str, Any]:
         try:
@@ -15550,6 +15687,10 @@ class PrivateCompanionPageApi(
                     180,
                 ),
                 "evidence_count": max(self._int(item.get("evidence_count")) for item in items),
+                "item_revisions": {
+                    self._single_line(item.get("id"), 100): self._int(item.get("item_revision"))
+                    for item in items if self._single_line(item.get("id"), 100)
+                },
             }
             result.append(group_row)
         result.sort(key=lambda item: (-self._int(item.get("evidence_count")), self._single_line(item.get("situation"), 100)))
@@ -15605,6 +15746,7 @@ class PrivateCompanionPageApi(
                 if pattern_details:
                     pattern_label = f"{pattern_label or '日常交流'} · {' · '.join(pattern_details)}"
             observation_status = "supported" if self._int(raw.get("evidence_count")) >= 2 else "single"
+            scope_binding = raw.get("scope_binding") if isinstance(raw.get("scope_binding"), dict) else {}
             return {
                 "id": self._single_line(raw.get("id"), 40) or str(index),
                 "index": index,
@@ -15623,6 +15765,7 @@ class PrivateCompanionPageApi(
                 "created_at": self._single_line(raw.get("created_at"), 30),
                 "ts": self._float(raw.get("ts")),
                 "time": self.plugin._format_timestamp_elapsed(raw.get("ts", 0)),
+                "item_revision": self._int(scope_binding.get("revision")),
             }
 
         samples = profile.get("samples") if isinstance(profile.get("samples"), list) else []
@@ -15651,6 +15794,7 @@ class PrivateCompanionPageApi(
             review_status = self._single_line(raw_rule.get("review_status"), 24).lower()
             if not review_status:
                 review_status = "pending" if pending_review else "approved"
+            scope_binding = raw_rule.get("scope_binding") if isinstance(raw_rule.get("scope_binding"), dict) else {}
             return {
                 "id": self._single_line(raw_rule.get("id"), 100),
                 "family_id": self._single_line(raw_rule.get("family_id"), 100),
@@ -15702,6 +15846,7 @@ class PrivateCompanionPageApi(
                 "use_count": self._int(raw_rule.get("use_count")),
                 "last_used_time": self.plugin._format_timestamp_elapsed(raw_rule.get("last_used_ts", 0))
                 if self._float(raw_rule.get("last_used_ts")) > 0 else "",
+                "item_revision": self._int(scope_binding.get("revision")),
             }
 
         learned_rules = profile.get("learned_rules") if isinstance(profile.get("learned_rules"), list) else []
@@ -15782,6 +15927,7 @@ class PrivateCompanionPageApi(
             "manual_review": bool(getattr(self.plugin, "enable_expression_manual_review", False)),
             "style_review": bool(getattr(self.plugin, "enable_expression_style_review", True)),
             "updated_at": self._single_line(profile.get("updated_at"), 30),
+            "scope_revision": self._int(profile.get("scope_revision")),
             "sample_count": len(samples),
             "observation_count": len(samples),
             "observation_evidence_count": sum(max(1, self._int(item.get("evidence_count"))) for item in samples if isinstance(item, dict)),
@@ -15836,7 +15982,11 @@ class PrivateCompanionPageApi(
             nonlocal injected_count, positive_feedback_count, negative_feedback_count
             nonlocal style_rule_count, grammar_rule_count, pending_style_count, pending_grammar_count
             summary = self._expression_profile_summary(item, source_type=source_type)
-            if source_type == "group":
+            if source_type == "persona":
+                source_name = "当前人格全局规则"
+                active = True
+                source_kind_label = "人格全局"
+            elif source_type == "group":
                 source_name = self._single_line(
                     item.get("name") or item.get("group_name") or item.get("display_name"),
                     80,
@@ -15856,6 +16006,7 @@ class PrivateCompanionPageApi(
                 "source_id": source_id,
                 "source_name": source_name,
                 "source_active": active,
+                "scope_revision": self._int(summary.get("scope_revision")),
             }
             source_sample_count = self._int(summary.get("sample_count"))
             source_pending_sample_count = self._int(summary.get("pending_count"))
@@ -15935,6 +16086,12 @@ class PrivateCompanionPageApi(
         for group_id, group in groups.items():
             if isinstance(group, dict):
                 collect("group", self._single_line(group_id, 80), group)
+        global_profile = data.get("_req041_persona_expression_profile")
+        if isinstance(global_profile, dict):
+            collect(
+                "persona", "current-persona",
+                {"expression_profile": global_profile, "display_name": "当前人格全局规则"},
+            )
 
         samples.sort(key=lambda row: (-self._float(row.get("ts")), row.get("source_type") or "", row.get("source_id") or ""))
         pending_samples.sort(key=lambda row: (-self._float(row.get("ts")), row.get("source_type") or "", row.get("source_id") or ""))
@@ -15966,6 +16123,7 @@ class PrivateCompanionPageApi(
             "source_count": len(sources),
             "private_source_count": sum(1 for source in sources if source.get("source_type") == "private"),
             "group_source_count": sum(1 for source in sources if source.get("source_type") == "group"),
+            "persona_source_count": sum(1 for source in sources if source.get("source_type") == "persona"),
             "active_source_count": sum(1 for source in sources if source.get("source_active")),
             "samples": samples,
             "pending_samples": pending_samples,
@@ -16187,6 +16345,29 @@ class PrivateCompanionPageApi(
             "candidates": importable,
         }
 
+    def _expression_import_preview_signature(
+        self,
+        normalized_pack: dict[str, Any],
+        *,
+        source_type: str,
+        source_id: str,
+        scope_revision: int,
+        preview: dict[str, Any],
+    ) -> str:
+        material = {
+            "pack": normalized_pack,
+            "source_type": source_type,
+            "source_id": source_id,
+            "scope_revision": int(scope_revision),
+            "candidate_ids": sorted(
+                self._single_line(item.get("id"), 100)
+                for item in preview.get("candidates", []) if isinstance(item, dict)
+            ),
+        }
+        return hashlib.sha256(
+            json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
     async def share_expression_library(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         raw_items = payload.get("items")
@@ -16217,6 +16398,21 @@ class PrivateCompanionPageApi(
                 for source_id, source in collection.items():
                     profile = source.get("expression_profile") if isinstance(source, dict) else None
                     learned = profile.get("learned_rules") if isinstance(profile, dict) and isinstance(profile.get("learned_rules"), list) else []
+                    try:
+                        managed, scope_context = self._expression_admin_scope_context(
+                            source_type, self._single_line(source_id, 80), source,
+                        )
+                        if managed:
+                            bound = self._expression_prepare_admin_profile(source, scope_context)
+                            learned = [
+                                item for item in bound.get("learned_rules", [])
+                                if isinstance(item, dict)
+                                and validate_expression_scope_binding(
+                                    item.get("scope_binding"), scope_context, approval_state="approved",
+                                )
+                            ]
+                    except (ExpressionScopeError, ValueError):
+                        continue
                     raw_groups = self.plugin._expression_rule_groups(learned) if callable(getattr(self.plugin, "_expression_rule_groups", None)) else [[item] for item in learned]
                     for raw_group in raw_groups:
                         family_id = self._single_line((raw_group[0] if raw_group else {}).get("family_id"), 100)
@@ -16262,10 +16458,26 @@ class PrivateCompanionPageApi(
         try:
             normalized = self._normalize_expression_share_pack(payload.get("package"))
             async with self.plugin._data_lock:
-                target = self._expression_share_target(payload.get("target_source_type"), payload.get("target_source_id"))
+                source_type = self._single_line(payload.get("target_source_type"), 16).lower()
+                source_id = self._single_line(payload.get("target_source_id"), 80)
+                target = self._expression_share_target(source_type, source_id)
                 if target is None:
                     return self._error("请选择有效的导入目标")
+                managed, scope_context = self._expression_admin_scope_context(source_type, source_id, target)
+                scope_changed = False
+                if managed:
+                    before_scope = deepcopy(target.get("expression_profile") or {})
+                    self._expression_prepare_admin_profile(target, scope_context)
+                    scope_changed = before_scope != (target.get("expression_profile") or {})
                 preview = self._expression_import_preview(normalized, target)
+                scope_revision = self._int((target.get("expression_profile") or {}).get("scope_revision"))
+                preview["target_scope_revision"] = scope_revision
+                preview["preview_signature"] = self._expression_import_preview_signature(
+                    normalized, source_type=source_type, source_id=source_id,
+                    scope_revision=scope_revision, preview=preview,
+                )
+                if scope_changed:
+                    self.plugin._save_data_sync()
             return self._ok(preview)
         except ValueError as exc:
             return self._error(str(exc))
@@ -16281,10 +16493,27 @@ class PrivateCompanionPageApi(
         try:
             normalized = self._normalize_expression_share_pack(payload.get("package"))
             async with self.plugin._data_lock:
-                target = self._expression_share_target(payload.get("target_source_type"), payload.get("target_source_id"))
+                source_type = self._single_line(payload.get("target_source_type"), 16).lower()
+                source_id = self._single_line(payload.get("target_source_id"), 80)
+                target = self._expression_share_target(source_type, source_id)
                 if target is None:
                     return self._error("请选择有效的导入目标")
+                managed, scope_context = self._expression_admin_scope_context(source_type, source_id, target)
+                if managed:
+                    prepared = self._expression_prepare_admin_profile(target, scope_context)
+                    expected_revision = self._int(payload.get("expected_scope_revision"))
+                    if expected_revision != self._int(prepared.get("scope_revision")):
+                        raise ValueError("导入目标已被其他操作更新，请重新预览")
                 preview = self._expression_import_preview(normalized, target)
+                if managed:
+                    expected_signature = self._expression_import_preview_signature(
+                        normalized, source_type=source_type, source_id=source_id,
+                        scope_revision=self._int(prepared.get("scope_revision")), preview=preview,
+                    )
+                    if not hmac.compare_digest(
+                        self._single_line(payload.get("preview_signature"), 80), expected_signature,
+                    ):
+                        raise ValueError("导入预览已失效，请重新预览")
                 candidates = [dict(item) for item in preview.get("candidates", []) if isinstance(item, dict)]
                 if not candidates:
                     result = self._expression_library_summary(deepcopy(self.plugin.data))
@@ -16295,6 +16524,7 @@ class PrivateCompanionPageApi(
                 if not isinstance(profile, dict):
                     profile = {}
                     target["expression_profile"] = profile
+                before = deepcopy(profile)
                 if destination == "learned":
                     for item in candidates:
                         item["review_status"] = "approved"
@@ -16327,6 +16557,12 @@ class PrivateCompanionPageApi(
                 stored = profile.get(storage_key) if isinstance(profile.get(storage_key), list) else []
                 profile[storage_key] = stored[:limit]
                 profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                if managed:
+                    try:
+                        self._expression_finalize_admin_profile(target, before, scope_context)
+                    except Exception:
+                        target["expression_profile"] = before
+                        raise
                 self.plugin._save_data_sync()
                 snapshot = deepcopy(self.plugin.data)
             result = self._expression_library_summary(snapshot)
@@ -16344,6 +16580,267 @@ class PrivateCompanionPageApi(
             logger.error(f"[PrivateCompanionPage] 导入表达分享包失败: {exc}", exc_info=True)
             return self._exception_error("导入表达分享包失败")
 
+    def _expression_admin_scope_context(
+        self,
+        source_type: str,
+        source_id: str,
+        owner: dict[str, Any],
+    ) -> tuple[bool, Any | None]:
+        managed = getattr(self.plugin, "req041_scoped_projection_sync", None) is not None
+        if not managed:
+            return False, None
+        if source_type == "persona":
+            if source_id != "current-persona":
+                raise ValueError("人格全局规则来源标识无效")
+            resolver = getattr(self.plugin, "_req041_persona_global_context", None)
+            context = resolver(purpose="rule_write") if callable(resolver) else None
+        elif source_type == "private":
+            resolver = getattr(self.plugin, "_req041_scoped_context_for_user", None)
+            context = resolver(owner, kind="private", purpose="rule_write") if callable(resolver) else None
+        elif source_type == "group":
+            normalize = getattr(self.plugin, "_normalize_group_identity_id", None)
+            normalized_source = self._single_line(normalize(source_id) if callable(normalize) else source_id, 160)
+            raw_owner_group = owner.get("group_id") or source_id
+            normalized_owner = self._single_line(
+                normalize(raw_owner_group) if callable(normalize) else raw_owner_group, 160,
+            )
+            if not normalized_source or normalized_source != normalized_owner:
+                raise ValueError("表达群来源标识与正式作用域不一致")
+            resolver = getattr(self.plugin, "_req041_scoped_group_context", None)
+            context = resolver(normalized_owner, purpose="rule_write") if callable(resolver) else None
+        else:
+            raise ValueError("表达来源类型无效")
+        if context is None:
+            raise ValueError("表达来源没有可写的正式身份作用域")
+        return True, context
+
+    def _expression_prepare_admin_profile(
+        self,
+        owner: dict[str, Any],
+        context: Any,
+    ) -> dict[str, Any]:
+        profile = owner.get("expression_profile") if isinstance(owner.get("expression_profile"), dict) else {}
+        binder = getattr(self.plugin, "_expression_bind_profile_scope", None)
+        try:
+            bound = binder(profile, context, bump_revision=False) if callable(binder) else bind_expression_profile(
+                profile, context, bump_revision=False,
+            )
+        except (ExpressionScopeError, TypeError, ValueError) as exc:
+            raise ValueError(f"表达来源作用域校验失败：{exc}") from exc
+        owner["expression_profile"] = bound
+        return bound
+
+    def _expression_validate_admin_revision(
+        self,
+        profile: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        raw_expected = payload.get("expected_scope_revision")
+        if raw_expected in (None, ""):
+            raise ValueError("缺少表达资料版本，请刷新页面后重试")
+        expected = self._int(raw_expected)
+        current = max(1, self._int(profile.get("scope_revision")))
+        if expected != current:
+            raise ValueError("表达资料已被其他操作更新，请刷新页面后重试")
+        raw_items = payload.get("expected_item_revisions")
+        if not isinstance(raw_items, dict):
+            raise ValueError("缺少表达项版本，请刷新页面后重试")
+        requested = {self._single_line(key, 100): self._int(value) for key, value in raw_items.items() if self._single_line(key, 100)}
+        if not requested:
+            raise ValueError("缺少表达项版本，请刷新页面后重试")
+        found: dict[str, int] = {}
+        target_ids: set[str] = set()
+        target_rule = self._single_line(payload.get("rule_id"), 100)
+        target_family = self._single_line(payload.get("rule_family_id"), 100)
+        target_sample = self._single_line(payload.get("sample_id"), 100)
+        for storage_key in ("samples", "pending_samples", "learned_rules", "pending_rules"):
+            items = profile.get(storage_key) if isinstance(profile.get(storage_key), list) else []
+            for index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                item_id = self._single_line(item.get("id"), 100) or f"{storage_key}:{index}"
+                binding = item.get("scope_binding") if isinstance(item.get("scope_binding"), dict) else {}
+                if (
+                    (target_rule and item_id == target_rule)
+                    or (target_family and self._single_line(item.get("family_id"), 100) == target_family)
+                    or (target_sample and item_id == target_sample)
+                ):
+                    target_ids.add(item_id)
+                if item_id in requested:
+                    found[item_id] = self._int(binding.get("revision"))
+        if found != requested or (target_ids and set(requested) != target_ids):
+            raise ValueError("表达项已被其他操作更新，请刷新页面后重试")
+
+    @staticmethod
+    def _expression_item_content(item: dict[str, Any]) -> dict[str, Any]:
+        result = deepcopy(item)
+        result.pop("scope_binding", None)
+        return result
+
+    def _expression_finalize_admin_profile(
+        self,
+        owner: dict[str, Any],
+        before: dict[str, Any],
+        context: Any,
+    ) -> None:
+        profile = owner.get("expression_profile") if isinstance(owner.get("expression_profile"), dict) else {}
+        previous: dict[str, tuple[str, dict[str, Any]]] = {}
+        for storage_key in (
+            "samples", "pending_samples", "learned_rules", "pending_rules",
+            "rejected_samples", "revoked_samples", "rejected_rules", "revoked_rules",
+        ):
+            for index, item in enumerate(before.get(storage_key) if isinstance(before.get(storage_key), list) else []):
+                if isinstance(item, dict):
+                    item_id = self._single_line(item.get("id"), 100) or f"{storage_key}:{index}"
+                    previous[item_id] = (storage_key, item)
+        states = {
+            "samples": ("approved", "administrator"),
+            "pending_samples": ("pending", ""),
+            "learned_rules": ("approved", "administrator"),
+            "pending_rules": ("pending", ""),
+            "rejected_samples": ("rejected", "administrator"),
+            "revoked_samples": ("revoked", "administrator"),
+            "rejected_rules": ("rejected", "administrator"),
+            "revoked_rules": ("revoked", "administrator"),
+        }
+        for storage_key, (approval_state, actor) in states.items():
+            items = profile.get(storage_key) if isinstance(profile.get(storage_key), list) else []
+            rebound: list[dict[str, Any]] = []
+            for index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                item_id = self._single_line(item.get("id"), 100) or f"{storage_key}:{index}"
+                old_storage, old = previous.get(item_id, ("", {}))
+                changed = bool(
+                    not old
+                    or old_storage != storage_key
+                    or self._expression_item_content(old) != self._expression_item_content(item)
+                )
+                existing = item.get("scope_binding") if isinstance(item.get("scope_binding"), dict) else {}
+                old_binding = old.get("scope_binding") if isinstance(old.get("scope_binding"), dict) else {}
+                already_advanced = bool(
+                    old and self._int(existing.get("revision")) > self._int(old_binding.get("revision"))
+                )
+                state_changed = bool(
+                    old_binding and self._single_line(old_binding.get("approval_state"), 24) != approval_state
+                )
+                approved_by = actor if changed and approval_state == "approved" else self._single_line(
+                    existing.get("approved_by"), 80,
+                )
+                if approval_state == "approved" and not approved_by:
+                    approved_by = "legacy_migration"
+                rebound.append(bind_expression_item(
+                    item, context, approval_state=approval_state,
+                    approved_by=approved_by,
+                    bump_revision=state_changed or (changed and not already_advanced),
+                ))
+            profile[storage_key] = rebound
+        owner["expression_profile"] = bind_expression_profile(profile, context, bump_revision=True)
+
+    @staticmethod
+    def _expression_promotion_confirmation(
+        *, operation_id: str, source_profile: dict[str, Any], target_profile: dict[str, Any],
+        family_id: str, rules: list[dict[str, Any]],
+    ) -> str:
+        material = {
+            "action": "promote_rule_group",
+            "operation_id": operation_id,
+            "family_id": family_id,
+            "source_scope": source_profile.get("scope_ownership"),
+            "source_revision": int(source_profile.get("scope_revision") or 0),
+            "target_scope": target_profile.get("scope_ownership"),
+            "target_revision": int(target_profile.get("scope_revision") or 0),
+            "rules": rules,
+        }
+        return hashlib.sha256(
+            json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _expression_global_promotion_state(
+        self,
+        *,
+        source_type: str,
+        source_id: str,
+        family_id: str,
+        operation_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        collection = self.plugin.data.get("groups" if source_type == "group" else "users")
+        source = collection.get(source_id) if isinstance(collection, dict) else None
+        if source_type not in {"private", "group"} or not isinstance(source, dict):
+            raise ValueError("表达规则来源不存在")
+        managed, source_context = self._expression_admin_scope_context(source_type, source_id, source)
+        if not managed or source_context is None:
+            raise ValueError("表达来源没有可写的正式身份作用域")
+        source_owner = {
+            "expression_profile": deepcopy(source.get("expression_profile"))
+            if isinstance(source.get("expression_profile"), dict) else {}
+        }
+        source_profile = self._expression_prepare_admin_profile(source_owner, source_context)
+        self._expression_validate_admin_revision(source_profile, payload)
+        matched = [
+            item for item in source_profile.get("learned_rules", [])
+            if isinstance(item, dict)
+            and self._single_line(item.get("family_id"), 100) == family_id
+        ]
+        if not matched:
+            raise ValueError("没有找到要提升的已审核规则组")
+        sanitized: list[dict[str, Any]] = []
+        for item in matched:
+            validate_expression_scope_binding(
+                item.get("scope_binding"), source_context, approval_state="approved",
+            )
+            clean, reason = self._expression_share_rule(item)
+            if clean is None:
+                raise ValueError(reason or "规则不能安全提升")
+            sanitized.append(clean)
+        persona_context_getter = getattr(self.plugin, "_req041_persona_global_context", None)
+        persona_context = persona_context_getter(purpose="rule_write") if callable(persona_context_getter) else None
+        if persona_context is None:
+            raise ValueError("当前人格全局规则作用域不可用")
+        raw_global = self.plugin.data.get("_req041_persona_expression_profile")
+        global_owner = {
+            "expression_profile": deepcopy(raw_global) if isinstance(raw_global, dict) else {}
+        }
+        target_profile = self._expression_prepare_admin_profile(global_owner, persona_context)
+        family_fingerprint = hashlib.sha256(
+            json.dumps(sanitized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        promoted: list[dict[str, Any]] = []
+        for index, clean in enumerate(sanitized):
+            rule_fingerprint = hashlib.sha256(
+                json.dumps(clean, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            candidate = {
+                **clean,
+                "id": f"persona-{rule_fingerprint[:20]}",
+                "family_id": f"persona-{family_fingerprint[:20]}",
+                "family_key": f"persona_{family_fingerprint[:20]}",
+                "evidence_count": 1,
+                "review_status": "approved",
+                "explicit_global_promotion": True,
+                "component_index": index,
+            }
+            promoted.append(bind_expression_item(
+                candidate, persona_context, approval_state="approved",
+                approved_by="administrator",
+            ))
+        confirmation = self._expression_promotion_confirmation(
+            operation_id=operation_id,
+            source_profile=source_profile,
+            target_profile=target_profile,
+            family_id=family_id,
+            rules=promoted,
+        )
+        return {
+            "source_profile": source_profile,
+            "persona_context": persona_context,
+            "global_owner": global_owner,
+            "target_profile": target_profile,
+            "rules": promoted,
+            "confirmation_token": confirmation,
+        }
+
     async def get_expression_library(self) -> dict[str, Any]:
         try:
             async with self.plugin._data_lock:
@@ -16355,7 +16852,8 @@ class PrivateCompanionPageApi(
                     collection = self.plugin.data.get(collection_key)
                     if not isinstance(collection, dict):
                         continue
-                    for item in collection.values():
+                    source_type = "group" if collection_key == "groups" else "private"
+                    for source_id, item in collection.items():
                         profile = item.get("expression_profile") if isinstance(item, dict) else None
                         if not isinstance(profile, dict):
                             continue
@@ -16365,6 +16863,18 @@ class PrivateCompanionPageApi(
                             changed = True
                         if callable(family_backfiller) and family_backfiller(profile):
                             changed = True
+                        try:
+                            managed, scope_context = self._expression_admin_scope_context(
+                                source_type, self._single_line(source_id, 80), item,
+                            )
+                            if managed:
+                                before_scope = deepcopy(profile)
+                                self._expression_prepare_admin_profile(item, scope_context)
+                                if before_scope != item.get("expression_profile"):
+                                    changed = True
+                        except (ExpressionScopeError, ValueError):
+                            # Pending/unresolved legacy sources remain visible but cannot be mutated.
+                            pass
                 if changed:
                     refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
                     if callable(refresher):
@@ -16381,6 +16891,110 @@ class PrivateCompanionPageApi(
         source_type = self._single_line(payload.get("source_type"), 16)
         source_id = self._single_line(payload.get("source_id"), 80)
         action = self._single_line(payload.get("expression_action"), 40)
+        if action == "promote_rule_group":
+            family_id = self._single_line(payload.get("rule_family_id"), 100)
+            operation_id = self._single_line(payload.get("operation_id"), 120)
+            confirmation_token = self._single_line(payload.get("confirmation_token"), 80)
+            if "dry_run" in payload and type(payload.get("dry_run")) is not bool:
+                return self._error("dry_run 必须是 JSON 布尔值")
+            dry_run = payload.get("dry_run", True)
+            if not source_id or not family_id or not operation_id:
+                return self._error("缺少规则来源、规则组或操作标识")
+            if not dry_run and not confirmation_token:
+                return self._error("提升为全局规则前必须先生成预览")
+            try:
+                async with self.plugin._data_lock:
+                    operations = self.plugin.data.get("_req041_expression_promotion_operations")
+                    if not isinstance(operations, dict):
+                        operations = {}
+                    prior = operations.get(operation_id)
+                    token_hash = hashlib.sha256(confirmation_token.encode("utf-8")).hexdigest()
+                    if not dry_run and isinstance(prior, dict):
+                        if not hmac.compare_digest(
+                            self._single_line(prior.get("confirmation_token_hash"), 80), token_hash
+                        ):
+                            return self._error("操作标识已用于另一份全局提升请求")
+                        snapshot = deepcopy(self.plugin.data)
+                        result = self._expression_library_summary(snapshot)
+                        result["promotion"] = {
+                            "ok": True,
+                            "code": "persona_global_promotion_replayed",
+                            "rule_count": self._int(prior.get("rule_count")),
+                        }
+                        result["message"] = "该全局提升已完成，无需重复操作"
+                        return self._ok(result)
+                    prepared = self._expression_global_promotion_state(
+                        source_type=source_type,
+                        source_id=source_id,
+                        family_id=family_id,
+                        operation_id=operation_id,
+                        payload=payload,
+                    )
+                    expected = prepared["confirmation_token"]
+                    if dry_run:
+                        return self._ok({
+                            "promotion": {
+                                "ok": True,
+                                "code": "persona_global_promotion_preview",
+                                "rule_count": len(prepared["rules"]),
+                                "target_scope_revision": self._int(
+                                    prepared["target_profile"].get("scope_revision")
+                                ),
+                                "confirmation_token": expected,
+                            }
+                        })
+                    if not hmac.compare_digest(confirmation_token, expected):
+                        return self._error("规则来源或全局规则库已变化，请重新预览")
+                    global_owner = prepared["global_owner"]
+                    before = deepcopy(prepared["target_profile"])
+                    learned = before.get("learned_rules") if isinstance(before.get("learned_rules"), list) else []
+                    existing_ids = {
+                        self._single_line(item.get("id"), 100)
+                        for item in learned if isinstance(item, dict)
+                    }
+                    inserted = [
+                        {**item, "approved_at": datetime.now().strftime("%Y-%m-%d %H:%M")}
+                        for item in prepared["rules"]
+                        if self._single_line(item.get("id"), 100) not in existing_ids
+                    ]
+                    if inserted:
+                        learned = inserted + learned
+                        limit = max(12, int(getattr(self.plugin, "max_learned_expression_items", 60) or 60))
+                        global_owner["expression_profile"] = {
+                            **before,
+                            "learned_rules": learned[:limit],
+                            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        }
+                        self._expression_finalize_admin_profile(
+                            global_owner, before, prepared["persona_context"],
+                        )
+                        self.plugin.data["_req041_persona_expression_profile"] = global_owner["expression_profile"]
+                        operations[operation_id] = {
+                            "confirmation_token_hash": token_hash,
+                            "rule_count": len(inserted),
+                            "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        }
+                        while len(operations) > 128:
+                            operations.pop(next(iter(operations)))
+                        self.plugin.data["_req041_expression_promotion_operations"] = operations
+                        self.plugin._save_data_sync()
+                    snapshot = deepcopy(self.plugin.data)
+                result = self._expression_library_summary(snapshot)
+                result["promotion"] = {
+                    "ok": True,
+                    "code": "persona_global_promoted" if inserted else "persona_global_already_present",
+                    "rule_count": len(inserted),
+                }
+                result["message"] = (
+                    f"已将 {len(inserted)} 条规则显式提升为当前人格全局规则"
+                    if inserted else "当前人格全局规则库已包含同一规则组"
+                )
+                return self._ok(result)
+            except (ExpressionScopeError, ValueError) as exc:
+                return self._error(str(exc))
+            except Exception as exc:
+                logger.error("[PrivateCompanionPage] 提升人格全局表达规则失败: %s", exc, exc_info=True)
+                return self._exception_error("提升人格全局表达规则失败")
         if action in {"batch_approve_rule_groups", "batch_reject_rule_groups"}:
             raw_items = payload.get("items")
             if not isinstance(raw_items, list) or not raw_items:
@@ -16416,16 +17030,38 @@ class PrivateCompanionPageApi(
                             profile = item.get("expression_profile")
                             if callable(normalizer) and isinstance(profile, dict):
                                 normalizer(profile)
-                        result_message = self._apply_expression_profile_action(
-                            item,
-                            {
+                        try:
+                            managed, scope_context = self._expression_admin_scope_context(
+                                target_type, target_id, item,
+                            )
+                            if managed:
+                                prepared = self._expression_prepare_admin_profile(item, scope_context)
+                                self._expression_validate_admin_revision(prepared, raw_item)
+                            before = deepcopy(item.get("expression_profile") or {})
+                            result_message = self._apply_expression_profile_action(
+                                item,
+                                {
                                 "expression_action": "approve_rule_group"
                                 if action == "batch_approve_rule_groups" else "reject_rule_group",
                                 "rule_family_id": family_id,
-                            },
-                        )
+                                },
+                            )
+                            profile_changed = before != (item.get("expression_profile") or {})
+                            if managed and profile_changed:
+                                try:
+                                    self._expression_finalize_admin_profile(item, before, scope_context)
+                                except Exception:
+                                    item["expression_profile"] = before
+                                    raise
+                        except (ExpressionScopeError, ValueError) as exc:
+                            results.append({
+                                "status": "skipped", "reason": str(exc),
+                                "source_type": target_type, "source_id": target_id,
+                                "rule_family_id": family_id,
+                            })
+                            continue
                         succeeded = not result_message.startswith(("没有找到", "缺少", "规则组中没有"))
-                        changed = changed or succeeded
+                        changed = changed or (succeeded and profile_changed)
                         results.append(
                             {
                                 "status": "success" if succeeded else "skipped",
@@ -16464,7 +17100,8 @@ class PrivateCompanionPageApi(
                         collection = self.plugin.data.get(collection_key)
                         if not isinstance(collection, dict):
                             continue
-                        for item in collection.values():
+                        source_type = "group" if collection_key == "groups" else "private"
+                        for source_id, item in collection.items():
                             if not isinstance(item, dict):
                                 continue
                             profile = item.get("expression_profile")
@@ -16474,8 +17111,23 @@ class PrivateCompanionPageApi(
                                 len(pending_rules) if isinstance(pending_rules, list) else 0
                             )
                             if item_count:
-                                cleared += item_count
-                                self._apply_expression_profile_action(item, {"expression_action": "clear_pending"})
+                                try:
+                                    managed, scope_context = self._expression_admin_scope_context(
+                                        source_type, self._single_line(source_id, 80), item,
+                                    )
+                                    if managed:
+                                        self._expression_prepare_admin_profile(item, scope_context)
+                                    before = deepcopy(item.get("expression_profile") or {})
+                                    self._apply_expression_profile_action(item, {"expression_action": "clear_pending"})
+                                    if managed and before != (item.get("expression_profile") or {}):
+                                        try:
+                                            self._expression_finalize_admin_profile(item, before, scope_context)
+                                        except Exception:
+                                            item["expression_profile"] = before
+                                            raise
+                                    cleared += item_count
+                                except (ExpressionScopeError, ValueError):
+                                    continue
                     self.plugin._save_data_sync()
                     snapshot = deepcopy(self.plugin.data)
                 result = self._expression_library_summary(snapshot)
@@ -16484,7 +17136,7 @@ class PrivateCompanionPageApi(
             except Exception as exc:
                 logger.error(f"[PrivateCompanionPage] 清空统一表达待审样本失败: {exc}", exc_info=True)
                 return self._exception_error("清空统一表达待审样本失败")
-        if source_type not in {"private", "group"} or not source_id:
+        if source_type not in {"private", "group", "persona"} or not source_id:
             return self._error("缺少有效的表达样本来源")
         if action not in {
             "approve", "reject", "approve_rule", "reject_rule", "delete_sample", "delete_rule",
@@ -16493,9 +17145,20 @@ class PrivateCompanionPageApi(
             return self._error("不支持的表达样本操作")
         try:
             async with self.plugin._data_lock:
+                persona_target = source_type == "persona"
                 collection_key = "groups" if source_type == "group" else "users"
                 collection = self.plugin.data.get(collection_key)
-                item = collection.get(source_id) if isinstance(collection, dict) else None
+                item = (
+                    {
+                        "expression_profile": deepcopy(
+                            self.plugin.data.get("_req041_persona_expression_profile")
+                        )
+                    }
+                    if persona_target
+                    and source_id == "current-persona"
+                    and isinstance(self.plugin.data.get("_req041_persona_expression_profile"), dict)
+                    else collection.get(source_id) if isinstance(collection, dict) else None
+                )
                 if not isinstance(item, dict):
                     return self._error("表达样本来源不存在")
                 if source_type == "group":
@@ -16503,8 +17166,23 @@ class PrivateCompanionPageApi(
                     profile = item.get("expression_profile")
                     if callable(normalizer) and isinstance(profile, dict):
                         normalizer(profile)
+                managed, scope_context = self._expression_admin_scope_context(
+                    source_type, source_id, item,
+                )
+                if managed:
+                    prepared = self._expression_prepare_admin_profile(item, scope_context)
+                    self._expression_validate_admin_revision(prepared, payload)
+                before = deepcopy(item.get("expression_profile") or {})
                 payload["source_type"] = source_type
                 action_message = self._apply_expression_profile_action(item, payload)
+                if managed and before != (item.get("expression_profile") or {}):
+                    try:
+                        self._expression_finalize_admin_profile(item, before, scope_context)
+                    except Exception:
+                        item["expression_profile"] = before
+                        raise
+                if persona_target:
+                    self.plugin.data["_req041_persona_expression_profile"] = item["expression_profile"]
                 if action in {
                     "approve", "approve_rule", "approve_rule_group", "delete_sample", "delete_rule", "delete_rule_group",
                     "update_rule_group",
@@ -16540,6 +17218,19 @@ class PrivateCompanionPageApi(
         rule_family_id = self._single_line(payload.get("rule_family_id"), 100)
         sample_index = self._int(payload.get("sample_index"))
 
+        def archive_items(storage_key: str, items: list[Any], state: str) -> None:
+            archived = profile.get(storage_key) if isinstance(profile.get(storage_key), list) else []
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            for raw in items:
+                if not isinstance(raw, dict):
+                    continue
+                item = dict(raw)
+                item["review_status"] = state
+                item[f"{state}_at"] = stamp
+                archived.insert(0, item)
+            limit = max(24, int(getattr(self.plugin, "max_learned_expression_items", 60) or 60) * 2)
+            profile[storage_key] = archived[:limit]
+
         def find_index(items: list[Any]) -> int:
             if sample_id:
                 for idx, item in enumerate(items):
@@ -16558,6 +17249,8 @@ class PrivateCompanionPageApi(
             return -1
 
         if action == "clear_pending":
+            archive_items("rejected_samples", pending, "rejected")
+            archive_items("rejected_rules", pending_rules, "rejected")
             profile["pending_samples"] = []
             profile["pending_rules"] = []
             profile["pending_count"] = 0
@@ -16571,6 +17264,7 @@ class PrivateCompanionPageApi(
             profile["pending_samples"] = pending
             profile["pending_count"] = len(pending)
             if action == "reject":
+                archive_items("rejected_samples", [item], "rejected")
                 profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                 return "已删除待审核样本"
             if isinstance(item, dict):
@@ -16596,6 +17290,7 @@ class PrivateCompanionPageApi(
             item = pending_rules.pop(idx)
             profile["pending_rules"] = pending_rules
             if action == "reject_rule":
+                archive_items("rejected_rules", [item], "rejected")
                 profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                 return "已拒绝归纳规则"
             if not isinstance(item, dict):
@@ -16714,6 +17409,7 @@ class PrivateCompanionPageApi(
                 if not isinstance(item, dict) or self._single_line(item.get("family_id"), 100) != rule_family_id
             ]
             if action == "reject_rule_group":
+                archive_items("rejected_rules", matched, "rejected")
                 profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
                 return f"已拒绝规则组中的 {len(matched)} 条归纳规则"
             validator = getattr(self.plugin, "_expression_rule_definition_is_valid", None)
@@ -16752,7 +17448,8 @@ class PrivateCompanionPageApi(
             idx = find_index(samples)
             if idx < 0:
                 return "没有找到已入库样本"
-            samples.pop(idx)
+            removed_item = samples.pop(idx)
+            archive_items("revoked_samples", [removed_item], "revoked")
             profile["samples"] = samples
             refresher = getattr(self.plugin, "_refresh_expression_profile_legacy_summary", None)
             if callable(refresher):
@@ -16764,6 +17461,10 @@ class PrivateCompanionPageApi(
             return "已删除表达样本"
         if action == "delete_rule":
             learned_rules = profile.get("learned_rules") if isinstance(profile.get("learned_rules"), list) else []
+            removed_rules = [
+                item for item in learned_rules
+                if isinstance(item, dict) and self._single_line(item.get("id"), 100) == rule_id
+            ]
             kept = [
                 item
                 for item in learned_rules
@@ -16771,6 +17472,7 @@ class PrivateCompanionPageApi(
             ]
             if len(kept) == len(learned_rules):
                 return "没有找到归纳规则"
+            archive_items("revoked_rules", removed_rules, "revoked")
             profile["learned_rules"] = kept
             profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             return "已删除归纳规则"
@@ -16786,6 +17488,10 @@ class PrivateCompanionPageApi(
             removed = len(learned_rules) - len(kept)
             if removed <= 0:
                 return "没有找到归纳规则组"
+            archive_items("revoked_rules", [
+                item for item in learned_rules
+                if isinstance(item, dict) and self._single_line(item.get("family_id"), 100) == rule_family_id
+            ], "revoked")
             profile["learned_rules"] = kept
             profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             return f"已删除规则组中的 {removed} 条规则"
@@ -17610,6 +18316,7 @@ class PrivateCompanionPageApi(
             "enable_daily_case_review_experiment",
             "enable_passive_topic_suppression",
             "enable_custom_relationship_stage_policy",
+            "enable_group_relationship_affinity",
             "enable_relationship_content_tiers",
             "enable_relationship_analysis",
             "enable_relationship_state_machine",
@@ -19744,6 +20451,13 @@ class PrivateCompanionPageApi(
             "owner_exclusive_tone",
             "owner_exclusive_address_style",
             "owner_exclusive_proactive_limit",
+            "enable_group_relationship_affinity",
+            "group_relationship_affinity_allowlist",
+            "group_relationship_daily_net_cap",
+            "group_relationship_window_minutes",
+            "group_relationship_window_absolute_cap",
+            "group_relationship_person_daily_absolute_cap",
+            "group_relationship_scope_daily_absolute_cap",
             "relationship_event_window_minutes",
             "relationship_positive_event_cap",
             "relationship_negative_event_cap",
@@ -22676,6 +23390,7 @@ class PrivateCompanionPageApi(
             "enable_daily_case_review_experiment",
             "enable_passive_topic_suppression",
             "enable_custom_relationship_stage_policy",
+            "enable_group_relationship_affinity",
             "enable_relationship_content_tiers",
             "enable_relationship_analysis",
             "enable_relationship_state_machine",
@@ -22900,6 +23615,13 @@ class PrivateCompanionPageApi(
             "owner_exclusive_tone",
             "owner_exclusive_address_style",
             "owner_exclusive_proactive_limit",
+            "enable_group_relationship_affinity",
+            "group_relationship_affinity_allowlist",
+            "group_relationship_daily_net_cap",
+            "group_relationship_window_minutes",
+            "group_relationship_window_absolute_cap",
+            "group_relationship_person_daily_absolute_cap",
+            "group_relationship_scope_daily_absolute_cap",
             "relationship_event_window_minutes",
             "relationship_positive_event_cap",
             "relationship_negative_event_cap",

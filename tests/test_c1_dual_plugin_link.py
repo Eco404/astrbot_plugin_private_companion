@@ -15,7 +15,9 @@ if not MEMORY_ROOT.exists():
 if not MEMORY_ROOT.exists():
     MEMORY_ROOT = ROOT.parent / "astrbot_plugin_remember_you"
 
-if "astrbot.api" not in sys.modules:
+try:
+    import astrbot.api  # noqa: F401
+except ImportError:
     astrbot = types.ModuleType("astrbot")
     api = types.ModuleType("astrbot.api")
     api.logger = SimpleNamespace(warning=lambda *args, **kwargs: None, debug=lambda *args, **kwargs: None)

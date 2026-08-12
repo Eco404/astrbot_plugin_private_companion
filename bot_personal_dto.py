@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 import json
 import re
 from typing import Any
@@ -231,7 +232,11 @@ def build_bot_personal_dto(
         evidence = default_evidence
     created_at = _text(safe.get("created_at"), 80) or current.isoformat(timespec="seconds")
     updated_at = _text(safe.get("updated_at"), 80) or created_at
-    record_id = _text(safe.get("record_id"), 160) or f"local:{_text(idempotency_key, 240)}"
+    canonical_key = _text(idempotency_key, 240)
+    record_digest = hashlib.sha256(
+        f"{BOT_PERSONAL_MEMORY_DOMAIN}|{memory_type}|{canonical_key}".encode("utf-8")
+    ).hexdigest()[:24]
+    record_id = f"botmem_{record_digest}"
     return BotPersonalArchiveDTO(
         record_id=record_id,
         memory_domain=BOT_PERSONAL_MEMORY_DOMAIN,

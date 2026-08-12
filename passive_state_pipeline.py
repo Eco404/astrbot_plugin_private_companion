@@ -84,6 +84,12 @@ async def inject_humanized_state(
             and self._private_passive_profile_available(private_user_id, private_user)
         )
         if private_user_active:
+            relationship_getter = getattr(self, "_req041_relationship_read_view", None)
+            if callable(relationship_getter):
+                private_user = relationship_getter(event, private_user, kind="private")
+            scoped_getter = getattr(self, "_req041_scoped_private_read_view", None)
+            if callable(scoped_getter):
+                private_user = scoped_getter(event, private_user)
             preferred_address = _single_line(
                 private_user.get("nickname") or getattr(self, "default_nickname", "你"),
                 24,
@@ -205,6 +211,30 @@ async def inject_humanized_state(
                 sender_id = ""
             group = self._get_group(group_id)
         if group_id and isinstance(group, dict):
+            existing_scoped_group = getattr(event, "req041_scoped_group_read_view", None)
+            if isinstance(existing_scoped_group, dict):
+                group = existing_scoped_group
+            else:
+                scoped_group_getter = getattr(self, "_req041_scoped_group_read_view", None)
+                if callable(scoped_group_getter):
+                    try:
+                        sender_id = str(event.get_sender_id())
+                    except Exception:
+                        sender_id = ""
+                    private_users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
+                    canonicalizer = getattr(self, "_canonical_private_user_id", None)
+                    canonical_sender = (
+                        canonicalizer(sender_id) if callable(canonicalizer) else sender_id
+                    )
+                    relationship_user = (
+                        private_users.get(canonical_sender) if isinstance(private_users, dict) else None
+                    )
+                    group = scoped_group_getter(
+                        event, group_id=group_id, group=group, sender_id=sender_id,
+                        relationship_user=(
+                            relationship_user if isinstance(relationship_user, dict) else None
+                        ),
+                    )
             expression_marker = "<!-- private_companion_expression_voice_group_v1 -->"
             current_prompt = req.system_prompt or ""
             current_turn_prompt = str(getattr(req, "prompt", "") or "")

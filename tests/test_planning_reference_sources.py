@@ -202,7 +202,7 @@ class DailyPlanRetryHarness(DailyStateMixin):
         self.data = {
             "users": {"10001": {"umo": "default:FriendMessage:10001"}},
             "daily_plan": {
-                "date": _today_key(),
+                "date": datetime.now().date().isoformat(),
                 "source": "fallback_previous_plan",
                 "retry_after": retry_after,
                 "items": [{"time": "09:00", "end": "10:00", "activity": "旧的个性化日程"}],
@@ -230,7 +230,7 @@ class DailyPlanRetryHarness(DailyStateMixin):
     async def _generate_daily_plan(self):
         self.generated_count += 1
         return {
-            "date": _today_key(),
+            "date": datetime.now().date().isoformat(),
             "source": "llm",
             "items": [{"time": "10:00", "end": "11:00", "activity": "重新生成的日程"}],
         }
@@ -571,15 +571,17 @@ class DailyPlanGenerationFallbackTests(unittest.IsolatedAsyncioTestCase):
                 self.assertGreater(plan["retry_after"], 0)
 
     async def test_saved_fallback_retries_only_after_retry_time(self):
-        future = DailyPlanRetryHarness(retry_after=10**12)
-        cached = await future._ensure_daily_plan(force=False)
-        self.assertEqual(future.generated_count, 0)
-        self.assertEqual(cached["source"], "fallback_previous_plan")
+        today = datetime.now().date().isoformat()
+        with patch("astrbot_plugin_private_companion.daily_state._today_key", return_value=today):
+            future = DailyPlanRetryHarness(retry_after=10**12)
+            cached = await future._ensure_daily_plan(force=False)
+            self.assertEqual(future.generated_count, 0)
+            self.assertEqual(cached["source"], "fallback_previous_plan")
 
-        due = DailyPlanRetryHarness(retry_after=1)
-        regenerated = await due._ensure_daily_plan(force=False)
-        self.assertEqual(due.generated_count, 1)
-        self.assertEqual(regenerated["source"], "llm")
+            due = DailyPlanRetryHarness(retry_after=1)
+            regenerated = await due._ensure_daily_plan(force=False)
+            self.assertEqual(due.generated_count, 1)
+            self.assertEqual(regenerated["source"], "llm")
 
 
 if __name__ == "__main__":

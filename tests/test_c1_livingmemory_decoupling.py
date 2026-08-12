@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 import time
@@ -10,7 +11,9 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 
-if "astrbot.api" not in sys.modules:
+try:
+    import astrbot.api  # noqa: F401
+except ImportError:
     astrbot = types.ModuleType("astrbot")
     api = types.ModuleType("astrbot.api")
     api.logger = types.SimpleNamespace(warning=lambda *args, **kwargs: None, debug=lambda *args, **kwargs: None)
@@ -99,6 +102,39 @@ def test_missing_or_mismatched_capability_probe_is_degraded_without_remote_use()
     assert "contract_fingerprint" in status["mismatches"]
 
 
+def test_bot_personal_sender_passes_registered_producer_capability():
+    capability = object()
+
+    class _CapabilityBridge(_ProbeBridge):
+        def __init__(self):
+            self.received_capability = None
+
+        def register_emotion_producer(self, _producer):
+            return capability
+
+        async def record_bot_personal_archive(self, envelope, *, producer_capability=None):
+            self.received_capability = producer_capability
+            return {"ok": True, "state": "stored", "record_id": envelope["idempotency_key"]}
+
+    bridge = _CapabilityBridge()
+    sender = _Plugin(True, False, bridge)._memory_companion_bot_personal_sender()
+
+    assert callable(sender)
+    result = asyncio.run(sender({"idempotency_key": "c1:sender-capability"}))
+    assert result["ok"] is True
+    assert bridge.received_capability is capability
+
+
+def test_bot_personal_sender_is_unavailable_without_producer_capability():
+    class _NoCapabilityBridge(_ProbeBridge):
+        async def record_bot_personal_archive(self, _envelope, *, producer_capability=None):
+            raise AssertionError("recorder must not be used without a producer capability")
+
+    sender = _Plugin(True, False, _NoCapabilityBridge())._memory_companion_bot_personal_sender()
+
+    assert sender is None
+
+
 def test_prefixed_or_livingmemory_modules_do_not_drive_bridge(monkeypatch):
     module = types.ModuleType("third_party_livingmemory_prefix")
     module.PLUGIN_NAME = "astrbot_plugin_memory_companion_extra"
@@ -163,6 +199,38 @@ def test_missing_bridge_negative_cache_retries_quickly():
     plugin._bridge_cache_ts = time.monotonic() - plugin._BRIDGE_MISSING_CACHE_TTL - 0.1
     assert plugin._memory_companion_bridge() is bridge
     assert plugin.calls == 2
+
+
+def test_inactive_cached_bridge_is_replaced_immediately():
+    class _LifecycleBridge(_ProbeBridge):
+        def __init__(self, active=True):
+            self.active = active
+
+        def bridge_lifecycle_status(self):
+            return {"active": self.active}
+
+    old_bridge = _LifecycleBridge(active=False)
+    new_bridge = _LifecycleBridge(active=True)
+    plugin = _Plugin(True, False, new_bridge)
+    plugin._bridge_cache = old_bridge
+    plugin._bridge_cache_ts = time.monotonic()
+    plugin._memory_companion_emotion_capability_bridge = old_bridge
+    plugin._memory_companion_emotion_producer_capability_cache = object()
+
+    assert plugin._memory_companion_bridge() is new_bridge
+    assert plugin._memory_companion_emotion_capability_bridge is None
+    assert plugin._memory_companion_emotion_producer_capability_cache is None
+
+
+def test_inactive_discovered_bridge_fails_closed():
+    class _InactiveBridge(_ProbeBridge):
+        @staticmethod
+        def bridge_lifecycle_status():
+            return {"active": False}
+
+    plugin = _Plugin(True, False, _InactiveBridge())
+    assert plugin._memory_companion_bridge() is None
+    assert plugin._memory_companion_coordination_status()["reason"] == "bridge_inactive"
 
 
 def test_legacy_livingmemory_migration_entrypoint_remains():

@@ -27,6 +27,8 @@ from .helpers import _missing_optional_model_dependency, _now_ts, _path_text, _s
 from .companion_interaction_expression import current_interaction_projection
 from .relationship_ledger import normalize_relationship_mode
 from .relationship_policy import relationship_projection_for_bridge
+from .namespace_capability import negotiate_namespace_capability
+from .identity_namespace import validate_namespace_context
 
 
 def _memory_companion_safe_float(value: Any, default: float, minimum: float = 0.0) -> float:
@@ -266,6 +268,29 @@ class MemoryCompanionAdapterMixin:
         self._bridge_last_status = status
         return status
 
+    def _memory_companion_invalidate_bridge_cache(self, reason: str = "") -> None:
+        """Drop every in-process reference issued by the previously active bridge."""
+        self._bridge_cache = None
+        self._bridge_cache_ts = 0.0
+        self._memory_companion_emotion_capability_bridge = None
+        self._memory_companion_emotion_producer_capability_cache = None
+        if reason:
+            self._memory_companion_degraded_status(reason)
+
+    @staticmethod
+    def _memory_companion_bridge_lifecycle_active(bridge: Any | None) -> bool:
+        """Treat old bridge implementations as live, but fail closed on a bad lifecycle probe."""
+        if bridge is None:
+            return False
+        lifecycle = getattr(bridge, "bridge_lifecycle_status", None)
+        if not callable(lifecycle):
+            return True
+        try:
+            status = lifecycle()
+        except Exception:
+            return False
+        return isinstance(status, dict) and status.get("active") is True
+
     def _memory_companion_filter_internal_error_context(self, value: Any) -> str:
         """Keep recalled Provider failures out of downstream generation prompts."""
         text = str(value or "").strip()
@@ -284,8 +309,7 @@ class MemoryCompanionAdapterMixin:
         module = _missing_optional_model_dependency(exc)
         if not module:
             return False
-        self._bridge_cache = None
-        self._bridge_cache_ts = 0.0
+        self._memory_companion_invalidate_bridge_cache()
         self._bridge_dependency_failure_until = time.monotonic() + 300.0
         self._bridge_dependency_failure_module = module
         self._memory_companion_degraded_status(
@@ -309,7 +333,10 @@ class MemoryCompanionAdapterMixin:
         if now < self._bridge_dependency_failure_until:
             return None
         if self._bridge_cache is not None and (now - self._bridge_cache_ts) < self._BRIDGE_CACHE_TTL:
-            return self._bridge_cache
+            if self._memory_companion_bridge_lifecycle_active(self._bridge_cache):
+                return self._bridge_cache
+            self._memory_companion_invalidate_bridge_cache("bridge_inactive")
+            now = time.monotonic()
         negative_cache_ttl = (
             self._BRIDGE_MISSING_CACHE_TTL
             if self._bridge_last_status.get("reason") == "bridge_missing"
@@ -331,10 +358,14 @@ class MemoryCompanionAdapterMixin:
         self._bridge_last_status = {}
         bridge = self._memory_companion_bridge_uncached()
         if bridge is not None:
-            capability_status = self._memory_companion_probe_capabilities(bridge)
-            self._bridge_last_status = capability_status
-            if not capability_status.get("available", False):
+            if not self._memory_companion_bridge_lifecycle_active(bridge):
+                self._memory_companion_degraded_status("bridge_inactive")
                 bridge = None
+            else:
+                capability_status = self._memory_companion_probe_capabilities(bridge)
+                self._bridge_last_status = capability_status
+                if not capability_status.get("available", False):
+                    bridge = None
         self._bridge_cache = bridge
         self._bridge_cache_ts = now
         if bridge is None and not self._bridge_last_status:
@@ -525,11 +556,12 @@ class MemoryCompanionAdapterMixin:
     def _memory_companion_bot_personal_sender(self) -> Any | None:
         bridge = self._memory_companion_bridge()
         recorder = getattr(bridge, "record_bot_personal_archive", None) if bridge is not None else None
-        if not callable(recorder):
+        capability = self._memory_companion_emotion_producer_capability(bridge)
+        if not callable(recorder) or capability is None:
             return None
 
         async def _send(envelope: dict[str, Any]) -> dict[str, Any]:
-            result = recorder(envelope)
+            result = recorder(envelope, producer_capability=capability)
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                 result = await result
             return result if isinstance(result, dict) else {"ok": False, "state": "retry", "error_code": "invalid_bridge_response"}
@@ -725,6 +757,175 @@ class MemoryCompanionAdapterMixin:
         status.setdefault("available", True)
         self._bridge_last_status = status
         return status
+
+    def _memory_companion_probe_namespace_capabilities(self, bridge: Any) -> dict[str, Any]:
+        """Negotiate only the REQ-041 scoped API; legacy bridge state is untouched."""
+        try:
+            getter = getattr(bridge, "probe_namespace_context_capabilities", None)
+        except Exception:
+            getter = None
+        if not callable(getter):
+            return {
+                "available": False,
+                "state": "degraded",
+                "code": "namespace_capability_probe_missing",
+                "mismatches": ["namespace_capability_probe_missing"],
+            }
+        try:
+            result = getter()
+        except Exception:
+            return {
+                "available": False,
+                "state": "degraded",
+                "code": "namespace_capability_probe_exception",
+                "mismatches": ["namespace_capability_probe_exception"],
+            }
+        return negotiate_namespace_capability(result)
+
+    @staticmethod
+    def _memory_companion_namespace_payload(namespace: Any) -> tuple[dict[str, Any], str]:
+        if isinstance(namespace, dict):
+            payload = dict(namespace)
+        else:
+            try:
+                serialized = namespace.to_dict()
+            except Exception:
+                serialized = None
+            payload = dict(serialized) if isinstance(serialized, dict) else {}
+        errors = validate_namespace_context(payload)
+        return payload, errors[0] if errors else ""
+
+    def _memory_companion_bind_namespace_epoch(
+        self,
+        bridge: Any,
+        *,
+        operation_id: str,
+        migration_epoch: str,
+        policy_version: str,
+        expected_previous_epoch: str = "",
+    ) -> dict[str, Any]:
+        operation = str(operation_id or "").strip()
+        epoch = str(migration_epoch or "").strip()
+        policy = str(policy_version or "").strip()
+        previous = str(expected_previous_epoch or "").strip()
+        token_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+        if (
+            not token_pattern.fullmatch(operation) or not token_pattern.fullmatch(epoch)
+            or not token_pattern.fullmatch(policy) or (previous and not token_pattern.fullmatch(previous))
+        ):
+            return {"ok": False, "state": "rejected", "code": "namespace_epoch_binding_invalid"}
+        capability = self._memory_companion_emotion_producer_capability(bridge)
+        if capability is None:
+            return {"ok": False, "state": "forbidden", "code": "producer_capability_unavailable"}
+        try:
+            binder = getattr(bridge, "bind_namespace_migration_epoch", None)
+        except Exception:
+            binder = None
+        if not callable(binder):
+            return {"ok": False, "state": "degraded", "code": "namespace_epoch_bind_missing"}
+        try:
+            result = binder(
+                capability,
+                operation_id=operation,
+                expected_previous_epoch=previous,
+                migration_epoch=epoch,
+                policy_version=policy,
+            )
+        except Exception:
+            return {"ok": False, "state": "degraded", "code": "namespace_epoch_bind_exception"}
+        if not isinstance(result, dict):
+            return {"ok": False, "state": "degraded", "code": "namespace_epoch_bind_invalid"}
+        return dict(result)
+
+    def _memory_companion_scoped_invoke(
+        self,
+        bridge: Any,
+        method_name: str,
+        namespace: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        payload, error = self._memory_companion_namespace_payload(namespace)
+        if error:
+            return {"ok": False, "state": "rejected", "code": error}
+        negotiated = self._memory_companion_probe_namespace_capabilities(bridge)
+        if negotiated.get("available") is not True:
+            return {
+                "ok": False,
+                "state": "degraded",
+                "code": str(negotiated.get("code") or "namespace_capability_unavailable")[:120],
+            }
+        capability = self._memory_companion_emotion_producer_capability(bridge)
+        if capability is None:
+            return {"ok": False, "state": "forbidden", "code": "producer_capability_unavailable"}
+        try:
+            method = getattr(bridge, method_name, None)
+        except Exception:
+            method = None
+        if not callable(method):
+            return {"ok": False, "state": "degraded", "code": "namespace_scoped_method_missing"}
+        try:
+            result = method(capability, payload, **kwargs)
+        except Exception:
+            return {"ok": False, "state": "degraded", "code": "namespace_scoped_call_exception"}
+        if not isinstance(result, dict):
+            return {"ok": False, "state": "degraded", "code": "namespace_scoped_result_invalid"}
+        return dict(result)
+
+    def _memory_companion_upsert_scoped_record(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "upsert_scoped_record", namespace, **kwargs
+        )
+
+    def _memory_companion_read_scoped_record(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "read_scoped_record", namespace, **kwargs
+        )
+
+    def _memory_companion_list_scoped_records(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "list_scoped_records", namespace, **kwargs
+        )
+
+    def _memory_companion_tombstone_scoped_record(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "tombstone_scoped_record", namespace, **kwargs
+        )
+
+    def _memory_companion_tombstone_scoped_namespace(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "tombstone_scoped_namespace", namespace, **kwargs
+        )
+
+    def _memory_companion_tombstone_scoped_identity_scopes(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "tombstone_scoped_identity_scopes", namespace, **kwargs
+        )
+
+    def _memory_companion_erase_scoped_group_scopes(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "erase_scoped_group_scopes", namespace, **kwargs
+        )
+
+    def _memory_companion_erase_scoped_persona_scopes(
+        self, bridge: Any, namespace: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        return self._memory_companion_scoped_invoke(
+            bridge, "erase_scoped_persona_scopes", namespace, **kwargs
+        )
 
     async def _memory_companion_read_profile(
         self,
@@ -1889,6 +2090,21 @@ class MemoryCompanionAdapterMixin:
             text=text,
             event=event,
         )
+        relationship_view = getattr(event, "req041_relationship_read_view", None) if event is not None else None
+        if (
+            isinstance(relationship_view, dict)
+            and relationship_view.get("req041_read_generation") == "new"
+        ):
+            payload["relationship_projection"] = {
+                "phase_key": _single_line(
+                    relationship_view.get("req041_relationship_stage_key")
+                    or relationship_view.get("relationship_phase_key"), 40
+                ),
+                "relationship_role": _single_line(relationship_view.get("relationship_role"), 20),
+                "relationship_mode": _single_line(relationship_view.get("relationship_mode"), 32),
+                "score_redacted": True,
+                "scope": "group_member",
+            }
         self._memory_companion_attach_context(event, payload)
         self._memory_companion_attach_person_context(event)
 

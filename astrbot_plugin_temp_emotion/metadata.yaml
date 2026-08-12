@@ -1,0 +1,7 @@
+name: astrbot_plugin_temp_emotion
+display_name: 临时情绪系统
+author: Yucloud
+version: 0.1.0
+description: 对话期间临时情绪：收到用户消息后判断角色产生的情绪（正负效价轴，同类叠加、异类相抵、随时间消解），在回复时注入情绪余波，让角色反应带着真实情绪的连续性。与 private_companion 联动但不修改其代码。
+desc: 对话期间临时情绪：收到用户消息后判断角色产生的情绪（正负效价轴，同类叠加、异类相抵、随时间消解），在回复时注入情绪余波，让角色反应带着真实情绪的连续性。与 private_companion 联动但不修改其代码。
+repo: ""

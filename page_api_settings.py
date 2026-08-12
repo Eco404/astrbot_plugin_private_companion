@@ -513,10 +513,7 @@ class PageSettingNormalizerMixin:
                     raise CatalogValidationError({"photo_reference_catalog": ["目录必须是 JSON 数组"]}) from exc
             if not isinstance(raw_items, list):
                 raise CatalogValidationError({"photo_reference_catalog": ["目录必须是数组"]})
-            return validate_and_serialize(
-                raw_items,
-                preset_names=self._photo_reference_preset_names(),
-            )
+            return validate_and_serialize(raw_items, preset_names=self._photo_reference_preset_names())
         if key == "bot_relationship_cards":
             normalizer = getattr(self.plugin, "_normalize_bot_relationship_cards", None)
             if callable(normalizer):

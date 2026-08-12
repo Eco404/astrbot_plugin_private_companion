@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 from astrbot.api import logger
 
 from .helpers import _safe_float, _single_line
+from .scoped_domain_contract import build_scoped_domain_payload
 
 
 _MAP_STORE_KEY = "place_cognitive_maps"
@@ -64,11 +66,11 @@ class PlaceCognitiveMapMixin:
             data[_MAP_STORE_KEY] = root
         return root
 
-    def _place_cognitive_map_user_state(self, user_id: str) -> dict[str, Any]:
+    def _place_cognitive_map_user_state(self, store_key: str) -> dict[str, Any]:
         root = self._place_cognitive_map_root()
-        if not isinstance(root, dict) or not user_id:
+        if not isinstance(root, dict) or not store_key:
             return {}
-        state = root.get(user_id)
+        state = root.get(store_key)
         if not isinstance(state, dict):
             state = {
                 "version": _MAP_VERSION,
@@ -77,7 +79,7 @@ class PlaceCognitiveMapMixin:
                 "current_place_key": "",
                 "updated_at": "",
             }
-            root[user_id] = state
+            root[store_key] = state
         state["version"] = _MAP_VERSION
         if not isinstance(state.get("places"), dict):
             state["places"] = {}
@@ -89,14 +91,14 @@ class PlaceCognitiveMapMixin:
     def _place_cognitive_map_event(
         *,
         event: str,
-        user_id: str,
+        subject_ref: str,
         place: dict[str, Any],
         timestamp: float,
         previous_place: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         name = _single_line(place.get("name"), 48)
         key = _single_line(place.get("key"), 96)
-        event_id = f"place-{event}:{user_id}:{key}:{int(timestamp)}"
+        event_id = f"place-{event}:{subject_ref}:{key}:{int(timestamp)}"
         if event == "arrival":
             title = f"用户到达已确认地点：{name}"
         else:
@@ -111,10 +113,46 @@ class PlaceCognitiveMapMixin:
             "title": title,
             "kind": f"confirmed_place_{event}",
             "start_at": PlaceCognitiveMapMixin._place_cognitive_map_iso(timestamp),
-            "source_refs": [f"reality:mobile_place:{user_id}:{key}"],
+            "source_refs": [f"reality:mobile_place:{subject_ref}:{key}"],
         }
 
-    def _place_cognitive_map_emit_memory_event(self, event: dict[str, Any]) -> None:
+    def _place_cognitive_map_emit_memory_event(
+        self,
+        event: dict[str, Any],
+        namespace: Any | None = None,
+    ) -> None:
+        if namespace is not None:
+            bridge_getter = getattr(self, "_memory_companion_bridge", None)
+            upsert = getattr(self, "_memory_companion_upsert_scoped_record", None)
+            bridge = bridge_getter() if callable(bridge_getter) else None
+            if bridge is None or not callable(upsert):
+                return
+            event_id = _single_line(event.get("activity_id"), 240)
+            if not event_id:
+                return
+            record_id = "place-event:" + hashlib.sha256(event_id.encode("utf-8")).hexdigest()
+            payload = build_scoped_domain_payload(
+                domain="memory",
+                source_kind="private",
+                source_revision=1,
+                content={
+                    "memory_type": "confirmed_place_event",
+                    "title": _single_line(event.get("title"), 300),
+                    "kind": _single_line(event.get("kind"), 80),
+                    "start_at": _single_line(event.get("start_at"), 80),
+                    "source_refs": list(event.get("source_refs") or [])[:4],
+                },
+            )
+            result = upsert(
+                bridge, namespace, record_kind="memory", record_id=record_id,
+                revision=1, payload=payload, event_id=event_id,
+            )
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                logger.debug(
+                    "[PrivateCompanion] 地点认知 scoped memory 写入被拒绝: code=%s",
+                    _single_line(result.get("code"), 120) if isinstance(result, dict) else "invalid_result",
+                )
+            return
         recorder = getattr(self, "_memory_companion_record_observed_activity", None)
         if not callable(recorder):
             return
@@ -189,19 +227,35 @@ class PlaceCognitiveMapMixin:
         normalized_user_id = _single_line(user_id, 120)
         if not normalized_user_id:
             return {"available": False, "current_place": {}, "known_places": [], "recent_routes": []}
+        binder = getattr(self, "_req041_reality_private_binding", None)
+        binding = binder(normalized_user_id, purpose="memory_write") if callable(binder) else None
+        if callable(binder) and (not isinstance(binding, dict) or binding.get("ok") is not True):
+            return {"available": False, "current_place": {}, "known_places": [], "recent_routes": []}
+        store_key = _single_line(binding.get("store_key"), 160) if isinstance(binding, dict) else normalized_user_id
+        subject_ref = _single_line(binding.get("subject_ref"), 160) if isinstance(binding, dict) else normalized_user_id
+        namespace = binding.get("context") if isinstance(binding, dict) else None
+        if not store_key or not subject_ref:
+            return {"available": False, "current_place": {}, "known_places": [], "recent_routes": []}
         location = mobile_location if isinstance(mobile_location, dict) else {}
         data = getattr(self, "data", None)
         root = data.get(_MAP_STORE_KEY) if isinstance(data, dict) and isinstance(data.get(_MAP_STORE_KEY), dict) else {}
+        promoted_legacy = False
+        if isinstance(binding, dict) and store_key not in root and isinstance(root.get(normalized_user_id), dict):
+            root[store_key] = root.pop(normalized_user_id)
+            promoted_legacy = True
+            saver = getattr(self, "_schedule_data_save", None)
+            if callable(saver):
+                saver(delay=0.5)
         if not bool(location.get("available")):
-            existing = root.get(normalized_user_id)
+            existing = root.get(store_key)
             return self._place_cognitive_map_summary(existing) if isinstance(existing, dict) else {
                 "available": False, "current_place": {}, "known_places": [], "recent_routes": [],
             }
         place = self._place_cognitive_map_place(location)
-        existing = root.get(normalized_user_id)
+        existing = root.get(store_key)
         if not place and not isinstance(existing, dict):
             return {"available": False, "current_place": {}, "known_places": [], "recent_routes": []}
-        state = self._place_cognitive_map_user_state(normalized_user_id)
+        state = self._place_cognitive_map_user_state(store_key)
         if not state:
             return {"available": False, "current_place": {}, "known_places": [], "recent_routes": []}
         timestamp = float(observed_at) if isinstance(observed_at, (int, float)) else self._place_cognitive_map_now_ts()
@@ -219,7 +273,7 @@ class PlaceCognitiveMapMixin:
                 state["updated_at"] = self._place_cognitive_map_iso(timestamp)
                 changed = True
                 events.append(self._place_cognitive_map_event(
-                    event="departure", user_id=normalized_user_id, place=previous, timestamp=timestamp,
+                    event="departure", subject_ref=subject_ref, place=previous, timestamp=timestamp,
                 ))
         else:
             key = place["key"]
@@ -239,7 +293,7 @@ class PlaceCognitiveMapMixin:
                 if previous:
                     previous["last_left_at"] = self._place_cognitive_map_iso(timestamp)
                     events.append(self._place_cognitive_map_event(
-                        event="departure", user_id=normalized_user_id, place=previous, timestamp=timestamp,
+                        event="departure", subject_ref=subject_ref, place=previous, timestamp=timestamp,
                     ))
                     route_key = f"{previous_key}>{key}"
                     route = state["routes"].get(route_key)
@@ -255,7 +309,7 @@ class PlaceCognitiveMapMixin:
                 state["updated_at"] = self._place_cognitive_map_iso(timestamp)
                 changed = True
                 events.append(self._place_cognitive_map_event(
-                    event="arrival", user_id=normalized_user_id, place=stored, timestamp=timestamp,
+                    event="arrival", subject_ref=subject_ref, place=stored, timestamp=timestamp,
                     previous_place=previous or None,
                 ))
 
@@ -274,10 +328,14 @@ class PlaceCognitiveMapMixin:
 
         if changed:
             saver = getattr(self, "_schedule_data_save", None)
-            if callable(saver):
+            if callable(saver) and not promoted_legacy:
                 saver(delay=0.5)
             for event in events:
-                self._place_cognitive_map_emit_memory_event(event)
+                try:
+                    self._place_cognitive_map_emit_memory_event(event, namespace)
+                except TypeError:
+                    # Preserve small third-party/test subclasses implementing the old hook.
+                    self._place_cognitive_map_emit_memory_event(event)
         return self._place_cognitive_map_summary(state)
 
     @staticmethod

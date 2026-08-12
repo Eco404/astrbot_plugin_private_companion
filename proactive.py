@@ -1447,8 +1447,12 @@ class ProactiveMixin(UserRestGateMixin):
         )
         if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
             return max(0, user_limit)
-        role = self._private_user_role(user)
-        mode = str(user.get("relationship_mode") or "normal")
+        view_getter = getattr(self, "_req041_relationship_snapshot_view", None)
+        relationship_user = (
+            view_getter(user, source="proactive_daily_limit") if callable(view_getter) else user
+        )
+        role = self._private_user_role(relationship_user)
+        mode = str(relationship_user.get("relationship_mode") or "normal")
         violation = user.get("relationship_violation")
         recovery_settler = getattr(self, "_settle_relationship_violation_recovery", None)
         if isinstance(violation, dict) and callable(recovery_settler):
@@ -1463,8 +1467,8 @@ class ProactiveMixin(UserRestGateMixin):
                 if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
                 else None
             )
-            stage = relationship_stage_for_score(user.get("relationship_score", 0), policy).get("phase", {})
-            relationship_is_distant = _safe_int(user.get("relationship_score"), 0, -1200, 1200) < 0 or str(
+            stage = relationship_stage_for_score(relationship_user.get("relationship_score", 0), policy).get("phase", {})
+            relationship_is_distant = _safe_int(relationship_user.get("relationship_score"), 0, -1200, 1200) < 0 or str(
                 stage.get("key") or ""
             ) in {"deeply_distant", "strongly_distant", "distant"}
         if relationship_is_distant:
@@ -1473,7 +1477,7 @@ class ProactiveMixin(UserRestGateMixin):
             user.get("current_interaction"),
             relationship_role=role,
             relationship_mode=mode,
-            relationship_score=user.get("relationship_score"),
+            relationship_score=relationship_user.get("relationship_score"),
             normal_interaction_band_cap=getattr(self, "normal_interaction_band_cap", "warm"),
             now=_now_ts(),
         )
@@ -1487,8 +1491,12 @@ class ProactiveMixin(UserRestGateMixin):
     def _relationship_proactive_soft_target(self, user: dict[str, Any]) -> int:
         if not bool(getattr(self, "enable_custom_relationship_stage_policy", False)):
             return max(1, _safe_int(getattr(self, "max_daily_messages", 1), 1, 0, 30))
-        role = self._private_user_role(user)
-        mode = str(user.get("relationship_mode") or "normal")
+        view_getter = getattr(self, "_req041_relationship_snapshot_view", None)
+        relationship_user = (
+            view_getter(user, source="proactive_soft_target") if callable(view_getter) else user
+        )
+        role = self._private_user_role(relationship_user)
+        mode = str(relationship_user.get("relationship_mode") or "normal")
         if role == "owner" and mode == "owner_exclusive":
             return max(1, _safe_int(getattr(self, "owner_exclusive_proactive_limit", 6), 6, 0, 30))
         violation = user.get("relationship_violation")
@@ -1503,8 +1511,8 @@ class ProactiveMixin(UserRestGateMixin):
             if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
             else None
         )
-        stage = relationship_stage_for_score(user.get("relationship_score", 0), policy).get("phase", {})
-        if _safe_int(user.get("relationship_score"), 0, -1200, 1200) < 0 or str(stage.get("key") or "") in {
+        stage = relationship_stage_for_score(relationship_user.get("relationship_score", 0), policy).get("phase", {})
+        if _safe_int(relationship_user.get("relationship_score"), 0, -1200, 1200) < 0 or str(stage.get("key") or "") in {
             "deeply_distant",
             "strongly_distant",
             "distant",

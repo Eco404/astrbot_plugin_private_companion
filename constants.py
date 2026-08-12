@@ -459,6 +459,7 @@ _DEFAULT_USER_TEMPLATE = {
     "reply_count": 0,
     "action_reply_affinity": {},
     "relationship_score": 0,
+    "req041_relationship_source_revision": 0,
     "companion_memory": {},
     "expression_profile": {},
     "intent_profile": {},

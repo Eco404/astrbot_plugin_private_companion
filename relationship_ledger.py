@@ -217,6 +217,12 @@ def migrate_legacy_relationship_score(
 
 
 def _effective_positive_stage_cap_key(user: dict[str, Any], configured: Any = None) -> str:
+    if configured is None and not str(user.get("relationship_positive_stage_cap_key") or "").strip():
+        # Preserve the historical low-level API for legacy records and third-
+        # party callers that never opted into staged caps.  New companion
+        # records persist an explicit cap and production calls pass it again,
+        # so ordinary users still use the configured ceiling.
+        return "deeply_bonded"
     return normalize_relationship_positive_stage_cap_key(
         configured if configured is not None else user.get("relationship_positive_stage_cap_key")
     )

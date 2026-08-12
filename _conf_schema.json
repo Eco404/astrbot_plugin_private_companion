@@ -395,6 +395,59 @@
         "hint": "只是阶段硬上限；实际次数仍取全局、用户、阶段和动态额度的最小值。",
         "default": 6
       },
+      "enable_group_relationship_affinity": {
+        "description": "允许测试群贡献统一好感度",
+        "type": "bool",
+        "hint": "默认关闭。开启后也只有下方明确列出的测试群、正式已建档身份、明确 @/引用 Bot 且回复真实发送成功的事件才可能结算；普通群消息、转发、回流和发送失败始终不计分。",
+        "default": false
+      },
+      "group_relationship_affinity_allowlist": {
+        "description": "好感度测试群白名单",
+        "type": "list",
+        "hint": "必须逐项填写群 ID。空列表始终表示不允许任何群，绝不会解释为全部群。",
+        "default": [],
+        "condition": "enable_group_relationship_affinity"
+      },
+      "group_relationship_daily_net_cap": {
+        "description": "每人每群每日净变化上限",
+        "type": "int",
+        "slider": {"min": 0, "max": 20, "step": 1},
+        "hint": "限制同一用户在同一群每天由群互动产生的净好感度变化。",
+        "default": 2,
+        "condition": "enable_group_relationship_affinity"
+      },
+      "group_relationship_window_minutes": {
+        "description": "群好感度滚动窗口（分钟）",
+        "type": "int",
+        "slider": {"min": 1, "max": 1440, "step": 1},
+        "hint": "同一用户与同一群的直接互动在该滚动窗口内共享绝对量预算。",
+        "default": 30,
+        "condition": "enable_group_relationship_affinity"
+      },
+      "group_relationship_window_absolute_cap": {
+        "description": "每人每群窗口绝对量上限",
+        "type": "int",
+        "slider": {"min": 0, "max": 20, "step": 1},
+        "hint": "正负变化都占用额度，防止用加分和扣分往返刷量。",
+        "default": 1,
+        "condition": "enable_group_relationship_affinity"
+      },
+      "group_relationship_person_daily_absolute_cap": {
+        "description": "每人跨群每日绝对量上限",
+        "type": "int",
+        "slider": {"min": 0, "max": 120, "step": 1},
+        "hint": "一个人在所有测试群累计的正负变化绝对量上限。",
+        "default": 4,
+        "condition": "enable_group_relationship_affinity"
+      },
+      "group_relationship_scope_daily_absolute_cap": {
+        "description": "每群全体每日绝对量上限",
+        "type": "int",
+        "slider": {"min": 0, "max": 1000, "step": 1},
+        "hint": "同一测试群内所有用户合计的正负变化绝对量上限。",
+        "default": 20,
+        "condition": "enable_group_relationship_affinity"
+      },
       "relationship_event_window_minutes": {
         "description": "亲密度事件去重窗口（分钟）",
         "type": "int",

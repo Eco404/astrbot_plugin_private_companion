@@ -257,7 +257,8 @@ class PhotoScopeToolRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual("error", payload["status"])
+        self.assertEqual("submission_unconfirmed", payload["status"])
+        self.assertFalse(payload["same_turn_retry_allowed"])
         user = harness.data["users"]["10001"]
         self.assertEqual(1, user["command_photo_generated_today"])
         self.assertEqual(["private_owner"], harness.scope_attempts)

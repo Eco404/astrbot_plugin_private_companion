@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import re
+import hashlib
+import hmac
+import json
 import time
+import uuid
 from copy import deepcopy
 from datetime import datetime
 from typing import Any
@@ -18,6 +22,7 @@ from .relationship_ledger import (
     record_manual_relationship_change,
     relationship_positive_score_cap,
 )
+from .migration_backfill import legacy_pending_reference
 
 
 class PrivateCompanionPageApiUsersGroupsMixin:
@@ -32,6 +37,328 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         if callable(normalizer):
             return normalizer(value)
         return self._single_line(value, 160)
+
+    @staticmethod
+    def _identity_unlink_confirmation(
+        *, person_id: str, operation_id: str, identity: dict[str, Any], checkpoint: dict[str, Any]
+    ) -> str:
+        """Bind an unlink preview to the exact identity projection revision."""
+        payload = {
+            "person_id": person_id,
+            "operation_id": operation_id,
+            "identity": identity,
+            "projection_revision": int(checkpoint.get("projection_revision") or 0),
+            "checkpoint_hash": str(checkpoint.get("checkpoint_hash") or ""),
+        }
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _identity_link_confirmation(
+        *, person_id: str, operation_id: str, identity: dict[str, Any], checkpoint: dict[str, Any]
+    ) -> str:
+        payload = {
+            "action": "relink",
+            "person_id": person_id,
+            "operation_id": operation_id,
+            "identity": identity,
+            "projection_revision": int(checkpoint.get("projection_revision") or 0),
+            "checkpoint_hash": str(checkpoint.get("checkpoint_hash") or ""),
+        }
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _safe_identity_unlink_result(result: dict[str, Any]) -> dict[str, Any]:
+        """Strip raw identity keys and migration checkpoints from page output."""
+        return {
+            "ok": bool(result.get("ok")),
+            "state": str(result.get("state") or "pending")[:32],
+            "code": str(result.get("code") or "identity_unlink_failed")[:80],
+            "changed": bool(result.get("changed")),
+            "source_event_count": max(0, _safe_int(result.get("source_event_count"), 0)),
+            "replayable_event_count": max(0, _safe_int(result.get("replayable_event_count"), 0)),
+            "ambiguity_count": max(0, _safe_int(result.get("ambiguity_count"), 0)),
+        }
+
+    @staticmethod
+    def _safe_person_lifecycle_result(result: dict[str, Any], action: str) -> dict[str, Any]:
+        """Expose lifecycle impact without leaking identity or storage keys."""
+        safe_action = action if action in {"archive", "purge"} else "archive"
+        safe = {
+            "ok": bool(result.get("ok")),
+            "state": str(result.get("state") or "pending")[:32],
+            "code": str(result.get("code") or f"person_{safe_action}_failed")[:80],
+            "changed": bool(result.get("changed")),
+            "active_identity_count": max(0, _safe_int(result.get("active_identity_count"), 0)),
+            "detached_identity_count": max(0, _safe_int(result.get("detached_identity_count"), 0)),
+            "group_overlay_count": max(0, _safe_int(result.get("group_overlay_count"), 0)),
+            "binding_checkpoint_count": max(0, _safe_int(result.get("binding_checkpoint_count"), 0)),
+        }
+        token = str(result.get("confirmation_token") or "")
+        if len(token) == 64 and re.fullmatch(r"[0-9a-f]{64}", token):
+            safe["confirmation_token"] = token
+        eligible_at = str(result.get("eligible_at") or "")[:40]
+        if eligible_at:
+            safe["eligible_at"] = eligible_at
+        if safe_action == "archive":
+            safe["impact"] = {
+                "identity_links": "detach_and_tombstone",
+                "scoped_private_and_group_member": "tombstone",
+                "relationship_account": "tombstone",
+                "group_overlays": "remove",
+                "migration_stream_count": 2,
+                "automatic_restore_available": False,
+                "purge_retention_days": 7,
+            }
+        else:
+            safe["impact"] = {
+                "detached_identity_links": "remove",
+                "binding_checkpoints": "remove",
+                "legacy_exact_records": "remove",
+                "retired_migration_streams": "remove",
+                "automatic_restore_available": False,
+            }
+        return safe
+
+    def _identity_domain_summary(
+        self, person_id: str, snapshot: dict[str, Any]
+    ) -> dict[str, dict[str, Any]]:
+        """Count projected domains without returning group identifiers or data."""
+        synchronizer = getattr(self.plugin, "req041_scoped_projection_sync", None)
+        builder = getattr(synchronizer, "build_records", None)
+        if not callable(builder) or not isinstance(snapshot, dict):
+            return {
+                kind: {"status": "unavailable", "scope_count": 0, "record_count": 0, "ready_scope_count": 0}
+                for kind in ("private", "group_member", "group_shared")
+            }
+        active_scope = ""
+        scope_getter = getattr(self.plugin, "_active_persona_scope", None)
+        try:
+            active_scope = str(scope_getter() or "") if callable(scope_getter) else ""
+        except Exception:
+            active_scope = ""
+        source_scope = (
+            "default" if not active_scope
+            else "persona:" + hashlib.sha256(active_scope.encode("utf-8")).hexdigest()[:24]
+        )
+        try:
+            records, contexts = builder(snapshot, source_scope=source_scope)
+        except Exception:
+            return {
+                kind: {"status": "degraded", "scope_count": 0, "record_count": 0, "ready_scope_count": 0}
+                for kind in ("private", "group_member", "group_shared")
+            }
+        member_groups = {
+            str(context.group_id)
+            for context in contexts
+            if getattr(context, "kind", "") == "group_member"
+            and getattr(context, "identity_id", "") == person_id
+            and str(getattr(context, "group_id", "") or "")
+        }
+        selected_contexts = {
+            "private": [
+                context for context in contexts
+                if getattr(context, "kind", "") == "private"
+                and getattr(context, "identity_id", "") == person_id
+            ],
+            "group_member": [
+                context for context in contexts
+                if getattr(context, "kind", "") == "group_member"
+                and getattr(context, "identity_id", "") == person_id
+            ],
+            "group_shared": [
+                context for context in contexts
+                if getattr(context, "kind", "") == "group_shared"
+                and str(getattr(context, "group_id", "") or "") in member_groups
+            ],
+        }
+        result: dict[str, dict[str, Any]] = {}
+        for kind, selected in selected_contexts.items():
+            scope_keys = {context.cache_scope() for context in selected}
+            record_count = sum(
+                1 for record in records
+                if record.context.cache_scope() in scope_keys
+                and (
+                    kind == "group_shared"
+                    or getattr(record.context, "identity_id", "") == person_id
+                )
+            )
+            ready_count = sum(
+                1 for context in selected
+                if callable(getattr(synchronizer, "is_ready", None))
+                and synchronizer.is_ready(context)
+            )
+            scope_count = len(scope_keys)
+            result[kind] = {
+                "status": "ready" if scope_count and ready_count == scope_count else (
+                    "reconciling" if scope_count else "empty"
+                ),
+                "scope_count": scope_count,
+                "record_count": record_count,
+                "ready_scope_count": ready_count,
+            }
+        return result
+
+    def _identity_pending_reference(self, user_id: str) -> str:
+        coordinator = getattr(self.plugin, "req041_migration_coordinator", None)
+        status_reader = getattr(coordinator, "status", None)
+        if not callable(status_reader):
+            return ""
+        try:
+            status = status_reader()
+        except Exception:
+            return ""
+        epoch = str(status.get("migration_epoch") or "") if isinstance(status, dict) else ""
+        if not epoch:
+            return ""
+        active_scope = ""
+        scope_getter = getattr(self.plugin, "_active_persona_scope", None)
+        try:
+            active_scope = str(scope_getter() or "") if callable(scope_getter) else ""
+        except Exception:
+            active_scope = ""
+        source_scope = (
+            "default" if not active_scope
+            else "persona:" + hashlib.sha256(active_scope.encode("utf-8")).hexdigest()[:24]
+        )
+        return legacy_pending_reference(epoch, source_scope, user_id)
+
+    def _identity_pending_summary(self, user_id: str) -> dict[str, Any]:
+        coordinator = getattr(self.plugin, "req041_migration_coordinator", None)
+        pending_reader = getattr(coordinator, "pending_status", None)
+        if not callable(pending_reader):
+            return {"found": False, "state": "unavailable", "reason_code": "migration_unavailable"}
+        reference = self._identity_pending_reference(user_id)
+        if not reference:
+            return {"found": False, "state": "degraded", "reason_code": "pending_lookup_failed"}
+        try:
+            result = pending_reader(reference)
+        except Exception:
+            return {"found": False, "state": "degraded", "reason_code": "pending_lookup_failed"}
+        return result if isinstance(result, dict) else {
+            "found": False, "state": "degraded", "reason_code": "pending_lookup_failed"
+        }
+
+    async def update_pending_identity_review(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return self._error("请求体必须是 JSON 对象")
+        user_id = self._single_line(payload.get("user_id"), 160)
+        action = self._single_line(payload.get("action"), 24)
+        if not user_id or action not in {"dismiss", "restore"}:
+            return self._error("user_id 与有效 action 均为必填项")
+        async with self.plugin._data_lock:
+            users = self.plugin.data.get("users") if isinstance(self.plugin.data, dict) else {}
+            user = users.get(user_id) if isinstance(users, dict) else None
+            if not isinstance(user, dict):
+                return self._error("用户不存在")
+            if self._single_line(user.get("unified_person_id"), 80):
+                return self._error("该用户已绑定统一人物，不能修改待确认状态")
+        coordinator = getattr(self.plugin, "req041_migration_coordinator", None)
+        reference = self._identity_pending_reference(user_id)
+        status_reader = getattr(coordinator, "pending_status", None)
+        transition = getattr(
+            coordinator, "dismiss_pending" if action == "dismiss" else "restore_pending", None
+        )
+        if not reference or not callable(status_reader) or not callable(transition):
+            return self._error("待确认身份服务不可用")
+        try:
+            before = status_reader(reference)
+            if not isinstance(before, dict) or not before.get("found"):
+                return self._error("没有找到该用户的待确认记录")
+            expected = "pending" if action == "dismiss" else "dismissed"
+            target = "dismissed" if action == "dismiss" else "pending"
+            current = str(before.get("state") or "")
+            changed = False
+            if current == expected:
+                changed = bool(transition(reference))
+            elif current != target:
+                return self._error("待确认记录状态已变化，请刷新后重试")
+            after = status_reader(reference)
+            safe = after if isinstance(after, dict) else {}
+            return self._ok({
+                "result": {
+                    "ok": str(safe.get("state") or "") == target,
+                    "state": str(safe.get("state") or "")[:24],
+                    "reason_code": str(safe.get("reason_code") or "")[:80],
+                    "changed": changed,
+                }
+            })
+        except Exception as exc:
+            logger.warning("[PrivateCompanionPage] 更新待确认身份状态失败: %s", exc)
+            return self._error("更新待确认身份状态失败")
+
+    def _identity_admin_summary(
+        self, user: dict[str, Any], *, user_id: str = "", snapshot: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Build the official user-page identity view from allowlisted state."""
+        if not isinstance(user, dict):
+            return {"linked": False, "code": "identity_pending"}
+        person_id = self._single_line(user.get("unified_person_id"), 80)
+        subject = self._single_line(
+            user.get("identity_subject_id") or user.get("user_id"), 160
+        )
+        if not person_id:
+            return {
+                "linked": False,
+                "code": "identity_pending",
+                "profile_status": "pending",
+                "identity_assurance": "unverified",
+                "migration": {"state": "pending", "read_generation": "legacy"},
+                "pending": self._identity_pending_summary(
+                    user_id or self._single_line(user.get("user_id"), 160)
+                ),
+                "domains": {
+                    kind: {"status": "pending", "scope_count": 0, "record_count": 0, "ready_scope_count": 0}
+                    for kind in ("private", "group_member", "group_shared")
+                },
+            }
+        registry = self._page_unified_person_registry()
+        reader = getattr(registry, "safe_admin_person_summary", None)
+        summary = reader(person_id, subject) if callable(reader) else {
+            "linked": False, "code": "identity_summary_unavailable"
+        }
+        if not isinstance(summary, dict):
+            summary = {"linked": False, "code": "identity_summary_unavailable"}
+        summary = dict(summary)
+        summary["person_id"] = person_id
+
+        coordinator = getattr(self.plugin, "req041_migration_coordinator", None)
+        migration_reader = getattr(coordinator, "identity_status", None)
+        migration = migration_reader(person_id) if callable(migration_reader) else {}
+        if not isinstance(migration, dict):
+            migration = {}
+        summary["migration"] = {
+            "state": self._single_line(migration.get("state"), 32) or "pending",
+            "read_generation": self._single_line(
+                migration.get("read_generation"), 16
+            ) or "legacy",
+            "backlog": max(0, _safe_int(migration.get("backlog"), 0)),
+            "stable_cycles": max(0, _safe_int(migration.get("stable_cycles"), 0)),
+        }
+
+        summary["domains"] = self._identity_domain_summary(person_id, snapshot or {})
+        summary["lifecycle"] = {
+            "can_unlink_current": bool(
+                summary.get("current_identity_linked")
+                and int(summary.get("active_identity_count") or 0) > 1
+                and summary.get("profile_status") == "active"
+            ),
+            "can_archive": bool(
+                summary.get("linked") and summary.get("profile_status") == "active"
+            ),
+            "can_purge": bool(summary.get("profile_status") == "deleted"),
+            "can_relink_current": bool(
+                summary.get("current_identity_detached")
+                and summary.get("profile_status") == "active"
+            ),
+        }
+        return summary
 
     @staticmethod
     def _relationship_score_input(value: Any) -> int:
@@ -81,8 +408,21 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 user = deepcopy((self.plugin.data.get("users") or {}).get(user_id))
                 daily_state = deepcopy(self.plugin.data.get("daily_state"))
                 state_conditions = deepcopy(self.plugin.data.get("state_conditions"))
+                identity_snapshot = {
+                    key: deepcopy(self.plugin.data.get(key))
+                    for key in (
+                        "unified_person", "users", "groups", "_req041_private_memory",
+                        "_req041_persona_reset_saga", "_req041_group_reset_sagas",
+                    )
+                    if key in self.plugin.data
+                }
             if not isinstance(user, dict):
                 return self._error("用户不存在")
+            relationship_view_getter = getattr(
+                self.plugin, "_req041_relationship_snapshot_view", None
+            )
+            if callable(relationship_view_getter):
+                user = relationship_view_getter(user, source="admin_user_detail")
             detail = self._user_summary(user_id, user)
             relationship_panel = self._relationship_panel(
                 user_id,
@@ -129,6 +469,9 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 if callable(portrait_status_reader)
                 else {"available": False, "code": "bridge_unavailable", "last_synced_at": "", "portrait_revision": 0}
             )
+            detail["identity_admin"] = self._identity_admin_summary(
+                user, user_id=user_id, snapshot=identity_snapshot
+            )
             return self._ok(detail)
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取用户详情失败: {exc}", exc_info=True)
@@ -138,42 +481,136 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         if not isinstance(payload, dict):
             return self._error("请求体必须是 JSON 对象")
         person_id = self._single_line(payload.get("person_id"), 80)
-        identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
+        user_id = self._single_line(payload.get("user_id"), 160)
         operation_id = self._single_line(payload.get("operation_id"), 120)
-        if not person_id or not identity or not operation_id:
-            return self._error("person_id、identity 和 operation_id 均为必填项")
+        confirmation_token = self._single_line(payload.get("confirmation_token"), 80)
+        if "dry_run" in payload and type(payload.get("dry_run")) is not bool:
+            return self._error("dry_run 必须是 JSON 布尔值")
+        dry_run = payload.get("dry_run", True)
+        if not person_id or not user_id or not operation_id:
+            return self._error("person_id、user_id 和 operation_id 均为必填项")
+        if not dry_run and not confirmation_token:
+            return self._error("执行重新关联必须提交预览返回的 confirmation_token")
         try:
             async with self.plugin._data_lock:
-                result = self._page_unified_person_registry().link_identity(
-                    person_id,
-                    identity,
-                    operation_id=operation_id,
-                    actor_id="page_administrator",
+                registry = self._page_unified_person_registry()
+                users = self.plugin.data.get("users")
+                user = users.get(user_id) if isinstance(users, dict) else None
+                if not isinstance(user, dict):
+                    return self._error("用户不存在")
+                if self._single_line(user.get("unified_person_id"), 80) != person_id:
+                    return self._error("用户与统一人物不匹配")
+                subject = self._single_line(
+                    user.get("identity_subject_id") or user.get("user_id") or user_id,
+                    160,
                 )
+                resolver = getattr(registry, "detached_identity_for_person_subject", None)
+                identity = resolver(person_id, subject) if callable(resolver) else None
+                if not isinstance(identity, dict):
+                    return self._error("当前账号没有可安全恢复的已解绑身份")
+                checkpoint_reader = getattr(registry, "identity_projection_checkpoint", None)
+                checkpoint = checkpoint_reader(person_id) if callable(checkpoint_reader) else {}
+                if not isinstance(checkpoint, dict) or checkpoint.get("ok") is not True:
+                    return self._error("统一身份投影暂不可安全变更")
+                expected_confirmation = self._identity_link_confirmation(
+                    person_id=person_id,
+                    operation_id=operation_id,
+                    identity=identity,
+                    checkpoint=checkpoint,
+                )
+                if not dry_run and not hmac.compare_digest(
+                    confirmation_token, expected_confirmation
+                ):
+                    return self._error("身份状态已变化，请刷新后重新预览")
+                if dry_run:
+                    summary_reader = getattr(registry, "safe_admin_person_summary", None)
+                    summary = summary_reader(person_id, subject) if callable(summary_reader) else {}
+                    result = {
+                        "ok": True,
+                        "state": "pending",
+                        "code": "identity_relink_preview",
+                        "changed": False,
+                        "active_identity_count": max(0, _safe_int(summary.get("active_identity_count"), 0)),
+                        "detached_identity_count": max(0, _safe_int(summary.get("detached_identity_count"), 0)),
+                        "confirmation_token": expected_confirmation,
+                    }
+                else:
+                    raw_result = registry.link_identity(
+                        person_id,
+                        identity,
+                        operation_id=operation_id,
+                        actor_id="page_administrator",
+                    )
+                    result = {
+                        "ok": bool(raw_result.get("ok")),
+                        "state": self._single_line(raw_result.get("state"), 32) or "pending",
+                        "code": self._single_line(raw_result.get("code"), 80) or "identity_relink_failed",
+                        "changed": bool(raw_result.get("changed")),
+                    }
                 if result.get("changed"):
+                    emitter = getattr(self.plugin, "_req041_emit_identity_dual_write", None)
+                    if callable(emitter):
+                        emitter(
+                            raw_result,
+                            action="link",
+                            operation_id=operation_id,
+                            registry=registry,
+                        )
                     self.plugin._schedule_data_save()
             if not result.get("ok"):
-                return self._error(str(result.get("code") or "统一身份链接失败"))
+                return self._error(str(result.get("code") or "统一身份重新关联失败"))
             return self._ok({"result": result})
         except Exception as exc:
-            logger.warning("[PrivateCompanionPage] 统一身份链接失败: %s", exc)
-            return self._error("统一身份链接失败")
+            logger.warning("[PrivateCompanionPage] 统一身份重新关联失败: %s", exc)
+            return self._error("统一身份重新关联失败")
 
     async def unlink_unified_identity(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True)
         if not isinstance(payload, dict):
             return self._error("请求体必须是 JSON 对象")
         person_id = self._single_line(payload.get("person_id"), 80)
-        identity = payload.get("identity") if isinstance(payload.get("identity"), dict) else {}
+        user_id = self._single_line(payload.get("user_id"), 160)
         operation_id = self._single_line(payload.get("operation_id"), 120)
+        confirmation_token = self._single_line(payload.get("confirmation_token"), 80)
         if "dry_run" in payload and type(payload.get("dry_run")) is not bool:
             return self._error("dry_run 必须是 JSON 布尔值")
         dry_run = payload.get("dry_run", True)
-        if not person_id or not identity or not operation_id:
-            return self._error("person_id、identity 和 operation_id 均为必填项")
+        if not person_id or not user_id or not operation_id:
+            return self._error("person_id、user_id 和 operation_id 均为必填项")
+        if not dry_run and not confirmation_token:
+            return self._error("执行解绑必须提交预览返回的 confirmation_token")
         try:
             async with self.plugin._data_lock:
-                result = self._page_unified_person_registry().unlink_identity(
+                registry = self._page_unified_person_registry()
+                users = self.plugin.data.get("users")
+                user = users.get(user_id) if isinstance(users, dict) else None
+                if not isinstance(user, dict):
+                    return self._error("用户不存在")
+                if self._single_line(user.get("unified_person_id"), 80) != person_id:
+                    return self._error("用户与统一人物不匹配")
+                subject = self._single_line(
+                    user.get("identity_subject_id") or user.get("user_id") or user_id,
+                    160,
+                )
+                resolver = getattr(registry, "identity_for_person_subject", None)
+                identity = resolver(person_id, subject) if callable(resolver) else None
+                if not isinstance(identity, dict):
+                    return self._error("当前用户没有唯一的正式身份链接")
+                checkpoint_reader = getattr(registry, "identity_projection_checkpoint", None)
+                checkpoint = checkpoint_reader(person_id) if callable(checkpoint_reader) else {}
+                if not isinstance(checkpoint, dict) or checkpoint.get("ok") is not True:
+                    return self._error("统一身份投影暂不可安全变更")
+                expected_confirmation = self._identity_unlink_confirmation(
+                    person_id=person_id,
+                    operation_id=operation_id,
+                    identity=identity,
+                    checkpoint=checkpoint,
+                )
+                if not dry_run and not hmac.compare_digest(
+                    confirmation_token, expected_confirmation
+                ):
+                    return self._error("身份状态已变化，请刷新后重新预览")
+                result = registry.unlink_identity(
                     person_id,
                     identity,
                     operation_id=operation_id,
@@ -181,13 +618,85 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     dry_run=dry_run,
                 )
                 if result.get("changed"):
+                    emitter = getattr(self.plugin, "_req041_emit_identity_dual_write", None)
+                    if callable(emitter):
+                        emitter(
+                            result,
+                            action="unlink",
+                            operation_id=operation_id,
+                            registry=registry,
+                        )
                     self.plugin._schedule_data_save()
             if not result.get("ok") and result.get("code") != "split_manual_review_required":
                 return self._error(str(result.get("code") or "统一身份解绑失败"))
-            return self._ok({"result": result})
+            safe_result = self._safe_identity_unlink_result(result)
+            if dry_run and result.get("ok"):
+                safe_result["confirmation_token"] = expected_confirmation
+            return self._ok({"result": safe_result})
         except Exception as exc:
             logger.warning("[PrivateCompanionPage] 统一身份解绑失败: %s", exc)
             return self._error("统一身份解绑失败")
+
+    async def archive_unified_person(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return self._error("请求体必须是 JSON 对象")
+        person_id = self._single_line(payload.get("person_id"), 80)
+        operation_id = self._single_line(payload.get("operation_id"), 120)
+        confirmation_token = self._single_line(payload.get("confirmation_token"), 80)
+        if "dry_run" in payload and type(payload.get("dry_run")) is not bool:
+            return self._error("dry_run 必须是 JSON 布尔值")
+        dry_run = payload.get("dry_run", True)
+        if not person_id or not operation_id:
+            return self._error("person_id 和 operation_id 均为必填项")
+        if not dry_run and not confirmation_token:
+            return self._error("执行归档必须提交预览返回的 confirmation_token")
+        archive = getattr(self.plugin, "archive_unified_person", None)
+        if not callable(archive):
+            return self._error("人物归档服务不可用")
+        try:
+            result = await archive(
+                person_id, operation_id=operation_id,
+                confirmation_token=confirmation_token, dry_run=dry_run,
+                actor_id="page_administrator", reason_code="person_archive",
+            )
+            if not result.get("ok"):
+                return self._error(str(result.get("code") or "人物归档失败"))
+            return self._ok({"result": self._safe_person_lifecycle_result(result, "archive")})
+        except Exception as exc:
+            logger.warning("[PrivateCompanionPage] 人物归档失败: %s", exc)
+            return self._error("人物归档失败")
+
+    async def delete_unified_person(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return self._error("请求体必须是 JSON 对象")
+        person_id = self._single_line(payload.get("person_id"), 80)
+        operation_id = self._single_line(payload.get("operation_id"), 120)
+        confirmation_token = self._single_line(payload.get("confirmation_token"), 80)
+        if "dry_run" in payload and type(payload.get("dry_run")) is not bool:
+            return self._error("dry_run 必须是 JSON 布尔值")
+        dry_run = payload.get("dry_run", True)
+        if not person_id or not operation_id:
+            return self._error("person_id 和 operation_id 均为必填项")
+        if not dry_run and not confirmation_token:
+            return self._error("执行删除必须提交预览返回的 confirmation_token")
+        purge = getattr(self.plugin, "purge_unified_person", None)
+        if not callable(purge):
+            return self._error("人物删除服务不可用")
+        try:
+            result = await purge(
+                person_id, operation_id=operation_id,
+                confirmation_token=confirmation_token, dry_run=dry_run,
+                actor_id="page_administrator", reason_code="person_delete",
+            )
+            safe_result = self._safe_person_lifecycle_result(result, "purge")
+            if not result.get("ok") and result.get("code") != "archive_retention_active":
+                return self._error(str(result.get("code") or "人物删除失败"))
+            return self._ok({"result": safe_result})
+        except Exception as exc:
+            logger.warning("[PrivateCompanionPage] 人物删除失败: %s", exc)
+            return self._error("人物删除失败")
 
     async def preview_unified_identity_merge(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True)
@@ -263,6 +772,29 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             action_message = ""
             async with self.plugin._data_lock:
                 user = self.plugin._get_user(user_id)
+                private_memory_mutation = any(
+                    bool(payload.get(key))
+                    for key in (
+                        "clear_emotion_state",
+                        "clear_behavior_habits",
+                        "clear_learning",
+                        "clear_open_loops",
+                    )
+                ) or bool(self._single_line(payload.get("remove_open_loop_text"), 120))
+                private_memory_revision = None
+                memory_managed_getter = getattr(
+                    self.plugin, "_req041_private_memory_managed", None
+                )
+                private_memory_managed = bool(
+                    memory_managed_getter() if callable(memory_managed_getter) else False
+                )
+                if private_memory_mutation and private_memory_managed:
+                    preparer = getattr(
+                        self.plugin, "_req041_prepare_authoritative_private_memory", None
+                    )
+                    private_memory_revision = preparer(user) if callable(preparer) else None
+                    if private_memory_revision is None:
+                        return self._error("权威私聊记忆暂不可写，请稍后重试")
                 expression_voice_needs_refresh = False
                 previous_role = self.plugin._private_user_role(user, user_id)
                 previous_mode = normalize_relationship_mode(user.get("relationship_mode"), previous_role)
@@ -334,10 +866,45 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                             self.plugin._ensure_private_user_umo(user_id, user)
                         else:
                             self.plugin._clear_pending_proactive_plan(user)
+                legacy_profile_before = {
+                    key: (key in user, user.get(key))
+                    for key in ("nickname", "style")
+                    if key in payload
+                }
                 if "nickname" in payload:
                     user["nickname"] = self._single_line(payload.get("nickname"), 24)
                 if "style" in payload:
                     user["style"] = self._single_line(payload.get("style"), 24)
+                profile_fact_changes = {}
+                if "nickname" in payload:
+                    profile_fact_changes["preferred_address"] = user["nickname"]
+                    if user["nickname"]:
+                        profile_fact_changes["display_name"] = user["nickname"]
+                if "style" in payload:
+                    profile_fact_changes["style"] = user["style"]
+                if profile_fact_changes:
+                    profile_updater = getattr(
+                        self.plugin, "_req041_update_unified_profile_facts", None
+                    )
+                    if callable(profile_updater):
+                        profile_result = profile_updater(
+                            user,
+                            profile_fact_changes,
+                            actor_id="page_administrator",
+                            schedule_save=False,
+                        )
+                        if (
+                            profile_result.get("state") != "skipped"
+                            and profile_result.get("ok") is not True
+                        ):
+                            for key, (was_present, previous_value) in legacy_profile_before.items():
+                                if was_present:
+                                    user[key] = previous_value
+                                else:
+                                    user.pop(key, None)
+                            return self._error(
+                                str(profile_result.get("code") or "统一身份档案更新失败")
+                            )
                 if "relationship_role" in payload:
                     user["relationship_role"] = role
                     expression_voice_needs_refresh = role != previous_role
@@ -484,6 +1051,26 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
                     if callable(voice_refresher):
                         voice_refresher()
+                if any(
+                    key in payload
+                    for key in ("relationship_role", "relationship_mode", "relationship_score", "companion_intimacy")
+                ):
+                    snapshot_emitter = getattr(self.plugin, "_req041_emit_relationship_snapshot", None)
+                    if callable(snapshot_emitter):
+                        snapshot_emitter(
+                            user,
+                            reason_code="administrator_relationship_update",
+                        )
+                if private_memory_mutation and private_memory_managed:
+                    committer = getattr(
+                        self.plugin, "_req041_commit_authoritative_private_memory", None
+                    )
+                    if not callable(committer) or not committer(
+                        user,
+                        expected_revision=private_memory_revision,
+                        operation_id=f"req041-page-memory:{user_id}:{uuid.uuid4().hex}",
+                    ):
+                        return self._error("权威私聊记忆已发生并发变更，请刷新后重试")
                 self.plugin._save_data_sync()
                 snapshot = deepcopy(user)
             result = self._user_summary(user_id, snapshot)
@@ -512,6 +1099,14 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     self.plugin.data["users"] = users
                 canonical_user_id = self.plugin._canonical_private_user_id(user_id)
                 stored_user_id = canonical_user_id if canonical_user_id in users else user_id
+                existing_user = users.get(stored_user_id)
+                if (
+                    isinstance(existing_user, dict)
+                    and self._single_line(existing_user.get("unified_person_id"), 80)
+                ):
+                    return self._error(
+                        "该用户已属于统一人物，请在“身份与隔离”中预览并归档，不能绕过统一数据链直接删除"
+                    )
                 removed_ids = {user_id, canonical_user_id, stored_user_id}
                 removed_user = users.pop(stored_user_id, None)
                 if isinstance(removed_user, dict):
@@ -1180,6 +1775,30 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         if not group_id:
             return self._error("缺少 group_id")
         try:
+            resetter = getattr(self.plugin, "reset_group_scoped_data", None)
+            if callable(resetter):
+                reset_result = await resetter(group_id)
+                if not reset_result.get("ok"):
+                    return self._error(str(reset_result.get("code") or "群聊分域清理失败"))
+                if reset_result.get("state") != "not_required":
+                    message_parts = []
+                    if reset_result.get("removed_group"):
+                        message_parts.append("已删除群聊观测")
+                    if reset_result.get("removed_whitelist") or reset_result.get("removed_blacklist"):
+                        message_parts.append("已移出群聊名单")
+                    if reset_result.get("removed_expression_scope"):
+                        message_parts.append("已清理表达学习范围")
+                    return self._ok({
+                        "group_id": group_id,
+                        "removed_group": bool(reset_result.get("removed_group")),
+                        "removed_whitelist": bool(reset_result.get("removed_whitelist")),
+                        "removed_blacklist": bool(reset_result.get("removed_blacklist")),
+                        "removed_expression_scope": bool(reset_result.get("removed_expression_scope")),
+                        "config_saved": bool(reset_result.get("config_saved")),
+                        "scoped_cleanup": reset_result.get("scoped_cleanup") or {},
+                        "operation_id": str(reset_result.get("operation_id") or ""),
+                        "message": "，".join(message_parts) if message_parts else "没有找到可删除的群聊记录",
+                    })
             async with self.plugin._data_lock:
                 groups = self.plugin.data.get("groups")
                 if not isinstance(groups, dict):
@@ -1250,6 +1869,9 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     "removed_blacklist": removed_blacklist,
                     "removed_expression_scope": removed_expression_scope,
                     "config_saved": config_saved,
+                    "scoped_cleanup": {
+                        "ok": True, "code": "scoped_group_erase_not_required", "count": 0,
+                    },
                     "message": message,
                 }
             )
