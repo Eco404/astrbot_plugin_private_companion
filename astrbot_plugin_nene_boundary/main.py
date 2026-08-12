@@ -758,6 +758,15 @@ class NeneBoundaryPlugin(star.Star):
                 pass
         return ""
 
+    @staticmethod
+    def _memory_companion_db_path() -> str:
+        """Resolve MemoryCompanion storage from AstrBot's configured data root."""
+        try:
+            path = Path(StarTools.get_data_dir("astrbot_plugin_memory_companion")) / "memory_companion.db"
+            return str(path) if path.is_file() else ""
+        except Exception:
+            return ""
+
     def _backup_companions(self, path: str):
         if not self._cfg("backup_before_write", True):
             return
@@ -1255,7 +1264,7 @@ class NeneBoundaryPlugin(star.Star):
         """让宁宁记得自己告状了、说了什么：写入今日生活叙事 + Memory Companion 记忆库（同内容近期不重复写）"""
         try:
             # 记忆去重：同内容 6 小时内不重复写入（避免一条委屈翻来覆去记六遍）
-            mc_db = r'C:\Users\Administrator\.astrbot-nene\data\plugin_data\astrbot_plugin_memory_companion\memory_companion.db'
+            mc_db = self._memory_companion_db_path()
             if os.path.exists(mc_db) and raw_hash:
                 try:
                     import sqlite3
@@ -1298,7 +1307,7 @@ class NeneBoundaryPlugin(star.Star):
             logger.error(f"[NeneBoundary] 记录告状叙事失败: {e}")
         # 写入 Memory Companion：她检索"我告状过吗/我说了什么"时能看到
         try:
-            mc_db = r'C:\Users\Administrator\.astrbot-nene\data\plugin_data\astrbot_plugin_memory_companion\memory_companion.db'
+            mc_db = self._memory_companion_db_path()
             if os.path.exists(mc_db):
                 import sqlite3, uuid
                 conn = sqlite3.connect(mc_db, timeout=10)
@@ -1334,7 +1343,7 @@ class NeneBoundaryPlugin(star.Star):
             pass
         # 查 Memory Companion identities（用户真名）
         try:
-            mc_db = r'C:\Users\Administrator\.astrbot-nene\data\plugin_data\astrbot_plugin_memory_companion\memory_companion.db'
+            mc_db = self._memory_companion_db_path()
             if os.path.exists(mc_db):
                 import sqlite3
                 conn = sqlite3.connect(mc_db, timeout=5)
@@ -1355,7 +1364,7 @@ class NeneBoundaryPlugin(star.Star):
         if not group_id:
             return ""
         try:
-            mc_db = r'C:\Users\Administrator\.astrbot-nene\data\plugin_data\astrbot_plugin_memory_companion\memory_companion.db'
+            mc_db = self._memory_companion_db_path()
             if os.path.exists(mc_db):
                 import sqlite3, re as _re
                 conn = sqlite3.connect(mc_db, timeout=5)

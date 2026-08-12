@@ -1099,14 +1099,14 @@ class TempEmotionPlugin(Star):
             # 状态读改写加锁，防止并发消息互相覆盖
             async with self._lock:
                 state = self._state.get(user_id)
-    
+
                 # 话头结束检查（先结算再处理新消息）
                 if state:
                     idle_min = _safe_int(self._cfg('settle_idle_minutes', 20) or 20, 20)
                     if now - _safe_float(state.get('last_msg_ts', now), now) >= idle_min * 60:
                         state, _ev = self._maybe_settle(state, now)
                         state.pop('apology_used', None)  # 话头结束：道歉"只认第一次"重置
-    
+
                 judged = None
                 topic_change = False
                 forced_anger = None
@@ -1166,7 +1166,7 @@ class TempEmotionPlugin(Star):
                         fb = _fallback_judge(text)
                         if fb:
                             judged = [(e, s, False) for e, s in fb]
-    
+
                 cfg = dict(
                     dm=self._decay_minutes(), dp=self._decay_points(),
                     pt=self._pos_thr(), nt=self._neg_thr(), nut=self._neu_thr(),
