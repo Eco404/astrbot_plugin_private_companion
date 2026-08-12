@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 import time
@@ -99,6 +100,39 @@ def test_missing_or_mismatched_capability_probe_is_degraded_without_remote_use()
     status = mismatched._memory_companion_coordination_status()
     assert status["reason"] == "capability_contract_mismatch"
     assert "contract_fingerprint" in status["mismatches"]
+
+
+def test_bot_personal_sender_passes_registered_producer_capability():
+    capability = object()
+
+    class _CapabilityBridge(_ProbeBridge):
+        def __init__(self):
+            self.received_capability = None
+
+        def register_emotion_producer(self, _producer):
+            return capability
+
+        async def record_bot_personal_archive(self, envelope, *, producer_capability=None):
+            self.received_capability = producer_capability
+            return {"ok": True, "state": "stored", "record_id": envelope["idempotency_key"]}
+
+    bridge = _CapabilityBridge()
+    sender = _Plugin(True, False, bridge)._memory_companion_bot_personal_sender()
+
+    assert callable(sender)
+    result = asyncio.run(sender({"idempotency_key": "c1:sender-capability"}))
+    assert result["ok"] is True
+    assert bridge.received_capability is capability
+
+
+def test_bot_personal_sender_is_unavailable_without_producer_capability():
+    class _NoCapabilityBridge(_ProbeBridge):
+        async def record_bot_personal_archive(self, _envelope, *, producer_capability=None):
+            raise AssertionError("recorder must not be used without a producer capability")
+
+    sender = _Plugin(True, False, _NoCapabilityBridge())._memory_companion_bot_personal_sender()
+
+    assert sender is None
 
 
 def test_prefixed_or_livingmemory_modules_do_not_drive_bridge(monkeypatch):

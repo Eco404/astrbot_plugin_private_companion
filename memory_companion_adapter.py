@@ -556,11 +556,12 @@ class MemoryCompanionAdapterMixin:
     def _memory_companion_bot_personal_sender(self) -> Any | None:
         bridge = self._memory_companion_bridge()
         recorder = getattr(bridge, "record_bot_personal_archive", None) if bridge is not None else None
-        if not callable(recorder):
+        capability = self._memory_companion_emotion_producer_capability(bridge)
+        if not callable(recorder) or capability is None:
             return None
 
         async def _send(envelope: dict[str, Any]) -> dict[str, Any]:
-            result = recorder(envelope)
+            result = recorder(envelope, producer_capability=capability)
             if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
                 result = await result
             return result if isinstance(result, dict) else {"ok": False, "state": "retry", "error_code": "invalid_bridge_response"}
