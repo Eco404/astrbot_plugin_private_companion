@@ -844,6 +844,11 @@ function contentCompanionInstalled() {
   return state.overview?.companion_plugins?.content?.installed === true;
 }
 
+function contentCompanionLinked() {
+  const status = state.overview?.companion_plugins?.content;
+  return status?.installed === true && status?.enabled === true && status?.available !== false;
+}
+
 function syncExternalCompanionVisibility() {
   const imageInstalled = imageCompanionInstalled();
   const imageTab = document.getElementById("modelsImageTab");
@@ -869,8 +874,23 @@ function syncExternalCompanionVisibility() {
   // Once the standalone content extension is loaded, its own page owns the
   // creative switches. Keep the host's legacy values available for migration,
   // but do not make users configure the same feature in two places.
-  if (contentCompanionInstalled() && state.featureDomainFilter === "content") {
+  if (contentCompanionLinked() && state.featureDomainFilter === "content") {
     state.featureDomainFilter = "all";
+  }
+
+  // QQ 空间与创作书柜由内容扩展承载；未安装或未启用时不展示迁移后的入口。
+  const qzoneTab = document.querySelector('.tab[data-tab="qzone"]');
+  const qzonePanel = document.getElementById("panel-qzone");
+  const bookshelfTab = document.querySelector('.tab[data-tab="bookshelf"]');
+  const bookshelfPanel = document.getElementById("panel-bookshelf");
+  const linked = contentCompanionLinked();
+  if (qzoneTab) qzoneTab.hidden = !linked;
+  if (qzonePanel) qzonePanel.hidden = !linked;
+  if (bookshelfTab) bookshelfTab.hidden = !linked;
+  if (bookshelfPanel) bookshelfPanel.hidden = !linked;
+  if (!linked && ["qzone", "bookshelf"].includes(state.activeTab)) {
+    state.activeTab = "dashboard";
+    document.querySelector('.tab[data-tab="dashboard"]')?.click();
   }
 }
 
@@ -886,12 +906,12 @@ const pluginIntegrationAvailabilityRules = {
   enable_qzone_generated_image_publish: () => imageCompanionInstalled() && state.overview?.qzone?.platform_supported !== false,
   enable_qzone_comment_inbox: () => state.overview?.qzone?.platform_supported !== false,
   enable_qzone_emotional_vent_publish: () => Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
-  enable_creative_writing: () => !contentCompanionInstalled(),
-  enable_creative_cover_generation: () => !contentCompanionInstalled(),
-  CREATIVE_MODEL_PROVIDER_ID: () => !contentCompanionInstalled(),
-  CREATIVE_PROVIDER_ID: () => !contentCompanionInstalled(),
-  CREATIVE_OUTLINE_PROVIDER_ID: () => !contentCompanionInstalled(),
-  CREATIVE_REVIEW_PROVIDER_ID: () => !contentCompanionInstalled(),
+  enable_creative_writing: () => !contentCompanionLinked(),
+  enable_creative_cover_generation: () => !contentCompanionLinked(),
+  CREATIVE_MODEL_PROVIDER_ID: () => !contentCompanionLinked(),
+  CREATIVE_PROVIDER_ID: () => !contentCompanionLinked(),
+  CREATIVE_OUTLINE_PROVIDER_ID: () => !contentCompanionLinked(),
+  CREATIVE_REVIEW_PROVIDER_ID: () => !contentCompanionLinked(),
 };
 
 function unavailablePluginIntegrationOwner(key) {

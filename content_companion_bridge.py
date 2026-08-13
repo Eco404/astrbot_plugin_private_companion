@@ -54,6 +54,10 @@ class ContentCompanionBridgeMixin:
     def _content_companion_available(self) -> bool:
         return bool(self._content_companion_status().get("available"))
 
+    def _content_companion_qzone_available(self) -> bool:
+        status = self._content_companion_status()
+        return bool(isinstance(status.get("qzone"), dict) and status["qzone"].get("enabled"))
+
     async def _content_companion_call(self, operation: str, *args: Any, **kwargs: Any) -> Any:
         api = self._content_companion_api()
         handler = getattr(api, operation, None) if api is not None else None
