@@ -4071,6 +4071,13 @@ class DailyStateMixin(DailyStateTickMixin):
             "last_phase": phase,
             "last_label": _single_line(cond.get("label"), 80),
         }
+        # Episode reconciliation rewrites this record whenever the bot
+        # catches up after downtime. Keep the daily discomfort dedup marker
+        # across those rewrites so one calendar day still gets one roll.
+        if meta.get("last_discomfort_roll_date"):
+            payload["last_discomfort_roll_date"] = _single_line(
+                meta.get("last_discomfort_roll_date"), 16
+            )
         if phase in self._ADVANCED_CYCLE_PHASES:
             payload["strategy"] = "advanced"
             previous_anchor = _safe_float(meta.get("cycle_anchor_ts"), 0)
@@ -8821,7 +8828,18 @@ class DailyStateMixin(DailyStateTickMixin):
             cond["phase"] = phase
             kept.append(cond)
         if removed:
-            self.data.pop("body_cycle_state", None)
+            existing_meta = self.data.get("body_cycle_state")
+            # A legacy condition may still be present while an advanced
+            # timeline has already been anchored. Remove only the incompatible
+            # condition in that case; resetting the anchor would move the
+            # user back to day one after a restart or migration.
+            keep_continuous_state = (
+                desired_mode == "advanced"
+                and isinstance(existing_meta, dict)
+                and _safe_float(existing_meta.get("cycle_anchor_ts"), 0) > 0
+            )
+            if not keep_continuous_state:
+                self.data.pop("body_cycle_state", None)
             logger.info(
                 "[PrivateCompanion] 周期策略切换，已清理不兼容旧状态: mode=%s removed=%s",
                 desired_mode,

@@ -259,6 +259,9 @@ CYCLE_SETTING_KEYS = (
     "advanced_cycle_pms_prompt",
     "advanced_cycle_pms_mood",
     "advanced_cycle_pms_energy",
+    "advanced_cycle_discomfort_simulation",
+    "advanced_cycle_discomfort_chance",
+    "advanced_cycle_discomfort_types",
 )
 
 try:

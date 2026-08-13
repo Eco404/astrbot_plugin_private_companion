@@ -574,6 +574,15 @@ def _initialize_world_and_model_config(self: Any, c: Any) -> None:
     )
     self.advanced_cycle_pms_mood = self._cfg_str(c, "advanced_cycle_pms_mood", "敏感")
     self.advanced_cycle_pms_energy = self._cfg_int(c, "advanced_cycle_pms_energy", -8, -50, 30)
+    self.advanced_cycle_discomfort_simulation = self._cfg_bool(
+        c, "advanced_cycle_discomfort_simulation", False
+    )
+    self.advanced_cycle_discomfort_chance = self._cfg_int(
+        c, "advanced_cycle_discomfort_chance", 55, 0, 100
+    )
+    self.advanced_cycle_discomfort_types = self._cfg_str(
+        c, "advanced_cycle_discomfort_types", "痛经,头痛,腰酸,乏力"
+    )
     self.enable_rest_reply_simulation = self._cfg_bool(c, "enable_rest_reply_simulation", False)
     self.rest_reply_mode = self._cfg_str(c, "rest_reply_mode", "probability", "probability").strip().lower()
     if self.rest_reply_mode in {"model", "模型", "llm_judge", "llm-judge"}:

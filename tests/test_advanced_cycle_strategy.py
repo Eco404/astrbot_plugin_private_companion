@@ -222,6 +222,38 @@ class AdvancedCycleStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cycle["start_ts"], anchor + 5 * 86400)
         self.assertEqual(cycle["end_ts"], anchor + 10 * 86400)
 
+    def test_cycle_episode_record_preserves_discomfort_roll_marker(self) -> None:
+        harness = _AdvancedCycleHarness()
+        marker = "2026-08-14"
+        harness.data["body_cycle_state"] = {
+            "cycle_anchor_ts": _now_ts() - 86400,
+            "last_discomfort_roll_date": marker,
+        }
+        condition = harness._advanced_cycle_condition("follicular")
+        harness._record_body_cycle_episode(condition)
+        self.assertEqual(
+            harness.data["body_cycle_state"].get("last_discomfort_roll_date"),
+            marker,
+        )
+
+    def test_incompatible_legacy_condition_does_not_reset_existing_anchor(self) -> None:
+        harness = _AdvancedCycleHarness()
+        anchor = _now_ts() - 86400
+        harness.data["body_cycle_state"] = {"cycle_anchor_ts": anchor}
+        legacy = harness._make_condition(
+            kind="body_cycle",
+            title="周期",
+            label="处于生理期",
+            mood="疲惫",
+            energy_delta=-10,
+            duration_hours=24,
+            intensity=50,
+            phase="period",
+        )
+        result = harness._synchronize_body_cycle_strategy([legacy], _now_ts())
+        self.assertEqual(harness.data["body_cycle_state"].get("cycle_anchor_ts"), anchor)
+        self.assertFalse(any(item.get("phase") == "period" for item in result))
+
     def test_compose_surfaces_phase_name_day_and_runtime(self) -> None:
         harness = _AdvancedCycleHarness()
         harness.data["body_cycle_state"] = {"cycle_anchor_ts": _now_ts() - 86400}
