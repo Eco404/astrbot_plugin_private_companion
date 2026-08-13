@@ -430,8 +430,11 @@ class GroupWakeupMixin:
         score = 0
         if mentions_bot:
             score += 70
+        # A weak wake word is only a contextual hint.  It must be accompanied
+        # by a clear request or bot-directed sentence before entering the reply
+        # chain; the direct-word path above remains unchanged for strong words.
         if matched_word:
-            score += 30
+            score += 18
         if relation_hit:
             score += 22
         if re.search(r"(你|妳|bot|Bot|机器人).{0,12}(觉得|看|说|怎么说|咋看|会不会|能不能|要不要|帮|解释|评价)", cleaned):
@@ -447,7 +450,7 @@ class GroupWakeupMixin:
         if re.search(r"(帮|求|救|解释|回答|评价|推荐|看看|分析|判断)", cleaned):
             score += 18
         if len(cleaned) <= 40 and (matched_word or mentions_bot):
-            score += 18
+            score += 10
         return score
 
     def _group_wakeup_context_should_reply(
@@ -477,7 +480,7 @@ class GroupWakeupMixin:
             relation_hit=relation_hit,
             mentions_bot=mentions_bot,
         )
-        threshold = 45 if str(scene.get("talking_to") or "") == "bot" else 58
+        threshold = 68 if str(scene.get("talking_to") or "") == "bot" else 72
         return score >= threshold
 
     def _group_wakeup_fatigue(self, group: dict[str, Any]) -> dict[str, Any]:

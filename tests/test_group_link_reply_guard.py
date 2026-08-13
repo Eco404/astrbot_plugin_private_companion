@@ -78,6 +78,10 @@ class _WakeupHarness(GroupWakeupMixin):
     def _group_wakeup_topic_interest_weight(group, word, *, sender_id, text, group_id):
         return {"multiplier": 1.0, "score": 0.0, "reason": ""}
 
+    @staticmethod
+    def _select_worldbook_member_profiles_for_group(group, *, sender_id, text):
+        return []
+
 
 class _QuotedLinkHarness(ForwardMessageMixin):
     def __init__(self, rows):
@@ -196,6 +200,32 @@ class GroupLinkReplyGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(miss, dict)
         self.assertEqual(miss.get("words"), ["摄影"])
         self.assertFalse(self.wakeup._group_wakeup_allows_general_interjection(scene))
+
+    def test_weak_wakeup_word_alone_does_not_trigger_reply(self) -> None:
+        self.wakeup.group_wakeup_context_words = ["机器人"]
+        wakeup = self.wakeup._evaluate_group_wakeup(
+            {},
+            scene={"talking_to": "group", "trigger": "normal"},
+            sender_id="10001",
+            sender_name="群友",
+            text="机器人呢？",
+            group_id="20001",
+        )
+
+        self.assertEqual(wakeup, {})
+
+    def test_weak_wakeup_word_with_clear_bot_directed_request_can_trigger(self) -> None:
+        self.wakeup.group_wakeup_context_words = ["机器人"]
+        wakeup = self.wakeup._evaluate_group_wakeup(
+            {},
+            scene={"talking_to": "group", "trigger": "normal"},
+            sender_id="10001",
+            sender_name="群友",
+            text="机器人你怎么看这个方案？",
+            group_id="20001",
+        )
+
+        self.assertEqual(wakeup.get("type"), "context_word")
 
     def test_question_beside_qq_boilerplate_keeps_only_user_text(self) -> None:
         text = "这个视频讲什么？ 当前QQ版本不支持此应用，请升级"
