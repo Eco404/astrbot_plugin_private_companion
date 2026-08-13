@@ -546,7 +546,7 @@ def _initialize_world_and_model_config(self: Any, c: Any) -> None:
     self.advanced_cycle_menstrual_energy = self._cfg_int(c, "advanced_cycle_menstrual_energy", -12, -50, 30)
     self.advanced_cycle_follicular_days = self._cfg_int(c, "advanced_cycle_follicular_days", 5, 1, 30)
     self.advanced_cycle_follicular_prompt = self._cfg_str(
-        c, "advanced_cycle_follicular_prompt", "处于卵泡期早，精力平稳回升，心情逐渐轻快"
+        c, "advanced_cycle_follicular_prompt", "处于卵泡期，精力平稳回升，心情逐渐轻快"
     )
     self.advanced_cycle_follicular_mood = self._cfg_str(c, "advanced_cycle_follicular_mood", "轻快")
     self.advanced_cycle_follicular_energy = self._cfg_int(c, "advanced_cycle_follicular_energy", 0, -50, 30)
@@ -564,7 +564,7 @@ def _initialize_world_and_model_config(self: Any, c: Any) -> None:
     self.advanced_cycle_ovulation_energy = self._cfg_int(c, "advanced_cycle_ovulation_energy", 9, -50, 30)
     self.advanced_cycle_luteal_days = self._cfg_int(c, "advanced_cycle_luteal_days", 8, 1, 30)
     self.advanced_cycle_luteal_prompt = self._cfg_str(
-        c, "advanced_cycle_luteal_prompt", "处于黄体期早，精力尚可，情绪整体平稳"
+        c, "advanced_cycle_luteal_prompt", "处于黄体期，精力尚可，情绪整体平稳"
     )
     self.advanced_cycle_luteal_mood = self._cfg_str(c, "advanced_cycle_luteal_mood", "平稳")
     self.advanced_cycle_luteal_energy = self._cfg_int(c, "advanced_cycle_luteal_energy", 5, -50, 30)

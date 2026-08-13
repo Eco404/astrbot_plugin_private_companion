@@ -9550,7 +9550,7 @@
       "enable_advanced_cycle_strategy": {
         "description": "启用六阶段周期策略",
         "type": "bool",
-        "hint": "把原有三阶段扩展为月经期、卵泡期早、排卵前期、排卵期、黄体期早和 PMS 期，并按顺序自然推进。默认关闭，避免改变现有行为。",
+        "hint": "把原有三阶段扩展为月经期、卵泡期、排卵前期、排卵期、黄体期和 PMS 期，并按顺序自然推进。默认关闭，避免改变现有行为。",
         "default": false,
         "condition": {
           "enable_cycle_state": true
@@ -9604,26 +9604,26 @@
         "condition": { "enable_advanced_cycle_strategy": true }
       },
       "advanced_cycle_follicular_days": {
-        "description": "卵泡期早持续天数",
+        "description": "卵泡期持续天数",
         "type": "int",
         "default": 5,
         "slider": { "min": 1, "max": 30, "step": 1 },
         "condition": { "enable_advanced_cycle_strategy": true }
       },
       "advanced_cycle_follicular_prompt": {
-        "description": "卵泡期早状态描述",
+        "description": "卵泡期状态描述",
         "type": "string",
-        "default": "处于卵泡期早，精力平稳回升，心情逐渐轻快",
+        "default": "处于卵泡期，精力平稳回升，心情逐渐轻快",
         "condition": { "enable_advanced_cycle_strategy": true }
       },
       "advanced_cycle_follicular_mood": {
-        "description": "卵泡期早情绪底色",
+        "description": "卵泡期情绪底色",
         "type": "string",
         "default": "轻快",
         "condition": { "enable_advanced_cycle_strategy": true }
       },
       "advanced_cycle_follicular_energy": {
-        "description": "卵泡期早精力变化",
+        "description": "卵泡期精力变化",
         "type": "int",
         "hint": "仅在关闭强度联动时使用；设为 0 仍会保留该阶段并继续推进。",
         "default": 0,
@@ -9685,26 +9685,26 @@
         "condition": { "enable_advanced_cycle_strategy": true }
       },
       "advanced_cycle_luteal_days": {
-        "description": "黄体期早持续天数",
+        "description": "黄体期持续天数",
         "type": "int",
         "default": 8,
         "slider": { "min": 1, "max": 30, "step": 1 },
         "condition": { "enable_advanced_cycle_strategy": true }
       },
       "advanced_cycle_luteal_prompt": {
-        "description": "黄体期早状态描述",
+        "description": "黄体期状态描述",
         "type": "string",
-        "default": "处于黄体期早，精力尚可，情绪整体平稳",
+        "default": "处于黄体期，精力尚可，情绪整体平稳",
         "condition": { "enable_advanced_cycle_strategy": true }
       },
       "advanced_cycle_luteal_mood": {
-        "description": "黄体期早情绪底色",
+        "description": "黄体期情绪底色",
         "type": "string",
         "default": "平稳",
         "condition": { "enable_advanced_cycle_strategy": true }
       },
       "advanced_cycle_luteal_energy": {
-        "description": "黄体期早精力变化",
+        "description": "黄体期精力变化",
         "type": "int",
         "hint": "仅在关闭强度联动时使用。",
         "default": 5,
@@ -9736,6 +9736,28 @@
         "hint": "仅在关闭强度联动时使用。",
         "default": -8,
         "slider": { "min": -50, "max": 30, "step": 1 },
+        "condition": { "enable_advanced_cycle_strategy": true }
+      },
+      "advanced_cycle_discomfort_simulation": {
+        "description": "生理期不适模拟",
+        "type": "bool",
+        "hint": "开启后，在月经期、PMS 期等阶段按概率生成短暂的痛经、头痛等不适状态，轻度压低精力并在总览中显示。默认关闭。",
+        "default": false,
+        "condition": { "enable_advanced_cycle_strategy": true }
+      },
+      "advanced_cycle_discomfort_chance": {
+        "description": "不适出现概率",
+        "type": "int",
+        "hint": "每天生成一次不适状态的概率（0-100），0 表示从不生成；同一时间只保留一条不适状态。",
+        "default": 55,
+        "slider": { "min": 0, "max": 100, "step": 1 },
+        "condition": { "enable_advanced_cycle_strategy": true }
+      },
+      "advanced_cycle_discomfort_types": {
+        "description": "可模拟的不适类型",
+        "type": "string",
+        "hint": "逗号分隔。可选：痛经、头痛、腰酸、乏力、情绪低落、恶心；只会出现在与之相关的阶段（如痛经仅在月经期）。",
+        "default": "痛经,头痛,腰酸,乏力",
         "condition": { "enable_advanced_cycle_strategy": true }
       },
       "humanized_state_intensity": {

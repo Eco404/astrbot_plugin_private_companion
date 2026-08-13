@@ -443,9 +443,39 @@ class CommandHandlersMixin:
             f"主动消息终审：{self._feature_on_text(getattr(self, 'enable_proactive_message_review', True))}，模式 {getattr(self, 'proactive_review_mode', 'full')}，强度 {getattr(self, 'proactive_review_strength', 'lenient')}",
             f"用户请求生图每日上限：{command_photo_limit_text}；非指令生图：{_single_line(getattr(self, 'natural_language_photo_generation_mode', 'tool_first'), 24) or 'tool_first'}，规则快判{self._feature_on_text(getattr(self, 'enable_natural_language_photo_generation', False))}，每日上限 {getattr(self, 'natural_language_photo_generation_max_daily', 0)}",
             f"拟人状态：健康 {self._feature_on_text(getattr(self, 'enable_health_state', True))}，饥饿 {self._feature_on_text(getattr(self, 'enable_hunger_state', True))}，生理期 {self._feature_on_text(getattr(self, 'enable_cycle_state', True))}，强度 {getattr(self, 'humanized_state_intensity', 0)}",
+            self._cycle_status_text(),
             f"回复风格：{'已配置' if reply_style else '未配置'}，长度 {len(reply_style)} 字",
         ]
 
+    def _cycle_status_text(self) -> str:
+        """Build the six-phase cycle position line for the status overview."""
+        if not self._advanced_cycle_enabled():
+            return "六阶段周期：未开启"
+        try:
+            runtime = self._advanced_cycle_runtime()
+        except Exception:
+            runtime = {}
+        if not runtime or not runtime.get("phase_name"):
+            return "六阶段周期：已开启（尚未进入首个周期）"
+        parts = [
+            f"{runtime.get('phase_name')} 第{runtime.get('day_in_phase', 1)}/{runtime.get('phase_days', 1)}天",
+            f"周期第{runtime.get('cycle_day', 0)}/{runtime.get('cycle_days', 0)}天",
+        ]
+        if runtime.get("next_phase_name"):
+            parts.append(f"下一阶段{runtime.get('next_phase_name')}")
+        try:
+            discomfort = self._active_cycle_discomfort_conditions()
+        except Exception:
+            discomfort = []
+        if isinstance(discomfort, list) and discomfort:
+            labels = "、".join(
+                _single_line(item.get("label") or item.get("type"), 40)
+                for item in discomfort[:3]
+                if isinstance(item, dict)
+            )
+            if labels:
+                parts.append(f"当前不适：{labels}")
+        return "六阶段周期：" + "，".join(parts)
     def _companion_manual_runtime_snapshot(self, event: AstrMessageEvent | None = None) -> str:
         lines: list[str] = []
         group_id = ""
