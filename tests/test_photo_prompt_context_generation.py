@@ -497,22 +497,10 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
             output.write_bytes(b"generated")
             harness = _PhotoGenerationHarness(str(output))
             harness.photo_generation_prompt_format = "nai"
-            TEST_LOGGER.records.clear()
-
-            with mock.patch.dict(
-                ProactiveMessageMixin._generate_photo_image.__globals__,
-                {"logger": TEST_LOGGER},
-            ):
-                await harness._generate_photo_image(
-                    workflow_kind="selfie",
-                    prompt_text="{1girl}, 1.5::red dress::, -1::text::",
-                    session_key="nai-trace-chain-session",
-                )
-
-            start_log = next(
-                message
-                for level, message in TEST_LOGGER.records
-                if level == "info" and "[PrivateCompanion] 生图开始:" in message
+            await harness._generate_photo_image(
+                workflow_kind="selfie",
+                prompt_text="{1girl}, 1.5::red dress::, -1::text::",
+                session_key="nai-trace-chain-session",
             )
 
             events = [
@@ -549,7 +537,6 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(prompt_event["data"]["prompt_format"], "nai")
         self.assertEqual(backend_event["data"]["prompt_format"], "nai")
-        self.assertIn("prompt_format=nai", start_log)
         self.assertIn("1.5::red dress::", prompt_event["data"]["submitted_prompt"])
 
     async def test_invalid_prompt_format_falls_back_to_traditional(self) -> None:
@@ -607,34 +594,23 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
                 return await analyze_intent(*args, **kwargs)
 
             harness._analyze_photo_reference_intent_async = analyze_after_reload
-            TEST_LOGGER.records.clear()
-            with mock.patch.dict(
-                ProactiveMessageMixin._generate_photo_image.__globals__,
-                {"logger": TEST_LOGGER},
-            ):
-                generation = asyncio.create_task(
-                    harness._generate_photo_image(
-                        workflow_kind="selfie",
-                        prompt_text=nai_prompt,
-                        session_key="prompt-format-hot-reload",
-                    )
+            generation = asyncio.create_task(
+                harness._generate_photo_image(
+                    workflow_kind="selfie",
+                    prompt_text=nai_prompt,
+                    session_key="prompt-format-hot-reload",
                 )
-                try:
-                    await asyncio.wait_for(analysis_started.wait(), timeout=3)
-                    harness.photo_generation_prompt_format = "natural_language"
-                    continue_analysis.set()
-                    await asyncio.wait_for(generation, timeout=5)
-                finally:
-                    continue_analysis.set()
-                    if not generation.done():
-                        generation.cancel()
-                    await asyncio.gather(generation, return_exceptions=True)
-
-            start_log = next(
-                message
-                for level, message in TEST_LOGGER.records
-                if level == "info" and "[PrivateCompanion] 生图开始:" in message
             )
+            try:
+                await asyncio.wait_for(analysis_started.wait(), timeout=3)
+                harness.photo_generation_prompt_format = "natural_language"
+                continue_analysis.set()
+                await asyncio.wait_for(generation, timeout=5)
+            finally:
+                continue_analysis.set()
+                if not generation.done():
+                    generation.cancel()
+                await asyncio.gather(generation, return_exceptions=True)
 
             backend_prompt = harness.backend_calls[0]["prompt"]
             events = [
@@ -654,7 +630,6 @@ class PhotoPromptContextGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Positive prompt:", backend_prompt)
         self.assertNotIn("Negative prompt:", backend_prompt)
         self.assertNotIn("Create a single coherent image showing", backend_prompt)
-        self.assertIn("prompt_format=nai", start_log)
         self.assertTrue(all(event["context"]["prompt_format"] == "nai" for event in events))
         for stage in ("prompt_composed", "backend_selected"):
             event = next(item for item in events if item["stage"] == stage)

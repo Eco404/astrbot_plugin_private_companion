@@ -88,6 +88,27 @@ class PrivateImageMixin:
             )
             return False
 
+    def _private_event_has_nontext_content(self, event: AstrMessageEvent) -> bool:
+        """Keep non-text message segments available to AstrBot's default chain.
+
+        File-only private messages commonly have an empty ``message_str``. They
+        must not be mistaken for an empty adapter event, otherwise the
+        companion's empty-message guard prevents the framework and file-aware
+        tools from receiving the attachment at all.
+        """
+        try:
+            components = self._event_components(event)
+        except Exception:
+            return False
+        for component in components:
+            if isinstance(component, dict):
+                type_name = str(component.get("type") or component.get("post_type") or "").strip().lower()
+            else:
+                type_name = component.__class__.__name__.strip().lower()
+            if type_name and type_name not in {"plain", "text"}:
+                return True
+        return False
+
     def _is_private_image_only_message(self, event: AstrMessageEvent, text: str) -> bool:
         cleaned = _single_line(text, 120)
         if cleaned and cleaned not in {"[图片]", "【图片】", "图片"}:

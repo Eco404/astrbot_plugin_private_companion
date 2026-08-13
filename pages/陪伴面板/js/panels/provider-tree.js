@@ -441,10 +441,6 @@ window.PrivateCompanionProviderTree = (() => {
       ? "通用识图与夹层阅读识图使用独立 Provider"
       : "当前仅显示已安装能力使用的视觉通道";
     document.getElementById("providerSummary").innerHTML = `
-      <div class="provider-cost-notice">
-        <b>成本提醒</b>
-        <span>火山方舟协作计划免费额度已延期到 2026-07-31 左右，具体以控制台/官方活动页为准。使用火山方舟 Provider 时，请检查每日 Token 限额和后台任务开关，注意成本控制。</span>
-      </div>
       <div class="provider-summary-card strong"><span>单独配置</span><b>${configured}/${keys.length}</b><small>已指定专用 Provider</small></div>
       <div class="provider-summary-card"><span>自动回退</span><b>${inherited}</b><small>留空项会按兜底链路执行</small></div>
       <div class="provider-summary-card speed"><span>被动速度相关</span><b>${passiveSensitive}</b><small>这些项建议优先关注延迟</small></div>

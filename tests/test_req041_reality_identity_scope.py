@@ -128,6 +128,22 @@ class _ScopedRealityHost(RealityCompanionBridgeMixin):
 
 def test_cross_device_continuity_is_shared_only_inside_one_formal_person() -> None:
     host = _ScopedRealityHost()
+    class Api:
+        outputs = {}
+
+        @staticmethod
+        def subject(user_id):
+            return PERSON_KEY if user_id in {"device-a", "device-b"} else "other"
+
+        async def record_reality_touch_output(self, user_id, text, **kwargs):
+            self.outputs[self.subject(user_id)] = {"text": text, "source": kwargs.get("source"), "delivered_at": kwargs.get("delivered_at")}
+            return {"recorded": True}
+
+        def recent_output(self, user_id):
+            return dict(self.outputs.get(self.subject(user_id), {}))
+
+    api = Api()
+    host._reality_companion_api = lambda: api
     delivered_at = time.time() - 3
     result = asyncio.run(host._record_reality_touch_output(
         "device-a", "早呀。", delivered_at=delivered_at,
@@ -137,7 +153,7 @@ def test_cross_device_continuity_is_shared_only_inside_one_formal_person() -> No
     })
 
     assert result["recorded"] is True
-    assert set(host.data["reality_touch_outputs"]) == {PERSON_KEY}
+    assert host.data["reality_touch_outputs"] == {}
     assert "last_reality_touch_output" not in host.data["users"]["device-a"]
     assert "早呀" in host._format_reality_touch_continuity_context(host.data["users"]["device-b"])
     assert host._format_reality_touch_continuity_context(host.data["users"]["other"]) == ""
@@ -147,6 +163,6 @@ def test_unreconciled_reality_output_is_rejected_without_mutation() -> None:
     host = _ScopedRealityHost(ready=False)
     result = asyncio.run(host._record_reality_touch_output("device-a", "不可写入"))
 
-    assert result == {"recorded": False, "reason": "scoped_projection_not_reconciled"}
+    assert result == {"recorded": False, "reason": "reality_companion_unavailable"}
     assert host.data["reality_touch_outputs"] == {}
     assert host.saved == 0

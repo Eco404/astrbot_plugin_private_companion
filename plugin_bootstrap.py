@@ -76,6 +76,44 @@ LEGACY_DEFAULT_NEWS_SOURCES = "\n".join(
     ]
 )
 
+_LEGACY_PHOTO_SCENE_PRESET_NAMES = {
+    "角色自拍",
+    "COS自拍",
+    "日常穿搭",
+    "居家睡衣",
+    "居家服",
+    "校服人像",
+    "礼服人像",
+    "泳装人像",
+    "运动服人像",
+    "镜前穿搭",
+    "头像特写",
+    "房间日常",
+    "可拍画面",
+    "表情包场景",
+}
+
+
+def _legacy_photo_scene_preset_names(raw: Any) -> set[str]:
+    """Read preset names only for validating legacy catalog migration."""
+    names = set(_LEGACY_PHOTO_SCENE_PRESET_NAMES)
+    if isinstance(raw, dict):
+        values = raw.keys()
+    elif isinstance(raw, list):
+        values = [
+            item.get("name") or item.get("key") or item.get("title")
+            if isinstance(item, dict)
+            else str(item or "").split("：", 1)[0].split(":", 1)[0]
+            for item in raw
+        ]
+    else:
+        values = [
+            line.split("：", 1)[0].split(":", 1)[0]
+            for line in str(raw or "").replace("\r", "\n").split("\n")
+        ]
+    names.update(_single_line(value, 40) for value in values if _single_line(value, 40))
+    return names
+
 PREVIOUS_TECH_DEFAULT_NEWS_SOURCES = "\n".join(
     [
         "BBC中文|https://feeds.bbci.co.uk/zhongwen/simp/rss.xml",
@@ -355,33 +393,8 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.private_user_aliases = self._parse_private_user_aliases(self._cfg_raw(c, "private_user_aliases", ""))
     self.private_user_delivery_aliases = self._parse_private_user_aliases(self._cfg_raw(c, "private_user_delivery_aliases", ""))
     self._load_tts_enhancement_config(c)
-    # Experimental local alarm: playback follows the host's default audio output.
-    self.enable_experimental_bluetooth_wakeup = self._cfg_bool(
-        c, "enable_experimental_bluetooth_wakeup", False
-    )
-    self.enable_reality_touch_camera = self._cfg_bool(c, "enable_reality_touch_camera", False)
-    self.reality_touch_camera_index = self._cfg_int(c, "reality_touch_camera_index", 0, 0, 100000)
-    self.reality_touch_camera_min_interval_seconds = self._cfg_int(
-        c, "reality_touch_camera_min_interval_seconds", 60, 10, 3600
-    )
-    self.reality_touch_camera_capture_timeout_seconds = self._cfg_int(
-        c, "reality_touch_camera_capture_timeout_seconds", 5, 2, 20
-    )
-    self.reality_touch_camera_analysis_timeout_seconds = self._cfg_int(
-        c, "reality_touch_camera_analysis_timeout_seconds", 25, 5, 90
-    )
-    self.enable_reality_touch_camera_proactive_curiosity = self._cfg_bool(
-        c, "enable_reality_touch_camera_proactive_curiosity", False
-    )
-    self.reality_touch_camera_proactive_min_tier = self._cfg_int(
-        c, "reality_touch_camera_proactive_min_tier", 4, 1, 5
-    )
-    self.reality_touch_camera_proactive_max_daily = self._cfg_int(
-        c, "reality_touch_camera_proactive_max_daily", 1, 0, 10
-    )
-    self.reality_touch_camera_proactive_cooldown_minutes = self._cfg_int(
-        c, "reality_touch_camera_proactive_cooldown_minutes", 240, 10, 1440
-    )
+    # Reality Companion owns all device runtime settings. Historical values
+    # stay in ``self.config`` only so its migration API can import them.
     self.target_platform = self._cfg_str(c, "target_platform", "aiocqhttp", "aiocqhttp")
     self.default_enable_configured_targets = self._cfg_bool(c, "default_enable_configured_targets", True)
     self.default_interaction_band = self._cfg_str(c, "default_interaction_band", "relaxed")
@@ -997,9 +1010,11 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
     self.local_photo_memory_busy_percent = self._cfg_int(c, "local_photo_memory_busy_percent", 88, 1, 100)
     self.local_photo_defer_minutes = self._cfg_int(c, "local_photo_defer_minutes", 30, 1, 240)
     self._local_photo_load_cache: dict[str, Any] = {}
-    self.external_image_api_platform = self._normalize_external_image_api_platform(
-        self._cfg_str(c, "external_image_api_platform", "auto", "auto")
-    )
+    # Raw legacy values are exposed only for Image Companion migration and old
+    # diagnostics. The host no longer normalizes or executes image backends.
+    self.external_image_api_platform = self._cfg_str(
+        c, "external_image_api_platform", "auto", "auto"
+    ).strip().lower()
     self.external_image_api_base_url = self._cfg_str(c, "EXTERNAL_IMAGE_API_BASE_URL", "")
     self.external_image_api_key = self._cfg_str(c, "EXTERNAL_IMAGE_API_KEY", "")
     self.external_image_api_model = self._cfg_str(c, "EXTERNAL_IMAGE_API_MODEL", "")
@@ -1018,17 +1033,20 @@ def _initialize_photo_and_expression_config(self: Any, c: Any) -> None:
     self._external_image_download_session_lock = None
     self._external_image_download_session_trust_env = None
     self.enable_backup_external_image_api = self._cfg_bool(c, "enable_backup_external_image_api", False)
-    self.backup_external_image_api_platform = self._normalize_external_image_api_platform(
-        self._cfg_str(c, "backup_external_image_api_platform", "auto", "auto")
-    )
+    self.backup_external_image_api_platform = self._cfg_str(
+        c, "backup_external_image_api_platform", "auto", "auto"
+    ).strip().lower()
     self.backup_external_image_api_base_url = self._cfg_str(c, "BACKUP_EXTERNAL_IMAGE_API_BASE_URL", "")
     self.backup_external_image_api_key = self._cfg_str(c, "BACKUP_EXTERNAL_IMAGE_API_KEY", "")
     self.backup_external_image_api_model = self._cfg_str(c, "BACKUP_EXTERNAL_IMAGE_API_MODEL", "")
     self.backup_external_image_api_size = self._cfg_str(c, "backup_external_image_api_size", "1024x1024", "1024x1024")
     self.backup_external_image_api_timeout_seconds = self._cfg_int(c, "backup_external_image_api_timeout_seconds", 180, 20, 600)
     self.backup_external_image_api_custom_headers = self._cfg_str(c, "backup_external_image_api_custom_headers", "")
-    self.external_image_api_endpoints = self._normalize_external_image_api_endpoints(
-        self._cfg_raw(c, "external_image_api_endpoints", [])
+    raw_external_image_endpoints = self._cfg_raw(c, "external_image_api_endpoints", [])
+    self.external_image_api_endpoints = (
+        [dict(item) for item in raw_external_image_endpoints if isinstance(item, dict)]
+        if isinstance(raw_external_image_endpoints, list)
+        else []
     )
     self.photo_generation_prompt_format = self._normalize_photo_generation_prompt_format(
         self._cfg_str(c, "photo_generation_prompt_format", "traditional", "traditional")
@@ -1072,13 +1090,16 @@ def _initialize_photo_and_expression_config(self: Any, c: Any) -> None:
         "photo_reference_catalog_user_cleared",
         False,
     )
+    # This is a compatibility projection only. Scene-preset interpretation and
+    # ongoing catalog ownership now live in Image Companion.
+    legacy_preset_names = _legacy_photo_scene_preset_names(self.photo_generation_scene_presets)
     loaded_reference_catalog = load_catalog(
         raw_reference_catalog,
         catalog_version=raw_reference_catalog_version,
         legacy_persona=self.photo_persona_reference_image_path,
         legacy_library=self.photo_reference_library,
         user_cleared=raw_reference_catalog_user_cleared,
-        preset_names=self._photo_generation_scene_presets().keys(),
+        preset_names=legacy_preset_names,
     )
     self.photo_reference_catalog = loaded_reference_catalog.references
     self.photo_reference_catalog_read_only = loaded_reference_catalog.read_only
@@ -1095,7 +1116,7 @@ def _initialize_photo_and_expression_config(self: Any, c: Any) -> None:
         try:
             serialized_reference_catalog = validate_and_serialize(
                 loaded_reference_catalog.references,
-                preset_names=self._photo_generation_scene_presets().keys(),
+                preset_names=legacy_preset_names,
             )
             if _set_into_config(c, "photo_reference_catalog", serialized_reference_catalog):
                 _set_into_config(c, "photo_reference_catalog_user_cleared", False)

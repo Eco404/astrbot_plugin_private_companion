@@ -3362,6 +3362,27 @@ small {
   color: var(--accent-strong);
 }
 
+#panel-config .feature-domain-filters button.is-capability {
+  border-color: color-mix(in srgb, #2a7c60 42%, var(--line-soft));
+  color: #23694f;
+}
+
+#panel-config .feature-domain-filters button.is-capability::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: #2a7c60;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #2a7c60 14%, transparent);
+}
+
+#panel-config .feature-domain-filters button.is-capability.is-active {
+  border-color: color-mix(in srgb, #2a7c60 64%, var(--line-soft));
+  background: color-mix(in srgb, var(--panel) 74%, #dcefe7);
+  color: #185c43;
+}
+
 #panel-config .feature-switch-group > header {
   align-items: start;
   padding: 12px 14px;
@@ -3397,6 +3418,12 @@ small {
   color: #516274;
   font-size: 10px;
   font-weight: 750;
+}
+
+#panel-config .feature-stage-tags > .feature-image-use {
+  border-color: color-mix(in srgb, #2a7c60 40%, var(--line-soft));
+  background: color-mix(in srgb, var(--panel) 72%, #dcefe7);
+  color: #185c43;
 }
 
 #panel-config .feature-stage-tags > [data-feature-stage="before"] {

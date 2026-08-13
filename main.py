@@ -187,7 +187,7 @@ from .p4_affinity_confinement import apply_legacy_relationship_delta
 from .p4_live_runtime import decide_live_request
 from .p4_runtime_gate import SAFE_CONFINEMENT_REPLY
 from .p6_readonly_projection import build_p6_readonly_status
-from .reply_temperature import compose_reply_temperature
+from .domains.affect.reply_temperature import compose_reply_temperature
 from .plugin_identity import (
     PLUGIN_ID,
     is_module_path_for_package,
@@ -355,6 +355,7 @@ from .astrbot_knowledge import AstrBotKnowledgeMixin
 from .atrelay import AtRelayMixin
 from .proactive_engine import ProactiveEngineMixin
 from .proactive_message import ProactiveMessageMixin
+from .image_companion_bridge import ImageCompanionBridgeMixin
 from .proactive_chat_runtime_bridge import ProactiveChatRuntimeBridge
 from .plugin_bootstrap import (
     DEFAULT_AI_DAILY_JUYA_UID,
@@ -529,6 +530,9 @@ class PrivateCompanionExtensionAPI:
             "user_id": normalized,
             "exists": bool(user),
             "identity_ready": identity_ready,
+            "reality_subject_ref": _single_line(binding.get("subject_ref"), 160)
+            if isinstance(binding, dict) and binding.get("ok") is True
+            else normalized,
             "is_admin": bool(callable(admin_checker) and admin_checker(normalized)),
             "is_primary_user": is_primary_user,
             "eligible": bool(
@@ -1555,6 +1559,7 @@ class PrivateCompanionPlugin(
     PlaceCognitiveMapMixin,
     SceneContextMixin,
     ProactiveMessageMixin,
+    ImageCompanionBridgeMixin,
     DailyStateMixin,
     AgendaRuntimeMixin,
     DailyReviewMixin,
@@ -6471,7 +6476,7 @@ class PrivateCompanionPlugin(
                 await asyncio.wait_for(self._apply_sqlite_wal_optimizations(), timeout=20)
             except asyncio.TimeoutError:
                 logger.warning("[PrivateCompanion] SQLite WAL 后台优化超时,已跳过本轮启动优化")
-            await self._maybe_cleanup_generated_photos(force=True)
+            await self._image_companion_maintenance()
             async with self._data_lock:
                 if self._run_startup_data_maintenance_locked():
                     self._save_data_sync()

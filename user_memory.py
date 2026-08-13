@@ -120,9 +120,9 @@ from .companion_interaction_expression import (
     build_expression_decision,
     current_interaction_projection,
 )
-from .emotion_event_ledger import record_recent_emotion_event
-from .interaction_dynamics import project_interaction_dynamics, settle_interaction_dynamics
-from .emotion_targeting import classify_emotion_target
+from .domains.affect.emotion_event_ledger import record_recent_emotion_event
+from .domains.affect.interaction_dynamics import project_interaction_dynamics, settle_interaction_dynamics
+from .domains.affect.emotion_targeting import classify_emotion_target
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,

@@ -184,7 +184,13 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     setattr(message_obj, "message_str", quoted_relation_text)
             except Exception:
                 pass
-    if not text and not forward_only_prompt and not self._private_event_has_image_safe(event, label="private_empty_guard"):
+    has_nontext_content = self._private_event_has_nontext_content(event)
+    if (
+        not text
+        and not forward_only_prompt
+        and not self._private_event_has_image_safe(event, label="private_empty_guard")
+        and not has_nontext_content
+    ):
         component_types: list[str] = []
         try:
             for item in self._event_components(event):

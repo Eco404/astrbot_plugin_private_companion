@@ -4532,6 +4532,13 @@ Bot 近期回复：
                 type_name = self._component_type_name(item)
             except Exception:
                 type_name = str(getattr(item, "type", "") or item.__class__.__name__).strip().lower()
+            type_name = str(type_name or "").strip().lower()
+            # AstrBot component enums stringify as ``ComponentType.File``.
+            # Normalize them before deciding whether a result must retain its
+            # complete MessageChain; otherwise file attachments degrade into a
+            # text-only result on current framework versions.
+            if "." in type_name:
+                type_name = type_name.rsplit(".", 1)[-1]
             if type_name in media_types:
                 return True
         return False

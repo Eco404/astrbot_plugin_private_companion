@@ -24,6 +24,29 @@ class ImageModelConfigUiTests(unittest.TestCase):
         self.assertIn('id="modelsImagePane"', self.html)
         self.assertIn('id="saveImageModelsBtn"', self.html)
 
+    def test_split_plugin_ui_is_hidden_until_the_plugin_is_detected(self) -> None:
+        self.assertIn('id="modelsImageTab"', self.html)
+        self.assertIn('aria-selected="false" hidden>生图模型</button>', self.html)
+        self.assertIn("function imageCompanionInstalled()", self.script)
+        self.assertIn("function realityCompanionInstalled()", self.script)
+        self.assertIn("function syncExternalCompanionVisibility()", self.script)
+        self.assertIn("enable_photo_text_action: () => imageCompanionInstalled()", self.script)
+        self.assertIn(
+            "enable_experimental_bluetooth_wakeup: () => realityCompanionInstalled()",
+            self.script,
+        )
+        self.assertIn(
+            "enable_qzone_generated_image_publish: () => imageCompanionInstalled()",
+            self.script,
+        )
+        self.assertIn("function visibleExperimentalFeatureKeys()", self.script)
+        self.assertIn("function visibleTroubleshootingCategories()", self.script)
+        self.assertIn("function visibleSetupGuideAdvancedItems(blockId)", self.script)
+        self.assertIn("const items = visibleSetupGuideAdvancedItems(block.id);", self.script)
+        self.assertIn("if (!setting || !visibleConfigKey(setting.key)) return false;", self.script)
+        self.assertIn("if (!realityCompanionInstalled())", self.script)
+        self.assertIn("if (!imageCompanionInstalled())", self.script)
+
     def test_provider_category_switch_uses_one_delegated_click(self) -> None:
         toolbar_binding = self.provider_tree.split("function bindProviderToolbar", 1)[1]
         self.assertIn('document.querySelector(".provider-mode-switch")', toolbar_binding)

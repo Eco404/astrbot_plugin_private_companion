@@ -966,6 +966,7 @@ class PrivateCompanionPageApi(
                     ),
                     "data_version": data.get("version"),
                 },
+                "companion_plugins": self._companion_plugins_summary(),
                 "private": {
                     "user_count": len(users),
                     "enabled_user_count": enabled_users,
@@ -1045,6 +1046,46 @@ class PrivateCompanionPageApi(
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取总览失败: {exc}", exc_info=True)
             return self._exception_error("获取总览失败")
+
+    def _companion_plugins_summary(self) -> dict[str, dict[str, bool]]:
+        image_api_getter = getattr(self.plugin, "_image_companion_api", None)
+        try:
+            image_api = image_api_getter() if callable(image_api_getter) else None
+        except Exception:
+            image_api = None
+        image_status_getter = getattr(image_api, "status", None) if image_api is not None else None
+        try:
+            image_status = image_status_getter() if callable(image_status_getter) else {}
+        except Exception:
+            image_status = {}
+        if not isinstance(image_status, dict):
+            image_status = {}
+
+        reality_api_getter = getattr(self.plugin, "_reality_companion_api", None)
+        try:
+            reality_api = reality_api_getter() if callable(reality_api_getter) else None
+        except Exception:
+            reality_api = None
+        reality_status_getter = getattr(reality_api, "status", None) if reality_api is not None else None
+        try:
+            reality_status = reality_status_getter() if callable(reality_status_getter) else {}
+        except Exception:
+            reality_status = {}
+        if not isinstance(reality_status, dict):
+            reality_status = {}
+
+        return {
+            "image": {
+                "installed": image_api is not None,
+                "enabled": bool(image_status.get("enabled")),
+                "available": image_api is not None,
+            },
+            "reality": {
+                "installed": reality_api is not None,
+                "enabled": bool(reality_status.get("enabled")),
+                "available": bool(reality_api is not None and reality_status.get("available", True)),
+            },
+        }
 
     def _req041_runtime_summary(self) -> dict[str, Any]:
         """Build an aggregate-only migration and isolation status for administrators."""
@@ -4456,214 +4497,10 @@ class PrivateCompanionPageApi(
             except Exception as exc:
                 logger.error("[PrivateCompanionPage] 更新现实触及联动失败: %s", exc, exc_info=True)
                 return self._exception_error("更新现实触及联动失败")
-        action = self._single_line(payload.get("action"), 24).lower()
-        user_id = self._single_line(payload.get("user_id"), 120)
-        if action not in {
-            "save", "save_policy", "disable", "stop_session", "cancel_reminder", "test", "select_output",
-            "save_camera_config", "save_camera_policy", "test_camera", "scan_cameras",
-        }:
-            return self._error("不支持的现实触及操作")
-        if action not in {"select_output", "save_camera_config", "scan_cameras"} and not user_id:
-            return self._error("请选择私聊用户")
-        snapshotter = getattr(self.plugin, "_reality_touch_page_snapshot", None)
-        updater = getattr(self.plugin, "_reality_touch_update_alarm", None)
-        policy_updater = getattr(self.plugin, "_reality_touch_update_policy", None)
-        camera_policy_updater = getattr(self.plugin, "_reality_touch_update_camera_policy", None)
-        camera_snapshotter = getattr(self.plugin, "_reality_touch_camera_snapshot_for_user", None)
-        camera_scanner = getattr(self.plugin, "_reality_touch_scan_camera_devices", None)
-        device_selector = getattr(self.plugin, "_reality_touch_select_audio_device", None)
-        wakeup_player = getattr(self.plugin, "_play_wakeup_alarm", None)
-        test_audio_player = getattr(self.plugin, "_play_reality_touch_test_audio", None)
-        reminder_canceller = getattr(self.plugin, "_cancel_reality_touch_official_reminder", None)
-        if not callable(snapshotter) or not callable(updater):
-            return self._error("当前插件实例不支持现实触及控制台", status_code=503)
-
-        user_for_test: dict[str, Any] | None = None
-        alarm_for_test: dict[str, Any] | None = None
-        test_kind = ""
-        cancel_reminder_id = ""
-        message = ""
-        camera_preview_data_url = ""
-        try:
-            if action == "scan_cameras":
-                if not callable(camera_scanner):
-                    return self._error("当前插件实例不支持摄像头设备枚举", status_code=503)
-                catalog = await asyncio.to_thread(camera_scanner)
-                async with self.plugin._data_lock:
-                    snapshot = deepcopy(snapshotter())
-                snapshot["message"] = (
-                    f"已发现 {len(catalog.get('devices') or [])} 个摄像头入口"
-                    if catalog.get("devices")
-                    else self._single_line(catalog.get("error"), 180) or "没有发现摄像头设备"
-                )
-                return self._ok(snapshot)
-            if action == "save_camera_config":
-                camera_enabled = self._normalize_bool_value(payload.get("camera_enabled"))
-                camera_index = _safe_int(payload.get("camera_index"), 0, 0, 100000)
-                min_interval = _safe_int(payload.get("min_interval_seconds"), 60, 10, 3600)
-                capture_timeout = _safe_int(payload.get("capture_timeout_seconds"), 5, 2, 20)
-                analysis_timeout = _safe_int(payload.get("analysis_timeout_seconds"), 25, 5, 90)
-                proactive_curiosity_enabled = self._normalize_bool_value(payload.get("proactive_curiosity_enabled"))
-                proactive_min_tier = _safe_int(payload.get("proactive_min_tier"), 4, 1, 5)
-                proactive_max_daily = _safe_int(payload.get("proactive_max_daily"), 1, 0, 10)
-                proactive_cooldown_minutes = _safe_int(payload.get("proactive_cooldown_minutes"), 240, 10, 1440)
-                self._set_config_value("enable_reality_touch_camera", camera_enabled)
-                self._set_config_value("reality_touch_camera_index", camera_index)
-                self._set_config_value("reality_touch_camera_min_interval_seconds", min_interval)
-                self._set_config_value("reality_touch_camera_capture_timeout_seconds", capture_timeout)
-                self._set_config_value("reality_touch_camera_analysis_timeout_seconds", analysis_timeout)
-                self._set_config_value("enable_reality_touch_camera_proactive_curiosity", proactive_curiosity_enabled)
-                self._set_config_value("reality_touch_camera_proactive_min_tier", proactive_min_tier)
-                self._set_config_value("reality_touch_camera_proactive_max_daily", proactive_max_daily)
-                self._set_config_value("reality_touch_camera_proactive_cooldown_minutes", proactive_cooldown_minutes)
-                self.plugin.enable_reality_touch_camera = camera_enabled
-                self.plugin.reality_touch_camera_index = camera_index
-                self.plugin.reality_touch_camera_min_interval_seconds = min_interval
-                self.plugin.reality_touch_camera_capture_timeout_seconds = capture_timeout
-                self.plugin.reality_touch_camera_analysis_timeout_seconds = analysis_timeout
-                self.plugin.enable_reality_touch_camera_proactive_curiosity = proactive_curiosity_enabled
-                self.plugin.reality_touch_camera_proactive_min_tier = proactive_min_tier
-                self.plugin.reality_touch_camera_proactive_max_daily = proactive_max_daily
-                self.plugin.reality_touch_camera_proactive_cooldown_minutes = proactive_cooldown_minutes
-                if not await self._save_config_if_possible():
-                    return self._error("摄像头配置已更新到运行态，但写入插件配置失败")
-                async with self.plugin._data_lock:
-                    snapshot = deepcopy(snapshotter())
-                snapshot["message"] = "现实触及摄像头配置已保存"
-                return self._ok(snapshot)
-            if action == "select_output":
-                if not callable(device_selector):
-                    return self._error("当前插件实例不支持选择音频输出设备", status_code=503)
-                async with self.plugin._data_lock:
-                    selected = device_selector(
-                        payload.get("device_id"),
-                        payload.get("playback_volume") if "playback_volume" in payload else None,
-                    )
-                    self.plugin._save_data_sync()
-                    snapshot = deepcopy(snapshotter())
-                snapshot["message"] = f"音频输出已切换为：{self._single_line(selected.get('name'), 120)}"
-                return self._ok(snapshot)
-
-            async with self.plugin._data_lock:
-                users = self.plugin.data.get("users", {}) if isinstance(self.plugin.data, dict) else {}
-                user = users.get(user_id) if isinstance(users, dict) else None
-                if not isinstance(user, dict):
-                    return self._error("没有找到对应的私聊用户")
-                if action == "save":
-                    updater(user, payload)
-                    self.plugin._save_data_sync()
-                    message = "起床提醒场景已保存"
-                elif action == "save_policy":
-                    if not callable(policy_updater):
-                        return self._error("当前插件实例不支持主动语音扩展", status_code=503)
-                    policy_updater(user, payload)
-                    self.plugin._save_data_sync()
-                    message = "现实触及主动语音策略已保存"
-                elif action == "save_camera_policy":
-                    if not callable(camera_policy_updater):
-                        return self._error("当前插件实例不支持摄像头用户策略", status_code=503)
-                    camera_policy_updater(user, payload, user_id=user_id)
-                    self.plugin._save_data_sync()
-                    message = "现实触及摄像头用户策略已保存"
-                elif action == "disable":
-                    alarm = user.get("wakeup_alarm")
-                    if not isinstance(alarm, dict):
-                        alarm = {}
-                        user["wakeup_alarm"] = alarm
-                    alarm["enabled"] = False
-                    alarm.pop("last_trigger_key", None)
-                    stopper = getattr(self.plugin, "_stop_wakeup_contact_session", None)
-                    if callable(stopper):
-                        stopper(user)
-                    self.plugin._save_data_sync()
-                    message = "已关闭该用户的起床语音"
-                elif action == "stop_session":
-                    stopper = getattr(self.plugin, "_stop_wakeup_contact_session", None)
-                    if not callable(stopper):
-                        return self._error("当前插件实例不支持停止触达会话", status_code=503)
-                    stopper(user)
-                    self.plugin._save_data_sync()
-                    message = "已停止该用户当前这轮触达，不影响之后的闹钟"
-                elif action == "cancel_reminder":
-                    cancel_reminder_id = self._single_line(payload.get("reminder_id"), 40)
-                    if not cancel_reminder_id:
-                        return self._error("缺少现实触及提醒 ID")
-                elif action == "test_camera":
-                    if not callable(camera_snapshotter):
-                        return self._error("当前插件实例没有摄像头单帧能力", status_code=503)
-                else:
-                    test_kind = "device" if self._single_line(payload.get("test_kind"), 24).lower() == "device" else "scenario"
-                    consented = getattr(self.plugin, "_reality_touch_audio_consented", lambda _: False)(user)
-                    if not bool(getattr(self.plugin, "enable_experimental_bluetooth_wakeup", False)):
-                        return self._error("请先开启现实触及总开关")
-                    if not consented:
-                        return self._error("该用户尚未在私聊中完成现实触及知情确认")
-                    alarm = user.get("wakeup_alarm") if isinstance(user.get("wakeup_alarm"), dict) else {}
-                    user_for_test = deepcopy(user)
-                    alarm_for_test = deepcopy(alarm)
-                    if "message" in payload:
-                        alarm_for_test["message"] = self._single_line(payload.get("message"), 240)
-                    if "fade_in_ms" in payload:
-                        alarm_for_test["fade_in_ms"] = _safe_int(payload.get("fade_in_ms"), 800, 0, 5000)
-
-            if action == "cancel_reminder":
-                if not callable(reminder_canceller):
-                    return self._error("当前插件实例不支持取消现实触及官方提醒", status_code=503)
-                if not await reminder_canceller(user_id, reminder_id=cancel_reminder_id):
-                    return self._error("取消失败，任务可能已经开始执行或已结束")
-                message = "现实触及官方提醒已取消"
-            elif action == "test_camera":
-                result = await camera_snapshotter(
-                    user_id,
-                    self._single_line(payload.get("purpose"), 120) or "管理员从现实触及页面手动测试单帧读取",
-                    include_preview=True,
-                )
-                if result.get("status") != "success":
-                    return self._error(self._single_line(result.get("message"), 200) or "摄像头单帧读取失败")
-                observation = result.get("observation") if isinstance(result.get("observation"), dict) else {}
-                camera_preview_data_url = str(result.get("preview_data_url") or "")
-                if not camera_preview_data_url.startswith("data:image/jpeg;base64,"):
-                    camera_preview_data_url = ""
-                message = "摄像头单帧读取完成：" + (
-                    self._single_line(observation.get("summary"), 180) or "已记录有限状态"
-                )
-            elif action == "test":
-                if test_kind == "device":
-                    if not callable(test_audio_player):
-                        return self._error("当前插件实例没有固定测试音频播放能力", status_code=503)
-                    if not await test_audio_player(
-                        payload.get("playback_volume") if "playback_volume" in payload else None
-                    ):
-                        return self._error("固定测试音频播放失败，请检查所选音频输出设备")
-                    message = "固定测试音频已发送到所选音频输出设备"
-                else:
-                    if not callable(wakeup_player) or user_for_test is None or alarm_for_test is None:
-                        return self._error("当前插件实例没有可用的本机语音播放能力", status_code=503)
-                    if not await wakeup_player(
-                        user_for_test,
-                        alarm_for_test,
-                        test=True,
-                        volume=payload.get("playback_volume") if "playback_volume" in payload else None,
-                    ):
-                        return self._error("场景试听失败，请检查 TTS 配置和所选音频输出设备")
-                    message = "场景试听已发送到所选音频输出设备"
-
-            async with self.plugin._data_lock:
-                snapshot = deepcopy(snapshotter())
-            if camera_preview_data_url:
-                snapshot["camera_preview"] = {
-                    "user_id": user_id,
-                    "captured_at": int(time.time()),
-                    "data_url": camera_preview_data_url,
-                    "ephemeral": True,
-                }
-            snapshot["message"] = message
-            return self._ok(snapshot)
-        except ValueError as exc:
-            return self._error(str(exc))
-        except Exception as exc:
-            logger.error("[PrivateCompanionPage] 更新现实触及失败: %s", exc, exc_info=True)
-            return self._exception_error("更新现实触及失败")
+        return self._error(
+            "现实触及已由“我会来到你身边”管理，请先安装并启用 astrbot_plugin_reality_companion。",
+            status_code=503,
+        )
 
     async def update_settings(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
@@ -6618,7 +6455,18 @@ class PrivateCompanionPageApi(
                 "detail": configuration_note,
                 "error": configuration_note,
             }
-        runner = getattr(self.plugin, "_run_external_photo_generation_with_endpoint", None)
+        runner = getattr(self.plugin, "_image_companion_test_endpoint", None)
+        legacy_runner = getattr(self.plugin, "_run_external_photo_generation_with_endpoint", None)
+        use_legacy_runner = not callable(runner) and callable(legacy_runner)
+        if use_legacy_runner:
+            async def runner(endpoint_value: dict[str, Any], prompt_value: str) -> dict[str, Any]:
+                image_value, note_value = await legacy_runner(
+                    endpoint_value,
+                    prompt_value,
+                    session_key=f"private_companion_troubleshooting_{summary['test_key'][-12:]}",
+                    image_size=summary["size"],
+                )
+                return {"image_path": image_value, "message": note_value}
         if not callable(runner):
             return {
                 **base_result,
@@ -6657,14 +6505,17 @@ class PrivateCompanionPageApi(
 
             queue_wait_ms = int((time.monotonic() - wait_started) * 1000)
             try:
-                image_path, note = await asyncio.wait_for(
-                    runner(
-                        endpoint,
-                        prompt_text,
-                        session_key=f"private_companion_troubleshooting_{summary['test_key'][-12:]}",
-                        image_size=summary["size"],
-                    ),
+                external_result = await asyncio.wait_for(
+                    runner(endpoint, prompt_text),
                     timeout=test_timeout,
+                )
+                image_path = _path_text(
+                    external_result.get("image_path") if isinstance(external_result, dict) else "",
+                    1000,
+                )
+                note = self._single_line(
+                    external_result.get("message") if isinstance(external_result, dict) else "",
+                    500,
                 )
             except asyncio.TimeoutError:
                 elapsed_ms = int((time.time() - started) * 1000)

@@ -57,7 +57,7 @@ class ConfigPageLifecycleFilterTests(unittest.TestCase):
 
     def test_filters_are_composable_and_keep_detail_navigation(self) -> None:
         for marker in (
-            'state.featureDomainFilter !== "all"',
+            'featureMatchesDomainFilter(key)',
             'state.featureStageFilter !== "all"',
             'featureMatchesStatusFilter(key)',
             'featureMatchesQueryFilter(key, query)',
@@ -66,6 +66,21 @@ class ConfigPageLifecycleFilterTests(unittest.TestCase):
             'target.scrollIntoView({ behavior: "smooth", block: "start" })',
         ):
             self.assertIn(marker, self.script)
+
+    def test_image_plugin_adds_a_cross_domain_capability_filter(self) -> None:
+        for marker in (
+            '...(imageCompanionInstalled() ? [{ title: "image_generation", label: "生图", capability: true }] : [])',
+            'enable_photo_text_action: "主动/用户生图"',
+            'enable_qzone_integration: "空间配图"',
+            'enable_creative_writing: "作品封面"',
+            'function featureMatchesDomainFilter(key, domain = state.featureDomainFilter)',
+            'state.featureDomainFilter === "image_generation" ? imageGenerationFeatureUse(key) : ""',
+            'class="feature-image-use"',
+            'if (!imageInstalled && state.featureDomainFilter === "image_generation")',
+        ):
+            self.assertIn(marker, self.script)
+        self.assertIn(".feature-domain-filters button.is-capability", self.css)
+        self.assertIn(".feature-stage-tags > .feature-image-use", self.css)
 
     def test_layout_has_focus_mobile_and_overflow_guards(self) -> None:
         for marker in (

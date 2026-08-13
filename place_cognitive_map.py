@@ -41,7 +41,11 @@ class PlaceCognitiveMapMixin:
     def _place_cognitive_map_place(mobile_location: Any) -> dict[str, Any]:
         location = mobile_location if isinstance(mobile_location, dict) else {}
         raw = location.get("place") if isinstance(location.get("place"), dict) else {}
-        if not bool(location.get("available")) or not bool(raw.get("matched")):
+        if (
+            not bool(location.get("available"))
+            or not bool(raw.get("matched"))
+            or _single_line(raw.get("confidence"), 32) not in {"", "confirmed"}
+        ):
             return {}
         name = _single_line(raw.get("name"), 48)
         kind = _single_line(raw.get("kind"), 24).casefold()
@@ -54,6 +58,12 @@ class PlaceCognitiveMapMixin:
             "name": name,
             "kind": kind,
             "radius_m": round(_safe_float(raw.get("radius_m"), 0.0, 0.0, 10000.0), 1),
+            "aliases": list(dict.fromkeys(
+                _single_line(item, 40)
+                for item in list(raw.get("aliases") or [])[:8]
+                if _single_line(item, 40) and _single_line(item, 40) != name
+            )),
+            "parent_name": _single_line(raw.get("parent_name"), 48),
         }
 
     def _place_cognitive_map_root(self) -> dict[str, Any]:
@@ -196,10 +206,7 @@ class PlaceCognitiveMapMixin:
                 "name": _single_line(current.get("name"), 48),
                 "kind": _single_line(current.get("kind"), 24),
             } if current else {},
-            "known_places": [
-                {"name": _single_line(item.get("name"), 48), "kind": _single_line(item.get("kind"), 24)}
-                for item in known
-            ],
+            "known_places": [PlaceCognitiveMapMixin._place_cognitive_map_known_place(item) for item in known],
             "recent_routes": [
                 {
                     "from_name": _single_line(item.get("from_name"), 48),
@@ -210,6 +217,21 @@ class PlaceCognitiveMapMixin:
                 if _single_line(item.get("from_name"), 48) and _single_line(item.get("to_name"), 48)
             ],
         }
+
+    @staticmethod
+    def _place_cognitive_map_known_place(item: Any) -> dict[str, Any]:
+        place = item if isinstance(item, dict) else {}
+        result = {
+            "name": _single_line(place.get("name"), 48),
+            "kind": _single_line(place.get("kind"), 24),
+        }
+        aliases = list(place.get("aliases") or [])[:8]
+        parent_name = _single_line(place.get("parent_name"), 48)
+        if aliases:
+            result["aliases"] = aliases
+        if parent_name:
+            result["parent_name"] = parent_name
+        return result
 
     def _observe_mobile_place_context(
         self,
@@ -284,6 +306,8 @@ class PlaceCognitiveMapMixin:
                 changed = True
             stored["name"] = place["name"]
             stored["kind"] = place["kind"]
+            stored["aliases"] = place["aliases"]
+            stored["parent_name"] = place["parent_name"]
             if place["radius_m"] > 0:
                 stored["radius_m"] = place["radius_m"]
             stored["last_seen_ts"] = timestamp
@@ -345,7 +369,7 @@ class PlaceCognitiveMapMixin:
         if not known:
             return ""
         place_text = "、".join(
-            f"{_single_line(item.get('name'), 48)}（{_PLACE_KIND_LABELS.get(_single_line(item.get('kind'), 24), '已标记地点')}）"
+            PlaceCognitiveMapMixin._format_place_cognitive_map_place_item(item)
             for item in known
             if isinstance(item, dict) and _single_line(item.get("name"), 48)
         )
@@ -359,3 +383,19 @@ class PlaceCognitiveMapMixin:
         if route_text:
             result += f"；近期地点间移动：{route_text}"
         return result
+
+    @staticmethod
+    def _format_place_cognitive_map_place_item(item: Any) -> str:
+        place = item if isinstance(item, dict) else {}
+        name = _single_line(place.get("name"), 48)
+        kind = _PLACE_KIND_LABELS.get(_single_line(place.get("kind"), 24), "已标记地点")
+        aliases = "、".join(
+            _single_line(alias, 40) for alias in list(place.get("aliases") or [])[:8] if _single_line(alias, 40)
+        )
+        parent_name = _single_line(place.get("parent_name"), 48)
+        details = [kind]
+        if aliases:
+            details.append(f"也叫{aliases}")
+        if parent_name:
+            details.append(f"位于{parent_name}")
+        return f"{name}（{'，'.join(details)}）"

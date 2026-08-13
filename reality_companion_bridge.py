@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import importlib
 import sys
 import time
 from typing import Any
@@ -75,62 +74,48 @@ class RealityCompanionBridgeMixin:
         visible = _single_line(text, 500)
         if not normalized_user_id or not visible:
             return {"recorded": False, "reason": "invalid_payload"}
-        binder = getattr(self, "_req041_reality_private_binding", None)
-        binding = binder(normalized_user_id, purpose="memory_write") if callable(binder) else None
-        if callable(binder) and (not isinstance(binding, dict) or binding.get("ok") is not True):
-            return {
-                "recorded": False,
-                "reason": _single_line(binding.get("code"), 120)
-                if isinstance(binding, dict) else "formal_private_identity_required",
-            }
-        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else None
-        if not isinstance(users, dict) or not isinstance(users.get(normalized_user_id), dict):
-            return {"recorded": False, "reason": "private_user_not_managed"}
-        timestamp = _safe_float(delivered_at, time.time(), 0.0) or time.time()
-        normalized_source = _single_line(source, 80) or "reality_touch_audio"
-        async with self._data_lock:
-            current = self._get_user(normalized_user_id)
-            current["last_companion_message"] = visible
-            current["last_companion_message_at"] = timestamp
-            current["last_proactive_message"] = visible
-            current["last_proactive_sent_at"] = timestamp
-            current["last_proactive_reason"] = normalized_source
-            current["last_proactive_action"] = "reality_touch_audio"
-            output = {
-                "text": visible,
-                "source": normalized_source,
-                "delivered_at": timestamp,
-            }
-            if isinstance(binding, dict):
-                root = self.data.setdefault("reality_touch_outputs", {})
-                root[_single_line(binding.get("store_key"), 160)] = output
-                current.pop("last_reality_touch_output", None)
-            else:
-                current["last_reality_touch_output"] = output
-            self._save_data_sync()
-        log_info = getattr(logger, "info", None)
-        if callable(log_info):
-            log_info(
-                "[PrivateCompanion] 已同步现实设备输出: scope=%s source=%s text=%s",
-                _single_line(binding.get("subject_ref"), 80) if isinstance(binding, dict) else "legacy",
-                normalized_source,
-                _single_line(visible, 120),
-            )
-        return {"recorded": True, "user_id": normalized_user_id, "delivered_at": timestamp}
+        api = self._reality_companion_api()
+        external_recorder = getattr(api, "record_reality_touch_output", None) if api is not None else None
+        if callable(external_recorder):
+            try:
+                return await external_recorder(
+                    normalized_user_id,
+                    visible,
+                    source=_single_line(source, 80) or "reality_touch_audio",
+                    delivered_at=delivered_at,
+                )
+            except Exception as exc:
+                logger.warning("[PrivateCompanion] 外部现实触及输出写入失败: %s", _single_line(exc, 160))
+                return {"recorded": False, "reason": "reality_companion_write_failed"}
+        return {"recorded": False, "reason": "reality_companion_unavailable"}
 
     def _format_reality_touch_continuity_context(self, user: dict[str, Any]) -> str:
+        user_id = self._reality_bridge_user_id(user)
+        api = self._reality_companion_api()
+        reader = getattr(api, "recent_output", None) if api is not None else None
+        output = None
+        if callable(reader):
+            try:
+                candidate = reader(user_id)
+                output = candidate if isinstance(candidate, dict) else None
+            except Exception:
+                output = None
+
+        # Read-only projection for installations that have not yet imported
+        # their historical reality state into the split plugin.
         binder = getattr(self, "_req041_reality_private_binding", None)
-        binding = binder(self._reality_bridge_user_id(user), purpose="memory_read") if callable(binder) else None
+        binding = binder(user_id, purpose="memory_read") if callable(binder) else None
         if callable(binder) and (not isinstance(binding, dict) or binding.get("ok") is not True):
             return ""
         continuity_user = binding.get("user") if isinstance(binding, dict) else user
         if not isinstance(continuity_user, dict):
             continuity_user = user
-        if isinstance(binding, dict):
-            root = self.data.get("reality_touch_outputs") if isinstance(getattr(self, "data", None), dict) else None
-            output = root.get(_single_line(binding.get("store_key"), 160)) if isinstance(root, dict) else None
-        else:
-            output = user.get("last_reality_touch_output") if isinstance(user, dict) else None
+        if not isinstance(output, dict):
+            if isinstance(binding, dict):
+                root = self.data.get("reality_touch_outputs") if isinstance(getattr(self, "data", None), dict) else None
+                output = root.get(_single_line(binding.get("store_key"), 160)) if isinstance(root, dict) else None
+            else:
+                output = user.get("last_reality_touch_output") if isinstance(user, dict) else None
         if not isinstance(output, dict):
             return ""
         text = _single_line(output.get("text"), 300)

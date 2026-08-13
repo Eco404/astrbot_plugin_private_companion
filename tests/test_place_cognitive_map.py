@@ -17,7 +17,15 @@ class _MapHarness(PlaceCognitiveMapMixin):
         self.events.append(event)
 
 
-def _location(name: str, kind: str = "custom", *, matched: bool = True) -> dict:
+def _location(
+    name: str,
+    kind: str = "custom",
+    *,
+    matched: bool = True,
+    confidence: str = "",
+    aliases: list[str] | None = None,
+    parent_name: str = "",
+) -> dict:
     return {
         "available": True,
         "place": {
@@ -25,6 +33,9 @@ def _location(name: str, kind: str = "custom", *, matched: bool = True) -> dict:
             "name": name,
             "kind": kind,
             "radius_m": 120,
+            "confidence": confidence,
+            "aliases": aliases or [],
+            "parent_name": parent_name,
         },
     }
 
@@ -65,3 +76,31 @@ def test_unmatched_place_does_not_create_any_durable_place_knowledge() -> None:
     assert result["available"] is False
     assert "place_cognitive_maps" not in harness.data or harness.data["place_cognitive_maps"] == {}
     assert harness.events == []
+
+
+def test_uncertain_boundary_does_not_create_arrival_memory() -> None:
+    harness = _MapHarness()
+
+    result = harness._observe_mobile_place_context(
+        "u1",
+        _location("公司", "work", confidence="boundary_uncertain"),
+        observed_at=100,
+    )
+
+    assert result["available"] is False
+    assert harness.events == []
+
+
+def test_place_aliases_and_parent_enter_semantic_map_without_coordinates() -> None:
+    harness = _MapHarness()
+
+    result = harness._observe_mobile_place_context(
+        "u1",
+        _location("办公室", "work", confidence="confirmed", aliases=["单位"], parent_name="科技园"),
+        observed_at=100,
+    )
+
+    rendered = harness._format_place_cognitive_map_context(result)
+    assert "办公室（工作地点，也叫单位，位于科技园）" in rendered
+    assert "latitude" not in repr(harness.data)
+    assert "longitude" not in repr(harness.data)

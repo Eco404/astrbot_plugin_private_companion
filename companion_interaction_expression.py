@@ -14,7 +14,7 @@ import re
 from typing import Any, Mapping
 
 try:
-    from .interaction_dynamics import project_interaction_dynamics
+    from .domains.affect.interaction_dynamics import project_interaction_dynamics
 except ImportError:  # pragma: no cover - direct module import in lightweight tests
     from interaction_dynamics import project_interaction_dynamics
 try:

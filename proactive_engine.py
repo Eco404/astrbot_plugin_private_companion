@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import gc
 import hashlib
 import html
 import importlib
@@ -57,7 +56,7 @@ from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.platform import PlatformStatus
 from astrbot.core.platform.platform_metadata import PlatformMetadata
-from astrbot.core.star.star_handler import EventType, star_handlers_registry
+from astrbot.core.star.star_handler import EventType
 from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
@@ -7845,256 +7844,28 @@ class ProactiveEngineMixin:
             return False
 
     def _comfyui_photo_available(self) -> bool:
-        if not self.enable_photo_text_action:
-            return False
-        if not self.comfyui_text2img_workflow_name and not self.comfyui_selfie_workflow_name:
-            return False
-        try:
-            module = self._get_comfyui_module()
-            return module is not None
-        except Exception:
-            return False
+        return bool(self.enable_photo_text_action) and self._image_companion_backend_available("comfyui")
 
     def _external_photo_available(self) -> bool:
-        if not self.enable_photo_text_action:
-            return False
-        configured = getattr(self, "external_image_api_endpoints", [])
-        has_configured_queue = isinstance(configured, list) and bool(configured)
-        queue_getter = getattr(self, "_external_image_api_endpoint_queue", None)
-        if callable(queue_getter):
-            try:
-                queue_available = bool(queue_getter())
-                if has_configured_queue:
-                    return queue_available
-                if queue_available:
-                    return True
-            except Exception:
-                if has_configured_queue:
-                    return False
-        configured = bool(
-            self.external_image_api_base_url
-            and self.external_image_api_key
-            and self.external_image_api_model
-        )
-        if configured:
-            checker = getattr(self, "_external_image_model_misconfiguration_note", None)
-            if callable(checker):
-                try:
-                    if not checker():
-                        return True
-                except Exception:
-                    return True
-            else:
-                return True
-        return self._backup_external_photo_available()
+        return bool(self.enable_photo_text_action) and self._image_companion_backend_available("external")
 
     def _backup_external_photo_unavailable_note(self) -> str:
         if not self.enable_photo_text_action:
             return "photo_action_disabled"
-        configured = getattr(self, "external_image_api_endpoints", [])
-        has_configured_queue = isinstance(configured, list) and bool(configured)
-        queue_getter = getattr(self, "_external_image_api_endpoint_queue", None)
-        endpoint_note = getattr(self, "_external_image_api_endpoint_unavailable_note", None)
-        if callable(queue_getter) and callable(endpoint_note):
-            try:
-                endpoints = queue_getter(include_incomplete=True)
-                if has_configured_queue:
-                    if len(endpoints) <= 1:
-                        return "missing_backup_endpoints"
-                    backup_endpoints = endpoints[1:]
-                    notes = [
-                        _single_line(endpoint_note(endpoint), 80)
-                        for endpoint in backup_endpoints
-                        if isinstance(endpoint, dict)
-                    ]
-                    if any(not note for note in notes):
-                        return ""
-                    return "all_backup_endpoints_unavailable" if notes else "missing_backup_endpoints"
-            except Exception:
-                if has_configured_queue:
-                    return "queue_error"
-        if not bool(getattr(self, "enable_backup_external_image_api", False)):
-            return "disabled"
-        missing = []
-        if not getattr(self, "backup_external_image_api_base_url", ""):
-            missing.append("base_url")
-        if not getattr(self, "backup_external_image_api_key", ""):
-            missing.append("api_key")
-        if not getattr(self, "backup_external_image_api_model", ""):
-            missing.append("model")
-        if missing:
-            return "missing_" + ",".join(missing)
-        checker = getattr(self, "_external_image_model_misconfiguration_note", None)
-        if not callable(checker):
-            return ""
-        keys = (
-            "external_image_api_platform",
-            "external_image_api_base_url",
-            "external_image_api_key",
-            "external_image_api_model",
-            "external_image_api_size",
-            "external_image_api_timeout_seconds",
-        )
-        backup_values = {
-            "external_image_api_platform": getattr(self, "backup_external_image_api_platform", "auto"),
-            "external_image_api_base_url": getattr(self, "backup_external_image_api_base_url", ""),
-            "external_image_api_key": getattr(self, "backup_external_image_api_key", ""),
-            "external_image_api_model": getattr(self, "backup_external_image_api_model", ""),
-            "external_image_api_size": getattr(self, "backup_external_image_api_size", "1024x1024"),
-            "external_image_api_timeout_seconds": getattr(self, "backup_external_image_api_timeout_seconds", 180),
-        }
-        old_values = {key: getattr(self, key, None) for key in keys}
-        try:
-            for key, value in backup_values.items():
-                setattr(self, key, value)
-            note = checker()
-            return _single_line(note, 120) if note else ""
-        except Exception:
-            return ""
-        finally:
-            for key, value in old_values.items():
-                setattr(self, key, value)
+        status = self._image_companion_status()
+        return _single_line(status.get("backup_external_note"), 120) or ""
 
     def _backup_external_photo_available(self) -> bool:
         return not bool(self._backup_external_photo_unavailable_note())
 
     def _sdgen_photo_available(self) -> bool:
-        if not self.enable_photo_text_action:
-            return False
-        try:
-            getter = getattr(getattr(self, "context", None), "get_registered_star", None)
-            if callable(getter):
-                for name in ("SDGen", "astrbot_plugin_sdgen"):
-                    plugin = getter(name)
-                    if plugin is not None and callable(getattr(plugin, "_call_t2i_api", None)):
-                        return True
-        except Exception:
-            pass
-        for obj in gc.get_objects():
-            try:
-                cls = obj.__class__
-                module = str(getattr(cls, "__module__", ""))
-                if "astrbot_plugin_sdgen" not in module:
-                    continue
-                if callable(getattr(obj, "_call_t2i_api", None)):
-                    return True
-            except Exception:
-                continue
-        return False
-
-    def _find_custom_photo_tool_handler(self) -> Any | None:
-        tool_name = _single_line(getattr(self, "custom_photo_tool_name", ""), 120)
-        if not tool_name:
-            return None
-
-        context = getattr(self, "context", None)
-        manager_getter = getattr(context, "get_llm_tool_manager", None)
-        if callable(manager_getter):
-            try:
-                manager = manager_getter()
-            except Exception as exc:
-                logger.warning(
-                    "[PrivateCompanion] 获取 LLM Tool Manager 失败: tool=%s error=%s",
-                    tool_name,
-                    _single_line(exc, 160),
-                )
-                manager = None
-            getter = getattr(manager, "get_func", None)
-            if callable(getter):
-                try:
-                    tool = getter(tool_name)
-                except Exception as exc:
-                    logger.warning(
-                        "[PrivateCompanion] 获取自定义生图函数工具失败: tool=%s error=%s",
-                        tool_name,
-                        _single_line(exc, 160),
-                    )
-                    tool = None
-                if tool is not None:
-                    handler = getattr(tool, "handler", None)
-                    if callable(handler):
-                        logger.info("[PrivateCompanion] 从 LLM 工具对象获取生图 handler: %s", tool_name)
-                        return handler
-                    if callable(tool):
-                        logger.info("[PrivateCompanion] 自定义生图工具对象本身可调用: %s", tool_name)
-                        return tool
-                    call = getattr(tool, "call", None)
-                    if callable(call):
-                        logger.warning(
-                            "[PrivateCompanion] 自定义生图工具未暴露 handler，回退 tool.call: %s",
-                            tool_name,
-                        )
-                        return call
-                    logger.warning(
-                        "[PrivateCompanion] 自定义生图工具不可调用: tool=%s type=%s",
-                        tool_name,
-                        type(tool).__name__,
-                    )
-                else:
-                    logger.warning("[PrivateCompanion] 自定义生图工具未注册: %s", tool_name)
-            elif manager is not None:
-                logger.warning("[PrivateCompanion] LLM Tool Manager 不支持 get_func: %s", tool_name)
-        else:
-            logger.warning("[PrivateCompanion] LLM Tool Manager 未初始化: %s", tool_name)
-
-        # 兼容旧版 AstrBot 或非 @llm_tool 的注册方式。
-        try:
-            for handler in star_handlers_registry:
-                handler_name = str(getattr(handler, "handler_name", "") or "")
-                if handler_name == tool_name:
-                    callback = getattr(handler, "handler", None) or getattr(handler, "func", None)
-                    if callable(callback):
-                        logger.info("[PrivateCompanion] 从旧注册表获取自定义生图 handler: %s", tool_name)
-                        return callback
-        except Exception as exc:
-            logger.debug("[PrivateCompanion] 查询旧工具注册表失败: tool=%s error=%s", tool_name, _single_line(exc, 120))
-        return None
+        return bool(self.enable_photo_text_action) and self._image_companion_backend_available("sdgen")
 
     def _custom_tool_photo_available(self) -> bool:
-        if not self.enable_photo_text_action:
-            return False
-        if not getattr(self, "custom_photo_tool_name", "").strip():
-            return False
-        return self._find_custom_photo_tool_handler() is not None
+        return bool(self.enable_photo_text_action) and self._image_companion_backend_available("tool_call")
 
     def _local_photo_generation_load_state(self, *, force_refresh: bool = False) -> dict[str, Any]:
-        now = _now_ts()
-        if not self.enable_local_photo_load_guard:
-            return {"enabled": False, "busy": False, "reason": "负载保护未启用", "sampled_at": now}
-        cached = getattr(self, "_local_photo_load_cache", {}) if isinstance(getattr(self, "_local_photo_load_cache", {}), dict) else {}
-        if cached and not force_refresh and now - _safe_float(cached.get("sampled_at"), 0) < 20:
-            return dict(cached)
-        state: dict[str, Any] = {
-            "enabled": True,
-            "available": False,
-            "busy": False,
-            "cpu_percent": 0.0,
-            "memory_percent": 0.0,
-            "reason": "",
-            "sampled_at": now,
-        }
-        try:
-            psutil = importlib.import_module("psutil")
-            cpu_percent = float(psutil.cpu_percent(interval=0.05))
-            memory_percent = float(getattr(psutil.virtual_memory(), "percent", 0.0) or 0.0)
-            state.update(
-                {
-                    "available": True,
-                    "cpu_percent": round(cpu_percent, 1),
-                    "memory_percent": round(memory_percent, 1),
-                }
-            )
-            reasons = []
-            if cpu_percent >= self.local_photo_cpu_busy_percent:
-                reasons.append(f"CPU {cpu_percent:.0f}%")
-            if memory_percent >= self.local_photo_memory_busy_percent:
-                reasons.append(f"内存 {memory_percent:.0f}%")
-            state["busy"] = bool(reasons)
-            state["reason"] = "、".join(reasons) if reasons else "负载正常"
-        except Exception as exc:
-            state["reason"] = f"无法读取系统负载:{exc.__class__.__name__}"
-        self._local_photo_load_cache = dict(state)
-        return state
+        return self._image_companion_load_state(force_refresh=force_refresh)
 
     def _local_photo_generation_busy_state(self, *, force_refresh: bool = False) -> dict[str, Any] | None:
         state = self._local_photo_generation_load_state(force_refresh=force_refresh)
@@ -8133,20 +7904,22 @@ class ProactiveEngineMixin:
                 "每日 Token 软限额已暂缓主动生图"
                 f"（今日已用约 {self._today_llm_token_total()} Token；软限额 {self.daily_token_soft_limit}）"
             )
-        if self.photo_generation_backend in {"external", "tool_call"}:
+        image_status = self._image_companion_status()
+        selected_backend = _single_line(image_status.get("selected_backend"), 30)
+        if selected_backend in {"external", "tool_call"}:
             return ""
-        if self.photo_generation_backend == "sdgen":
-            local_available = self._sdgen_photo_available()
+        if selected_backend == "sdgen":
+            local_available = bool((image_status.get("backends") or {}).get("sdgen"))
         else:
-            local_available = self._comfyui_photo_available() or (
-                self.photo_generation_backend == "auto" and self._sdgen_photo_available()
+            local_available = bool((image_status.get("backends") or {}).get("comfyui")) or (
+                selected_backend == "auto" and bool((image_status.get("backends") or {}).get("sdgen"))
             )
         if not local_available:
             return ""
         state = self._local_photo_generation_busy_state(force_refresh=force_refresh)
         if not state:
             return ""
-        if self.photo_generation_backend == "auto" and self._external_photo_available():
+        if selected_backend == "auto" and bool((image_status.get("backends") or {}).get("external")):
             return ""
         return (
             "电脑高负荷,已延后本地生图"
@@ -8182,26 +7955,15 @@ class ProactiveEngineMixin:
                     return False
         if self._daily_token_soft_limit_should_defer("photo_prompt"):
             return False
-        if self.photo_generation_backend == "comfyui":
-            if not self._comfyui_photo_available():
-                return False
-            if self._local_photo_generation_busy_state():
-                return False
-        elif self.photo_generation_backend == "sdgen":
-            if not self._sdgen_photo_available():
-                return False
-            if self._local_photo_generation_busy_state():
-                return False
-        elif self.photo_generation_backend == "external":
-            if not self._external_photo_available():
-                return False
-        elif self.photo_generation_backend == "tool_call":
-            if not self._custom_tool_photo_available():
-                return False
-        else:
-            comfyui_available = self._comfyui_photo_available() and not self._local_photo_generation_busy_state()
-            sdgen_available = self._sdgen_photo_available() and not self._local_photo_generation_busy_state()
-            if not (comfyui_available or sdgen_available or self._external_photo_available()):
+        if not self._image_companion_available():
+            return False
+        image_status = self._image_companion_status()
+        selected_backend = _single_line(image_status.get("selected_backend"), 30)
+        if selected_backend in {"comfyui", "sdgen"} and self._local_photo_generation_busy_state():
+            return False
+        if selected_backend == "auto" and self._local_photo_generation_busy_state():
+            backends = image_status.get("backends") if isinstance(image_status.get("backends"), dict) else {}
+            if not bool(backends.get("external") or backends.get("tool_call")):
                 return False
         photo_limit = self._effective_user_photo_daily_limit(user)
         if user and photo_limit == 0:

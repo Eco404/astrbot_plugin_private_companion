@@ -55,7 +55,23 @@ class _RecordingHost(RealityCompanionBridgeMixin):
         self.saved += 1
 
 
-def test_reality_output_is_recorded_as_cross_device_conversation_context() -> None:
+class _RealityApi:
+    def __init__(self) -> None:
+        self.output: dict = {}
+
+    async def record_reality_touch_output(self, _user_id: str, text: str, **kwargs) -> dict:
+        self.output = {
+            "text": text,
+            "source": kwargs.get("source", "reality_touch_audio"),
+            "delivered_at": kwargs.get("delivered_at"),
+        }
+        return {"recorded": True}
+
+    def recent_output(self, _user_id: str) -> dict:
+        return dict(self.output)
+
+
+def test_core_extension_does_not_record_reality_output_without_split_plugin() -> None:
     host = _RecordingHost()
     api = PrivateCompanionExtensionAPI(host)
 
@@ -67,18 +83,15 @@ def test_reality_output_is_recorded_as_cross_device_conversation_context() -> No
             delivered_at=1000,
         )
     )
-    user = host.data["users"]["u"]
-    user.update({"last_user_message": "早", "last_user_message_at": 1001})
-
-    assert result["recorded"] is True
-    assert user["last_companion_message"] == "早呀，该起床啦。"
-    assert user["last_companion_message_at"] == 1000
-    assert user["last_reality_touch_output"]["source"] == "wakeup_alarm"
-    assert host.saved == 1
+    assert result == {"recorded": False, "reason": "reality_companion_unavailable"}
+    assert "last_reality_touch_output" not in host.data["users"]["u"]
+    assert host.saved == 0
 
 
 def test_recent_reality_output_and_user_reply_form_one_continuous_exchange() -> None:
     host = _RecordingHost()
+    reality_api = _RealityApi()
+    host._reality_companion_api = lambda: reality_api
     delivered_at = time.time() - 3
     asyncio.run(
         host._record_reality_touch_output(
@@ -96,3 +109,14 @@ def test_recent_reality_output_and_user_reply_form_one_continuous_exchange() -> 
     assert "Bot 已通过现实音频设备对用户说：早呀，该起床啦。" in context
     assert "用户随后在私聊回应：早" in context
     assert "不要把它当作首次问候" in context
+
+
+def test_missing_reality_plugin_does_not_write_new_runtime_state_to_core() -> None:
+    host = _RecordingHost()
+    host._reality_companion_api = lambda: None
+
+    result = asyncio.run(host._record_reality_touch_output("u", "不会写进本体"))
+
+    assert result == {"recorded": False, "reason": "reality_companion_unavailable"}
+    assert "last_reality_touch_output" not in host.data["users"]["u"]
+    assert host.saved == 0

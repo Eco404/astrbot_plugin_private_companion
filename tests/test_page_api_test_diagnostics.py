@@ -210,6 +210,9 @@ class TestDiagnosticUiTests(unittest.TestCase):
             encoding="utf-8", errors="strict"
         )
         self.assertIn("function showTestDiagnosticDialog", script)
+        self.assertIn("function troubleshootingDiagnosticCategoryLabel", script)
+        self.assertIn('authorization: "认证或权限未通过"', script)
+        self.assertIn('provider: "Provider 未返回有效结果"', script)
         self.assertIn('data-test-result-source="troubleshooting"', script)
         self.assertIn('data-test-result-source="image-api"', script)
         self.assertIn('data-test-result-source="tts-provider"', script)

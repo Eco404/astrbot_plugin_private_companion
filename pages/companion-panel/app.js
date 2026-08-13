@@ -832,14 +832,47 @@ function discardAllFeatureChanges() {
   return true;
 }
 
+function imageCompanionInstalled() {
+  return state.overview?.companion_plugins?.image?.installed === true;
+}
+
+function realityCompanionInstalled() {
+  return state.overview?.companion_plugins?.reality?.installed === true;
+}
+
+function syncExternalCompanionVisibility() {
+  const imageInstalled = imageCompanionInstalled();
+  const imageTab = document.getElementById("modelsImageTab");
+  const imagePane = document.getElementById("modelsImagePane");
+  if (imageTab) imageTab.hidden = !imageInstalled;
+  if (imagePane && !imageInstalled) imagePane.hidden = true;
+  if (!imageInstalled && state.modelsSection === "image") state.modelsSection = "providers";
+  if (!imageInstalled && state.featureDomainFilter === "image_generation") {
+    state.featureDomainFilter = "all";
+  }
+
+  if (!realityCompanionInstalled()) {
+    if (state.experimentalSubpage === "enable_experimental_bluetooth_wakeup") {
+      state.experimentalSubpage = "";
+    }
+    state.realityTouch = null;
+    state.realityTouchError = "";
+  }
+  if (!imageInstalled && state.troubleshootingCategory === "image_generation") {
+    state.troubleshootingCategory = "all";
+  }
+}
+
 const pluginIntegrationAvailabilityRules = {
+  enable_photo_text_action: () => imageCompanionInstalled(),
+  enable_experimental_bluetooth_wakeup: () => realityCompanionInstalled(),
   enable_yesterday_screen_diary_context: () => Boolean(state.overview?.screen_companion?.available),
   enable_livingmemory_integration: () => Boolean(state.overview?.livingmemory?.compatible_available || state.overview?.livingmemory?.available || state.overview?.livingmemory?.memory_companion_active),
   enable_bilibili_integration: () => Boolean(state.overview?.bilibili?.available),
   enable_bilibili_boredom_watch: () => Boolean(state.overview?.bilibili?.available),
   enable_qzone_integration: () => state.overview?.qzone?.platform_supported !== false,
   enable_qzone_life_publish: () => state.overview?.qzone?.platform_supported !== false,
-  enable_qzone_generated_image_publish: () => state.overview?.qzone?.platform_supported !== false,
+  enable_qzone_generated_image_publish: () => imageCompanionInstalled() && state.overview?.qzone?.platform_supported !== false,
   enable_qzone_comment_inbox: () => state.overview?.qzone?.platform_supported !== false,
   enable_qzone_emotional_vent_publish: () => Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
 };
@@ -6433,6 +6466,7 @@ async function loadTroubleshooting(options = {}) {
   state.troubleshooting = data || null;
   if (overview) {
     state.overview = overview;
+    syncExternalCompanionVisibility();
     syncFeatureDraftFromOverview(overview);
   }
   if (!silent) renderTroubleshooting();
@@ -6450,6 +6484,11 @@ async function loadDailyReview(force = false) {
 }
 
 async function loadRealityTouch(force = false) {
+  if (!realityCompanionInstalled()) {
+    state.realityTouch = null;
+    state.realityTouchError = "";
+    return null;
+  }
   if (state.realityTouchLoading && !force) return state.realityTouch;
   if (state.realityTouch && !force) return state.realityTouch;
   state.realityTouchLoading = true;
@@ -6509,6 +6548,7 @@ function applyOverviewData(overview) {
     resetBookshelfSelection();
   }
   state.overview = overview;
+  syncExternalCompanionVisibility();
   if (!state.setupGuideOpen) {
     state.setupGuideDraft = null;
     state.setupGuideProviderTests = {};
@@ -6857,6 +6897,11 @@ async function loadTtsProviderConfigs(force = false) {
 }
 
 async function loadImageApiStatus(force = false) {
+  if (!imageCompanionInstalled()) {
+    state.imageApiStatus = null;
+    state.lazyLoaded.imageApiStatus = false;
+    return null;
+  }
   if (state.lazyLoaded.imageApiStatus && !force) return state.imageApiStatus;
   const status = await fetchJson("/image_api/status");
   state.imageApiStatus = status || { items: [] };
@@ -7904,6 +7949,10 @@ const setupGuideAdvancedItems = {
   ],
 };
 
+function visibleSetupGuideAdvancedItems(blockId) {
+  return (setupGuideAdvancedItems[blockId] || []).filter((item) => visibleConfigKey(item.key));
+}
+
 const setupGuideAdvancedDynamicFields = new Set(
   Object.values(setupGuideAdvancedItems)
     .flat()
@@ -8310,7 +8359,7 @@ function setupGuideStepSummaryHtml(items) {
 }
 
 function setupGuideAdvancedBlockHtml(block) {
-  const items = setupGuideAdvancedItems[block.id] || [];
+  const items = visibleSetupGuideAdvancedItems(block.id);
   const enabledCount = items.filter((item) => Boolean(setupGuideFieldValue(item.key))).length;
   const selected = state.setupGuideAdvancedBlock === block.id;
   const icons = {
@@ -8367,7 +8416,7 @@ function setupGuideAdvancedHomeHtml() {
 }
 
 function setupGuideAdvancedStepIndex(blockId = state.setupGuideAdvancedBlock) {
-  const items = setupGuideAdvancedItems[blockId] || [];
+  const items = visibleSetupGuideAdvancedItems(blockId);
   if (!items.length) return 0;
   const raw = Number(state.setupGuideAdvancedStep || 0);
   const value = Number.isFinite(raw) ? raw : 0;
@@ -8375,11 +8424,11 @@ function setupGuideAdvancedStepIndex(blockId = state.setupGuideAdvancedBlock) {
 }
 
 function setupGuideAdvancedEnabledCount(blockId) {
-  return (setupGuideAdvancedItems[blockId] || []).filter((item) => Boolean(setupGuideFieldValue(item.key))).length;
+  return visibleSetupGuideAdvancedItems(blockId).filter((item) => Boolean(setupGuideFieldValue(item.key))).length;
 }
 
 function setupGuideAdvancedEnabledSummaryHtml(blockId) {
-  const items = setupGuideAdvancedItems[blockId] || [];
+  const items = visibleSetupGuideAdvancedItems(blockId);
   const enabledItems = items.filter((item) => Boolean(setupGuideFieldValue(item.key)));
   return `
     <div class="setup-guide-advanced-summary">
@@ -8391,7 +8440,7 @@ function setupGuideAdvancedEnabledSummaryHtml(blockId) {
 }
 
 function setupGuideAdvancedStepProgressHtml(blockId, activeIndex) {
-  const items = setupGuideAdvancedItems[blockId] || [];
+  const items = visibleSetupGuideAdvancedItems(blockId);
   return `
     <div class="setup-guide-advanced-step-progress" aria-label="板块内问卷进度">
       ${items.map((item, index) => {
@@ -8442,7 +8491,7 @@ function setupGuideModeHomeHtml() {
 
   const advancedIcons = { common: "🔧", private: "💬", group: "👥", proactive: "🌟" };
   const advancedBlocks = setupGuideAdvancedBlocks.map((block) => {
-    const items = setupGuideAdvancedItems[block.id] || [];
+    const items = visibleSetupGuideAdvancedItems(block.id);
     return {
       id: block.id,
       title: block.title,
@@ -8525,7 +8574,8 @@ function setupGuideAdvancedSettingHtml(setting) {
 }
 
 function setupGuideAdvancedSettingVisible(setting) {
-  if (!setting || typeof setting.showWhen !== "function") return true;
+  if (!setting || !visibleConfigKey(setting.key)) return false;
+  if (typeof setting.showWhen !== "function") return true;
   try {
     return Boolean(setting.showWhen(setupGuideDraft()));
   } catch (_) {
@@ -8614,7 +8664,7 @@ function setupGuideAdvancedQuestionnaireHtml() {
   const blockId = state.setupGuideAdvancedBlock || "";
   const block = setupGuideAdvancedBlockMap[blockId];
   if (!block) return setupGuideAdvancedHomeHtml();
-  const items = setupGuideAdvancedItems[blockId] || [];
+  const items = visibleSetupGuideAdvancedItems(blockId);
   if (!items.length) {
     return `
       <div class="setup-guide-question">
@@ -8654,7 +8704,7 @@ function setupGuideAdvancedQuestionnaireHtml() {
 
 function setupGuideAdvancedPayload(blockId = state.setupGuideAdvancedBlock) {
   const overviewSettings = state.overview?.settings || {};
-  const items = setupGuideAdvancedItems[blockId] || [];
+  const items = visibleSetupGuideAdvancedItems(blockId);
   const draft = setupGuideDraft();
   const features = {};
   const settings = {};
@@ -8698,8 +8748,7 @@ async function saveSetupGuideAdvancedBlock(control = null) {
       control,
     );
     if (result) {
-      state.overview = result;
-      syncFeatureDraftFromOverview(result);
+      applyOverviewData(result);
       state.providerConfigMode = result.settings?.provider_config_mode || state.providerConfigMode;
       showToast(configPersistenceFailed(result) ? "已写入运行态，但配置持久化可能失败" : `已保存${block.title}`);
       return true;
@@ -10104,7 +10153,7 @@ function setupGuideModalHtml() {
   const index = setupGuideStepIndex();
   const step = setupGuideSteps[index] || setupGuideSteps[0];
   const advancedBlock = setupGuideAdvancedBlockMap[state.setupGuideAdvancedBlock || ""];
-  const advancedItems = setupGuideAdvancedItems[state.setupGuideAdvancedBlock || ""] || [];
+  const advancedItems = visibleSetupGuideAdvancedItems(state.setupGuideAdvancedBlock || "");
   const advancedStepIndex = setupGuideAdvancedStepIndex(state.setupGuideAdvancedBlock || "");
   const advancedLastStep = advancedBlock && advancedItems.length ? advancedStepIndex >= advancedItems.length - 1 : false;
   const proactiveTestPassed = setupGuideProactiveTestPassed();
@@ -10140,7 +10189,7 @@ function setupGuideModalHtml() {
         ${mode === "home" || mode === "advanced" ? "" : `<div class="setup-guide-progress" aria-label="引导进度">
           ${mode === "advanced" ? setupGuideAdvancedBlocks.map((item) => {
             const active = item.id === state.setupGuideAdvancedBlock;
-            const done = (setupGuideAdvancedItems[item.id] || []).some((feature) => Boolean(setupGuideFieldValue(feature.key)));
+            const done = visibleSetupGuideAdvancedItems(item.id).some((feature) => Boolean(setupGuideFieldValue(feature.key)));
             return `
             <button type="button" class="${[active ? "active" : "", done ? "done" : ""].filter(Boolean).join(" ")}" data-setup-guide-advanced-block="${escapeHtml(item.id)}" title="${escapeHtml(item.title)}"></button>
           `;
@@ -11137,8 +11186,14 @@ function troubleshootingCategoryInfo(category) {
   return troubleshootingCategories[category] || troubleshootingCategories.all;
 }
 
+function visibleTroubleshootingCategories() {
+  return Object.entries(troubleshootingCategories).filter(([key]) => (
+    key !== "image_generation" || imageCompanionInstalled()
+  ));
+}
+
 function troubleshootingCategoryPickerMarkup(selected) {
-  return Object.entries(troubleshootingCategories).map(([key, item]) => `
+  return visibleTroubleshootingCategories().map(([key, item]) => `
     <button type="button" class="diagnostic-category ${key === selected ? "is-active" : ""}" data-troubleshooting-category="${escapeHtml(key)}" role="tab" aria-selected="${key === selected}">
       <b>${escapeHtml(item.label)}</b><span>${escapeHtml(item.description)}</span>
     </button>
@@ -11216,7 +11271,7 @@ async function navigateToDailyReviewConfig(key) {
     requestAnimationFrame(() => focusConfigControl(key, $("#experimentalRoot") || document));
     return;
   }
-  if (experimentalFeatureKeys.includes(key)) {
+  if (visibleExperimentalFeatureKeys().includes(key)) {
     state.experimentalSubpage = key;
     if (state.activeTab !== "experimental") switchTab("experimental");
     else renderExperimentalPage();
@@ -11805,7 +11860,7 @@ function troubleshootingFaqMarkup(data = {}, category = "all") {
         { label: "看最近注入", anchor: "troubleshootingPromptInjections" },
       ],
     },
-  ];
+  ].filter((item) => item.category !== "image_generation" || imageCompanionInstalled());
   const visibleItems = category === "all" ? items : items.filter((item) => item.category === category);
   if (!visibleItems.length) return `<div class="empty small">当前问题类型暂时没有额外说明；先运行上方对应的链路测试。</div>`;
   return visibleItems.map((item, index) => `
@@ -12126,7 +12181,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       text: "检查技能、群黑话、关系网、本地陪伴画像和表达学习里的模型理解杂音；只给建议，不自动修改",
       button: "运行模型排障",
     },
-  ];
+  ].filter((test) => test.category !== "image_generation" || imageCompanionInstalled());
   const visibleTests = category === "all" ? tests : tests.filter((test) => test.category === category);
   const testsMarkup = visibleTests.map((test) => {
     const result = results?.[test.type]
@@ -12197,7 +12252,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       </section>
     `;
   }).join("");
-  const photoHistory = ["all", "image_generation"].includes(category)
+  const photoHistory = imageCompanionInstalled() && ["all", "image_generation"].includes(category)
     ? troubleshootingRecentPhotoGenerationMarkup(recentPhotoGenerations)
     : "";
   const empty = visibleTests.length ? "" : `<div class="empty small">当前问题类型没有可直接运行的链路测试。</div>`;
@@ -12232,6 +12287,21 @@ function troubleshootingChainDetailText(test, result, hasResult) {
     return result.detail || `本地发现 ${localCount} 条候选，模型给出 ${modelCount} 条建议`;
   }
   return result.detail || test.text;
+}
+
+function troubleshootingDiagnosticCategoryLabel(category) {
+  const value = String(category || "").trim();
+  const labels = {
+    none: "无",
+    configuration: "配置不完整或不兼容",
+    authorization: "认证或权限未通过",
+    timeout: "调用超时",
+    unavailable: "依赖服务不可用",
+    validation: "测试目标或参数无效",
+    provider: "Provider 未返回有效结果",
+    unknown: "未能完成诊断",
+  };
+  return labels[value.toLowerCase()] || value || "未分类";
 }
 
 function troubleshootingDiagnosticEnvelopeMarkup(result = {}) {
@@ -20259,8 +20329,8 @@ function selectBookshelfBook(bookId) {
       state.creativeEditing = false;
       state.selectedBookSpreadIndex = 0;
       if (book.kind === "diary") {
-        const entries = Array.isArray(book.entries) ? book.entries : [];
-        const latest = entries[entries.length - 1] || {};
+        const entries = sortedDiaryEntries(book.entries);
+        const latest = entries[0] || {};
         state.selectedDiaryDate = latest.date || "";
         state.selectedDiaryKey = latest.entry_key || latest.date || "";
       }
@@ -20273,6 +20343,29 @@ function selectBookshelfBook(bookId) {
       if (book.kind === "creative") void ensureCreativeProjectDetail(book);
     },
   });
+}
+
+function diaryEntrySortValue(entry) {
+  const row = entry && typeof entry === "object" ? entry : {};
+  const date = String(row.date || "").trim();
+  const timestamp = String(row.generated_at || row.updated_at || row.created_at || "").trim();
+  return `${date}\u0000${timestamp}`;
+}
+
+function sortedDiaryEntries(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .map((entry, index) => ({ entry, index }))
+    .sort((left, right) => {
+      const byTime = diaryEntrySortValue(right.entry).localeCompare(diaryEntrySortValue(left.entry));
+      return byTime || right.index - left.index;
+    })
+    .map(({ entry }) => entry);
+}
+
+function diaryEntryTimeLabel(entry) {
+  const timestamp = String(entry?.generated_at || entry?.updated_at || entry?.created_at || "").trim();
+  const matched = timestamp.match(/(?:T|\s)(\d{1,2}:\d{2})(?::\d{2})?/);
+  return matched?.[1] || "";
 }
 
 function selectDiaryEntry(value) {
@@ -20304,13 +20397,16 @@ function renderBookDetailPanel() {
     jm_album: "私密阅读",
   }[book.kind] || "书";
   const entryBook = ["diary", "browsing"].includes(book.kind || "");
-  const diaryEntries = entryBook && Array.isArray(book.entries) ? book.entries : [];
-  const selectedDiaryDate = state.selectedDiaryDate || diaryEntries[diaryEntries.length - 1]?.date || "";
-  const selectedDiaryKey = state.selectedDiaryKey || diaryEntries[diaryEntries.length - 1]?.entry_key || selectedDiaryDate;
+  const diaryEntries = entryBook && Array.isArray(book.entries)
+    ? (book.kind === "diary" ? sortedDiaryEntries(book.entries) : book.entries)
+    : [];
+  const fallbackEntry = book.kind === "diary" ? diaryEntries[0] : diaryEntries[diaryEntries.length - 1];
+  const selectedDiaryDate = state.selectedDiaryDate || fallbackEntry?.date || "";
+  const selectedDiaryKey = state.selectedDiaryKey || fallbackEntry?.entry_key || selectedDiaryDate;
   const diaryEntry = (book.kind === "diary"
     ? diaryEntries.find((entry) => String(entry.entry_key || entry.date || "") === selectedDiaryKey)
     : diaryEntries.find((entry) => entry.date === selectedDiaryDate))
-    || diaryEntries[diaryEntries.length - 1]
+    || fallbackEntry
     || null;
   if (entryBook && diaryEntry && state.selectedDiaryDate !== diaryEntry.date) {
     state.selectedDiaryDate = diaryEntry.date;
@@ -20328,7 +20424,7 @@ function renderBookDetailPanel() {
       <label class="diary-date-picker">
         <span>${book.kind === "diary" ? "日期" : "记录"}</span>
         <select data-diary-date>
-          ${diaryEntries.slice().reverse().map((entry) => {
+          ${(book.kind === "diary" ? diaryEntries : diaryEntries.slice().reverse()).map((entry) => {
             const value = book.kind === "diary" ? String(entry.entry_key || entry.date || "") : String(entry.date || "");
             const selected = book.kind === "diary" ? value === state.selectedDiaryKey : entry.date === state.selectedDiaryDate;
             return `<option value="${escapeHtml(value)}"${selected ? " selected" : ""}>${escapeHtml(entry.date || "某天")}</option>`;
@@ -20576,10 +20672,14 @@ function renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro, readin
 }
 
 function renderDiaryBookReader(book, kindLabel, entries, selectedEntry) {
- const rows = Array.isArray(entries) ? entries : [];
- const current = selectedEntry || rows[rows.length - 1] || {};
- const currentDate = current.date || state.selectedDiaryDate || "";
+  const rows = sortedDiaryEntries(entries);
+  const current = selectedEntry || rows[0] || {};
+  const currentDate = current.date || state.selectedDiaryDate || "";
   const currentKey = String(current.entry_key || currentDate || state.selectedDiaryKey || "");
+  const uniqueDayCount = new Set(rows.map((entry) => String(entry?.date || "").trim()).filter(Boolean)).size;
+  const countLabel = uniqueDayCount && uniqueDayCount !== rows.length
+    ? `${rows.length} 篇 · ${uniqueDayCount} 天`
+    : `${rows.length} 篇`;
   const tags = Array.isArray(current.tags) && current.tags.length
     ? `<div class="book-tags">${current.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>`
     : "";
@@ -20593,7 +20693,7 @@ function renderDiaryBookReader(book, kindLabel, entries, selectedEntry) {
       </nav>
       <div class="reader-toolbar">
         <button type="button" data-book-back>返回简介</button>
-        <span>${escapeHtml(kindLabel)} · ${escapeHtml(rows.length)} 天</span>
+        <span>${escapeHtml(kindLabel)} · ${escapeHtml(countLabel)}</span>
         <button type="button" data-book-close>收回书柜</button>
       </div>
       <div class="diary-reader-shell">
@@ -20603,12 +20703,18 @@ function renderDiaryBookReader(book, kindLabel, entries, selectedEntry) {
             <b>${escapeHtml(rows.length)}</b>
           </header>
           <div class="diary-date-list">
-           ${rows.slice().reverse().map((entry) => `
-              <button type="button" data-diary-jump="${escapeHtml(entry.entry_key || entry.date || "")}" class="${String(entry.entry_key || entry.date || "") === currentKey ? "is-active" : ""}">
-                <b>${escapeHtml(entry.date || "某天")}</b>
-                <span>${escapeHtml(shortName(entry.intro || entry.content || "没有摘要", 34))}</span>
+            ${rows.map((entry) => {
+              const timeLabel = diaryEntryTimeLabel(entry);
+              const entryTitle = entry.intro || entry.content || "没有摘要";
+              return `
+              <button type="button" data-diary-jump="${escapeHtml(entry.entry_key || entry.date || "")}" class="${String(entry.entry_key || entry.date || "") === currentKey ? "is-active" : ""}" aria-current="${String(entry.entry_key || entry.date || "") === currentKey ? "true" : "false"}">
+                <span class="diary-date-list-head">
+                  <b>${escapeHtml(entry.date || "某天")}</b>
+                  ${timeLabel ? `<small>${escapeHtml(timeLabel)}</small>` : ""}
+                </span>
+                <span title="${escapeHtml(entryTitle)}">${escapeHtml(shortName(entryTitle, 58))}</span>
               </button>
-            `).join("")}
+            `; }).join("")}
           </div>
         </aside>
         <section class="reader-paper diary-paper">
@@ -20620,7 +20726,7 @@ function renderDiaryBookReader(book, kindLabel, entries, selectedEntry) {
           ${tags}
           <div class="reader-content diary-reader-content">${formatBookContent(current.content || current.intro || "这一天的日记暂时没有正文。")}</div>
           <footer class="reader-page-foot">
-            <span>${escapeHtml(book.created || "夹层日记")}</span>
+            <span>${escapeHtml(current.generated_at ? `写于 ${current.generated_at}` : (currentDate ? `写于 ${currentDate}` : "夹层日记"))}</span>
             <button type="button" class="danger-outline" data-book-delete
               data-book-kind="diary"
              data-book-id="${escapeHtml(book.id || "")}"
@@ -24543,24 +24649,46 @@ function featureMatchesQueryFilter(key, query) {
   return `${featureSearchText(key)} ${featureGroupForKey(key)} ${stageText}`.toLowerCase().includes(query);
 }
 
+const imageGenerationFeatureUses = {
+  enable_photo_text_action: "主动/用户生图",
+  enable_qzone_integration: "空间配图",
+  enable_creative_writing: "作品封面",
+};
+
+function imageGenerationFeatureUse(key) {
+  return imageGenerationFeatureUses[topLevelFeatureKey(key)] || "";
+}
+
+function featureMatchesDomainFilter(key, domain = state.featureDomainFilter) {
+  if (domain === "all") return true;
+  if (domain === "image_generation") {
+    return imageCompanionInstalled() && Boolean(imageGenerationFeatureUse(key));
+  }
+  return featureGroupForKey(key) === domain;
+}
+
 function featureMatchesCurrentFilters(key, { ignore = "" } = {}) {
   const query = ($("#featureFilter")?.value || "").trim().toLowerCase();
   if (ignore !== "query" && !featureMatchesQueryFilter(key, query)) return false;
-  if (ignore !== "domain" && state.featureDomainFilter !== "all" && featureGroupForKey(key) !== state.featureDomainFilter) return false;
+  if (ignore !== "domain" && !featureMatchesDomainFilter(key)) return false;
   if (ignore !== "stage" && state.featureStageFilter !== "all" && !featureStagesForKey(key).includes(state.featureStageFilter)) return false;
   if (ignore !== "status" && !featureMatchesStatusFilter(key)) return false;
   return true;
 }
 
 function renderFeatureFilterControls(groups, allKeys, visibleCount) {
-  const domainOptions = [{ title: "all", label: "全部领域" }, ...groups.map((group) => ({ title: group.title, label: group.title }))];
+  const domainOptions = [
+    { title: "all", label: "全部领域" },
+    ...(imageCompanionInstalled() ? [{ title: "image_generation", label: "生图", capability: true }] : []),
+    ...groups.map((group) => ({ title: group.title, label: group.title })),
+  ];
   $("#featureDomainFilters").innerHTML = domainOptions.map((option) => {
     const count = allKeys.filter((key) => (
-      (option.title === "all" || featureGroupForKey(key) === option.title)
+      featureMatchesDomainFilter(key, option.title)
       && featureMatchesCurrentFilters(key, { ignore: "domain" })
     )).length;
     const active = state.featureDomainFilter === option.title;
-    return `<button type="button" data-feature-domain-filter="${escapeHtml(option.title)}" class="${active ? "is-active" : ""}" role="tab" aria-selected="${active ? "true" : "false"}"><span>${escapeHtml(option.label)}</span><small>${count}</small></button>`;
+    return `<button type="button" data-feature-domain-filter="${escapeHtml(option.title)}" class="${[active ? "is-active" : "", option.capability ? "is-capability" : ""].filter(Boolean).join(" ")}" role="tab" aria-selected="${active ? "true" : "false"}"><span>${escapeHtml(option.label)}</span><small>${count}</small></button>`;
   }).join("");
 
   const stageOptions = [{ id: "all", label: "全部阶段" }, ...featureStageDefinitions];
@@ -24690,7 +24818,7 @@ function renderFeatureSwitches() {
   );
 
   const board = groups.map((group) => {
-    if (state.featureDomainFilter !== "all" && state.featureDomainFilter !== group.title) return "";
+    if (!["all", "image_generation", group.title].includes(state.featureDomainFilter)) return "";
     const visibleKeys = group.keys.filter((key) => {
       if (!visibleFeatureSwitchKey(key)) return false;
       return featureMatchesCurrentFilters(key);
@@ -25210,6 +25338,7 @@ function featureSwitchItem(key) {
   const stageTags = featureStagesForKey(key)
     .map((stage) => `<span data-feature-stage="${escapeHtml(stage)}">${escapeHtml(featureStageLabel(stage, true))}</span>`)
     .join("");
+  const imageUse = state.featureDomainFilter === "image_generation" ? imageGenerationFeatureUse(key) : "";
   return `
     <section class="feature-switch-item has-feature-detail ${displayOn ? "on" : "off"} ${locked ? "locked" : ""}" data-feature-card-open="${escapeHtml(key)}" title="${escapeHtml(locked ? "仅保留主动能力开启时，本功能在本插件普通被动链路中被跳过，原配置会保留。" : featureDescription(key))}">
       <label class="feature-toggle-hit" aria-label="${escapeHtml(featureLabel(key))}">
@@ -25222,7 +25351,7 @@ function featureSwitchItem(key) {
           <small>${escapeHtml(featurePublicKey(key))}</small>
           <span class="feature-open-hint">查看配置 <span aria-hidden="true">›</span></span>
         </button>
-        <div class="feature-stage-tags" aria-label="作用阶段">${stageTags}</div>
+        <div class="feature-stage-tags" aria-label="作用阶段">${imageUse ? `<span class="feature-image-use">${escapeHtml(imageUse)}</span>` : ""}${stageTags}</div>
         <div class="feature-switch-meta">
           <span class="feature-state-text">${escapeHtml(stateText)}</span>
           ${locked ? `<span class="feature-lock-note">${escapeHtml(lockNote)}</span>` : ""}
@@ -29922,13 +30051,14 @@ function renderTtsModelConfig() {
 }
 
 function syncModelsSectionControls() {
-  const sections = ["providers", "tts", "image"];
+  const sections = imageCompanionInstalled() ? ["providers", "tts", "image"] : ["providers", "tts"];
   const requested = String(state.modelsSection || "providers");
   const section = sections.includes(requested) ? requested : "providers";
   state.modelsSection = section;
   const tablist = document.querySelector(".models-subnav");
   if (tablist) tablist.dataset.activeSection = section;
   document.querySelectorAll("[data-models-section]").forEach((button) => {
+    if (button.dataset.modelsSection === "image") button.hidden = !imageCompanionInstalled();
     const active = button.dataset.modelsSection === section;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", active ? "true" : "false");
@@ -29957,7 +30087,7 @@ function syncModelsSectionControls() {
   if (tablist && tablist.dataset.keyboardBound !== "1") {
     tablist.addEventListener("keydown", (event) => {
       if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-      const tabs = [...tablist.querySelectorAll("[data-models-section]")];
+      const tabs = [...tablist.querySelectorAll("[data-models-section]")].filter((tab) => !tab.hidden);
       const current = Math.max(0, tabs.indexOf(document.activeElement));
       const next = event.key === "Home" ? 0
         : event.key === "End" ? tabs.length - 1
@@ -29969,12 +30099,13 @@ function syncModelsSectionControls() {
     tablist.dataset.keyboardBound = "1";
   }
   document.querySelectorAll("[data-models-pane]").forEach((pane) => {
-    pane.hidden = pane.dataset.modelsPane !== section;
+    pane.hidden = pane.dataset.modelsPane !== section || (pane.dataset.modelsPane === "image" && !imageCompanionInstalled());
   });
   return section;
 }
 
 function renderImageModelConfig() {
+  if (!imageCompanionInstalled()) return;
   const summary = document.getElementById("imageModelSummary");
   const editor = document.getElementById("imageModelEditor");
   if (!summary || !editor) return;
@@ -31251,6 +31382,12 @@ const experimentalFeatureKeys = [
   "enable_reaction_expression_experiment",
 ];
 
+function visibleExperimentalFeatureKeys() {
+  return experimentalFeatureKeys.filter((key) => (
+    key !== "enable_experimental_bluetooth_wakeup" || realityCompanionInstalled()
+  ));
+}
+
 const PERSONA_STYLE_SCENARIO_BATCH_SIZE = 3;
 const PERSONA_STYLE_REFERENCE_LIMIT = 4000;
 
@@ -31658,7 +31795,7 @@ function renderExperimentalCardVisual(key) {
 
 function renderExperimentalOverviewMap() {
   const features = state.featureDraft || {};
-  const nodes = experimentalFeatureKeys.map((key) => {
+  const nodes = visibleExperimentalFeatureKeys().map((key) => {
     const meta = experimentalFeatureMeta[key];
     const spec = experimentalVisualSpec(key);
     const signal = experimentalRuntimeSignals(key);
@@ -31844,7 +31981,7 @@ function renderExperimentalPage() {
   const root = $("#experimentalRoot");
   if (!root) return;
   const subpage = state.experimentalSubpage || "";
-  if (subpage && experimentalFeatureKeys.includes(subpage)) {
+  if (subpage && visibleExperimentalFeatureKeys().includes(subpage)) {
     root.innerHTML = renderExperimentalSubpage(subpage);
     bindExperimentalSubpageActions(subpage);
     if (subpage === "enable_experimental_bluetooth_wakeup" && !state.realityTouch && !state.realityTouchLoading) {
@@ -31906,7 +32043,8 @@ function reflectExperimentalToggleChange(key, enabled) {
 
 function renderExperimentalOverview() {
   const features = state.featureDraft || {};
-  const cards = experimentalFeatureKeys.map((key) => {
+  const featureKeys = visibleExperimentalFeatureKeys();
+  const cards = featureKeys.map((key) => {
     const meta = experimentalFeatureMeta[key];
     const enabled = toBool(features[key]);
     return `
@@ -31932,7 +32070,7 @@ function renderExperimentalOverview() {
       </article>
     `;
   }).join("");
-  const enabledCount = experimentalFeatureKeys.filter((key) => toBool(features[key])).length;
+  const enabledCount = featureKeys.filter((key) => toBool(features[key])).length;
   return `
     <div class="subpage experimental-page">
       <div class="section-head">
@@ -31940,7 +32078,7 @@ function renderExperimentalOverview() {
           <h2>实验性功能</h2>
           <span class="muted">运行时实验能力在这里开启；配置和整理类工具作为入口单独使用。</span>
         </div>
-        <div class="actions compact"><span class="module-badge">${enabledCount} / ${experimentalFeatureKeys.length} 开启</span></div>
+        <div class="actions compact"><span class="module-badge">${enabledCount} / ${featureKeys.length} 开启</span></div>
       </div>
       <div class="experimental-overview-note">
         <b>建议一次只验证一项</b>
@@ -35493,7 +35631,8 @@ function switchTab(tabName) {
 }
 
 function openModelConfigSection(section) {
-  const target = ["image", "tts"].includes(String(section || "")) ? String(section) : "providers";
+  const requested = String(section || "");
+  const target = requested === "tts" || (requested === "image" && imageCompanionInstalled()) ? requested : "providers";
   const previousSection = state.modelsSection;
   state.modelsSection = target;
   switchTab("models");
@@ -35696,7 +35835,7 @@ document.addEventListener("click", async (event) => {
     if (state.setupGuideMode === "advanced") {
       const button = target.closest("[data-setup-guide-next]");
       const blockId = state.setupGuideAdvancedBlock || "";
-      const items = setupGuideAdvancedItems[blockId] || [];
+      const items = visibleSetupGuideAdvancedItems(blockId);
       const stepIndex = setupGuideAdvancedStepIndex(blockId);
       if (items.length && stepIndex < items.length - 1) {
         state.setupGuideAdvancedStep = stepIndex + 1;
@@ -35731,7 +35870,7 @@ document.addEventListener("click", async (event) => {
   const advancedStepTarget = target.closest("[data-setup-guide-advanced-step]");
   if (advancedStepTarget) {
     const blockId = state.setupGuideAdvancedBlock || "";
-    const items = setupGuideAdvancedItems[blockId] || [];
+    const items = visibleSetupGuideAdvancedItems(blockId);
     const index = Number(advancedStepTarget.dataset.setupGuideAdvancedStep || 0);
     if (items.length) {
       state.setupGuideAdvancedStep = Math.max(0, Math.min(items.length - 1, Number.isFinite(index) ? index : 0));

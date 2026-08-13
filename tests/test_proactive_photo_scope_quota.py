@@ -28,8 +28,16 @@ class _AvailabilityHarness(ProactiveEngineMixin):
         return False
 
     @staticmethod
-    def _external_photo_available() -> bool:
+    def _image_companion_available() -> bool:
         return True
+
+    @staticmethod
+    def _image_companion_status() -> dict[str, Any]:
+        return {
+            "available": True,
+            "selected_backend": "external",
+            "backends": {"external": True},
+        }
 
     def _effective_user_photo_daily_limit(self, _user: dict[str, Any] | None = None) -> int:
         return self.legacy_limit
