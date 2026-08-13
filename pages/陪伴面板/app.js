@@ -418,7 +418,7 @@ const setupGuideQuickProviderMeta = {
   CREATIVE_MODEL_PROVIDER_ID: {
     requirement: "可选测试",
     tone: "recommended",
-    intro: "日记、梦境、私下创作、生图提示词等表达类任务会优先走它。首次引导可先选择，不强制测试。",
+    intro: "日记、梦境和生图提示词等表达类任务会优先走它；独立创作扩展安装后，创作项目模型请在 astrbot_plugin_content_companion 配置。首次引导可先选择，不强制测试。",
     placeholder: "选择或输入创作 Provider ID",
   },
   PLUGIN_VISION_PROVIDER_ID: {
@@ -840,6 +840,10 @@ function realityCompanionInstalled() {
   return state.overview?.companion_plugins?.reality?.installed === true;
 }
 
+function contentCompanionInstalled() {
+  return state.overview?.companion_plugins?.content?.installed === true;
+}
+
 function syncExternalCompanionVisibility() {
   const imageInstalled = imageCompanionInstalled();
   const imageTab = document.getElementById("modelsImageTab");
@@ -861,6 +865,13 @@ function syncExternalCompanionVisibility() {
   if (!imageInstalled && state.troubleshootingCategory === "image_generation") {
     state.troubleshootingCategory = "all";
   }
+
+  // Once the standalone content extension is loaded, its own page owns the
+  // creative switches. Keep the host's legacy values available for migration,
+  // but do not make users configure the same feature in two places.
+  if (contentCompanionInstalled() && state.featureDomainFilter === "content") {
+    state.featureDomainFilter = "all";
+  }
 }
 
 const pluginIntegrationAvailabilityRules = {
@@ -875,6 +886,12 @@ const pluginIntegrationAvailabilityRules = {
   enable_qzone_generated_image_publish: () => imageCompanionInstalled() && state.overview?.qzone?.platform_supported !== false,
   enable_qzone_comment_inbox: () => state.overview?.qzone?.platform_supported !== false,
   enable_qzone_emotional_vent_publish: () => Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
+  enable_creative_writing: () => !contentCompanionInstalled(),
+  enable_creative_cover_generation: () => !contentCompanionInstalled(),
+  CREATIVE_MODEL_PROVIDER_ID: () => !contentCompanionInstalled(),
+  CREATIVE_PROVIDER_ID: () => !contentCompanionInstalled(),
+  CREATIVE_OUTLINE_PROVIDER_ID: () => !contentCompanionInstalled(),
+  CREATIVE_REVIEW_PROVIDER_ID: () => !contentCompanionInstalled(),
 };
 
 function unavailablePluginIntegrationOwner(key) {
@@ -1348,7 +1365,7 @@ const featureMeta = {
   enable_tts_enhancement: ["TTS强化", "支持中文聊天文本搭配外语语音块，统一处理生成路径、<tts> 标签规范化、语种控制与朗读文本清洗；生效范围可配置为普通回复，或普通回复加全部主动消息。"],
   enable_proactive_quote_trigger_message: ["引用触发消息", "群聊回复、群主动插话和可追溯的私聊主动消息会引用触发消息；普通群回复可只在首次或对象变化时引用。"],
   enable_reply_interception_forward: ["回复拦截转发", "把插件阻断、回复改写和主动消息拦截情况发送到指定私聊或群聊。"],
-  enable_creative_writing: ["私下创作", "闲暇时可选地因生活小事、日记碎片或梦境灵感写一点文本作品。该功能仍未经充分打磨，实际呈现效果可能不尽人意。"],
+  enable_creative_writing: ["独立创作联动", "安装 astrbot_plugin_content_companion 后由独立扩展负责创作项目、续写、审校、创作记忆和作品封面；未安装时才使用本体兼容回退。"],
   enable_creative_work_read_guard: ["创作原文读取保护", "询问书柜已有作品时先读取真实原文；关闭后不再强制调用工具或替换模型回复。"],
   creative_hidden_mode: ["低调创作模式", "默认不汇报创作，只在节点或用户询问时自然提起。"],
   enable_reaction_expression_experiment: ["表情表达实验", "主模型一次生成完整文字和隐藏表情意图，插件再按配置的位置发送合适图片；没有足够合适的候选时保持纯文字。"],
@@ -7892,10 +7909,10 @@ const setupGuideAdvancedItems = {
       key: "enable_qzone_integration",
       title: "QQ 空间",
       ask: "是否让 Bot 读取/发布 QQ 空间相关内容？",
-      description: "仅 OneBot/aiocqhttp 可用于生活说说、自动配图、评论收件箱和情绪宣泄说说；QQ 官方机器人不支持。",
+      description: "仅 OneBot/aiocqhttp 可用于生活说说、自动配图、评论收件箱和情绪宣泄说说；QQ 官方机器人不支持。QQ 空间是本体兼容能力，不依赖独立创作扩展。",
       caution: "这是 OneBot 外部账号动作，建议先只开总集成，不要马上开启自动发布。",
       dependencies: [
-        { label: "内置", text: "QQ 空间动作已内置参考 astrbot_plugin_qzone，不需要再装同名插件。" },
+        { label: "本体兼容", text: "QQ 空间动作由陪伴本体保留并按 OneBot/Cookie 能力检测；不需要为 QQ 空间安装创作扩展。" },
         { label: "凭据", text: "需要 OneBot/NapCat 能获取 Cookie；获取不到时必须手动填写 QZONE_COOKIE。" },
       ],
       kind: "feature",
@@ -7936,8 +7953,8 @@ const setupGuideAdvancedItems = {
       key: "enable_creative_writing",
       title: "长线创作",
       ask: "是否让 Bot 在空档推进日记、梦境、故事或其他创作？",
-      description: "它会把生活状态、关系和灵感整理成长期文本项目。",
-      caution: "创作会持续消耗模型调用。开启隐藏模式后，内容更偏后台，不一定主动展示。",
+      description: "安装 astrbot_plugin_content_companion 后，独立扩展负责项目生成、续写、审校、创作记忆和作品封面；本体只负责陪伴上下文和兼容回退。",
+      caution: "检测到独立创作扩展后，本体会隐藏旧版创作细项，请到扩展插件自己的配置页调整模型、预算和分享策略。",
       kind: "feature",
       settings: [
         { key: "creative_inspiration_probability", type: "number", label: "灵感触发概率（%）", placeholder: "15", min: 0, max: 100 },

@@ -274,6 +274,7 @@ from .body_monitor_integration import BodyMonitorIntegration
 from .worldbook import WorldbookMixin
 from .user_memory import UserMemoryMixin
 from .creative import CreativeMixin
+from .content_companion_bridge import ContentCompanionBridgeMixin
 from .proactive import ProactiveMixin
 from .group_wakeup import GroupWakeupMixin
 from .group_observation import GroupObservationMixin
@@ -1552,6 +1553,7 @@ class PrivateCompanionPlugin(
     BalanceAwarenessMixin,
     WorldbookMixin,
     UserMemoryMixin,
+    ContentCompanionBridgeMixin,
     CreativeMixin,
     ProactiveMixin,
     ProactiveEngineMixin,
@@ -10589,6 +10591,38 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             + "\n无论工具或模型返回什么内容，外发正文都不要照抄英文报错、内容策略提示、政策链接或内部诊断；遇到这类结果时，用当前人格的一句简短中文说明，再自然收住或邀请用户换一种说法。"
         )
 
+    @staticmethod
+    def _format_technical_reasoning_prompt(
+        event: AstrMessageEvent | None,
+        req: ProviderRequest | None = None,
+    ) -> str:
+        text = "\n".join(
+            part
+            for part in (
+                str(getattr(event, "message_str", "") or "").strip(),
+                str(getattr(req, "prompt", "") or "").strip(),
+            )
+            if part
+        )
+        compact = re.sub(r"\s+", "", text).lower()
+        if not compact:
+            return ""
+        technical_markers = (
+            "代码", "源码", "脚本", "python", "sleep(", "报错", "日志", "执行结果",
+            "计算", "公式", "换算", "单位", "耗时", "延迟", "超时", "秒", "分钟", "小时",
+        )
+        if not any(marker in compact for marker in technical_markers):
+            return ""
+        return (
+            "【技术解释准确性】\n"
+            "解释代码、公式、日志耗时或单位换算时，先逐项读取用户给出的原表达式和原始数值，写清每个量的单位；"
+            "先统一换算到同一种基本单位，再换算成用户需要的展示单位，并用一次反向换算复核。"
+            "严格区分配置/代码要求的时长、程序实际运行耗时、日志记录值和界面格式化后的显示值，不要把它们当成同一个量。\n"
+            "不得引入源码、日志或用户材料中没有出现的运算、常数、倍率、对数或所谓解释器规则来凑结果；"
+            "尤其不能凭空加入 ln、log、指数或除法。如果结果与原表达式不一致，明确指出缺少哪段真实代码或日志，不要虚构原因。\n"
+            "例如 `time.sleep(10 * 60)` 的参数是 600 秒，也就是 10 分钟；除非真实代码另有运算，不能解释成 4.35 分钟。"
+        )
+
     async def _append_reply_style_to_request(
         self,
         event: AstrMessageEvent,
@@ -10598,7 +10632,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         priority: int = 12,
     ) -> None:
         style_prompt = self._format_reply_style_prompt()
-        if not style_prompt:
+        technical_prompt = self._format_technical_reasoning_prompt(event, req)
+        combined_prompt = "\n\n".join(part for part in (style_prompt, technical_prompt) if part).strip()
+        if not combined_prompt:
             return
         marker = "<!-- private_companion_reply_style_v1 -->"
         current_prompt = req.system_prompt or ""
@@ -10608,17 +10644,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         placement = "prompt" if self._append_turn_prompt_fragment_by_position(
             req,
             marker,
-            style_prompt,
+            combined_prompt,
             priority=priority,
             source="reply_style",
         ) else "system_prompt"
         if placement == "system_prompt":
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{style_prompt}".strip()
+            req.system_prompt = f"{current_prompt}\n\n{marker}\n{combined_prompt}".strip()
         await self._record_request_prompt_fragment(
             event,
             title="回复风格约束",
             key="reply.style",
-            text=style_prompt,
+            text=combined_prompt,
             source="reply_style",
             mode=mode,
             metadata={"注入位置": placement},
@@ -16062,9 +16098,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         except Exception:
             is_private = False
         raw_command_text = str(getattr(event, "message_str", "") or "")
-        bootstrap_args = raw_command_text.replace("\u3000", " ").split(maxsplit=2)
+        # Some adapters (notably QQ official) preserve the slash while others
+        # strip the registered command token before invoking the handler. Keep
+        # both forms equivalent so bootstrap commands do not fall back to help.
+        command_text = raw_command_text.replace("\u3000", " ").replace("／", "/").strip()
+        if command_text.startswith("/"):
+            command_text = command_text[1:].lstrip()
+        bootstrap_args = command_text.split(maxsplit=2)
         bootstrap_action = bootstrap_args[1].strip() if len(bootstrap_args) >= 2 else ""
         bootstrap_value = bootstrap_args[2].strip() if len(bootstrap_args) >= 3 else ""
+        if len(bootstrap_args) == 1 and bootstrap_args[0] in {
+            "绑定主动消息", "绑定主动会话", "绑定会话",
+            "查看主动路由", "查看主动绑定", "主动路由", "主动绑定",
+            "解绑主动消息", "解绑主动会话", "解绑会话",
+        }:
+            bootstrap_action = bootstrap_args[0]
         bootstrap_normalizer = getattr(self, "_normalize_companion_command_action", None)
         if callable(bootstrap_normalizer):
             bootstrap_action, _ = bootstrap_normalizer(
@@ -16103,9 +16151,18 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 self._schedule_data_save()
         self._qzone_note_event_bot(event)
         raw_text = str(event.message_str or "")
-        args = raw_text.replace("\u3000", " ").split(maxsplit=2)
+        normalized_text = raw_text.replace("\u3000", " ").replace("／", "/").strip()
+        if normalized_text.startswith("/"):
+            normalized_text = normalized_text[1:].lstrip()
+        args = normalized_text.split(maxsplit=2)
         action = args[1].strip() if len(args) >= 2 else "帮助"
         value = args[2].strip() if len(args) >= 3 else ""
+        if len(args) == 1 and args[0] in {
+            "绑定主动消息", "绑定主动会话", "绑定会话",
+            "查看主动路由", "查看主动绑定", "主动路由", "主动绑定",
+            "解绑主动消息", "解绑主动会话", "解绑会话",
+        }:
+            action, value = args[0], ""
         action, value = self._normalize_companion_command_action(action, value)
         companion_manual_query_actions = {"答疑", "排障", "诊断", "说明"}
         companion_manual_confirm_actions = {"答疑确认", "排障确认", "诊断确认", "应用答疑建议", "应用建议"}

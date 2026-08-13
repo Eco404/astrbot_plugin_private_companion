@@ -1075,6 +1075,27 @@ class PrivateCompanionPageApi(
             reality_status = {}
 
         return {
+            # These two capabilities are part of the companion core. Keep them
+            # visible in the same status payload so the panel and diagnostics
+            # do not mistake them for optional external plugins.
+            "boundary_feedback": {
+                "installed": True,
+                "enabled": bool(getattr(self.plugin, "enable_relationship_boundary_feedback", True)),
+                "available": callable(getattr(self.plugin, "_enrich_boundary_feedback_intent", None)),
+            },
+            "temp_emotion": {
+                "installed": True,
+                "enabled": bool(getattr(self.plugin, "enable_emotion_simulation", True)),
+                "available": callable(getattr(self.plugin, "_record_interaction_emotion_event", None)),
+            },
+            "content": dict(
+                getattr(self.plugin, "_content_companion_status", lambda: {
+                    "installed": False,
+                    "enabled": False,
+                    "available": False,
+                    "reason": "content_companion_unavailable",
+                })()
+            ),
             "image": {
                 "installed": image_api is not None,
                 "enabled": bool(image_status.get("enabled")),

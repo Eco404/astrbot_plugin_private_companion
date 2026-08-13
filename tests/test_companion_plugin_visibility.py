@@ -16,13 +16,11 @@ class CompanionPluginVisibilityTests(unittest.TestCase):
     def test_missing_plugins_are_reported_as_not_installed(self) -> None:
         summary = self._summary(SimpleNamespace())
 
-        self.assertEqual(
-            summary,
-            {
-                "image": {"installed": False, "enabled": False, "available": False},
-                "reality": {"installed": False, "enabled": False, "available": False},
-            },
-        )
+        self.assertEqual(summary["boundary_feedback"], {"installed": True, "enabled": True, "available": False})
+        self.assertEqual(summary["temp_emotion"], {"installed": True, "enabled": True, "available": False})
+        self.assertEqual(summary["content"], {"installed": False, "enabled": False, "available": False, "reason": "content_companion_unavailable"})
+        self.assertEqual(summary["image"], {"installed": False, "enabled": False, "available": False})
+        self.assertEqual(summary["reality"], {"installed": False, "enabled": False, "available": False})
 
     def test_loaded_plugins_remain_installed_when_disabled(self) -> None:
         image_api = SimpleNamespace(status=lambda: {"enabled": False})
@@ -40,6 +38,25 @@ class CompanionPluginVisibilityTests(unittest.TestCase):
         )
         self.assertEqual(
             summary["reality"],
+            {"installed": True, "enabled": False, "available": True},
+        )
+
+    def test_builtin_affect_capabilities_follow_core_switches(self) -> None:
+        plugin = SimpleNamespace(
+            enable_relationship_boundary_feedback=False,
+            enable_emotion_simulation=False,
+            _enrich_boundary_feedback_intent=lambda *_args, **_kwargs: {},
+            _record_interaction_emotion_event=lambda *_args, **_kwargs: {},
+        )
+
+        summary = self._summary(plugin)
+
+        self.assertEqual(
+            summary["boundary_feedback"],
+            {"installed": True, "enabled": False, "available": True},
+        )
+        self.assertEqual(
+            summary["temp_emotion"],
             {"installed": True, "enabled": False, "available": True},
         )
 

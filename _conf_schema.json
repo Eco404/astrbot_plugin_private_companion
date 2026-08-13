@@ -537,7 +537,7 @@
       "persona_creative_voice_prompt": {
         "description": "创作风格",
         "type": "text",
-        "hint": "用于日记、QQ 空间、私下创作和文案。可以比聊天完整，但应避免 AI 作文、总结升华和营销文案腔。",
+        "hint": "用于日记、QQ 空间和文案。独立创作项目的专用风格请在 astrbot_plugin_content_companion 配置；这里仍可作为主插件日记/空间文案的兼容风格来源。",
         "default": ""
       },
       "persona_planning_voice_prompt": {
@@ -6175,7 +6175,7 @@
   "daily_creative_config": {
     "description": "日常问候与创作",
     "type": "object",
-    "hint": "控制早晚问候、主动分享概率和 Bot 私下创作行为。私下创作目前仍未经充分打磨，生成质量、内容连贯性和最终呈现效果可能不尽人意。",
+    "hint": "控制早晚问候和主动分享概率。创作项目、续写、审校、创作记忆和封面已拆分到 astrbot_plugin_content_companion；安装扩展后，创作相关配置以扩展页为准。本组保留创作开关和旧字段用于兼容迁移。",
     "items": {
       "enable_daily_greetings": {
         "description": "启用早午晚锚点问候",
@@ -6217,19 +6217,19 @@
       "enable_creative_writing": {
         "description": "启用私下创作行为",
         "type": "bool",
-        "hint": "开启后，Bot 会在闲暇时因为生活小事、日记碎片或梦境余温产生创作灵感，可能写小说、诗、随笔、剧本、设定集等文本；这是可选的私下行为，不会按小时生产，也不会一次写完整篇。该功能目前仍未经充分打磨，实际呈现效果可能不尽人意。",
+        "hint": "安装并启用 astrbot_plugin_content_companion 后，此开关作为陪伴主链的创作协同开关；实际项目生成、续写、审校和保存由内容扩展负责。未安装时仅启用本体兼容回退，升级期间可保持旧行为。",
         "default": true
       },
       "enable_creative_work_read_guard": {
         "description": "启用创作原文读取保护",
         "type": "bool",
-        "hint": "开启后，仅当用户明确询问书柜中的已有作品、具体章节或原文时，要求模型先读取真实内容，并拦截没有实际读取的占位回答。关闭后不再注入读取要求，也不会替换模型原回复；私下创作和书柜本身不受影响。",
+        "hint": "开启后，仅当用户明确询问书柜中的已有作品、具体章节或原文时，要求模型先读取真实内容，并拦截没有实际读取的占位回答。内容扩展可用时，读取结果以扩展返回的作品数据为准；关闭后不再注入读取要求。",
         "default": true
       },
       "creative_inspiration_probability": {
         "description": "创作灵感触发概率",
         "type": "float",
-        "hint": "每轮调度中尝试开启新创作项目的概率。仍受冷却、活动项目数量和是否有灵感来源影响。",
+        "hint": "兼容字段。内容扩展可用时请在 astrbot_plugin_content_companion 配置页调整新项目触发策略；本字段仅在扩展不可用、主插件回退旧创作实现时生效。",
         "slider": {
           "min": 0,
           "max": 1,
@@ -6243,7 +6243,7 @@
       "creative_share_probability": {
         "description": "小说节点透露概率",
         "type": "float",
-        "hint": "Bot 写到开头、过半、完稿或想听读后感觉时，是否找时机向用户透露/征求观感的基础概率。用户反馈只作为灵感参考，创作方向仍由 Bot 自己决定。普通创作进度不会直接分享。",
+        "hint": "兼容字段。内容扩展可用时请在独立创作插件中调整作品分享策略；本字段仅供旧版创作回退使用。",
         "slider": {
           "min": 0,
           "max": 1,
@@ -6257,7 +6257,7 @@
       "creative_chars_per_session": {
         "description": "每次创作字数",
         "type": "int",
-        "hint": "每次闲暇创作行为大约写多少字。实际字数会根据人格关键词、聊天风格和当天能量上下浮动；创作只会在空闲时作为可选行为推进。",
+        "hint": "兼容字段。内容扩展可用时请在独立创作插件中调整单次正文预算；本字段仅供旧版创作回退使用。",
         "slider": {
           "min": 60,
           "max": 1200,
@@ -6271,7 +6271,7 @@
       "creative_max_active_projects": {
         "description": "最多同时创作项目数",
         "type": "int",
-        "hint": "限制同时进行的创作项目数量，避免灵感过多导致状态发散。",
+        "hint": "兼容字段。内容扩展可用时请在独立创作插件中调整活动项目上限；本字段仅供旧版创作回退使用。",
         "slider": {
           "min": 1,
           "max": 5,
@@ -6285,7 +6285,7 @@
       "creative_hidden_mode": {
         "description": "创作默认低调进行",
         "type": "bool",
-        "hint": "开启后，创作不会作为普通日常频繁分享，只在达到节点、想听读后感觉，或用户主动询问最近在做什么时作为可选回答素材。不会把作品走向交给用户决定。",
+        "hint": "兼容字段。内容扩展可用时请在独立创作插件中调整低调分享策略；本字段仅供旧版创作回退使用。",
         "default": true,
         "condition": {
           "enable_creative_writing": true
@@ -6294,7 +6294,7 @@
       "creative_direction_prompt": {
         "description": "创作方向提示词",
         "type": "text",
-        "hint": "可选。用于长期引导私下创作的作品类型、题材、风格、主题和避雷，例如：优先创作轻悬疑和都市奇幻短篇；避免诗歌、校园恋爱和悲剧结局。会作用于新项目立项、已有项目大纲、正文续写和审校；人工大纲与人工修订的优先级更高。",
+        "hint": "可选。安装内容扩展后建议在 astrbot_plugin_content_companion 配置页维护创作方向；这里保留旧字段用于迁移和未安装扩展时的兼容回退。",
         "default": "",
         "condition": {
           "enable_creative_writing": true
@@ -7552,9 +7552,9 @@
     "hint": "控制说说查看、点赞评论、低频生活说说和配图。",
     "items": {
       "enable_qzone_integration": {
-        "description": "启用 QQ 空间动态层",
+        "description": "启用 QQ 空间动态层（本体兼容）",
         "type": "bool",
-        "hint": "整合 QQ 空间查看、点赞、评论和发布说说入口。仅 OneBot/aiocqhttp 可用；QQ 官方机器人不支持，插件会自动跳过工具注入、后台轮询和发布任务。",
+        "hint": "本体保留的 QQ 空间 OneBot/aiocqhttp 兼容能力。开启前请确认当前账号有可用 Cookie 和协议端支持；QQ 官方机器人不支持。它与独立创作插件无关，扩展页只在能力检测通过后显示 QQ 空间入口。",
         "default": true
       },
       "QZONE_COOKIE": {
