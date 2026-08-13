@@ -56,6 +56,8 @@
 | 生图 | [`astrbot_plugin_image_companion`](https://github.com/menglimi/astrbot_plugin_image_companion) | 文生图、自拍、改图、参考图库、提示词处理及图片后端管理 |
 | 现实交互 | [`astrbot_plugin_reality_companion`](https://github.com/menglimi/astrbot_plugin_reality_companion) | 摄像头单帧、本机音频、现实提醒、设备授权及主动语音策略 |
 | 长期记忆 | [`astrbot_plugin_memory_companion`](https://github.com/menglimi/astrbot_plugin_memory_companion) | 跨会话记忆、历史导入、知识关联与权限化召回 |
+| 边界与情感反馈 | [`astrbot_plugin_nene_boundary`](https://github.com/menglimi/astrbot_plugin_nene_boundary) | 关系边界判断、越界反馈、道歉修复和边界事件转达；需单独安装 |
+| 临时情绪 | [`astrbot_plugin_temp_emotion`](https://github.com/menglimi/astrbot_plugin_temp_emotion) | 对话期间的临时情绪状态与情绪余波；需单独安装 |
 
 扩展插件未安装或不可用时，对应入口会隐藏，相关动作会被跳过，基础聊天和其他功能不受影响。由旧版本升级时，扩展插件可读取本插件保留的兼容配置和历史数据作为迁移来源。
 

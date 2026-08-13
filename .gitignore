@@ -18,3 +18,7 @@ __pycache__/
 
 # The Android companion terminal is maintained and distributed separately.
 /android/
+
+# Companion extensions are maintained in their own repositories.
+/astrbot_plugin_nene_boundary/
+/astrbot_plugin_temp_emotion/
