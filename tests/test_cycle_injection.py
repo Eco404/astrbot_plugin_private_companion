@@ -117,7 +117,7 @@ class CycleInjectionTests(unittest.TestCase):
     def test_non_menstrual_phases_do_not_force_intimacy_refusal(self) -> None:
         for cycle_text in (
             "处于 PMS 期，精力有所下降",
-            "处于卵泡期早，精力平稳回升",
+            "处于卵泡期，精力平稳回升",
             "处于排卵期，精力较充足",
             "生理期后，慢慢回到稳定状态",
             "不处于生理期",

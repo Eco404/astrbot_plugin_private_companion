@@ -72,7 +72,7 @@ class HumanizedScheduleUiGroupingTests(unittest.TestCase):
         self.assertIn("enable_passive_state_continuity_anchor: {", self.script)
 
     def test_advanced_cycle_settings_are_grouped_and_conditionally_visible(self) -> None:
-        for title in ("周期策略", "月经期", "卵泡期早", "排卵前期", "排卵期", "黄体期早", "PMS 期"):
+        for title in ("周期策略", "月经期", "卵泡期", "排卵前期", "排卵期", "黄体期", "PMS 期", "经期不适模拟"):
             self.assertIn(f'title: "{title}"', self.script)
         for key in (
             "enable_advanced_cycle_strategy",
@@ -86,9 +86,22 @@ class HumanizedScheduleUiGroupingTests(unittest.TestCase):
             "advanced_cycle_pms_prompt",
         ):
             self.assertIn(key, self.script)
+        self.assertIn(
+            'keys: ["advanced_cycle_discomfort_simulation", "advanced_cycle_discomfort_chance", "advanced_cycle_discomfort_types"]',
+            self.script,
+        )
         self.assertIn('settingKey === "enable_advanced_cycle_strategy") return boolSetting("enable_cycle_state")', self.script)
         self.assertIn('!boolSetting("enable_cycle_state") || !boolSetting("enable_advanced_cycle_strategy")', self.script)
         self.assertIn('manualCycleEnergyKeys.has(settingKey) && boolSetting("advanced_cycle_link_intensity")', self.script)
+
+    def test_cycle_discomfort_settings_grouped_right_after_pms_section(self) -> None:
+        marker = 'title: "PMS 期"'
+        pms_index = self.script.index(marker)
+        discomfort_marker = 'title: "经期不适模拟"'
+        discomfort_index = self.script.index(discomfort_marker)
+        self.assertGreater(discomfort_index, pms_index)
+        between = self.script[pms_index + len(marker) : discomfort_index]
+        self.assertNotIn('title: "', between)
 
     def test_advanced_cycle_controls_rerender_without_losing_draft(self) -> None:
         for key in ("enable_cycle_state", "enable_advanced_cycle_strategy", "advanced_cycle_link_intensity"):

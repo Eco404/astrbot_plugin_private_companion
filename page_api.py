@@ -26990,6 +26990,31 @@ class PrivateCompanionPageApi(
             return {}
         keys = ["date", "sleep", "dream", "health", "hunger", "body_cycle", "location", "weather", "mood_bias", "energy", "note"]
         summary = {key: state.get(key, "") for key in keys}
+        cycle_runtime = state.get("cycle_runtime") if isinstance(state.get("cycle_runtime"), dict) else {}
+        if cycle_runtime:
+            discomfort = cycle_runtime.get("discomfort")
+            summary["cycle_runtime"] = {
+                "phase": self._single_line(cycle_runtime.get("phase"), 24),
+                "phase_name": self._single_line(cycle_runtime.get("phase_name"), 24),
+                "day_in_phase": self._int(cycle_runtime.get("day_in_phase")),
+                "phase_days": self._int(cycle_runtime.get("phase_days")),
+                "cycle_day": self._int(cycle_runtime.get("cycle_day")),
+                "cycle_days": self._int(cycle_runtime.get("cycle_days")),
+                "mood": self._single_line(cycle_runtime.get("mood"), 20),
+                "energy_delta": self._int(cycle_runtime.get("energy_delta")),
+                "next_phase_name": self._single_line(cycle_runtime.get("next_phase_name"), 24),
+                "discomfort": [
+                    {
+                        "type": self._single_line(item.get("type"), 12),
+                        "label": self._single_line(item.get("label"), 80),
+                        "mood": self._single_line(item.get("mood"), 12),
+                    }
+                    for item in discomfort[:4]
+                    if isinstance(item, dict)
+                ]
+                if isinstance(discomfort, list)
+                else [],
+            }
         location_getter = getattr(self.plugin, "_current_location_state_text", None)
         if callable(location_getter):
             try:

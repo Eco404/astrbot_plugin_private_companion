@@ -28,10 +28,10 @@ class GroupCycleBoundaryTests(unittest.TestCase):
     def test_six_phase_labels_classify_without_exposing_an_unrelated_phase(self) -> None:
         cases = {
             "处于月经期": "menstrual",
-            "处于卵泡期早": "follicular",
+            "处于卵泡期": "follicular",
             "处于排卵前期": "pre_ovulation",
             "处于排卵期": "ovulation",
-            "处于黄体期早": "luteal",
+            "处于黄体期": "luteal",
             "处于 PMS 期": "pms",
         }
         for label, phase in cases.items():
@@ -71,7 +71,7 @@ class GroupCycleBoundaryTests(unittest.TestCase):
         non_menstrual = build_group_cycle_boundary(
             enabled=True,
             group_allowed=True,
-            cycle_label="处于卵泡期早",
+            cycle_label="处于卵泡期",
             inbound_text="我们做爱吧",
         )
         self.assertFalse(non_menstrual["private_boundary"])

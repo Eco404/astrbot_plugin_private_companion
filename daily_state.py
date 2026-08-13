@@ -3315,6 +3315,12 @@ class DailyStateMixin(DailyStateTickMixin):
                 dream_pick = deferred_updates.get("dream_pick")
                 if isinstance(dream_pick, tuple):
                     self._remember_daily_dream_pick(dream_pick)
+                discomfort_roll_date = deferred_updates.get("cycle_discomfort_roll_date")
+                if discomfort_roll_date:
+                    cycle_meta = self.data.get("body_cycle_state")
+                    cycle_meta = dict(cycle_meta) if isinstance(cycle_meta, dict) else {}
+                    cycle_meta["last_discomfort_roll_date"] = discomfort_roll_date
+                    self.data["body_cycle_state"] = cycle_meta
                 body_cycle_conditions = deferred_updates.get("body_cycle_conditions", [])
                 if isinstance(body_cycle_conditions, list):
                     for condition in body_cycle_conditions:
@@ -3391,12 +3397,27 @@ class DailyStateMixin(DailyStateTickMixin):
         if persona_profile.get("allow_hunger", True):
             specs.append(("hunger", "饥饿", *hunger_pick))
         if persona_profile.get("allow_cycle", False):
-            cycle_spec = (
-                self._pick_advanced_cycle_spec(intensity)
-                if self._advanced_cycle_enabled()
-                else self._pick_body_cycle_spec(cycle_pool, intensity)
-            )
-            specs.append(("body_cycle", "周期", *cycle_spec))
+            skip_cycle_spec = False
+            if self._advanced_cycle_enabled():
+                meta = self.data.get("body_cycle_state", {})
+                anchor_ts = _safe_float(meta.get("cycle_anchor_ts"), 0) if isinstance(meta, dict) else 0
+                active_advanced_cycle = any(
+                    isinstance(cond, dict)
+                    and str(cond.get("kind") or "") == "body_cycle"
+                    and str(cond.get("phase") or "") in self._ADVANCED_CYCLE_PHASES
+                    and _safe_float(cond.get("start_ts"), 0) <= _now_ts() < _safe_float(cond.get("end_ts"), 0)
+                    for cond in (self.data.get("state_conditions", []) or [])
+                )
+                # The anchored continuous timeline owns phase progression once
+                # started, so no daily random cycle pick is needed anymore.
+                skip_cycle_spec = anchor_ts > 0 or active_advanced_cycle
+            if not skip_cycle_spec:
+                cycle_spec = (
+                    self._pick_advanced_cycle_spec(intensity)
+                    if self._advanced_cycle_enabled()
+                    else self._pick_body_cycle_spec(cycle_pool, intensity)
+                )
+                specs.append(("body_cycle", "周期", *cycle_spec))
         else:
             specs.append(("body_cycle", "周期", *cycle_pool[0]))
 
@@ -3480,6 +3501,9 @@ class DailyStateMixin(DailyStateTickMixin):
         dream_aftertaste = self._build_dream_aftertaste_condition(dream_pick)
         if dream_aftertaste is not None:
             conditions.append(dream_aftertaste)
+        discomfort_condition = self._maybe_pick_cycle_discomfort(deferred_state_updates)
+        if discomfort_condition is not None:
+            conditions.append(discomfort_condition)
         if 0 <= current_minute < 5 * 60:
             late_night_pool = [
                 ("夜里还没完全安静下来,眼睛和脑子都慢半拍", "困倦", -14, 4),
@@ -3601,6 +3625,64 @@ class DailyStateMixin(DailyStateTickMixin):
         "luteal": 4.5,
         "pms": -7.5,
     }
+    _ADVANCED_CYCLE_PHASE_NAMES = {
+        "menstrual": "月经期",
+        "follicular": "卵泡期",
+        "pre_ovulation": "排卵前期",
+        "ovulation": "排卵期",
+        "luteal": "黄体期",
+        "pms": "PMS 期",
+    }
+    _ADVANCED_CYCLE_DISCOMFORT_SPECS = {
+        "痛经": {
+            "phases": {"menstrual"},
+            "label": "今天有点痛经，小腹闷闷地不舒服",
+            "mood": "疲惫",
+            "energy_delta": -14,
+            "duration_hours": 6,
+            "weight": 4,
+        },
+        "头痛": {
+            "phases": {"menstrual", "pms"},
+            "label": "头有点闷痛，注意力不太集中",
+            "mood": "迟钝",
+            "energy_delta": -10,
+            "duration_hours": 5,
+            "weight": 3,
+        },
+        "腰酸": {
+            "phases": {"menstrual", "luteal"},
+            "label": "腰有点酸，不太想久坐",
+            "mood": "疲惫",
+            "energy_delta": -8,
+            "duration_hours": 6,
+            "weight": 3,
+        },
+        "乏力": {
+            "phases": {"menstrual", "luteal", "pms"},
+            "label": "身上没什么力气，动作慢半拍",
+            "mood": "困倦",
+            "energy_delta": -12,
+            "duration_hours": 8,
+            "weight": 4,
+        },
+        "情绪低落": {
+            "phases": {"pms"},
+            "label": "情绪有点低，不太想说话",
+            "mood": "低落",
+            "energy_delta": -6,
+            "duration_hours": 5,
+            "weight": 2,
+        },
+        "恶心": {
+            "phases": {"menstrual", "pms"},
+            "label": "胃里有点泛恶心，不太想吃东西",
+            "mood": "虚弱",
+            "energy_delta": -9,
+            "duration_hours": 4,
+            "weight": 1,
+        },
+    }
 
     def _advanced_cycle_enabled(self) -> bool:
         return bool(getattr(self, "enable_advanced_cycle_strategy", False))
@@ -3688,6 +3770,170 @@ class DailyStateMixin(DailyStateTickMixin):
             cursor += phase_days
         return "pms", self._advanced_cycle_phase_days("pms")
 
+    def _advanced_cycle_day_of_phase(self, phase: str, day_in_phase: int) -> int:
+        """Map a phase plus its day index to the absolute cycle day."""
+        cursor = 0
+        for candidate in self._ADVANCED_CYCLE_PHASES:
+            if candidate == phase:
+                return cursor + max(1, int(day_in_phase))
+            cursor += self._advanced_cycle_phase_days(candidate)
+        return 1
+
+    def _advanced_cycle_runtime(self) -> dict[str, Any]:
+        """Derive the current six-phase position for display and continuity.
+
+        The stored cycle anchor timestamp is the authoritative continuous
+        timeline: it always yields the current phase and day, even when the
+        bot was offline or no body_cycle condition is currently active. Active
+        conditions are only used as a fallback for old data without an anchor.
+
+        Returns:
+            Phase position details, or an empty dict when the strategy is off
+            or the cycle has not started yet.
+        """
+        if not self._advanced_cycle_enabled():
+            return {}
+        now = _now_ts()
+        meta = self.data.get("body_cycle_state")
+        anchor_ts = _safe_float(meta.get("cycle_anchor_ts"), 0) if isinstance(meta, dict) else 0
+        phase = ""
+        day_in_phase = 0
+        if anchor_ts > 0:
+            cycle_day = int((now - anchor_ts) // 86400) + 1
+            phase, day_in_phase = self._advanced_cycle_position_from_offset(cycle_day)
+        else:
+            # Legacy fallback for historical data created before the anchor
+            # existed. The anchor is always seeded on first enable now, so this
+            # branch only matters while migrating old conditions.
+            conditions = self.data.get("state_conditions", [])
+            if isinstance(conditions, list):
+                for cond in conditions:
+                    if not isinstance(cond, dict) or str(cond.get("kind") or "") != "body_cycle":
+                        continue
+                    cond_phase = str(cond.get("phase") or "")
+                    if cond_phase not in self._ADVANCED_CYCLE_PHASES:
+                        continue
+                    start_ts = _safe_float(cond.get("start_ts"), 0)
+                    end_ts = _safe_float(cond.get("end_ts"), 0)
+                    if start_ts <= now < end_ts:
+                        phase = cond_phase
+                        day_in_phase = int((now - start_ts) // 86400) + 1
+                        break
+            if not phase:
+                return {}
+        phase_days = self._advanced_cycle_phase_days(phase)
+        day_in_phase = max(1, min(phase_days, int(day_in_phase)))
+        label, mood, energy_delta, _ = self._advanced_cycle_phase_spec(phase)
+        next_phase = self._ADVANCED_CYCLE_TRANSITIONS.get(phase, "")
+        next_phase = self._ADVANCED_CYCLE_TRANSITIONS.get(phase, "").removeprefix("body_")
+        return {
+            "phase": phase,
+            "phase_name": self._ADVANCED_CYCLE_PHASE_NAMES.get(phase, phase),
+            "day_in_phase": day_in_phase,
+            "phase_days": phase_days,
+            "cycle_day": self._advanced_cycle_day_of_phase(phase, day_in_phase),
+            "cycle_days": self._advanced_cycle_total_days(),
+            "mood": _single_line(mood, 20),
+            "energy_delta": int(energy_delta),
+            "label": _single_line(label, 160),
+            "next_phase": next_phase,
+            "next_phase_name": self._ADVANCED_CYCLE_PHASE_NAMES.get(next_phase, ""),
+        }
+
+    def _active_cycle_discomfort_conditions(self) -> list[dict[str, Any]]:
+        now = _now_ts()
+        items: list[dict[str, Any]] = []
+        conditions = self.data.get("state_conditions", [])
+        if not isinstance(conditions, list):
+            return items
+        for cond in conditions:
+            if not isinstance(cond, dict) or str(cond.get("kind") or "") != "cycle_discomfort":
+                continue
+            if _safe_float(cond.get("start_ts"), 0) <= now < _safe_float(cond.get("end_ts"), 0):
+                items.append(
+                    {
+                        "type": _single_line(cond.get("phase"), 12) or "经期不适",
+                        "label": _single_line(cond.get("label"), 80),
+                        "mood": _single_line(cond.get("mood"), 12),
+                    }
+                )
+        return items
+
+    def _maybe_pick_cycle_discomfort(self, deferred_state_updates: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """Roll once per day for a menstrual discomfort episode on the current phase.
+
+        Only runs when the discomfort simulation, the advanced six-phase
+        strategy and the persona cycle allowance are all enabled, and only
+        during phases allowed per discomfort type. Rolls at most once per
+        calendar day and skips the roll while another discomfort condition is
+        still active.
+
+        Returns:
+            A cycle_discomfort condition dict, or None when skipped.
+        """
+        if not bool(getattr(self, "advanced_cycle_discomfort_simulation", False)):
+            return None
+        if not self._persona_state_profile().get("allow_cycle", False):
+            return None
+        intensity = _safe_int(getattr(self, "humanized_state_intensity", 50), 50, 0, 100)
+        if intensity <= 0:
+            return None
+        meta = self.data.get("body_cycle_state")
+        meta = dict(meta) if isinstance(meta, dict) else {}
+        if meta.get("last_discomfort_roll_date") == _today_key():
+            return None
+        runtime = self._advanced_cycle_runtime()
+        phase = runtime.get("phase") if runtime else ""
+        if phase not in self._ADVANCED_CYCLE_PHASES:
+            return None
+        now = _now_ts()
+        conditions = self.data.get("state_conditions", [])
+        if isinstance(conditions, list):
+            for cond in conditions:
+                if (
+                    isinstance(cond, dict)
+                    and str(cond.get("kind") or "") == "cycle_discomfort"
+                    and _safe_float(cond.get("end_ts"), 0) > now
+                ):
+                    return None
+        # One roll attempt per day regardless of the outcome, so a failed roll
+        # does not give the phase extra chances later the same day.
+        if deferred_state_updates is None:
+            meta["last_discomfort_roll_date"] = _today_key()
+            self.data["body_cycle_state"] = meta
+        else:
+            deferred_state_updates["cycle_discomfort_roll_date"] = _today_key()
+        chance = _safe_int(getattr(self, "advanced_cycle_discomfort_chance", 55), 55, 0, 100)
+        if chance <= 0 or random.random() > chance / 100.0:
+            return None
+        raw_types = str(getattr(self, "advanced_cycle_discomfort_types", "") or "痛经,头痛,腰酸,乏力")
+        requested = {token.strip() for token in raw_types.replace("，", ",").split(",") if token.strip()}
+        candidates = [
+            (name, spec)
+            for name, spec in self._ADVANCED_CYCLE_DISCOMFORT_SPECS.items()
+            if name in requested and phase in spec.get("phases", set())
+        ]
+        if not candidates:
+            return None
+        name, spec = random.choices(
+            candidates,
+            weights=[int(spec.get("weight") or 1) for _, spec in candidates],
+            k=1,
+        )[0]
+        energy_delta = int((spec.get("energy_delta") or 0) * max(0.5, intensity / 50.0))
+        return self._make_condition(
+            kind="cycle_discomfort",
+            title="经期不适",
+            label=_single_line(spec.get("label"), 80),
+            mood=_single_line(spec.get("mood"), 12) or "疲惫",
+            energy_delta=energy_delta,
+            duration_hours=_safe_int(spec.get("duration_hours"), 6, 1, 24),
+            intensity=random.randint(45, max(46, min(92, 40 + intensity))),
+            cause="生理周期阶段伴随不适",
+            phase=name,
+            episode_key=f"cycle-discomfort-{_today_key()}",
+        )
+
     def _advanced_cycle_linked_energy(self, phase: str) -> int:
         median = self._ADVANCED_CYCLE_INTENSITY_MEDIANS.get(phase, 0.0)
         intensity = _safe_int(getattr(self, "humanized_state_intensity", 50), 50, 0, 100)
@@ -3696,10 +3942,10 @@ class DailyStateMixin(DailyStateTickMixin):
     def _advanced_cycle_phase_spec(self, phase: str) -> tuple[str, str, int, int]:
         defaults = {
             "menstrual": ("处于月经期，身体更容易疲倦，情绪感受稍敏锐", "疲惫", -12),
-            "follicular": ("处于卵泡期早，精力平稳回升，心情逐渐轻快", "轻快", 0),
+            "follicular": ("处于卵泡期，精力平稳回升，心情逐渐轻快", "轻快", 0),
             "pre_ovulation": ("处于排卵前期，身体逐渐轻盈，精力有所上升", "期待", 8),
             "ovulation": ("处于排卵期，精力较充足，社交意愿稍有增强", "明朗", 9),
-            "luteal": ("处于黄体期早，精力尚可，情绪整体平稳", "平稳", 5),
+            "luteal": ("处于黄体期，精力尚可，情绪整体平稳", "平稳", 5),
             "pms": ("处于 PMS 期，精力有所下降，情绪波动稍明显", "敏感", -8),
         }
         attributes = {
@@ -3753,8 +3999,13 @@ class DailyStateMixin(DailyStateTickMixin):
         neutral = ("不处于生理期", "平稳", 0, 24)
         if self._body_cycle_generation_blocked():
             return neutral
-        now = _now_ts()
         meta = self.data.get("body_cycle_state", {})
+        anchor_ts = _safe_float(meta.get("cycle_anchor_ts"), 0) if isinstance(meta, dict) else 0
+        if anchor_ts > 0:
+            # Once the continuous timeline is anchored, phase progression is
+            # deterministic; a random new-cycle pick would shift it backwards.
+            return neutral
+        now = _now_ts()
         expected_ts = _safe_float(meta.get("next_expected_start_ts"), 0) if isinstance(meta, dict) else 0
         if expected_ts > 0:
             days_late = max(0.0, (now - expected_ts) / 86400)
@@ -3822,6 +4073,11 @@ class DailyStateMixin(DailyStateTickMixin):
         }
         if phase in self._ADVANCED_CYCLE_PHASES:
             payload["strategy"] = "advanced"
+            previous_anchor = _safe_float(meta.get("cycle_anchor_ts"), 0)
+            if phase == "menstrual" and previous_anchor <= 0:
+                payload["cycle_anchor_ts"] = start_ts
+            elif previous_anchor > 0:
+                payload["cycle_anchor_ts"] = previous_anchor
             if phase != "menstrual" and _safe_float(meta.get("last_start_ts"), 0) > 0:
                 payload["last_start_ts"] = _safe_float(meta.get("last_start_ts"), start_ts)
                 payload["next_expected_start_ts"] = _safe_float(
@@ -8584,6 +8840,19 @@ class DailyStateMixin(DailyStateTickMixin):
                 for key in ("manual_offset", "manual_offset_signature", "manual_offset_phase", "manual_offset_day_in_phase"):
                     meta.pop(key, None)
                 self.data["body_cycle_state"] = meta
+            has_cycle_condition = any(
+                isinstance(cond, dict) and str(cond.get("kind") or "") == "body_cycle"
+                for cond in kept
+            )
+            anchor_ts = _safe_float(meta.get("cycle_anchor_ts"), 0)
+            if not has_cycle_condition and anchor_ts <= 0:
+                condition = self._advanced_cycle_condition(
+                    "menstrual",
+                    cause="六阶段周期策略首次启用，自然进入第一周期",
+                )
+                kept.append(condition)
+                self._record_body_cycle_episode(condition)
+                logger.info("[PrivateCompanion] 六阶段周期策略首次启用，已从月经期第 1 天开始推进")
             return kept
 
         signature = self._advanced_cycle_offset_signature(offset)
@@ -8612,6 +8881,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 "manual_offset_signature": signature,
                 "manual_offset_phase": phase,
                 "manual_offset_day_in_phase": day_in_phase,
+                "cycle_anchor_ts": max(0.0, now - (offset - 1) * 86400),
                 "strategy": "advanced",
             }
         )
@@ -8636,7 +8906,7 @@ class DailyStateMixin(DailyStateTickMixin):
             before_count = len(conditions)
             conditions = [
                 cond for cond in conditions
-                if not isinstance(cond, dict) or str(cond.get("kind") or "") != "body_cycle"
+                if not isinstance(cond, dict) or str(cond.get("kind") or "") not in {"body_cycle", "cycle_discomfort"}
             ]
             removed_count = before_count - len(conditions)
             if removed_count:
@@ -8645,6 +8915,20 @@ class DailyStateMixin(DailyStateTickMixin):
         else:
             conditions = self._synchronize_body_cycle_strategy(conditions, now)
             conditions = self._repair_body_cycle_conditions(conditions, now)
+            if not self._advanced_cycle_enabled() or not bool(
+                getattr(self, "advanced_cycle_discomfort_simulation", False)
+            ):
+                before_count = len(conditions)
+                conditions = [
+                    cond
+                    for cond in conditions
+                    if not isinstance(cond, dict) or str(cond.get("kind") or "") != "cycle_discomfort"
+                ]
+                if len(conditions) < before_count:
+                    logger.info(
+                        "[PrivateCompanion] 不适模拟已关闭，清理残留经期不适状态: removed=%s",
+                        before_count - len(conditions),
+                    )
         active = []
         expired = []
         for cond in conditions:
@@ -8656,6 +8940,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 expired.append(cond)
         for cond in expired:
             active.extend(self._spawn_followup_conditions(cond))
+        active = self._reconcile_advanced_cycle_condition(active, now)
         active = self._prune_active_hunger_conditions(active, now)
         self.data["state_conditions"] = active
 
@@ -8744,6 +9029,66 @@ class DailyStateMixin(DailyStateTickMixin):
             )
             self.data["body_cycle_state"] = meta
         return repaired
+
+    def _reconcile_advanced_cycle_condition(self, conditions: list[dict[str, Any]], now: float) -> list[dict[str, Any]]:
+        """Align the active cycle condition with the anchored continuous timeline.
+
+        The anchor always knows the true current phase and day. When the bot
+        was offline or a transition condition was spawned late, this replaces
+        the stale condition with one positioned exactly on the timeline so its
+        energy and mood effects never lag behind the displayed phase.
+
+        Args:
+            conditions: Currently active condition list after follow-up spawns.
+            now: Current unix timestamp.
+
+        Returns:
+            The adjusted condition list.
+        """
+        if not self._advanced_cycle_enabled():
+            return conditions
+        meta = self.data.get("body_cycle_state")
+        anchor_ts = _safe_float(meta.get("cycle_anchor_ts"), 0) if isinstance(meta, dict) else 0
+        if anchor_ts <= 0:
+            return conditions
+        expected_phase, day_in_phase = self._advanced_cycle_position_from_offset(
+            int((now - anchor_ts) // 86400) + 1
+        )
+        phase_days = self._advanced_cycle_phase_days(expected_phase)
+        phase_start = anchor_ts + (self._advanced_cycle_day_of_phase(expected_phase, 1) - 1) * 86400
+        active_cycles = [
+            cond
+            for cond in conditions
+            if isinstance(cond, dict)
+            and str(cond.get("kind") or "") == "body_cycle"
+            and _safe_float(cond.get("start_ts"), 0) <= now < _safe_float(cond.get("end_ts"), 0)
+        ]
+        if len(active_cycles) == 1:
+            cond = active_cycles[0]
+            cond_start = _safe_float(cond.get("start_ts"), 0)
+            if str(cond.get("phase") or "") == expected_phase and abs(cond_start - phase_start) < 6 * 3600:
+                return conditions
+        kept = [
+            cond
+            for cond in conditions
+            if not (isinstance(cond, dict) and str(cond.get("kind") or "") == "body_cycle")
+        ]
+        condition = self._advanced_cycle_condition(
+            expected_phase,
+            cause="周期阶段自然推进",
+        )
+        condition["start_ts"] = phase_start
+        condition["duration_hours"] = phase_days * 24
+        condition["end_ts"] = phase_start + phase_days * 24 * 3600
+        kept.append(condition)
+        self._record_body_cycle_episode(condition)
+        logger.info(
+            "[PrivateCompanion] 已对齐六阶段周期状态: phase=%s phase_start=%s day_in_phase=%s",
+            expected_phase,
+            self._environment_fromtimestamp(phase_start).strftime("%Y-%m-%d %H:%M"),
+            day_in_phase,
+        )
+        return kept
 
     def _spawn_followup_conditions(self, cond: dict[str, Any]) -> list[dict[str, Any]]:
         choice = self._pick_condition_transition(cond)
@@ -8972,6 +9317,16 @@ class DailyStateMixin(DailyStateTickMixin):
             sorted(mood_candidates, key=lambda item: item[1], reverse=True)[0][0]
             if mood_candidates else "平稳"
         )
+        cycle_runtime: dict[str, Any] = {}
+        if self._advanced_cycle_enabled() and profile.get("allow_cycle", False):
+            cycle_runtime = self._advanced_cycle_runtime()
+            if cycle_runtime:
+                values["body_cycle"] = (
+                    f"{cycle_runtime.get('phase_name', '周期')} 第{cycle_runtime.get('day_in_phase', 1)}天"
+                )
+                discomfort = self._active_cycle_discomfort_conditions()
+                if discomfort:
+                    cycle_runtime["discomfort"] = discomfort
         note = self._build_state_note(
             values["sleep"],
             values["dream"],
@@ -8990,6 +9345,7 @@ class DailyStateMixin(DailyStateTickMixin):
             "mood_bias": mood_bias,
             "energy": energy,
             "note": note,
+            "cycle_runtime": cycle_runtime,
             "conditions": active,
             "affect_modulation": compose_affect_modulation(active, now=composed_at),
         }
@@ -9912,7 +10268,7 @@ class DailyStateMixin(DailyStateTickMixin):
             return bool(profile.get("allow_health", True))
         if kind == "hunger":
             return bool(profile.get("allow_hunger", True))
-        if kind == "body_cycle":
+        if kind in {"body_cycle", "cycle_discomfort"}:
             return bool(profile.get("allow_cycle", False))
         return True
 
@@ -11255,9 +11611,9 @@ class DailyStateMixin(DailyStateTickMixin):
                 "passive": "Bot 处于月经期模拟阶段：周期会相对牵制可用精力和身体耐受，回复可适当简短放慢，措辞更温和；不要把状态当成固定台词反复说明。",
             },
             "follicular": {
-                "stage": "处于卵泡期早阶段",
+                "stage": "处于卵泡期阶段",
                 "influence": "精力逐渐回升，语气可以自然轻快一些；仍以当前话题为主，不必主动解释周期",
-                "passive": "Bot 处于卵泡期早模拟阶段：精力逐渐回升，语气可自然轻快一些，不需要主动解释周期。",
+                "passive": "Bot 处于卵泡期模拟阶段：精力逐渐回升，语气可自然轻快一些，不需要主动解释周期。",
             },
             "pre_ovulation": {
                 "stage": "处于排卵前期阶段",
@@ -11270,9 +11626,9 @@ class DailyStateMixin(DailyStateTickMixin):
                 "passive": "Bot 处于排卵期模拟阶段：精力相对充足，语气可略显明朗，但不据此强行提高亲密程度。",
             },
             "luteal": {
-                "stage": "处于黄体期早阶段",
+                "stage": "处于黄体期阶段",
                 "influence": "整体保持平稳，只允许轻微影响语气和节奏，不额外放大情绪",
-                "passive": "Bot 处于黄体期早模拟阶段：整体保持平稳，只轻微影响语气和节奏。",
+                "passive": "Bot 处于黄体期模拟阶段：整体保持平稳，只轻微影响语气和节奏。",
             },
             "pms": {
                 "stage": "处于 PMS 模拟阶段",
@@ -11504,10 +11860,10 @@ class DailyStateMixin(DailyStateTickMixin):
                 "body_period": "可能自然进入生理期阶段",
                 "body_recovery": "可能自然进入恢复期",
                 "body_menstrual": "会自然进入月经期",
-                "body_follicular": "会自然进入卵泡期早",
+                "body_follicular": "会自然进入卵泡期",
                 "body_pre_ovulation": "会自然进入排卵前期",
                 "body_ovulation": "会自然进入排卵期",
-                "body_luteal": "会自然进入黄体期早",
+                "body_luteal": "会自然进入黄体期",
                 "body_pms": "会自然进入 PMS 期",
                 "stable": "也可能直接回稳",
             }.get(target, target)
@@ -11542,10 +11898,10 @@ class DailyStateMixin(DailyStateTickMixin):
             "body_period": "身体感会自然往更敏感的阶段走",
             "body_recovery": "身体感会自然往恢复期走",
             "body_menstrual": "自然进入下一轮月经期",
-            "body_follicular": "自然进入卵泡期早",
+            "body_follicular": "自然进入卵泡期",
             "body_pre_ovulation": "自然进入排卵前期",
             "body_ovulation": "自然进入排卵期",
-            "body_luteal": "自然进入黄体期早",
+            "body_luteal": "自然进入黄体期",
             "body_pms": "自然进入 PMS 期",
             "stable": "慢慢回到平稳",
         }

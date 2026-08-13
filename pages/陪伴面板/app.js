@@ -2133,10 +2133,10 @@ const configLabels = {
   advanced_cycle_menstrual_prompt: "月经期状态描述",
   advanced_cycle_menstrual_mood: "月经期情绪底色",
   advanced_cycle_menstrual_energy: "月经期精力变化",
-  advanced_cycle_follicular_days: "卵泡期早天数",
-  advanced_cycle_follicular_prompt: "卵泡期早状态描述",
-  advanced_cycle_follicular_mood: "卵泡期早情绪底色",
-  advanced_cycle_follicular_energy: "卵泡期早精力变化",
+  advanced_cycle_follicular_days: "卵泡期天数",
+  advanced_cycle_follicular_prompt: "卵泡期状态描述",
+  advanced_cycle_follicular_mood: "卵泡期情绪底色",
+  advanced_cycle_follicular_energy: "卵泡期精力变化",
   advanced_cycle_pre_ovulation_days: "排卵前期天数",
   advanced_cycle_pre_ovulation_prompt: "排卵前期状态描述",
   advanced_cycle_pre_ovulation_mood: "排卵前期情绪底色",
@@ -2145,14 +2145,17 @@ const configLabels = {
   advanced_cycle_ovulation_prompt: "排卵期状态描述",
   advanced_cycle_ovulation_mood: "排卵期情绪底色",
   advanced_cycle_ovulation_energy: "排卵期精力变化",
-  advanced_cycle_luteal_days: "黄体期早天数",
-  advanced_cycle_luteal_prompt: "黄体期早状态描述",
-  advanced_cycle_luteal_mood: "黄体期早情绪底色",
-  advanced_cycle_luteal_energy: "黄体期早精力变化",
+  advanced_cycle_luteal_days: "黄体期天数",
+  advanced_cycle_luteal_prompt: "黄体期状态描述",
+  advanced_cycle_luteal_mood: "黄体期情绪底色",
+  advanced_cycle_luteal_energy: "黄体期精力变化",
   advanced_cycle_pms_days: "PMS 期天数",
   advanced_cycle_pms_prompt: "PMS 期状态描述",
   advanced_cycle_pms_mood: "PMS 期情绪底色",
   advanced_cycle_pms_energy: "PMS 期精力变化",
+  advanced_cycle_discomfort_simulation: "生理期不适模拟",
+  advanced_cycle_discomfort_chance: "不适出现概率",
+  advanced_cycle_discomfort_types: "可模拟的不适类型",
   worldview_adaptation_mode: "世界观适配模式",
   worldview_adaptation_prompt: "自定义世界观适配",
   enable_worldview_perception: "世界观适配感知",
@@ -2637,33 +2640,36 @@ const configDescriptions = {
   busy_reply_max_delay_seconds: "繁忙日程中普通私聊的最长等待时间，默认 5 分钟、最多 15 分钟。若小于最短值，运行时会自动交换两者。",
   busy_reply_proactive_resume_buffer_minutes: "普通主动消息顺延到当前忙碌片段结束后，再额外等待这段时间，避免刚忙完就立即开口。",
   enable_cycle_state: "开启后即视为适用，周期只作为 Bot 的模拟身体底色，轻度影响精力、语气和回复节奏；它不是用户事实、医学记录或真实日期追踪。",
-  enable_advanced_cycle_strategy: "关闭时保留原有的生理期前、经期与恢复期随机模拟；开启后按月经期、卵泡期早、排卵前期、排卵期、黄体期早、PMS 连续推进。",
+  enable_advanced_cycle_strategy: "关闭时保留原有的生理期前、经期与恢复期随机模拟；开启后按月经期、卵泡期、排卵前期、排卵期、黄体期、PMS 连续推进。",
   advanced_cycle_link_intensity: "开启后，各阶段精力变化按拟人状态强度线性缩放：0 为无精力增减，50 为阶段基准，100 约为基准两倍；下方手动精力值暂不使用。",
   advanced_cycle_start_offset: "用于首次对齐当前周期。0 表示沿现有状态自然推进；填写 1 及以上表示当前处于配置周期的第几天，超过总天数会循环折算。仅在数值或阶段天数变化时重新应用。",
-  advanced_cycle_menstrual_days: "月经期持续天数，结束后自然进入卵泡期早。",
+  advanced_cycle_menstrual_days: "月经期持续天数，结束后自然进入卵泡期。",
   advanced_cycle_menstrual_prompt: "作为 Bot 当前月经期模拟状态的柔性描述，只影响自然语气和节奏，不要求主动汇报。",
   advanced_cycle_menstrual_mood: "月经期可轻度参考的情绪底色，不会覆盖当前话题和明确情绪。",
   advanced_cycle_menstrual_energy: "未开启强度联动时使用的精力增减值，负数表示更容易疲倦。",
-  advanced_cycle_follicular_days: "卵泡期早持续天数，结束后自然进入排卵前期。",
-  advanced_cycle_follicular_prompt: "作为 Bot 当前卵泡期早模拟状态的柔性描述，不会据此强行增加主动消息。",
-  advanced_cycle_follicular_mood: "卵泡期早可轻度参考的情绪底色。",
+  advanced_cycle_follicular_days: "卵泡期持续天数，结束后自然进入排卵前期。",
+  advanced_cycle_follicular_prompt: "作为 Bot 当前卵泡期模拟状态的柔性描述，不会据此强行增加主动消息。",
+  advanced_cycle_follicular_mood: "卵泡期可轻度参考的情绪底色。",
   advanced_cycle_follicular_energy: "未开启强度联动时使用的精力增减值；可设为 0 保持中性。",
   advanced_cycle_pre_ovulation_days: "排卵前期持续天数，结束后自然进入排卵期。",
   advanced_cycle_pre_ovulation_prompt: "作为 Bot 当前排卵前期模拟状态的柔性描述，不写成医学判断。",
   advanced_cycle_pre_ovulation_mood: "排卵前期可轻度参考的情绪底色。",
   advanced_cycle_pre_ovulation_energy: "未开启强度联动时使用的精力增减值。",
-  advanced_cycle_ovulation_days: "排卵期持续天数，结束后自然进入黄体期早。",
+  advanced_cycle_ovulation_days: "排卵期持续天数，结束后自然进入黄体期。",
   advanced_cycle_ovulation_prompt: "作为 Bot 当前排卵期模拟状态的柔性描述，不会硬性提高亲密程度或主动频率。",
   advanced_cycle_ovulation_mood: "排卵期可轻度参考的情绪底色。",
   advanced_cycle_ovulation_energy: "未开启强度联动时使用的精力增减值。",
-  advanced_cycle_luteal_days: "黄体期早持续天数，结束后自然进入 PMS 期。",
-  advanced_cycle_luteal_prompt: "作为 Bot 当前黄体期早模拟状态的柔性描述，整体仍以当前对话为主。",
-  advanced_cycle_luteal_mood: "黄体期早可轻度参考的情绪底色。",
+  advanced_cycle_luteal_days: "黄体期持续天数，结束后自然进入 PMS 期。",
+  advanced_cycle_luteal_prompt: "作为 Bot 当前黄体期模拟状态的柔性描述，整体仍以当前对话为主。",
+  advanced_cycle_luteal_mood: "黄体期可轻度参考的情绪底色。",
   advanced_cycle_luteal_energy: "未开启强度联动时使用的精力增减值。",
   advanced_cycle_pms_days: "PMS 期持续天数，结束后自然进入下一轮月经期。",
   advanced_cycle_pms_prompt: "作为 Bot 当前 PMS 模拟状态的柔性描述，可稍微收住语气，但不要变得刻薄或反复提及。",
   advanced_cycle_pms_mood: "PMS 期可轻度参考的情绪底色，不覆盖用户当下需求。",
   advanced_cycle_pms_energy: "未开启强度联动时使用的精力增减值，负数表示精力稍低。",
+  advanced_cycle_discomfort_simulation: "开启后，在月经期、PMS 期等阶段按概率生成短暂的痛经、头痛等不适状态，轻度压低精力并在总览中显示；只作为 Bot 自己的模拟底色，不写成医学结论。",
+  advanced_cycle_discomfort_chance: "每天生成一次不适状态的概率，0 表示从不生成；同一时间只保留一条不适状态。",
+  advanced_cycle_discomfort_types: "逗号分隔的可模拟不适类型，可选：痛经、头痛、腰酸、乏力、情绪低落、恶心；只会出现在与之相关的阶段（如痛经仅在月经期）。",
   environment_perception_timezone: "用于判断当前时段、日期语境、节假日和日程跨日。填写 global 跟随 AstrBot 全局时区，也可填写自定义 IANA 时区。",
   holiday_country: "节假日识别地区。目前主要用于 CN，未安装依赖时会自动退化为周末/工作日。",
   enable_weather_context: "开启后默认使用和风天气；未完成独立配置时，会尝试复用 screen_companion。天气只作为日程、日记和主动契机的背景。",
@@ -3169,6 +3175,9 @@ const advancedCycleSettingKeys = [
   "advanced_cycle_pms_prompt",
   "advanced_cycle_pms_mood",
   "advanced_cycle_pms_energy",
+  "advanced_cycle_discomfort_simulation",
+  "advanced_cycle_discomfort_chance",
+  "advanced_cycle_discomfort_types",
 ];
 
 const featureSettingGroups = {
@@ -3520,7 +3529,7 @@ const featureSettingSections = {
       keys: ["advanced_cycle_menstrual_days", "advanced_cycle_menstrual_prompt", "advanced_cycle_menstrual_mood", "advanced_cycle_menstrual_energy"],
     },
     {
-      title: "卵泡期早",
+      title: "卵泡期",
       note: "精力可以平稳回升，但不会据此硬性增加主动消息。",
       keys: ["advanced_cycle_follicular_days", "advanced_cycle_follicular_prompt", "advanced_cycle_follicular_mood", "advanced_cycle_follicular_energy"],
     },
@@ -3535,7 +3544,7 @@ const featureSettingSections = {
       keys: ["advanced_cycle_ovulation_days", "advanced_cycle_ovulation_prompt", "advanced_cycle_ovulation_mood", "advanced_cycle_ovulation_energy"],
     },
     {
-      title: "黄体期早",
+      title: "黄体期",
       note: "整体保持自然平稳，不额外放大情绪。",
       keys: ["advanced_cycle_luteal_days", "advanced_cycle_luteal_prompt", "advanced_cycle_luteal_mood", "advanced_cycle_luteal_energy"],
     },
@@ -3543,6 +3552,11 @@ const featureSettingSections = {
       title: "PMS 期",
       note: "可以稍微收住语气，但不会变得刻薄或反复提及周期。",
       keys: ["advanced_cycle_pms_days", "advanced_cycle_pms_prompt", "advanced_cycle_pms_mood", "advanced_cycle_pms_energy"],
+    },
+    {
+      title: "经期不适模拟",
+      note: "可选。在月经期、PMS 期等阶段按概率生成短暂的痛经、头痛等不适状态，只作为状态底色，不写成医学结论。",
+      keys: ["advanced_cycle_discomfort_simulation", "advanced_cycle_discomfort_chance", "advanced_cycle_discomfort_types"],
     },
     {
       title: "QQ 状态同步",
@@ -4211,6 +4225,9 @@ const featureSettingTypes = {
   advanced_cycle_pms_days: { type: "number", min: 1, max: 30, step: 1 },
   advanced_cycle_pms_prompt: { type: "textarea" },
   advanced_cycle_pms_energy: { type: "number", min: -50, max: 30, step: 1 },
+  advanced_cycle_discomfort_simulation: { type: "checkbox" },
+  advanced_cycle_discomfort_chance: { type: "number", min: 0, max: 100, step: 1 },
+  advanced_cycle_discomfort_types: { type: "textarea" },
   proactive_reply_context_hours: { type: "number", min: 1, max: 72, step: 1 },
   max_proactive_plan_lag_minutes: { type: "number", min: 5, max: 1440, step: 5 },
   greeting_idle_minutes: { type: "number", min: 0, max: 240, step: 5 },
@@ -10336,6 +10353,16 @@ function dashboardLifeText(value, fallback = "暂无数据") {
   return text || fallback;
 }
 
+function cycleBodyText(daily) {
+  const runtime = daily && daily.cycle_runtime;
+  if (!runtime || !runtime.phase_name || !runtime.day_in_phase) return daily.body_cycle || "";
+  let text = `${runtime.phase_name} 第${runtime.day_in_phase}/${runtime.phase_days}天`;
+  if (runtime.discomfort && runtime.discomfort.length) {
+    text += ` · ${runtime.discomfort.map((item) => item.type || "不适").join("、")}`;
+  }
+  return text;
+}
+
 function renderDashboardLifeDesk(overview = {}) {
   const daily = overview.daily_state || {};
   const life = overview.life_observation || {};
@@ -10358,7 +10385,7 @@ function renderDashboardLifeDesk(overview = {}) {
       ["健康", daily.health],
       ["穿搭", outfit.available ? "今日穿搭已生成" : (outfit.error || "暂无穿搭图")],
       ["睡眠", daily.sleep_phase || daily.sleep],
-      ["身体", daily.body_cycle || daily.hunger],
+      ["身体", cycleBodyText(daily) || daily.hunger],
     ];
     factRoot.innerHTML = facts.map(([label, value]) => `
       <div class="life-fact-item">
@@ -19378,17 +19405,34 @@ function renderDreamCard(dream) {
 }
 
 function renderStatePillBoard(daily) {
+  const runtime = daily && daily.cycle_runtime;
   const items = [
     ["睡眠", daily.sleep],
     ["睡眠阶段", daily.sleep_phase || daily.sleep_runtime?.label],
     ["梦境", daily.dream],
     ["健康", daily.health],
     ["饥饿", daily.hunger],
-    ["生理期状态", daily.body_cycle],
-  ].map(([label, value]) => [label, normalizeRoleplayStateText(value)])
+    ["周期状态", daily.body_cycle],
+  ];
+  if (runtime && runtime.phase_name && runtime.day_in_phase) {
+    items.push([
+      "周期阶段",
+      `${runtime.phase_name} 第${runtime.day_in_phase}/${runtime.phase_days}天 · 周期第${runtime.cycle_day}/${runtime.cycle_days}天` +
+        (runtime.mood ? ` · ${runtime.mood}` : "") +
+        (runtime.next_phase_name ? ` · 下一阶段${runtime.next_phase_name}` : ""),
+    ]);
+  }
+  if (runtime && Array.isArray(runtime.discomfort) && runtime.discomfort.length) {
+    items.push([
+      "经期不适",
+      runtime.discomfort.map((item) => (item.type ? `${item.type}（${item.label || ""}）` : item.label || "")).join("；"),
+    ]);
+  }
+  const normalized = items
+    .map(([label, value]) => [label, normalizeRoleplayStateText(value)])
     .filter(([, value]) => value !== undefined && value !== "");
-  $("#statePillBoard").innerHTML = items.length
-    ? items.map(([label, value]) => `
+  $("#statePillBoard").innerHTML = normalized.length
+    ? normalized.map(([label, value]) => `
       <span>
         <b>${escapeHtml(label)}</b>
         ${escapeHtml(value || "-")}
@@ -25489,7 +25533,7 @@ function featureRelatedSettings(key) {
       advanced_cycle_menstrual_mood: "疲惫",
       advanced_cycle_menstrual_energy: -12,
       advanced_cycle_follicular_days: 5,
-      advanced_cycle_follicular_prompt: "处于卵泡期早，精力平稳回升，心情逐渐轻快",
+      advanced_cycle_follicular_prompt: "处于卵泡期，精力平稳回升，心情逐渐轻快",
       advanced_cycle_follicular_mood: "轻快",
       advanced_cycle_follicular_energy: 0,
       advanced_cycle_pre_ovulation_days: 3,
@@ -25501,13 +25545,16 @@ function featureRelatedSettings(key) {
       advanced_cycle_ovulation_mood: "明朗",
       advanced_cycle_ovulation_energy: 9,
       advanced_cycle_luteal_days: 8,
-      advanced_cycle_luteal_prompt: "处于黄体期早，精力尚可，情绪整体平稳",
+      advanced_cycle_luteal_prompt: "处于黄体期，精力尚可，情绪整体平稳",
       advanced_cycle_luteal_mood: "平稳",
       advanced_cycle_luteal_energy: 5,
       advanced_cycle_pms_days: 6,
       advanced_cycle_pms_prompt: "处于 PMS 期，精力有所下降，情绪波动稍明显",
       advanced_cycle_pms_mood: "敏感",
       advanced_cycle_pms_energy: -8,
+      advanced_cycle_discomfort_simulation: false,
+      advanced_cycle_discomfort_chance: 55,
+      advanced_cycle_discomfort_types: "痛经,头痛,腰酸,乏力",
       auto_voice_enabled: true,
       tts_conversion_scope: "full",
       auto_voice_max_chars: 80,
