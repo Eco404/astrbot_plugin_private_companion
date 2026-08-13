@@ -15022,7 +15022,13 @@ class PrivateCompanionPageApi(
         last_sent = user.get("last_sent", 0)
         user_id_text = str(user_id)
         is_qq_user = user_id_text.isdigit()
-        umo = str(user.get("umo", "") or "")
+        umo = str(
+            user.get("umo")
+            or user.get("bound_delivery_umo")
+            or user.get("preferred_delivery_umo")
+            or user.get("last_inbound_umo", "")
+            or ""
+        )
         source = self._single_line(umo.split(":", 1)[0], 40) if ":" in umo else ""
         platform_profile_getter = getattr(self.plugin, "_platform_profile", None)
         platform_profile = platform_profile_getter(umo=umo) if callable(platform_profile_getter) else {}

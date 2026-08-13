@@ -8114,7 +8114,9 @@ function setupGuideBoundUsers() {
 }
 
 function setupGuideBoundPlatform(user) {
-  return String(user?.platform_kind || "").toLowerCase() === "qq_official" ? "qq_official" : "aiocqhttp";
+  const kind = String(user?.platform_kind || "").toLowerCase();
+  const umo = String(user?.bound_delivery_umo || user?.umo || "").toLowerCase();
+  return kind === "qq_official" || umo.startsWith("qq_official:") ? "qq_official" : "aiocqhttp";
 }
 
 function setupGuideDraft() {
@@ -36035,7 +36037,14 @@ document.addEventListener("click", async (event) => {
   if (refreshBindingsButton instanceof HTMLButtonElement) {
     setActionBusy(refreshBindingsButton, true);
     try {
-      await loadUserGroupLists(loadAllRequestSeq, { force: true, silent: true, showErrors: true });
+      const [overview] = await Promise.all([
+        fetchJson("/overview"),
+        loadUserGroupLists(loadAllRequestSeq, { force: true, silent: true, showErrors: true }),
+      ]);
+      if (overview) applyOverviewData(overview);
+      // Rebuild the guide from the freshly loaded bound routes instead of
+      // retaining an earlier empty/default draft.
+      state.setupGuideDraft = null;
       const boundUsers = syncSetupGuideBoundUsers({ append: true });
       rerenderSetupGuideOverlayPreserveScroll();
       showToast(boundUsers.length ? `已读取 ${boundUsers.length} 个私聊绑定` : "暂未检测到私聊绑定", boundUsers.length ? "success" : "warn");
