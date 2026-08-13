@@ -2073,6 +2073,37 @@ class TtsEnhancementMixin:
                 parts.append(part)
         return _single_line("\n".join(parts), 800)
 
+    def _tts_unwrapped_foreign_translation_fallback(self, text: str, event: Any = None) -> str:
+        """Recover the visible Chinese half of an unwrapped fast-tag reply.
+
+        Fast-tag replies reserve foreign text for ``<pc_tts>``. A few models
+        occasionally omit the wrapper but still emit the prescribed
+        "foreign speech + Chinese display text" layout. Restrict recovery to
+        that exact shape so ordinary Chinese replies with a foreign word, and
+        user-requested foreign text, remain untouched.
+        """
+        if getattr(self, "tts_generation_mode", "fast_tag") != "fast_tag":
+            return ""
+        if self._tts_voice_language_for_event(event) == "zh":
+            return ""
+        if getattr(self, "tts_foreign_text_mode", "translation") != "translation":
+            return ""
+        if self._event_explicitly_requests_foreign_visible_text(event):
+            return ""
+        cleaned = self._sanitize_tts_visible_text(text, max_chars=1600)
+        if not cleaned or re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", cleaned, flags=re.IGNORECASE):
+            return ""
+        first_visible = re.search(r"[^\s\[\(（\"'“‘]", cleaned)
+        if first_visible is None or not re.match(r"[\u3040-\u30ff\u31f0-\u31ff]", first_visible.group(0)):
+            return ""
+        kana_count = len(re.findall(r"[\u3040-\u30ff\u31f0-\u31ff]", cleaned))
+        if kana_count < 2:
+            return ""
+        visible_chinese = self._tts_chinese_visible_fallback_from_mixed(cleaned)
+        if not visible_chinese or visible_chinese == cleaned:
+            return ""
+        return visible_chinese
+
     async def _translate_tts_spoken_to_chinese(self, text: str, event: Any, *, provider_kind: str) -> str:
         spoken = self._normalize_tts_spoken_text(text, provider_kind=provider_kind)
         if not spoken:
@@ -2255,9 +2286,9 @@ TTS 朗读文本：
         elif foreign_text_mode == "bilingual":
             language_rule = f"<pc_tts> 内必须是自然{lang}；插件最终会同时显示朗读原文和自然中文译文。"
         elif voice_lang == "en":
-            language_rule = "<pc_tts> 内必须是自然英语；每个语音块后直接补一句自然中文，不要加“中文含义：”“对应文本：”这类标题。"
+            language_rule = "<pc_tts> 内必须是自然英语；每个语音块后直接补一句自然中文，不要加“中文含义：”“对应文本：”这类标题。英语朗读稿绝不能裸写在标签外；若本轮不用标签，整条可见正文只能使用中文。"
         else:
-            language_rule = "<pc_tts> 内必须是自然日语，除极短语气词外要包含假名；每个语音块后直接补一句自然中文，不要加“中文含义：”“对应文本：”这类标题。"
+            language_rule = "<pc_tts> 内必须是自然日语，除极短语气词外要包含假名；每个语音块后直接补一句自然中文，不要加“中文含义：”“对应文本：”这类标题。日语朗读稿绝不能裸写在标签外；若本轮不用标签，整条可见正文只能使用中文。"
         examples = ""
         if mode == "fast_tag":
             if full_scope and voice_lang == "zh":
@@ -2765,6 +2796,16 @@ TTS 朗读文本：
                     provider_kind = self._tts_provider_kind_for_event(event, config=config)
                     text = await self._ensure_tts_blocks_have_visible_chinese(text, event, provider_kind=provider_kind)
                 text = self._protect_tts_blocks_for_framework(text, event)
+            else:
+                visible_fallback = self._tts_unwrapped_foreign_translation_fallback(text, event)
+                if visible_fallback:
+                    logger.warning(
+                        "[PrivateCompanion] 快速标签回复漏写语音标记，已仅保留中文可见正文: session=%s original=%s visible=%s",
+                        _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                        _single_line(text, 160),
+                        _single_line(visible_fallback, 160),
+                    )
+                    text = visible_fallback
             resp.completion_text = _normalize_outbound_punctuation_flow(text)
 
     async def apply_tts_enhancement_before_send(self, event: Any) -> None:

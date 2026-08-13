@@ -848,6 +848,44 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.completion_text, "今日はゆっくりしてね。今天慢一点也没关系。")
         self.assertNotIn("<tts", response.completion_text.lower())
 
+    async def test_fast_tag_unwrapped_japanese_and_chinese_keeps_only_visible_chinese(self):
+        harness = _TtsHarness()
+        harness.tts_generation_mode = "fast_tag"
+        harness.tts_voice_language = "ja"
+        harness.tts_foreign_text_mode = "translation"
+        response = SimpleNamespace(
+            completion_text=(
+                "えへへ、なんだかんだで、少し良くなった気がする。"
+                "被比折大人这么一直揉着，感觉肚子好像也没那么闷了呢。"
+            )
+        )
+        event = SimpleNamespace(
+            unified_msg_origin="test-session",
+            message_str="摸摸",
+            _private_companion_tts_request_applied=True,
+        )
+
+        await harness.protect_tts_enhancement_response_blocks(event, response)
+
+        self.assertEqual("被比折大人这么一直揉着，感觉肚子好像也没那么闷了呢。", response.completion_text)
+
+    async def test_fast_tag_unwrapped_japanese_is_preserved_when_user_requested_japanese_text(self):
+        harness = _TtsHarness()
+        harness.tts_generation_mode = "fast_tag"
+        harness.tts_voice_language = "ja"
+        harness.tts_foreign_text_mode = "translation"
+        response = SimpleNamespace(completion_text="えへへ、なんだかんだで、少し良くなった気がする。")
+        event = SimpleNamespace(
+            unified_msg_origin="test-session",
+            message_str="请用日语文字回复我",
+            _private_companion_tts_request_applied=True,
+            _private_companion_tts_voice_language="ja",
+        )
+
+        await harness.protect_tts_enhancement_response_blocks(event, response)
+
+        self.assertEqual("えへへ、なんだかんだで、少し良くなった気がする。", response.completion_text)
+
     def test_full_scope_rebuilds_partial_foreign_tag_from_complete_visible_reply(self):
         harness = _TtsHarness()
         harness.tts_generation_mode = "fast_tag"
