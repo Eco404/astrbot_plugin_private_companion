@@ -889,17 +889,17 @@ function syncExternalCompanionVisibility() {
     state.featureDomainFilter = "all";
   }
 
-  // QQ 空间与创作书柜由内容扩展承载；未安装或未启用时不展示迁移后的入口。
+  // 内容扩展可用时由它自己的“QQ 空间与书柜”页面承载；否则保留主插件兼容回退。
   const qzoneTab = document.querySelector('.tab[data-tab="qzone"]');
   const qzonePanel = document.getElementById("panel-qzone");
   const bookshelfTab = document.querySelector('.tab[data-tab="bookshelf"]');
   const bookshelfPanel = document.getElementById("panel-bookshelf");
   const linked = contentCompanionLinked();
-  if (qzoneTab) qzoneTab.hidden = !linked;
-  if (qzonePanel) qzonePanel.hidden = !linked;
-  if (bookshelfTab) bookshelfTab.hidden = !linked;
-  if (bookshelfPanel) bookshelfPanel.hidden = !linked;
-  if (!linked && ["qzone", "bookshelf"].includes(state.activeTab)) {
+  if (qzoneTab) qzoneTab.hidden = linked;
+  if (qzonePanel) qzonePanel.hidden = linked;
+  if (bookshelfTab) bookshelfTab.hidden = linked;
+  if (bookshelfPanel) bookshelfPanel.hidden = linked;
+  if (linked && ["qzone", "bookshelf"].includes(state.activeTab)) {
     state.activeTab = "dashboard";
     document.querySelector('.tab[data-tab="dashboard"]')?.click();
   }
@@ -912,11 +912,11 @@ const pluginIntegrationAvailabilityRules = {
   enable_livingmemory_integration: () => Boolean(state.overview?.livingmemory?.compatible_available || state.overview?.livingmemory?.available || state.overview?.livingmemory?.memory_companion_active),
   enable_bilibili_integration: () => Boolean(state.overview?.bilibili?.available),
   enable_bilibili_boredom_watch: () => Boolean(state.overview?.bilibili?.available),
-  enable_qzone_integration: () => state.overview?.qzone?.platform_supported !== false,
-  enable_qzone_life_publish: () => state.overview?.qzone?.platform_supported !== false,
-  enable_qzone_generated_image_publish: () => imageCompanionInstalled() && state.overview?.qzone?.platform_supported !== false,
-  enable_qzone_comment_inbox: () => state.overview?.qzone?.platform_supported !== false,
-  enable_qzone_emotional_vent_publish: () => Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
+  enable_qzone_integration: () => !contentCompanionLinked() && state.overview?.qzone?.platform_supported !== false,
+  enable_qzone_life_publish: () => !contentCompanionLinked() && state.overview?.qzone?.platform_supported !== false,
+  enable_qzone_generated_image_publish: () => !contentCompanionLinked() && imageCompanionInstalled() && state.overview?.qzone?.platform_supported !== false,
+  enable_qzone_comment_inbox: () => !contentCompanionLinked() && state.overview?.qzone?.platform_supported !== false,
+  enable_qzone_emotional_vent_publish: () => !contentCompanionLinked() && Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
   enable_creative_writing: () => !contentCompanionLinked(),
   enable_creative_cover_generation: () => !contentCompanionLinked(),
   CREATIVE_MODEL_PROVIDER_ID: () => !contentCompanionLinked(),
@@ -6804,6 +6804,9 @@ function openExtensionMigrationNoticeIfNeeded() {
   extensionMigrationNoticeChecked = true;
   const dialog = $("#extensionMigrationNoticeDialog");
   if (!dialog) return;
+  // The notice is declared near a tab panel for maintainability, but a modal
+  // inside a hidden panel can make the page inert without rendering itself.
+  if (dialog.parentElement !== document.body) document.body.append(dialog);
   bindExtensionMigrationNoticeDialog(dialog);
   try {
     if (window.localStorage.getItem(EXTENSION_MIGRATION_NOTICE_STORAGE_KEY) === "1") return;
@@ -6813,6 +6816,13 @@ function openExtensionMigrationNoticeIfNeeded() {
   if (dialog.open) return;
   if (typeof dialog.showModal === "function") dialog.showModal();
   else dialog.setAttribute("open", "");
+  window.requestAnimationFrame(() => {
+    const rect = dialog.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) return;
+    if (typeof dialog.close === "function" && dialog.open) dialog.close();
+    else dialog.removeAttribute("open");
+    console.warn("[PrivateCompanionPage] 迁移提示未能可见渲染，已自动解除模态状态");
+  });
 }
 
 async function loadAll(options = {}) {
@@ -8581,7 +8591,7 @@ function setupGuideModeHomeHtml() {
   const hasCreative = Boolean(features.enable_creative_writing);
   const hasNews = Boolean(features.enable_news_integration);
   const hasBili = Boolean(features.enable_bilibili_integration);
-  const hasQzone = Boolean(features.enable_qzone_integration);
+  const hasQzone = !contentCompanionLinked() && Boolean(features.enable_qzone_integration);
   const hasMemory = Boolean(features.enable_companion_memory);
 
   const firstGuideSteps = [
@@ -10902,7 +10912,7 @@ function moduleShortcutNote(overview) {
     ["长期创作", Boolean(features.enable_creative_writing || settings.enable_creative_writing)],
     ["新闻阅读", Boolean(features.enable_news_integration || settings.enable_news_integration)],
     ["主动搜索", Boolean(features.enable_web_exploration || settings.enable_web_exploration)],
-    ["QQ 空间", Boolean((features.enable_qzone_integration || settings.enable_qzone_integration) && overview?.qzone?.platform_supported !== false)],
+    ["QQ 空间", !contentCompanionLinked() && Boolean((features.enable_qzone_integration || settings.enable_qzone_integration) && overview?.qzone?.platform_supported !== false)],
   ];
   if (overview?.private_reading?.available) {
     items.push(["夹层阅读", Boolean(features.enable_private_reading_integration || settings.enable_private_reading_integration)]);
@@ -11019,7 +11029,7 @@ function renderSetupProgress() {
   const hasMemory = Boolean(features.enable_companion_memory);
   const hasCreative = Boolean(features.enable_creative_writing);
   const hasNews = Boolean(features.enable_news_integration);
-  const hasQzone = Boolean(features.enable_qzone_integration);
+  const hasQzone = !contentCompanionLinked() && Boolean(features.enable_qzone_integration);
   const hasBili = Boolean(features.enable_bilibili_integration);
 
   const checklist = [

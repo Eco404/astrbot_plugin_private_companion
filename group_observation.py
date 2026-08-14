@@ -3093,8 +3093,24 @@ class GroupObservationMixin:
         )
         group_id = _single_line(group.get("group_id"), 80)
         llm_blocked = bool(group_id and self._group_llm_reply_blocked(group_id))
+        global_enabled = bool(getattr(self, "enable_group_companion", False))
+        group_enabled = bool(group.get("enabled", True))
+        allowed_by_mode = bool(group_id and self._group_allowed_by_access_mode(group_id))
+        effective_enabled = global_enabled and group_enabled and allowed_by_mode
+        if not global_enabled:
+            effective_reason = "群聊陪伴总开关关闭"
+        elif not group_enabled:
+            effective_reason = "本群单独停用；可在群聊面板启用本群"
+        elif not allowed_by_mode:
+            effective_reason = "当前群未被名单模式放行"
+        else:
+            effective_reason = "总开关、本群开关和名单均已生效"
         return (
-            f"群聊陪伴状态：{'开启' if group.get('enabled', True) else '关闭'}\n"
+            f"群聊陪伴最终状态：{'开启' if effective_enabled else '关闭'}\n"
+            f"群聊陪伴总开关：{'开启' if global_enabled else '关闭'}\n"
+            f"本群单独开关：{'开启' if group_enabled else '关闭'}\n"
+            f"名单放行：{'是' if allowed_by_mode else '否'}\n"
+            f"状态说明：{effective_reason}\n"
             f"本群 LLM 回复：{'关闭' if llm_blocked else '开启'}\n"
             f"访问模式：{'黑名单' if self.group_access_mode == 'blacklist' else '白名单'}\n"
             f"群号：{group_id}\n"

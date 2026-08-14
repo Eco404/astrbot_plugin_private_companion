@@ -217,6 +217,9 @@ def _multi_persona_event_context(function):
     if inspect.isasyncgenfunction(function):
         @functools.wraps(function)
         async def asyncgen_wrapper(self, event, *args, **kwargs):
+            scope_checker = getattr(self, "_bot_scope_allows_event", None)
+            if callable(scope_checker) and not scope_checker(event):
+                return
             activator = getattr(self, "_activate_persona_for_event_context", None)
             if not callable(activator):
                 activator = getattr(self, "_activate_persona_for_event", None)
@@ -235,6 +238,9 @@ def _multi_persona_event_context(function):
 
     @functools.wraps(function)
     async def async_wrapper(self, event, *args, **kwargs):
+        scope_checker = getattr(self, "_bot_scope_allows_event", None)
+        if callable(scope_checker) and not scope_checker(event):
+            return None
         activator = getattr(self, "_activate_persona_for_event_context", None)
         if not callable(activator):
             activator = getattr(self, "_activate_persona_for_event", None)
@@ -7841,6 +7847,57 @@ class PrivateCompanionPlugin(
                 "[PrivateCompanion] 发送前已清理内部控制标签: session=%s",
                 _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
             )
+
+    @filter.on_decorating_result(priority=-29999)
+    @_multi_persona_event_context
+    async def final_strip_outbound_control_blocks_before_send(
+        self, event: AstrMessageEvent, *args, **kwargs
+    ):
+        """最后一环清理，防止后续 TTS/分段钩子重新带出内部标签。"""
+        if self is None or not bool(getattr(self, "enabled", False)):
+            return
+        result = event.get_result()
+        chain = list(getattr(result, "chain", []) or []) if result is not None else []
+        if not chain:
+            return
+        protected_tts_tokens = getattr(event, "_private_companion_tts_block_tokens", None)
+        preserve_private_tts_tokens = (
+            bool(getattr(self, "enable_tts_enhancement", False))
+            and isinstance(protected_tts_tokens, dict)
+            and bool(protected_tts_tokens)
+        )
+        cleaned_chain: list[Any] = []
+        changed = False
+        for component in chain:
+            if not isinstance(component, Plain):
+                cleaned_chain.append(component)
+                continue
+            original = str(getattr(component, "text", "") or "")
+            cleaned = _strip_outbound_control_blocks(
+                original,
+                preserve_private_tts_tokens=preserve_private_tts_tokens,
+                allowed_private_tts_tokens=(
+                    set(protected_tts_tokens.keys())
+                    if isinstance(protected_tts_tokens, dict)
+                    else None
+                ),
+            )
+            if not bool(getattr(self, "enable_tts_enhancement", False)):
+                cleaned = re.sub(r"</?t{2,}s\b[^>]*>", "", cleaned, flags=re.IGNORECASE).strip()
+            if cleaned:
+                cleaned_chain.append(Plain(cleaned) if cleaned != original else component)
+            if cleaned != original:
+                changed = True
+        if not changed:
+            return
+        try:
+            result.chain = cleaned_chain
+        except Exception:
+            event.set_result(self._build_result_from_chain(cleaned_chain))
+        logger.warning(
+            "[PrivateCompanion] 最终发送前已清理内部控制标签: session=%s",
+            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+        )
 
     @filter.on_decorating_result()
     @_multi_persona_event_context

@@ -102,6 +102,75 @@ class _IdentitySourceHarness(CoreStoreMixin):
     pass
 
 
+class _BotScopeHarness(CoreStoreMixin):
+    def __init__(self) -> None:
+        self.bot_scope_mode = "all"
+        self.bot_scope_ids = []
+        self.context = SimpleNamespace(
+            platform_manager=SimpleNamespace(
+                get_insts=lambda: [
+                    SimpleNamespace(
+                        self_id="bot-a",
+                        bot=SimpleNamespace(_wsr_api_clients={"bot-a": object()}),
+                        meta=lambda: SimpleNamespace(id="adapter-a", name="Adapter A"),
+                    ),
+                    SimpleNamespace(
+                        self_id="bot-b",
+                        bot=SimpleNamespace(_wsr_api_clients={"bot-b": object()}),
+                        meta=lambda: SimpleNamespace(id="adapter-b", name="Adapter B"),
+                    ),
+                ]
+            )
+        )
+
+    @staticmethod
+    def _event_self_id(event) -> str:
+        return str(getattr(event, "self_id", "") or "")
+
+
+class BotScopeTests(unittest.TestCase):
+    @staticmethod
+    def _event(bot_id: str, adapter_id: str):
+        return SimpleNamespace(
+            self_id=bot_id,
+            adapter_instance_id=adapter_id,
+            unified_msg_origin=f"{adapter_id}:FriendMessage:user",
+            message_obj=None,
+        )
+
+    def test_all_mode_accepts_both_bots(self) -> None:
+        harness = _BotScopeHarness()
+
+        self.assertTrue(harness._bot_scope_allows_event(self._event("bot-a", "adapter-a")))
+        self.assertTrue(harness._bot_scope_allows_event(self._event("bot-b", "adapter-b")))
+
+    def test_allowlist_accepts_self_id_or_adapter_id(self) -> None:
+        harness = _BotScopeHarness()
+        harness.bot_scope_mode = "allowlist"
+        harness.bot_scope_ids = ["bot-a"]
+
+        self.assertTrue(harness._bot_scope_allows_event(self._event("bot-a", "adapter-a")))
+        self.assertTrue(harness._bot_scope_allows_umo("adapter-a:FriendMessage:user"))
+        self.assertFalse(harness._bot_scope_allows_event(self._event("bot-b", "adapter-b")))
+        self.assertFalse(harness._bot_scope_allows_umo("adapter-b:FriendMessage:user"))
+
+        harness.bot_scope_ids = ["adapter-b"]
+        self.assertTrue(harness._bot_scope_allows_event(self._event("bot-b", "adapter-b")))
+
+    def test_denylist_and_empty_list_semantics(self) -> None:
+        harness = _BotScopeHarness()
+        harness.bot_scope_mode = "denylist"
+        harness.bot_scope_ids = ["bot-b"]
+
+        self.assertTrue(harness._bot_scope_allows_umo("adapter-a:FriendMessage:user"))
+        self.assertFalse(harness._bot_scope_allows_umo("adapter-b:FriendMessage:user"))
+
+        harness.bot_scope_ids = []
+        self.assertTrue(harness._bot_scope_allows_umo("adapter-b:FriendMessage:user"))
+        harness.bot_scope_mode = "allowlist"
+        self.assertFalse(harness._bot_scope_allows_umo("adapter-a:FriendMessage:user"))
+
+
 class BotIdentitySourceTests(unittest.TestCase):
     def test_onebot_connection_id_is_used_instead_of_internal_client_uuid(self) -> None:
         harness = _IdentitySourceHarness()

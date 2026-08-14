@@ -34,6 +34,23 @@
         "hint": "用于日程、状态、日记和拓展页面展示，不会覆盖 AstrBot 全局人格名。",
         "default": "小星"
       },
+      "bot_scope_mode": {
+        "description": "Bot 作用域模式",
+        "type": "string",
+        "options": ["all", "allowlist", "denylist"],
+        "labels": ["全部 Bot", "仅允许列表", "排除列表"],
+        "hint": "默认对当前 AstrBot 载入的全部 Bot 生效。选择“仅允许列表”后，仅处理填写的 Bot self_id；也接受事件中的 adapter 实例 ID。",
+        "default": "all"
+      },
+      "bot_scope_ids": {
+        "description": "Bot 作用域 ID 列表",
+        "type": "list",
+        "condition": {
+          "bot_scope_mode": ["allowlist", "denylist"]
+        },
+        "hint": "每行填写一个 Bot self_id 或 adapter 实例 ID。allowlist 留空时不处理任何 Bot；denylist 留空时不排除任何 Bot。",
+        "default": []
+      },
       "plugin_specific_persona_id": {
         "description": "插件指定人格 ID",
         "type": "string",

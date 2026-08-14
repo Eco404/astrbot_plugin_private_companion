@@ -595,6 +595,7 @@ def _format_history_media_marker(*, images: int = 0, records: int = 0) -> str:
 def _strip_history_media_markers(text: Any) -> str:
     """Remove internal media metadata and legacy chat-like attachment notes."""
     normalized = str(text or "")
+    had_marker = bool(re.search(r"<pc_history_media\b", normalized, flags=re.IGNORECASE))
     normalized = re.sub(
         r"<pc_history_media\b[^>]*>(?:[\s\S]*?</pc_history_media\s*>)?",
         "",
@@ -610,6 +611,8 @@ def _strip_history_media_markers(text: Any) -> str:
     normalized = re.sub(r"[ \t]+([，,。！？!?；;：:、~～…])", r"\1", normalized)
     normalized = re.sub(r"\n[ \t]+", "\n", normalized)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    if had_marker:
+        normalized = re.sub(r"(?<!\w)[（(]\s*[）)]", "", normalized)
     return normalized.strip()
 
 

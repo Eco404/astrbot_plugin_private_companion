@@ -43,6 +43,16 @@ class ExternalAbilityControlsUiTests(unittest.TestCase):
         self.assertEqual(self.css, self.localized_css)
         self.assertEqual(self.html, self.localized_html)
 
+    def test_content_extension_owns_legacy_qzone_and_bookshelf_entrypoints(self) -> None:
+        for source in (self.script, self.localized_script):
+            self.assertIn("if (qzoneTab) qzoneTab.hidden = linked;", source)
+            self.assertIn("if (bookshelfTab) bookshelfTab.hidden = linked;", source)
+            self.assertIn(
+                "enable_qzone_integration: () => !contentCompanionLinked()",
+                source,
+            )
+            self.assertIn("if (linked && [\"qzone\", \"bookshelf\"]", source)
+
 
 if __name__ == "__main__":
     unittest.main()

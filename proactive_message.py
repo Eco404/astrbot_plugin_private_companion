@@ -14606,6 +14606,13 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         *,
         apply_decorating_hooks: bool = True,
     ) -> bool:
+        bot_scope_checker = getattr(self, "_bot_scope_allows_umo", None)
+        if callable(bot_scope_checker) and not bot_scope_checker(umo):
+            logger.info(
+                "[PrivateCompanion] Bot 作用域已跳过后台投递: umo=%s",
+                _single_line(umo, 140),
+            )
+            return False
         chain_redactor = getattr(self, "_redact_outbound_chain_secrets", None)
         if callable(chain_redactor):
             chain, redacted = chain_redactor(chain)

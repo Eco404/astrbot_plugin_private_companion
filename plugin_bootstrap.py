@@ -515,6 +515,10 @@ def _initialize_world_and_model_config(self: Any, c: Any) -> None:
     self.enable_daily_plan = self._cfg_bool(c, "enable_daily_plan", True)
     self.daily_plan_time = self._cfg_str(c, "daily_plan_time", "07:30")
     self.bot_name = self._cfg_str(c, "bot_name", "小星", "小星")
+    self.bot_scope_mode = self._cfg_str(c, "bot_scope_mode", "all", "all").strip().lower()
+    if self.bot_scope_mode not in {"all", "allowlist", "denylist"}:
+        self.bot_scope_mode = "all"
+    self.bot_scope_ids = self._cfg_raw(c, "bot_scope_ids", [])
     self.include_schedule_in_messages = self._cfg_bool(c, "include_schedule_in_messages", True)
     self.daily_plan_prompt = self._cfg_str(c, "daily_plan_prompt", "")
     self.plugin_specific_persona_id = self._cfg_str(c, "plugin_specific_persona_id", "")

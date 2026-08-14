@@ -152,6 +152,8 @@ C:\Users\你的用户名\.astrbot\data\plugins\astrbot_plugin_private_companion
 
 ### OneBot 与 QQ 官方身份
 
+单个 AstrBot 同时加载多个 Bot 时，陪伴插件默认对全部 Bot 事件生效。若只希望某个 Bot 使用陪伴注入，在“基础配置”中选择 `bot_scope_mode=allowlist`，并将对应 Bot 的 `self_id` 填入 `bot_scope_ids`；需要排除某个 Bot 时可选择 `denylist`。该作用域覆盖被动提示词注入、发送前处理、命令和工具，不会卸载其他 Bot 的适配器。
+
 - OneBot/aiocqhttp 私聊目标通常填写数字 QQ。
 - QQ 官方机器人填写 openid/平台用户 ID，不要把数字 QQ 当作 openid。
 - QQ 官方群聊可把 <code>/sid</code> 返回的完整 <code>GroupMessage</code> UMO 或末尾 Session ID 填入群白名单；插件会统一按 <code>group_openid</code> 识别。

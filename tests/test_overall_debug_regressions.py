@@ -132,6 +132,20 @@ class _SnowLumaPresenceClient:
 
 
 class OverallDebugRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_final_outbound_guard_removes_history_media_marker_after_late_hooks(self) -> None:
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        plugin.enabled = True
+        plugin.enable_tts_enhancement = False
+        result = SimpleNamespace(chain=[Plain('() <pc_history_media records="1" />')])
+        event = SimpleNamespace(
+            unified_msg_origin=UMO,
+            get_result=lambda: result,
+        )
+
+        await plugin.final_strip_outbound_control_blocks_before_send(event)
+
+        self.assertEqual([], result.chain)
+
     def test_segmented_reply_never_keeps_history_media_marker_as_a_bubble(self) -> None:
         plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
         plugin.enable_tts_enhancement = False

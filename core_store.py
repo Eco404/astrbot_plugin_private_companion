@@ -3153,6 +3153,112 @@ class CoreStoreMixin:
                         ids.add(value)
         return ids
 
+    def _configured_bot_scope_ids(self) -> set[str]:
+        """Return normalized Bot self IDs or adapter instance IDs."""
+        raw = getattr(self, "bot_scope_ids", [])
+        if isinstance(raw, str):
+            values = re.split(r"[,\s,、;；]+", raw)
+        elif isinstance(raw, (list, tuple, set)):
+            values = list(raw)
+        else:
+            values = []
+        return {
+            _single_line(value, 160).casefold()
+            for value in values
+            if _single_line(value, 160)
+        }
+
+    def _bot_scope_allows_candidates(self, candidates: set[str]) -> bool:
+        mode = _single_line(getattr(self, "bot_scope_mode", "all"), 20).casefold() or "all"
+        if mode not in {"all", "allowlist", "denylist"}:
+            mode = "all"
+        if mode == "all":
+            return True
+        configured = self._configured_bot_scope_ids()
+        if not configured:
+            return mode != "allowlist"
+        normalized = {
+            _single_line(value, 160).casefold()
+            for value in candidates
+            if _single_line(value, 160)
+        }
+        matched = bool(normalized.intersection(configured))
+        return matched if mode == "allowlist" else not matched
+
+    def _bot_scope_platform_instance_candidates(self, instance_id: str) -> set[str]:
+        prefix = _single_line(instance_id, 160).casefold()
+        candidates = {prefix} if prefix else set()
+        manager = getattr(getattr(self, "context", None), "platform_manager", None)
+        if manager is None or not prefix:
+            return candidates
+        try:
+            platforms = list(manager.get_insts())
+        except Exception:
+            platforms = list(getattr(manager, "platform_insts", []) or [])
+        for platform in platforms:
+            try:
+                meta = platform.meta()
+            except Exception:
+                meta = None
+            instance_ids = {
+                _single_line(getattr(meta, attr, ""), 160).casefold()
+                for attr in ("id", "name")
+                if _single_line(getattr(meta, attr, ""), 160)
+            }
+            if prefix not in instance_ids:
+                continue
+            candidates.update(instance_ids)
+            for owner in (platform, getattr(platform, "bot", None)):
+                if owner is None:
+                    continue
+                for attr in ("self_id", "bot_self_id", "bot_user_id"):
+                    value = _single_line(getattr(owner, attr, ""), 160).casefold()
+                    if value:
+                        candidates.add(value)
+            api_clients = getattr(getattr(platform, "bot", None), "_wsr_api_clients", None)
+            if isinstance(api_clients, dict):
+                candidates.update(
+                    _single_line(value, 160).casefold()
+                    for value in api_clients
+                    if _single_line(value, 160)
+                )
+            break
+        return candidates
+
+    def _bot_scope_allows_umo(self, umo: Any) -> bool:
+        """Apply Bot scope to an eventless background delivery route."""
+        origin = _single_line(umo, 240)
+        prefix = origin.split(":", 1)[0] if ":" in origin else origin
+        return self._bot_scope_allows_candidates(
+            self._bot_scope_platform_instance_candidates(prefix)
+        )
+
+    def _bot_scope_allows_event(self, event: Any | None) -> bool:
+        """Check whether the configured Bot scope accepts this event."""
+        candidates: set[str] = set()
+        if event is not None:
+            self_getter = getattr(self, "_event_self_id", None)
+            if callable(self_getter):
+                try:
+                    value = _single_line(self_getter(event), 160)
+                except Exception:
+                    value = ""
+                if value:
+                    candidates.add(value.casefold())
+            for owner in (event, getattr(event, "message_obj", None)):
+                if owner is None:
+                    continue
+                for attr in ("adapter_instance_id", "platform_instance_id", "platform_id"):
+                    value = _single_line(getattr(owner, attr, ""), 160)
+                    if value:
+                        candidates.add(value.casefold())
+            origin = _single_line(getattr(event, "unified_msg_origin", ""), 240)
+            if ":" in origin:
+                candidates.update(
+                    self._bot_scope_platform_instance_candidates(origin.split(":", 1)[0])
+                )
+        return self._bot_scope_allows_candidates(candidates)
+
     def _get_group(self, group_id: str) -> dict[str, Any]:
         canonical_id = self._normalize_group_identity_id(group_id)
         if not canonical_id:
