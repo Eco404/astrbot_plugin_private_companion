@@ -836,6 +836,14 @@ function imageCompanionInstalled() {
   return state.overview?.companion_plugins?.image?.installed === true;
 }
 
+function naiImageInstalled() {
+  return state.overview?.companion_plugins?.nai?.installed === true;
+}
+
+function anyImageGeneratorInstalled() {
+  return imageCompanionInstalled() || naiImageInstalled();
+}
+
 function realityCompanionInstalled() {
   return state.overview?.companion_plugins?.reality?.installed === true;
 }
@@ -846,12 +854,13 @@ function contentCompanionInstalled() {
 
 function syncExternalCompanionVisibility() {
   const imageInstalled = imageCompanionInstalled();
+  const anyImageInstalled = anyImageGeneratorInstalled();
   const imageTab = document.getElementById("modelsImageTab");
   const imagePane = document.getElementById("modelsImagePane");
   if (imageTab) imageTab.hidden = !imageInstalled;
   if (imagePane && !imageInstalled) imagePane.hidden = true;
   if (!imageInstalled && state.modelsSection === "image") state.modelsSection = "providers";
-  if (!imageInstalled && state.featureDomainFilter === "image_generation") {
+  if (!anyImageInstalled && state.featureDomainFilter === "image_generation") {
     state.featureDomainFilter = "all";
   }
 
@@ -862,7 +871,7 @@ function syncExternalCompanionVisibility() {
     state.realityTouch = null;
     state.realityTouchError = "";
   }
-  if (!imageInstalled && state.troubleshootingCategory === "image_generation") {
+  if (!anyImageInstalled && state.troubleshootingCategory === "image_generation") {
     state.troubleshootingCategory = "all";
   }
 
@@ -875,7 +884,7 @@ function syncExternalCompanionVisibility() {
 }
 
 const pluginIntegrationAvailabilityRules = {
-  enable_photo_text_action: () => imageCompanionInstalled(),
+  enable_photo_text_action: () => anyImageGeneratorInstalled(),
   enable_experimental_bluetooth_wakeup: () => realityCompanionInstalled(),
   enable_yesterday_screen_diary_context: () => Boolean(state.overview?.screen_companion?.available),
   enable_livingmemory_integration: () => Boolean(state.overview?.livingmemory?.compatible_available || state.overview?.livingmemory?.available || state.overview?.livingmemory?.memory_companion_active),
@@ -2992,7 +3001,7 @@ const configDescriptions = {
   qzone_comment_inbox_max_replies_per_tick: "每次后台检查最多公开回复多少条新评论，建议保持 1，避免刷屏。",
   photo_action_max_daily: "每个私聊对象每天最多生成几张主动图片。真实生成成功就消耗额度，避免失败重试时反复生图。",
   proactive_photo_text_probability: "在主动生图可用、额度未用完，且本轮主动有生活画面或视觉切口时，把普通文字主动升级成带图的概率，按百分比填写。",
-  photo_generation_backend: "auto 会在在线图片 API 配置完整时优先尝试在线 API，失败后回退本地 ComfyUI/SDGen；未配置在线 API 时使用本地后端。comfyui/sdgen/external 可指定单一后端。tool_call 会调用其他插件注册的函数工具（需在下方填写工具名）。",
+  photo_generation_backend: "auto 会在在线图片 API 配置完整时优先尝试在线 API，失败后回退本地 ComfyUI/SDGen；未配置在线 API 时使用本地后端。comfyui/sdgen/external 可指定单一后端。tool_call 会调用其他插件注册的函数工具（需在下方填写工具名）。nai 会直连 NAI 生图插件（astrbot_plugin_nai_image），无需在线 API 与本地工作流。",
   COMFYUI_TEXT2IMG_WORKFLOW_NAME: "用于普通随手拍、风景、桌面小物等 photo_text 的 ComfyUI 工作流名。",
   COMFYUI_SELFIE_WORKFLOW_NAME: "用于自拍或人像类 photo_text 的 ComfyUI 工作流名。开启参考图一致性后，会按实际提交数量寻找匹配的 images=N 自拍/改图工作流；单图工作流只提交主参考，其余职责转为文字提示。",
   enable_photo_reference_image: "可选。开启后，自拍、人像、头像和角色表情包会自动使用今日穿搭图或下方人设参考图来保持外观一致；关闭后不自动读取固定参考图，只按提示词生成。用户显式发送或引用图片要求改图时不受影响。",
@@ -4384,7 +4393,7 @@ const featureSettingTypes = {
   segmented_proactive_group_log_base: { type: "number", min: 1.1, max: 10, step: 0.1 },
   proactive_chat_bridge_review_mode: { type: "select", options: [["local", "轻量本地（更即时）"], ["follow_proactive_review", "跟随主动终审（更稳）"]] },
   proactive_chat_bridge_collision_window_seconds: { type: "number", min: 10, max: 600, step: 10, unit: "秒" },
-  photo_generation_backend: { type: "select", options: [["auto", "auto"], ["comfyui", "ComfyUI"], ["sdgen", "SDGen"], ["external", "在线图片 API"], ["tool_call", "函数工具"]] },
+  photo_generation_backend: { type: "select", options: [["auto", "auto"], ["comfyui", "ComfyUI"], ["sdgen", "SDGen"], ["external", "在线图片 API"], ["tool_call", "函数工具"], ["nai", "NAI 生图（直连）"]] },
   external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["openrouter", "OpenRouter"], ["agnes", "Agnes Image"], ["sensenova", "SenseNova 日日新"], ["minimax", "MiniMax"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
   backup_external_image_api_platform: { type: "select", options: [["auto", "auto"], ["openai", "OpenAI 兼容"], ["openrouter", "OpenRouter"], ["agnes", "Agnes Image"], ["sensenova", "SenseNova 日日新"], ["minimax", "MiniMax"], ["bailian", "阿里云百炼"], ["modelscope", "魔搭社区"], ["doubao", "豆包/火山方舟"], ["gemini", "Gemini"]] },
   EXTERNAL_IMAGE_API_KEY: { type: "password" },
@@ -7821,6 +7830,7 @@ const setupGuideAdvancedItems = {
         { label: "在线 API", text: "选择 external/auto 时，请到“模型配置 → 生图模型”填写 API 地址、Key、模型和优先级队列。" },
         { label: "ComfyUI", text: "选择 comfyui/auto 且想走本地生图时，需要安装 astrbot_plugin_comfyui，并填写文生图/自拍工作流名。" },
         { label: "SDGen", text: "选择 sdgen 时，需要安装 astrbot_plugin_SDGen 或 astrbot_plugin_sdgen，并在 SDGen 插件里配好 WebUI。" },
+        { label: "NAI 生图", text: "选择 nai 时，需要安装 astrbot_plugin_nai_image，直接走 NAI 生图插件，无需在线 API 与本地工作流。" },
       ],
       kind: "feature",
       settings: [
@@ -7828,7 +7838,7 @@ const setupGuideAdvancedItems = {
         { key: "photo_generation_private_friend_max_daily", type: "number", label: "其他陪伴用户私聊每日上限", placeholder: "-1（不限量）", min: -1, max: 100, step: 1, description: "-1 表示不限量，0 表示不允许，正数表示每日限额。" },
         { key: "photo_generation_group_max_daily", type: "number", label: "群聊生图每日上限", placeholder: "-1（不限量）", min: -1, max: 100, step: 1, description: "-1 表示不限量，0 表示不允许，正数表示每日限额。" },
         { key: "photo_generation_proactive_max_daily", type: "number", label: "Bot 主动生图每日上限", placeholder: "-1（不限量）", min: -1, max: 100, step: 1, description: "-1 表示不限量，0 表示不允许，正数表示每日限额。" },
-        { key: "photo_generation_backend", type: "select", label: "生图后端", options: [["auto", "自动：在线 API → ComfyUI → SDGen"], ["external", "只用在线图片 API"], ["comfyui", "只用 ComfyUI"], ["sdgen", "只用 SDGen"], ["tool_call", "函数工具（调用其他插件的生图工具）"]], description: "这里仅选择后端；在线 API 凭据和队列统一在“模型配置 → 生图模型”维护。" },
+        { key: "photo_generation_backend", type: "select", label: "生图后端", options: [["auto", "自动：在线 API → ComfyUI → SDGen"], ["external", "只用在线图片 API"], ["comfyui", "只用 ComfyUI"], ["sdgen", "只用 SDGen"], ["tool_call", "函数工具（调用其他插件的生图工具）"], ["nai", "只用 NAI 生图插件（直连）"]], description: "这里仅选择后端；在线 API 凭据和队列统一在“模型配置 → 生图模型”维护。" },
         { key: "natural_language_photo_generation_mode", type: "select", label: "非指令生图处理方式", options: [["tool_first", "工具优先：主链调用 pc_generate_photo"], ["rule_fast", "规则快判：插件前置接管"], ["off", "关闭：不做前置接管"]], description: "注册生图工具后建议用工具优先；只有工具调用不稳定时再用规则快判。" },
         { key: "command_photo_generation_max_daily", type: "number", label: "用户请求每日上限", placeholder: "-1（不限量）", min: -1, max: 100, description: "显式陪伴生图指令与主链 pc_generate_photo 工具共用；-1 表示不限量，0 表示不允许用户请求生图/改图。" },
         { key: "photo_generation_trace_max_size_kb", type: "number", label: "生图日志单文件大小（KB）", placeholder: "0", min: 0, max: 102400, description: "仅排障时开启；事件日志和逐次提示词调试文件可能包含会话标识、用户请求、完整提示词和本地参考图路径。0 表示全部关闭。" },
@@ -11234,7 +11244,7 @@ function troubleshootingCategoryInfo(category) {
 
 function visibleTroubleshootingCategories() {
   return Object.entries(troubleshootingCategories).filter(([key]) => (
-    key !== "image_generation" || imageCompanionInstalled()
+    key !== "image_generation" || anyImageGeneratorInstalled()
   ));
 }
 
@@ -11906,7 +11916,7 @@ function troubleshootingFaqMarkup(data = {}, category = "all") {
         { label: "看最近注入", anchor: "troubleshootingPromptInjections" },
       ],
     },
-  ].filter((item) => item.category !== "image_generation" || imageCompanionInstalled());
+  ].filter((item) => item.category !== "image_generation" || anyImageGeneratorInstalled());
   const visibleItems = category === "all" ? items : items.filter((item) => item.category === category);
   if (!visibleItems.length) return `<div class="empty small">当前问题类型暂时没有额外说明；先运行上方对应的链路测试。</div>`;
   return visibleItems.map((item, index) => `
@@ -12227,7 +12237,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       text: "检查技能、群黑话、关系网、本地陪伴画像和表达学习里的模型理解杂音；只给建议，不自动修改",
       button: "运行模型排障",
     },
-  ].filter((test) => test.category !== "image_generation" || imageCompanionInstalled());
+  ].filter((test) => test.category !== "image_generation" || anyImageGeneratorInstalled());
   const visibleTests = category === "all" ? tests : tests.filter((test) => test.category === category);
   const testsMarkup = visibleTests.map((test) => {
     const result = results?.[test.type]
@@ -12298,7 +12308,7 @@ function troubleshootingChainTestMarkup(results, recentPhotoGenerations = [], sc
       </section>
     `;
   }).join("");
-  const photoHistory = imageCompanionInstalled() && ["all", "image_generation"].includes(category)
+  const photoHistory = anyImageGeneratorInstalled() && ["all", "image_generation"].includes(category)
     ? troubleshootingRecentPhotoGenerationMarkup(recentPhotoGenerations)
     : "";
   const empty = visibleTests.length ? "" : `<div class="empty small">当前问题类型没有可直接运行的链路测试。</div>`;
@@ -24725,7 +24735,7 @@ function imageGenerationFeatureUse(key) {
 function featureMatchesDomainFilter(key, domain = state.featureDomainFilter) {
   if (domain === "all") return true;
   if (domain === "image_generation") {
-    return imageCompanionInstalled() && Boolean(imageGenerationFeatureUse(key));
+    return anyImageGeneratorInstalled() && Boolean(imageGenerationFeatureUse(key));
   }
   return featureGroupForKey(key) === domain;
 }
@@ -24742,7 +24752,7 @@ function featureMatchesCurrentFilters(key, { ignore = "" } = {}) {
 function renderFeatureFilterControls(groups, allKeys, visibleCount) {
   const domainOptions = [
     { title: "all", label: "全部领域" },
-    ...(imageCompanionInstalled() ? [{ title: "image_generation", label: "生图", capability: true }] : []),
+    ...(anyImageGeneratorInstalled() ? [{ title: "image_generation", label: "生图", capability: true }] : []),
     ...groups.map((group) => ({ title: group.title, label: group.title })),
   ];
   $("#featureDomainFilters").innerHTML = domainOptions.map((option) => {
@@ -30188,6 +30198,7 @@ function renderImageModelConfig() {
     ["comfyui", "只用 ComfyUI"],
     ["sdgen", "只用 SDGen"],
     ["tool_call", "函数工具"],
+    ["nai", "NAI 生图插件直连"],
   ];
   const backendLabel = backendOptions.find(([value]) => value === backend)?.[1] || backend;
   summary.innerHTML = `

@@ -1064,6 +1064,19 @@ class PrivateCompanionPageApi(
         if not isinstance(image_status, dict):
             image_status = {}
 
+        nai_api_getter = getattr(self.plugin, "_nai_image_api", None)
+        try:
+            nai_api = nai_api_getter() if callable(nai_api_getter) else None
+        except Exception:
+            nai_api = None
+        nai_status_getter = getattr(nai_api, "status", None) if nai_api is not None else None
+        try:
+            nai_status = nai_status_getter() if callable(nai_status_getter) else {}
+        except Exception:
+            nai_status = {}
+        if not isinstance(nai_status, dict):
+            nai_status = {}
+
         reality_api_getter = getattr(self.plugin, "_reality_companion_api", None)
         try:
             reality_api = reality_api_getter() if callable(reality_api_getter) else None
@@ -1103,6 +1116,11 @@ class PrivateCompanionPageApi(
                 "installed": image_api is not None,
                 "enabled": bool(image_status.get("enabled")),
                 "available": image_api is not None,
+            },
+            "nai": {
+                "installed": nai_api is not None,
+                "enabled": bool(nai_status.get("enabled")),
+                "available": nai_api is not None,
             },
             "reality": {
                 "installed": reality_api is not None,
@@ -6873,6 +6891,9 @@ class PrivateCompanionPageApi(
 
         segments: list[tuple[str, int]] = []
         warnings: list[str] = []
+        if preferred == "nai":
+            segments.append(("NAI 生图直连", external_timeout * 2))
+            warnings.append("NAI 直连超时与重试由 NAI 生图插件内部控制，本插件只能估算耗时。")
         if preferred in {"auto", "external"} and external_available:
             if endpoint_queue:
                 for index, endpoint in enumerate(endpoint_queue[:12]):
@@ -23057,7 +23078,7 @@ class PrivateCompanionPageApi(
                 text = str(value).strip()
                 if key == "photo_generation_backend":
                     text = text.lower()
-                    if text not in {"auto", "comfyui", "sdgen", "external", "tool_call"}:
+                    if text not in {"auto", "comfyui", "sdgen", "external", "tool_call", "nai"}:
                         text = "auto"
                 elif key == "photo_generation_prompt_format":
                     normalizer = getattr(self.plugin, "_normalize_photo_generation_prompt_format", None)

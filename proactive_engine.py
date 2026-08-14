@@ -7904,6 +7904,9 @@ class ProactiveEngineMixin:
                 "每日 Token 软限额已暂缓主动生图"
                 f"（今日已用约 {self._today_llm_token_total()} Token；软限额 {self.daily_token_soft_limit}）"
             )
+        nai_selected = getattr(self, "_nai_image_selected", None)
+        if callable(nai_selected) and nai_selected():
+            return ""
         image_status = self._image_companion_status()
         selected_backend = _single_line(image_status.get("selected_backend"), 30)
         if selected_backend in {"external", "tool_call"}:
@@ -7955,16 +7958,21 @@ class ProactiveEngineMixin:
                     return False
         if self._daily_token_soft_limit_should_defer("photo_prompt"):
             return False
-        if not self._image_companion_available():
-            return False
-        image_status = self._image_companion_status()
-        selected_backend = _single_line(image_status.get("selected_backend"), 30)
-        if selected_backend in {"comfyui", "sdgen"} and self._local_photo_generation_busy_state():
-            return False
-        if selected_backend == "auto" and self._local_photo_generation_busy_state():
-            backends = image_status.get("backends") if isinstance(image_status.get("backends"), dict) else {}
-            if not bool(backends.get("external") or backends.get("tool_call")):
+        nai_selected = getattr(self, "_nai_image_selected", None)
+        if callable(nai_selected) and nai_selected():
+            if not self._nai_image_available():
                 return False
+        elif not self._image_companion_available():
+            return False
+        else:
+            image_status = self._image_companion_status()
+            selected_backend = _single_line(image_status.get("selected_backend"), 30)
+            if selected_backend in {"comfyui", "sdgen"} and self._local_photo_generation_busy_state():
+                return False
+            if selected_backend == "auto" and self._local_photo_generation_busy_state():
+                backends = image_status.get("backends") if isinstance(image_status.get("backends"), dict) else {}
+                if not bool(backends.get("external") or backends.get("tool_call")):
+                    return False
         photo_limit = self._effective_user_photo_daily_limit(user)
         if user and photo_limit == 0:
             return False

@@ -499,7 +499,7 @@ class PageSettingNormalizerMixin:
             return mode if mode in {"inject", "transcribe"} else "inject"
         if key == "photo_generation_backend":
             mode = str(value or "auto").strip().lower()
-            return mode if mode in {"auto", "comfyui", "sdgen", "external", "tool_call"} else "auto"
+            return mode if mode in {"auto", "comfyui", "sdgen", "external", "tool_call", "nai"} else "auto"
         if key == "photo_generation_allowed_scopes":
             return normalize_photo_generation_scopes(value)
         if key in PHOTO_GENERATION_SCOPE_LIMIT_KEYS.values():

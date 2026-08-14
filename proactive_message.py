@@ -9484,6 +9484,8 @@ Output:
             return f"path={_single_line(path_text, 120)} exists=unknown size=-"
 
     def _photo_generation_backend_config_summary(self) -> str:
+        nai_api_getter = getattr(self, "_nai_image_api", None)
+        nai_installed = nai_api_getter() is not None if callable(nai_api_getter) else False
         configured_endpoints = getattr(self, "external_image_api_endpoints", [])
         if isinstance(configured_endpoints, list) and configured_endpoints:
             queue_getter = getattr(self, "_external_image_api_endpoint_queue", None)
@@ -9513,6 +9515,7 @@ Output:
                 f"external_queue={len(endpoints)} "
                 f"external_queue_items={';'.join(endpoint_bits) or '-'} "
                 f"backup_note={_single_line(self._backup_external_photo_unavailable_note(), 80) or '-'} "
+                f"nai={nai_installed} "
                 f"tool_call={self._custom_tool_photo_available()} "
                 f"tool_name={_single_line(getattr(self, 'custom_photo_tool_name', ''), 80) or '-'}"
             )
@@ -9536,6 +9539,7 @@ Output:
             f"backup_model={_single_line(getattr(self, 'backup_external_image_api_model', ''), 80) or '-'} "
             f"backup_base={backup_base or '-'} "
             f"backup_note={_single_line(self._backup_external_photo_unavailable_note(), 80) or '-'} "
+            f"nai={nai_installed} "
             f"tool_call={self._custom_tool_photo_available()} "
             f"tool_name={_single_line(getattr(self, 'custom_photo_tool_name', ''), 80) or '-'}"
         )
@@ -11458,7 +11462,17 @@ Output:
         self,
         **kwargs: Any,
     ) -> tuple[str, str, str]:
-        """Run image generation exclusively through Image Companion."""
+        """Run image generation through the selected backend service."""
+        nai_selected = getattr(self, "_nai_image_selected", None)
+        if callable(nai_selected) and nai_selected():
+            nai_bridge = getattr(self, "_nai_image_generate", None)
+            if callable(nai_bridge):
+                return await nai_bridge(**kwargs)
+            return (
+                "NAI 生图",
+                "",
+                "生图后端已选择 NAI 直连，但未检测到 NAI 生图插件，请安装并启用 astrbot_plugin_nai_image。",
+            )
         bridge = getattr(self, "_image_companion_generate", None)
         if callable(bridge):
             return await bridge(**kwargs)
@@ -11516,8 +11530,13 @@ Output:
         return "", "独立生图运行时不可用"
     async def _generate_photo_image_result(self, **kwargs: Any) -> PhotoGenerationResult:
         backend, image_path, note = await self._generate_photo_image(**kwargs)
-        external_metadata_getter = getattr(self, "_image_companion_last_metadata", None)
-        metadata = external_metadata_getter() if callable(external_metadata_getter) else {}
+        metadata: dict[str, Any] = {}
+        for getter_name in ("_image_companion_last_metadata", "_nai_image_last_metadata"):
+            getter = getattr(self, getter_name, None)
+            if callable(getter):
+                metadata = getter() or {}
+                if metadata:
+                    break
         if not metadata:
             metadata = self._photo_generation_result_metadata(
                 image_path=image_path,
