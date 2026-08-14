@@ -4697,7 +4697,11 @@ class DailyStateMixin(DailyStateTickMixin):
                 if _safe_float(old_ts, 0) < cutoff:
                     recent_fingerprints.pop(old_key, None)
             recently_repeated = _safe_float(recent_fingerprints.get(fingerprint), 0) >= cutoff
-            too_soon = now - last_prompted_at < 20 * 60 and _safe_int(change.get("score"), 0) < 90
+            # 通用冷却：距上一次环境突变提示 < cooldown 内，非紧急（score<90）的变化不
+            # 重复开口。不同变化（雨停/下雨/雨势变大）指纹不同，recently_repeated 拦不住；
+            # 旧代码用写死的 20 分钟，cooldown_minutes 只对同指纹去重，360 分钟设置等于
+            # 形同虚设（实测 30-40 分钟就 offer 一条）。score>=90 的极端变化保留逃生口。
+            too_soon = now - last_prompted_at < cooldown_minutes * 60 and _safe_int(change.get("score"), 0) < 90
             if recently_repeated or too_soon:
                 self._schedule_data_save(delay=0.5)
                 return
@@ -5992,10 +5996,15 @@ class DailyStateMixin(DailyStateTickMixin):
             if not isinstance(item, dict):
                 continue
             color = item.get("color_code") or item.get("color") or item.get("level")
-            rank = max(
-                _qweather_alert_rank(color),
-                _qweather_alert_rank(item.get("severity")),
-            )
+            if color:
+                # 颜色等级为准（蓝<黄<橙<红）。不能与 severity 取 max——qweather 的
+                # severity 是国际档位（minor/moderate/severe/extreme），与国内颜色
+                # 错位一档（黄色预警 severity=moderate），max 会让黄色顶穿 orange 阈值
+                # （实测 08-14 黄色暴雨/雷电被误发）。颜色缺失（非中文/全球预警源）才
+                # 退回 severity。
+                rank = _qweather_alert_rank(color)
+            else:
+                rank = _qweather_alert_rank(item.get("severity"))
             if rank >= threshold:
                 result.append(item)
         return result

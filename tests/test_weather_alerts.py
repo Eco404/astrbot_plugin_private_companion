@@ -106,6 +106,22 @@ class WeatherAlertTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.harness._filter_weather_alerts([alert], "red")), 0)
         self.assertEqual(len(self.harness._filter_weather_alerts([alert], "orange")), 1)
 
+    def test_yellow_alert_with_global_severity_does_not_pass_orange_threshold(self) -> None:
+        # 回归：qweather 国际 severity 档位与国内颜色错位一档（黄色预警 severity=moderate），
+        # 旧代码 max(color, severity) 让黄色顶穿 orange 阈值（实测 08-14 黄色暴雨/雷电被误发）。
+        # 修复后颜色等级为准：黄色=1 < orange=2，必须被挡。
+        yellow = {"id": "y1", "color": "黄色", "color_code": "yellow", "severity": "moderate"}
+        orange = {"id": "o1", "color": "橙色", "color_code": "orange", "severity": "severe"}
+        blue = {"id": "b1", "color": "蓝色", "color_code": "blue", "severity": "minor"}
+        self.assertEqual(len(self.harness._filter_weather_alerts([yellow], "orange")), 0)
+        self.assertEqual(len(self.harness._filter_weather_alerts([orange], "orange")), 1)
+        self.assertEqual(len(self.harness._filter_weather_alerts([blue], "orange")), 0)
+        self.assertEqual(len(self.harness._filter_weather_alerts([yellow, orange], "orange")), 1)
+        # 颜色缺失（非中文/全球预警源）时退回 severity 兜底
+        sev_only = {"id": "s1", "severity": "extreme"}
+        self.assertEqual(len(self.harness._filter_weather_alerts([sev_only], "orange")), 1)
+        self.assertEqual(len(self.harness._filter_weather_alerts([sev_only], "red")), 1)
+
     def test_legacy_warning_payload_and_duplicate_revision_are_supported(self) -> None:
         old_payload = {
             "code": "200",
