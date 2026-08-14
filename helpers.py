@@ -528,11 +528,19 @@ def _text_looks_garbled(text: Any) -> bool:
 
 
 _PERSONALITY_SYNC_COMMENT_PATTERN = re.compile(
-    r"<!--\s*private_companion_personality_sync_v1\s*-->",
+    r"<!--\s*private_companion_personality_sync_v\d+\s*-->",
+    re.IGNORECASE,
+)
+_TRUNCATED_PERSONALITY_SYNC_COMMENT_PATTERN = re.compile(
+    r"<!--\s*private_companion_personality_sync_v\d+[\s\S]*$",
     re.IGNORECASE,
 )
 _PERSONALITY_SYNC_BLOCK_PATTERN = re.compile(
     r"<\s*personality_sync\b[^>]*>[\s\S]*?<\s*/\s*personality_sync\s*>",
+    re.IGNORECASE,
+)
+_PERSONALITY_SYNC_CLOSING_TAG_PATTERN = re.compile(
+    r"<\s*/\s*personality_sync\s*>",
     re.IGNORECASE,
 )
 
@@ -541,6 +549,7 @@ def _strip_personality_sync_blocks(text: Any) -> str:
     """Remove complete or truncated internal personality synchronization blocks."""
     normalized = str(text or "")
     normalized = _PERSONALITY_SYNC_COMMENT_PATTERN.sub("", normalized)
+    normalized = _TRUNCATED_PERSONALITY_SYNC_COMMENT_PATTERN.sub("", normalized)
     normalized = _PERSONALITY_SYNC_BLOCK_PATTERN.sub("", normalized)
     # A generation can be cut off before the closing tag is produced.
     normalized = re.sub(
@@ -549,6 +558,7 @@ def _strip_personality_sync_blocks(text: Any) -> str:
         normalized,
         flags=re.IGNORECASE,
     )
+    normalized = _PERSONALITY_SYNC_CLOSING_TAG_PATTERN.sub("", normalized)
     return normalized
 
 

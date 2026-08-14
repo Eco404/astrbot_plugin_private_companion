@@ -66,6 +66,22 @@ class PersonalitySyncCleanupTests(unittest.TestCase):
 
         self.assertEqual("可见正文", _strip_outbound_control_blocks(raw))
 
+    def test_future_marker_and_orphan_closing_tag_are_removed(self) -> None:
+        raw = (
+            "前半句<!-- private_companion_personality_sync_v2 -->"
+            '<personality_sync mode="delta">{"focus":"reply"}</personality_sync>'
+            "后半句</ PERSONALITY_SYNC >"
+        )
+
+        self.assertEqual("前半句后半句", _strip_internal_message_blocks(raw))
+        self.assertEqual("前半句后半句", _strip_outbound_control_blocks(raw))
+
+    def test_truncated_comment_is_removed_without_leaking_metadata(self) -> None:
+        raw = "可见正文\n<!-- private_companion_personality_sync_v1\n{\"focus\":\"reply\"}"
+
+        self.assertEqual("可见正文", _strip_internal_message_blocks(raw))
+        self.assertEqual("可见正文", _strip_outbound_control_blocks(raw))
+
 
 if __name__ == "__main__":
     unittest.main()
