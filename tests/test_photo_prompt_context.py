@@ -939,6 +939,79 @@ class PhotoPromptContextTests(unittest.TestCase):
             )
         )
 
+    def test_daily_outfit_rotation_exclusions_are_not_category_negations(self) -> None:
+        wardrobe = PhotoWardrobeDecision(
+            rule_id="explicit_prompt",
+            category="daily_outfit",
+            lock_outfit=True,
+        )
+        rotation_clauses = (
+            "避免重复最近的日常穿搭",
+            "avoid repeating recent daily outfits",
+        )
+
+        for clause in rotation_clauses:
+            with self.subTest(clause=clause):
+                resolved = resolve_photo_prompt_context(
+                    wardrobe=wardrobe,
+                    sections=(
+                        PhotoPromptSection("request", "user_request", "生成今日穿搭"),
+                        PhotoPromptSection(
+                            "rotation_contract",
+                            "composition",
+                            negative=clause,
+                        ),
+                    ),
+                    prompt_format="traditional",
+                    workflow_kind="selfie",
+                )
+                contract = next(
+                    section
+                    for section in resolved.prompt_sections
+                    if section.name == "rotation_contract"
+                )
+
+                self.assertEqual(clause, contract.negative)
+                self.assertFalse(
+                    any(
+                        item["rule"] == "authoritative_wardrobe_negated"
+                        for item in resolved.removed_conflicts
+                    )
+                )
+
+    def test_direct_authoritative_category_negation_is_still_removed(self) -> None:
+        wardrobe = PhotoWardrobeDecision(
+            rule_id="explicit_prompt",
+            category="daily_outfit",
+            lock_outfit=True,
+        )
+        resolved = resolve_photo_prompt_context(
+            wardrobe=wardrobe,
+            sections=(
+                PhotoPromptSection("request", "user_request", "生成今日穿搭"),
+                PhotoPromptSection(
+                    "invalid_negative",
+                    "preset",
+                    negative="avoid daily outfit",
+                ),
+            ),
+            prompt_format="traditional",
+            workflow_kind="selfie",
+        )
+        invalid = next(
+            section
+            for section in resolved.prompt_sections
+            if section.name == "invalid_negative"
+        )
+
+        self.assertEqual("", invalid.negative)
+        self.assertTrue(
+            any(
+                item["rule"] == "authoritative_wardrobe_negated"
+                for item in resolved.removed_conflicts
+            )
+        )
+
     def test_final_prompt_never_leaks_compaction_marker(self) -> None:
         resolved = resolve_photo_prompt_context(
             wardrobe=PhotoWardrobeDecision(rule_id="none"),

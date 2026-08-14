@@ -57,6 +57,17 @@ _NEGATIVE_TO_POSITIVE_TRANSITION_PATTERN = re.compile(
     r"|(?:但|不过|可是|而是)?(?:改穿|换成|换上|换为|改为|要穿|穿上)\s*",
     flags=re.I,
 )
+_OUTFIT_ROTATION_NEGATIVE_PATTERN = re.compile(
+    r"(?:\b(?:same|repeat(?:ed|ing)?|reus(?:e|ed|ing)|recent(?:ly)?|previous(?:ly)?|"
+    r"histor(?:y|ical)|rotation|duplicate)\b.{0,80}\b(?:outfits?|wardrobes?|clothes|clothing|attire)\b"
+    r"|\b(?:outfits?|wardrobes?|clothes|clothing|attire)\b.{0,80}\b(?:same|repeat(?:ed|ing)?|"
+    r"reus(?:e|ed|ing)|recent(?:ly)?|previous(?:ly)?|histor(?:y|ical)|rotation|duplicate)\b"
+    r"|(?:重复|复用|沿用|相同|同一|最近|近期|历史|此前|之前|上一套|用过|穿过|轮换|轮替)"
+    r".{0,40}(?:穿搭|衣服|服装|衣着|着装|配饰)"
+    r"|(?:穿搭|衣服|服装|衣着|着装|配饰).{0,40}"
+    r"(?:重复|复用|沿用|相同|同一|最近|近期|历史|此前|之前|上一套|用过|穿过|轮换|轮替))",
+    flags=re.I,
+)
 
 __all__ = [
     "PhotoPromptSection",
@@ -315,6 +326,10 @@ def _negative_conflict(
     authoritative_items: frozenset[str],
 ) -> tuple[str, str] | None:
     if not authoritative:
+        return None
+    # Rotation/history exclusions constrain reuse; they do not reject the
+    # authoritative outfit category or an item that merely appears in history.
+    if _OUTFIT_ROTATION_NEGATIVE_PATTERN.search(str(text or "")):
         return None
     categories = _categories(text)
     denied = next((category for category in categories if _compatible(category, active_category)), "")
