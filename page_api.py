@@ -13184,6 +13184,7 @@ class PrivateCompanionPageApi(
                 self.plugin._refresh_daily_state_location_from_plan(
                     plan=current_plan if isinstance(current_plan, dict) else plan,
                     detail=detail,
+                    segment=segment,
                 )
                 self.plugin._save_data_sync()
                 data = self._overview_data_snapshot_locked(self.plugin.data)
@@ -27060,7 +27061,12 @@ class PrivateCompanionPageApi(
         current_item = {}
         current_lifecycle = ""
         try:
-            picked = self.plugin._get_current_plan_item(plan)
+            current_getter = getattr(self.plugin, "_agenda_current_context_item", None)
+            picked = (
+                current_getter()
+                if callable(current_getter)
+                else self.plugin._get_current_plan_item(plan)
+            )
             current_item = picked if isinstance(picked, dict) else {}
             items = plan.get("items") if isinstance(plan.get("items"), list) else []
             current_index = next((index for index, item in enumerate(items) if item is picked), -1)
@@ -27814,16 +27820,30 @@ class PrivateCompanionPageApi(
     def _timeline_story_items(self, value: Any, limit: int, plan_date: str) -> list[dict[str, Any]]:
         items = self._limited_story_items(value, limit)
         for item in items:
-            start, end = self.plugin._parse_window_minutes(str(item.get("window") or ""))
-            if start is None or end is None:
-                item["lifecycle"] = "planned"
+            # Story/detail entries are projections.  Their clock window only
+            # describes when a generated scene could occur; it is not an
+            # execution observation.  Never turn them into ``active`` or
+            # ``completed`` solely because the wall clock crossed the window.
+            # Preserve explicit editorial transitions (cancelled/changed/
+            # deferred), while evidence-backed canonical states may still be
+            # surfaced when a producer supplied the full evidence contract.
+            explicit = self._single_line(item.get("lifecycle_status"), 24).lower()
+            if explicit in {"cancelled", "canceled", "changed", "deferred", "postponed"}:
+                item["lifecycle"] = "cancelled" if explicit == "canceled" else (
+                    "deferred" if explicit == "postponed" else explicit
+                )
                 continue
-            item["lifecycle"] = self.plugin._schedule_window_runtime_status(
-                start,
-                end,
-                plan_date=plan_date,
-                explicit_status=item.get("lifecycle_status"),
-            )
+            evidence_kind = self._single_line(item.get("evidence_kind"), 48).lower()
+            eligibility = self._single_line(item.get("fact_eligibility"), 48).lower()
+            status = self._single_line(item.get("status"), 32).lower()
+            if (
+                evidence_kind in {"interaction", "tool_action", "external_record"}
+                and eligibility in {"current_observed", "history_observed"}
+                and status in {"active", "completed", "partially_completed"}
+            ):
+                item["lifecycle"] = status
+            else:
+                item["lifecycle"] = "planned"
         return items
 
     @staticmethod

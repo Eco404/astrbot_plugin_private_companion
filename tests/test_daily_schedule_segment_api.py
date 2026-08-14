@@ -485,7 +485,9 @@ class DailyScheduleSegmentApiTests(unittest.IsolatedAsyncioTestCase):
         timeline = self.api._daily_timeline_summary(self.plugin.data)
 
         self.assertEqual([item["window"] for item in timeline["segments"]], ["22:00-23:00", "23:00-00:30", "00:30-01:30"])
-        self.assertEqual(timeline["segments"][2]["lifecycle"], "active")
+        # Crossing the clock boundary identifies the current window, but a
+        # planned row without execution evidence remains unknown.
+        self.assertEqual(timeline["segments"][2]["lifecycle"], "unknown")
         current = self.plugin._current_detail_segment_for_update()
         self.assertIsNotNone(current)
         self.assertEqual(current["index"], 2)

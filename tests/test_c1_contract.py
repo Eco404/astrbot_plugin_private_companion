@@ -8,8 +8,16 @@ from pathlib import Path
 COMPANION_ROOT = Path(__file__).resolve().parents[1]
 PEIBAN_ROOT = COMPANION_ROOT.parents[1]
 CONTRACT_PATH = COMPANION_ROOT / "bot_personal_contract.py"
-MEMORY_CONTRACT_PATH = PEIBAN_ROOT / "astrbot_plugin_memory_companion-main" / "core" / "bot_personal_contract.py"
-SHARED_CONTRACT_PATH = PEIBAN_ROOT / "doc" / "shared" / "bot_personal_contract.py"
+_MEMORY_CONTRACT_CANDIDATES = (
+    PEIBAN_ROOT / "astrbot_plugin_memory_companion-main" / "core" / "bot_personal_contract.py",
+    COMPANION_ROOT.parent / "我会牢牢记住你" / "core" / "bot_personal_contract.py",
+)
+MEMORY_CONTRACT_PATH = next((path for path in _MEMORY_CONTRACT_CANDIDATES if path.is_file()), _MEMORY_CONTRACT_CANDIDATES[0])
+_SHARED_CONTRACT_CANDIDATES = (
+    PEIBAN_ROOT / "doc" / "shared" / "bot_personal_contract.py",
+    MEMORY_CONTRACT_PATH,
+)
+SHARED_CONTRACT_PATH = next((path for path in _SHARED_CONTRACT_CANDIDATES if path.is_file()), _SHARED_CONTRACT_CANDIDATES[0])
 
 
 def load_contract(path: Path, name: str):
@@ -35,9 +43,9 @@ def test_contract_bytes_match_authority_and_other_side():
 
 def test_frozen_contract_values_and_self_check():
     for module in (contract, memory_contract):
-        assert module.CONTRACT_FINGERPRINT == "5b8a97c1527dcc62"
-        assert module.CONTRACT_REVISION == 1
-        assert module.BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION == "1.1"
+        assert module.CONTRACT_FINGERPRINT == "0ffe3a1ab69b659c"
+        assert module.CONTRACT_REVISION == 2
+        assert module.BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION == "1.2"
         assert module.BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION == "1.0"
         assert module.BOT_PERSONAL_MEMORY_DOMAIN == "bot_self_schedule"
         assert len(module.BOT_PERSONAL_MEMORY_TYPES) == 12
@@ -82,9 +90,10 @@ def test_descriptor_fields_and_cross_side_descriptor_equality():
     companion = contract.capability_descriptor()
     memory = memory_contract.capability_descriptor()
     assert companion == memory
-    assert companion["contract_fingerprint"] == "5b8a97c1527dcc62"
-    assert companion["contract_revision"] == 1
-    assert companion["capability_schema_version"] == "1.1"
+    assert companion["contract_fingerprint"] == "0ffe3a1ab69b659c"
+    assert companion["contract_revision"] == 2
+    assert companion["capability_schema_version"] == "1.2"
+    assert companion["canonical_schema_version"] == 2
     assert companion["payload_schema_version"] == "1.0"
     assert companion["memory_domain"] == "bot_self_schedule"
     assert companion["windows"] == list(contract.WINDOW_SLUGS)

@@ -1959,6 +1959,54 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         now_minutes = self._effective_plan_now_minutes(str(plan.get("date") or ""))
         if now_minutes is None:
             return {}
+        # The raw daily plan is an edit input.  Build a purpose-specific view
+        # before exposing any text to proactive generation so past/current
+        # facts require evidence and future scene prose is reduced to a small
+        # labelled summary.
+        current_ids: set[str] = set()
+        history_ids: set[str] = set()
+        proactive_entries: dict[str, dict[str, Any]] = {}
+        disclosure_available = callable(getattr(self, "_agenda_disclosure_view", None))
+        disclosure_keys: dict[tuple[str, str], str] = {}
+        disclosure = getattr(self, "_agenda_disclosure_view", None)
+        if callable(disclosure):
+            try:
+                for purpose, bucket in (("current_fact", current_ids), ("history_fact", history_ids)):
+                    view = disclosure(purpose, max_entries=64)
+                    values = view.get("entries", []) if isinstance(view, dict) else getattr(view, "entries", [])
+                    for value in values if isinstance(values, list) else []:
+                        if isinstance(value, dict):
+                            key = str(value.get("plan_id") or value.get("entry_id") or "").strip()
+                            if key:
+                                bucket.add(key)
+                            pair = (
+                                _single_line(value.get("time"), 12),
+                                _single_line(value.get("title") or value.get("activity"), 120),
+                            )
+                            if pair[0] and pair[1] and key:
+                                disclosure_keys[pair] = key
+                view = disclosure("proactive", max_entries=64)
+                values = view.get("entries", []) if isinstance(view, dict) else getattr(view, "entries", [])
+                for value in values if isinstance(values, list) else []:
+                    if isinstance(value, dict):
+                        key = str(value.get("plan_id") or value.get("entry_id") or "").strip()
+                        if key:
+                            proactive_entries[key] = value
+                        pair = (
+                            _single_line(value.get("time"), 12),
+                            _single_line(value.get("title") or value.get("activity"), 120),
+                        )
+                        if pair[0] and pair[1] and key:
+                            disclosure_keys[pair] = key
+            except Exception:
+                current_ids.clear()
+                history_ids.clear()
+                proactive_entries = {}
+                disclosure_keys = {}
+                # The policy is a disclosure firewall.  If it is present but
+                # unavailable, fail closed instead of falling back to raw
+                # daily-plan prose in a proactive prompt.
+                disclosure_available = True
         parsed: list[tuple[int, dict[str, Any]]] = []
         for item in items:
             if not isinstance(item, dict):
@@ -1966,6 +2014,30 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             minute = self._parse_hhmm_to_minutes(item.get("time"))
             if minute is None:
                 continue
+            item_key = str(item.get("plan_id") or "").strip()
+            if not item_key and disclosure_available:
+                pair = (
+                    _single_line(item.get("time"), 12),
+                    _single_line(item.get("activity") or item.get("title"), 120),
+                )
+                item_key = disclosure_keys.get(pair, "")
+            if disclosure_available and minute <= now_minutes and item_key not in current_ids and item_key not in history_ids:
+                # A clock window alone is not a current/history fact.  This
+                # also prevents an unexecuted past plan from being presented
+                # as the "previous" item in proactive prompts.
+                continue
+            if disclosure_available and minute > now_minutes:
+                public = proactive_entries.get(item_key)
+                if not public:
+                    # The proactive view applies its horizon and commitment
+                    # gates.  Do not fall back to raw future scene prose.
+                    continue
+                safe = dict(item)
+                safe["activity"] = _single_line(public.get("title"), 100) or "临近时段可能有安排"
+                safe["message_seed"] = ""
+                safe["scene"] = ""
+                safe["candidates"] = []
+                item = safe
             parsed.append((minute, item))
         if not parsed:
             return {}
@@ -15704,6 +15776,18 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
     def _format_plan_item_for_prompt(self, item: dict[str, Any] | None) -> str:
         if not isinstance(item, dict):
             return "（暂无）"
+        phase = _single_line(item.get("temporal_phase"), 16).lower()
+        eligibility = _single_line(item.get("fact_eligibility"), 48).lower()
+        status = _single_line(item.get("status"), 24).lower()
+        commitment = _single_line(item.get("commitment_level"), 24).lower()
+        is_unverified_future = phase == "future" or (status in {"planned", "unknown", ""} and eligibility in {"", "none"})
+        if is_unverified_future and commitment not in {"confirmed", "routine"}:
+            return f"{_single_line(item.get('time'), 12)}｜临近时段可能有安排"
+        if phase == "future" and status in {"planned", ""} and commitment in {"confirmed", "routine"}:
+            label = _single_line(item.get("title") or item.get("activity"), 80)
+            label = re.split(r"[，,。；;：:]", label, maxsplit=1)[0].strip()[:50]
+            prefix = "按安排" if commitment == "confirmed" else "照平常"
+            return "｜".join(part for part in (_single_line(item.get("time"), 12), f"{prefix}{label}") if part)
         parts = [
             str(item.get("time", "")).strip(),
             str(item.get("activity", "")).strip(),

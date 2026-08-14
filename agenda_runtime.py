@@ -21,6 +21,8 @@ try:
     )
     from .schedule_reconciler import reconcile
     from .unified_agenda import build_unified_agenda, format_agenda_context
+    from .agenda_disclosure_policy import AgendaDisclosurePolicy
+    from .runtime_scene_resolver import RuntimeSceneResolver
 except ImportError:
     from activity_capture import ActivityCapture
     from agenda_contracts import (
@@ -36,6 +38,8 @@ except ImportError:
     )
     from schedule_reconciler import reconcile
     from unified_agenda import build_unified_agenda, format_agenda_context
+    from agenda_disclosure_policy import AgendaDisclosurePolicy
+    from runtime_scene_resolver import RuntimeSceneResolver
 
 
 class AgendaRuntimeMixin:
@@ -68,6 +72,26 @@ class AgendaRuntimeMixin:
             self._agenda_migration_dirty = True
         if not isinstance(getattr(self, "_agenda_capture", None), ActivityCapture):
             self._agenda_capture = ActivityCapture()
+        bot_id = str(
+            getattr(self, "bot_id", "")
+            or getattr(self, "bot_personal_subject", "")
+            or "bot_self"
+        ).strip()
+        timezone_name = self._agenda_timezone_name()
+        policy = getattr(self, "_agenda_disclosure_policy", None)
+        if not isinstance(policy, AgendaDisclosurePolicy) or policy.bot_id != bot_id or policy.timezone_name != timezone_name:
+            self._agenda_disclosure_policy = AgendaDisclosurePolicy(bot_id=bot_id, timezone_name=timezone_name)
+        runtime_resolver = getattr(self, "_runtime_scene_resolver", None)
+        if (
+            not isinstance(runtime_resolver, RuntimeSceneResolver)
+            or runtime_resolver.bot_id != bot_id
+            or getattr(runtime_resolver, "timezone_name", timezone_name) != timezone_name
+        ):
+            self._runtime_scene_resolver = RuntimeSceneResolver(
+                bot_id=bot_id,
+                clock=self._agenda_now,
+                timezone_name=timezone_name,
+            )
 
     def _agenda_activities_store(self) -> list[dict[str, Any]]:
         self._agenda_prepare_store()
@@ -126,7 +150,11 @@ class AgendaRuntimeMixin:
 
     def _agenda_capture_hard_fact(self, activity: dict[str, Any]) -> dict[str, Any]:
         self._agenda_prepare_store()
-        normalized = normalize_observed_activity(activity, now=self._agenda_now())
+        payload = dict(activity or {})
+        payload.setdefault("actor_type", "bot")
+        payload.setdefault("subject_actor_id", self._agenda_disclosure_policy.bot_id)
+        payload.setdefault("source_actor_id", "system")
+        normalized = normalize_observed_activity(payload, now=self._agenda_now())
         activities = self._agenda_activities_store()
         existing = next((item for item in activities if item.get("activity_id") == normalized.get("activity_id")), None)
         if existing is None:
@@ -150,6 +178,8 @@ class AgendaRuntimeMixin:
                 continue
             item = deepcopy(raw)
             item.setdefault("date", plan_date)
+            item.setdefault("subject_actor_id", getattr(getattr(self, "_agenda_disclosure_policy", None), "bot_id", "bot_self"))
+            item.setdefault("actor_type", "bot")
             try:
                 normalized = normalize_plan_item(item, plan_id=str(item.get("plan_id") or f"{plan_date}:{index}"), now=self._agenda_now())
             except Exception:
@@ -175,8 +205,148 @@ class AgendaRuntimeMixin:
             timezone_name=self._agenda_timezone_name(),
         )
 
+    def _agenda_disclosure_view(
+        self,
+        purpose: str = "future_schedule",
+        *,
+        now: datetime | None = None,
+        target_user_id: str = "",
+        max_entries: int = 32,
+        date_key: str = "",
+    ) -> dict[str, Any]:
+        """Return the only agenda view that should cross a module boundary."""
+
+        self._agenda_prepare_store()
+        agenda = self._agenda_build(date_key=str(date_key or ""))
+        return self._agenda_disclosure_policy.build_view(
+            agenda,
+            now=now or self._agenda_now(),
+            purpose=purpose,
+            target_user_id=target_user_id,
+            max_entries=max_entries,
+        )
+
+    def _agenda_runtime_scene(
+        self,
+        *,
+        conversation_state: Any = None,
+        now: datetime | None = None,
+        hard_constraints: Any = None,
+    ) -> dict[str, Any] | None:
+        """Resolve a short-lived Bot-only current state without mutating plans."""
+
+        self._agenda_prepare_store()
+        agenda = self._agenda_build()
+        # A clock window or a soft plan is not a runtime state.  The resolver
+        # may only consume entries that the disclosure layer has already
+        # qualified as a Bot current fact.  This prevents ordinary planned
+        # activity text (for example, "上课" or "出门") from becoming a
+        # short-lived ``self_state_commit`` merely because its time arrived.
+        bot_id = str(getattr(self._agenda_disclosure_policy, "bot_id", "bot_self") or "bot_self")
+        candidates: list[dict[str, Any]] = []
+        for item in (
+            list(agenda.get("current_fact") or [])
+            + list(agenda.get("plans") or [])
+        ):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("subject_actor_id") or "") != bot_id:
+                continue
+            phase = str(item.get("temporal_phase") or "").lower()
+            eligibility = str(item.get("fact_eligibility") or "").lower()
+            if phase != "current" or eligibility not in {"current_internal", "current_observed"}:
+                continue
+            candidates.append(item)
+        return self._runtime_scene_resolver.resolve_now(
+            candidates,
+            conversation_state=conversation_state,
+            hard_constraints=hard_constraints,
+            now=now or self._agenda_now(),
+        )
+
+    @staticmethod
+    def _agenda_clock_from_value(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) >= 16 and "T" in text:
+            return text.split("T", 1)[1][:5]
+        return text[:5] if len(text) >= 5 and text[2:3] == ":" else ""
+
+    def _agenda_current_context_item(
+        self,
+        *,
+        conversation_state: Any = None,
+        now: datetime | None = None,
+        hard_constraints: Any = None,
+    ) -> dict[str, Any] | None:
+        """Return a Bot-only current item for behavior and scene consumers.
+
+        The result is either an evidence-backed ``current_fact`` or a
+        short-lived runtime commit.  Raw plan prose and future commitments are
+        deliberately never returned from this boundary.
+        """
+
+        current = now or self._agenda_now()
+        view = self._agenda_disclosure_view("current_fact", now=current, max_entries=32)
+        entries = getattr(view, "entries", None)
+        if entries is None and hasattr(view, "get"):
+            try:
+                entries = view.get("entries", [])
+            except Exception:
+                entries = []
+        bot_id = str(getattr(self._agenda_disclosure_policy, "bot_id", "bot_self") or "bot_self")
+        eligible = [
+            item
+            for item in entries
+            if isinstance(item, dict)
+            and str(item.get("subject_actor_id") or "") == bot_id
+            and str(item.get("temporal_phase") or "").lower() == "current"
+            and str(item.get("fact_eligibility") or "").lower() in {"current_internal", "current_observed"}
+        ]
+        if eligible:
+            selected = sorted(
+                eligible,
+                key=lambda item: (
+                    str(item.get("fact_eligibility") or "") != "current_observed",
+                    str(item.get("start_at") or item.get("committed_at") or ""),
+                ),
+            )[0]
+            title = str(selected.get("title") or selected.get("state") or selected.get("activity") or "").strip()[:120]
+            return {
+                **deepcopy(selected),
+                "time": str(selected.get("time") or self._agenda_clock_from_value(selected.get("start_at") or selected.get("committed_at")))[:12],
+                "end": str(selected.get("end") or self._agenda_clock_from_value(selected.get("end_at") or selected.get("valid_until")))[:12],
+                "activity": title,
+                "title": title,
+                "message_seed": "",
+            }
+
+        runtime = self._agenda_runtime_scene(
+            conversation_state=conversation_state,
+            hard_constraints=hard_constraints,
+            now=current,
+        )
+        if not isinstance(runtime, dict):
+            return None
+        title = str(runtime.get("state") or runtime.get("title") or "").strip()[:120]
+        if not title:
+            return None
+        return {
+            **deepcopy(runtime),
+            "time": self._agenda_clock_from_value(runtime.get("committed_at")),
+            "end": self._agenda_clock_from_value(runtime.get("valid_until")),
+            "activity": title,
+            "title": title,
+            "mood": "当前状态",
+            "message_seed": "",
+        }
+
     def _agenda_context_for_prompt(self, *, max_entries: int = 8) -> str:
-        return format_agenda_context(self._agenda_build(), max_entries=max_entries)
+        # Prompt consumers receive a filtered future view; diagnostics remain
+        # available through ``_agenda_disclosure_view('diagnostic')`` only.
+        view = self._agenda_disclosure_view("future_schedule", max_entries=max_entries)
+        return format_agenda_context({"entries": view.get("entries", []), "date": self._agenda_now().date().isoformat()}, max_entries=max_entries)
 
     def _agenda_snapshot_window(
         self,
@@ -207,6 +377,8 @@ class AgendaRuntimeMixin:
                 "reconciled": settled["reconciliations"],
                 "open_items": list(open_items or []),
                 "source_refs": [str(item.get("activity_id")) for item in settled["activities"] if item.get("activity_id")],
+                "subject_actor_id": self._agenda_disclosure_policy.bot_id,
+                "actor_type": "bot",
                 "certainty": "high" if settled["reconciliations"] else "medium",
             },
             now=now,
@@ -238,7 +410,9 @@ class AgendaRuntimeMixin:
                 "plans": settled["reconciliations"],
                 "observed_activity_ids": list(snapshot.get("source_refs") or []),
                 "source_refs": [snapshot_id],
-                "status": "completed",
+                "status": "reconciled",
+                "subject_actor_id": self._agenda_disclosure_policy.bot_id,
+                "actor_type": "bot",
             },
             now=now,
         )

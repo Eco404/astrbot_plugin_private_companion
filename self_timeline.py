@@ -139,6 +139,33 @@ class SelfTimelineMixin:
         return [item[2] for item in scored]
 
     def _self_timeline_from_daily_plan(self, data: dict[str, Any]) -> list[dict[str, Any]]:
+        disclosure = getattr(self, "_agenda_disclosure_view", None)
+        if callable(disclosure):
+            try:
+                view = disclosure("history_fact", max_entries=32)
+                entries = view.get("entries", []) if isinstance(view, dict) else getattr(view, "entries", [])
+                if isinstance(entries, list):
+                    result: list[dict[str, Any]] = []
+                    for item in entries:
+                        if not isinstance(item, dict):
+                            continue
+                        result.append(
+                            {
+                                "source": "日程",
+                                "date": _single_line(item.get("date"), 24),
+                                "time": _single_line(item.get("time"), 12),
+                                "minutes": self._self_timeline_parse_hhmm(item.get("time")),
+                                "when": self._self_timeline_when(_single_line(item.get("date"), 24), _single_line(item.get("time"), 12)),
+                                "summary": _single_line(item.get("title") or item.get("activity"), 140),
+                                "detail": "",
+                                "keywords": "日程 做了什么 干嘛 忙 " + _single_line(item.get("title") or item.get("activity"), 140),
+                            }
+                        )
+                    return result
+            except Exception:
+                # A policy failure must not reactivate the legacy path that
+                # interpreted every elapsed plan row as Bot history.
+                return []
         plan = data.get("daily_plan") if isinstance(data.get("daily_plan"), dict) else {}
         items = plan.get("items") if isinstance(plan.get("items"), list) else plan.get("schedule")
         if not isinstance(items, list):
@@ -173,6 +200,8 @@ class SelfTimelineMixin:
         entries = []
         for key, snapshot in enhanced.items():
             if not isinstance(snapshot, dict):
+                continue
+            if str(snapshot.get("fact_eligibility") or "none").lower() not in {"history_observed", "current_observed"}:
                 continue
             start, window = self._self_timeline_segment_window(str(key), snapshot)
             summary = _single_line(snapshot.get("summary") or snapshot.get("event"), 160)

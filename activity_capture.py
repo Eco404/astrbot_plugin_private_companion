@@ -110,6 +110,9 @@ class ActivityCapture:
                 "visibility": bucket["visibility"],
                 "certainty": "high" if bucket["count"] >= self.min_sustained_messages + 1 else "medium",
                 "status": "active",
+                "actor_type": "bot",
+                "subject_actor_id": "bot_self",
+                "source_actor_id": str(participant or "user").strip() or "system",
             },
             now=event_time,
         )
@@ -141,6 +144,9 @@ class ActivityCapture:
                 "visibility": visibility,
                 "certainty": certainty,
                 "status": "completed" if end_at else "active",
+                "actor_type": "bot",
+                "subject_actor_id": "bot_self",
+                "source_actor_id": str(source or "system").strip() or "system",
             },
             now=start_at,
         )

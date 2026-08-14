@@ -406,6 +406,21 @@ def _decode_news_response_text(
 class NewsExplorationMixin:
     """新闻阅读/网页探索"""
 
+    def _news_current_agenda_item(self) -> dict[str, Any] | None:
+        getter = getattr(self, "_agenda_current_context_item", None)
+        if callable(getter):
+            try:
+                item = getter()
+            except Exception:
+                return None
+            return item if isinstance(item, dict) else None
+        legacy_getter = getattr(self, "_get_current_plan_item", None)
+        try:
+            item = legacy_getter(self.data.get("daily_plan", {})) if callable(legacy_getter) else None
+        except Exception:
+            item = None
+        return item if isinstance(item, dict) else None
+
     def _clean_bilibili_share_field(self, value: Any, limit: int = 160) -> str:
         cleaner = getattr(self, "_clean_external_share_source_field", None)
         if callable(cleaner):
@@ -1311,7 +1326,7 @@ class NewsExplorationMixin:
         state = self.data.get("daily_state", {})
         energy = _safe_int(state.get("energy") if isinstance(state, dict) else 70, 70, 0, 100)
         mood = _single_line(state.get("mood_bias") if isinstance(state, dict) else "", 24)
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._news_current_agenda_item()
         activity = _single_line((current_item or {}).get("activity"), 80)
         text = f"{mood} {activity}"
         boredom_tokens = ("无聊", "发呆", "摸鱼", "刷视频", "短视频", "休息", "闲", "空")
@@ -2863,7 +2878,7 @@ class NewsExplorationMixin:
 
     def _format_external_event_current_self_context(self) -> str:
         state = self.data.get("daily_state", {}) if isinstance(self.data.get("daily_state"), dict) else {}
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._news_current_agenda_item()
         mood = _single_line(state.get("mood_bias"), 40)
         energy = _safe_int(state.get("energy"), 70, 0, 100)
         activity = _single_line((current_item or {}).get("activity"), 120)
@@ -3048,7 +3063,7 @@ class NewsExplorationMixin:
         state = self.data.get("daily_state", {})
         energy = _safe_int(state.get("energy") if isinstance(state, dict) else 70, 70, 0, 100)
         mood = _single_line(state.get("mood_bias") if isinstance(state, dict) else "", 24)
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._news_current_agenda_item()
         activity = _single_line((current_item or {}).get("activity"), 80)
         text = f"{mood} {activity}"
         if any(token in text for token in ("无聊", "发呆", "摸鱼", "休息", "闲", "空", "刷")):
@@ -4120,7 +4135,7 @@ class NewsExplorationMixin:
         state = self.data.get("daily_state", {})
         mood = _single_line(state.get("mood_bias") if isinstance(state, dict) else "", 30)
         energy = _safe_int(state.get("energy") if isinstance(state, dict) else 70, 70, 0, 100)
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._news_current_agenda_item()
         activity = _single_line((current_item or {}).get("activity"), 80)
         recent_user = ""
         users = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}

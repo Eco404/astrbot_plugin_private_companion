@@ -471,7 +471,7 @@ class QzonePublishMixin:
 
         qzone_state = self._qzone_state_dict()
         daily_state = self.data.get("daily_state", {})
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._qzone_current_agenda_item()
         diary_context = self._recent_diary_context(count=2)
         theme_hint = self._qzone_publish_theme_hint()
         temporal_context = self._qzone_temporal_context()
@@ -618,7 +618,7 @@ class QzonePublishMixin:
 
         state = self._qzone_state_dict()
         daily_state = self.data.get("daily_state", {})
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._qzone_current_agenda_item()
         diary_context = self._recent_diary_context(count=2)
         public_state_hint = self._qzone_relationship_safe_source(
             self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {}),
