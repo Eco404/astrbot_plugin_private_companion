@@ -248,6 +248,21 @@ _PLATFORM_DISPLAY_NAMES = {
 class PrivateReadingMixin:
     """私密阅读/书架"""
 
+    def _private_reading_current_agenda_item(self) -> dict[str, Any] | None:
+        getter = getattr(self, "_agenda_current_context_item", None)
+        if callable(getter):
+            try:
+                item = getter()
+            except Exception:
+                return None
+            return item if isinstance(item, dict) else None
+        legacy_getter = getattr(self, "_get_current_plan_item", None)
+        try:
+            item = legacy_getter(self.data.get("daily_plan", {})) if callable(legacy_getter) else None
+        except Exception:
+            item = None
+        return item if isinstance(item, dict) else None
+
     def _jm_cosmos_plugin_dir(self) -> Path:
         candidates = [
             Path(__file__).resolve().parent.parent / "astrbot_plugin_jm_cosmos",
@@ -299,7 +314,7 @@ class PrivateReadingMixin:
         state = self.data.get("daily_state", {})
         energy = _safe_int(state.get("energy") if isinstance(state, dict) else 70, 70, 0, 100)
         mood = _single_line(state.get("mood_bias") if isinstance(state, dict) else "", 24)
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._private_reading_current_agenda_item()
         activity = _single_line((current_item or {}).get("activity"), 80)
         hour = datetime.now().hour
         text = f"{mood} {activity}"

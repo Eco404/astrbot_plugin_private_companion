@@ -109,6 +109,7 @@ from .helpers import _date_key, _normalize_outbound_punctuation_flow, _normalize
 from .domains.affect.affect_modulation import compose_affect_modulation
 from .daily_state_tick import DailyStateTickMixin
 from .memo_notes import memo_note_due_state, memo_note_sort_key, normalize_memo_note
+from .agenda_contracts import normalize_plan_item
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -894,7 +895,11 @@ class DailyStateMixin(DailyStateTickMixin):
                     plan=plan,
                 )
                 self._remember_detail_enhancement_history(plan_date, enhanced, story_plan)
-                self._refresh_daily_state_location_from_plan(plan=plan, detail=detail)
+                self._refresh_daily_state_location_from_plan(
+                    plan=plan,
+                    detail=detail,
+                    segment=segment,
+                )
                 self._reschedule_users_for_new_detail_events(segment)
                 self._save_data_sync()
                 last_detail = detail
@@ -1487,6 +1492,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 self._refresh_daily_state_location_from_plan(
                     plan=current_plan if isinstance(current_plan, dict) else plan,
                     detail=detail,
+                    segment=segment,
                 )
                 self._save_data_sync()
                 label = self._schedule_segment_label(segment)
@@ -9573,7 +9579,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 item["end"] = end_text
                 changed = True
             lifecycle = _single_line(item.get("lifecycle_status"), 20).lower()
-            if lifecycle not in {"planned", "changed", "cancelled"}:
+            if lifecycle not in {"planned", "changed", "cancelled", "deferred"}:
                 item["lifecycle_status"] = "planned"
                 changed = True
             basis = self._normalize_schedule_basis(item.get("basis"), default=["coarse_plan"])
@@ -9594,6 +9600,7 @@ class DailyStateMixin(DailyStateTickMixin):
             "completed": "completed", "完成": "completed", "已完成": "completed",
             "changed": "changed", "变更": "changed", "已变更": "changed",
             "cancelled": "cancelled", "canceled": "cancelled", "取消": "cancelled", "已取消": "cancelled",
+            "deferred": "deferred", "postponed": "deferred", "顺延": "deferred", "延期": "deferred",
         }
         return aliases.get(_single_line(value, 20).lower(), "")
 
@@ -9638,6 +9645,38 @@ class DailyStateMixin(DailyStateTickMixin):
         return runtime
 
     def _plan_item_runtime_status(self, plan: dict[str, Any], item: dict[str, Any], index: int = -1) -> str:
+        # Lifecycle display must come from canonical evidence, never from the
+        # clock alone.  Keep the legacy helper signature for callers, but map
+        # old lifecycle values through a conservative planned/unknown view.
+        if isinstance(item, dict):
+            legacy = self._normalize_schedule_lifecycle_status(item.get("lifecycle_status"))
+            if legacy == "cancelled":
+                return "cancelled"
+            if legacy == "changed":
+                return "changed"
+            if legacy == "deferred":
+                return "deferred"
+            evidence = _single_line(item.get("evidence_kind"), 48).lower()
+            eligibility = _single_line(item.get("fact_eligibility"), 48).lower()
+            status = _single_line(item.get("status"), 32).lower()
+            if evidence in {"interaction", "tool_action", "external_record"} and eligibility in {"current_observed", "history_observed"}:
+                if status in {"active", "completed", "partially_completed"}:
+                    return status
+            if evidence == "self_state_commit" and eligibility == "current_internal":
+                return "active"
+            plan_date = str((plan or {}).get("date") or item.get("date") or "")
+            try:
+                canonical = normalize_plan_item(
+                    {**item, "date": plan_date or _today_key(), "subject_actor_id": item.get("subject_actor_id") or "bot_self"},
+                    plan_id=str(item.get("plan_id") or ""),
+                    now=self._environment_now(),
+                )
+                phase = _single_line(canonical.get("temporal_phase"), 16).lower()
+                if phase == "past":
+                    return "unknown"
+                return "planned"
+            except Exception:
+                return "planned"
         items = plan.get("items") if isinstance(plan, dict) else None
         starts = self._normalized_plan_item_starts(items)
         start = starts[index] if isinstance(items, list) and 0 <= index < len(starts) else self._parse_hhmm_to_minutes(item.get("time"))
@@ -11430,7 +11469,8 @@ class DailyStateMixin(DailyStateTickMixin):
         detail: dict[str, Any] | None = None,
     ) -> str:
         candidates: list[str] = []
-        if isinstance(detail, dict):
+        detail_allowed = self._detail_model_location_policy_allowed(detail)
+        if isinstance(detail, dict) and detail_allowed:
             model_location = _single_line(detail.get("location"), 60)
             if model_location:
                 return model_location
@@ -11462,46 +11502,79 @@ class DailyStateMixin(DailyStateTickMixin):
                     if _single_line(current_item.get(key), 120)
                 )
             )
-        if isinstance(plan, dict) and isinstance(plan.get("items"), list):
-            now_minutes = self._effective_plan_now_minutes(str(plan.get("date") or ""))
-            nearby: list[tuple[int, str]] = []
-            plan_items = plan.get("items", [])
-            starts = self._normalized_plan_item_starts(plan_items)
-            for index, item in enumerate(plan_items):
-                if not isinstance(item, dict):
-                    continue
-                if self._normalize_schedule_lifecycle_status(item.get("lifecycle_status")) == "cancelled":
-                    continue
-                item_minutes = starts[index] if index < len(starts) else None
-                if item_minutes is None:
-                    continue
-                distance = abs(item_minutes - now_minutes) if now_minutes is not None else item_minutes
-                text = " ".join(
-                    _single_line(item.get(key), 120)
-                    for key in ("activity", "mood", "message_seed")
-                    if _single_line(item.get(key), 120)
-                )
-                if text:
-                    nearby.append((distance, text))
-            for _, text in sorted(nearby, key=lambda row: row[0])[:3]:
-                candidates.append(text)
+        # Do not inspect neighboring raw plan rows here.  They are future or
+        # unverified projections and their clock distance cannot establish the
+        # Bot's current location.  A current item above is already policy /
+        # runtime qualified; a generated detail location is handled separately
+        # by ``_refresh_daily_state_location_from_plan``.
         for text in candidates:
             inferred = self._infer_location_from_text(text)
             if inferred:
                 return inferred
         return ""
 
+    def _detail_model_location_policy_allowed(self, detail: dict[str, Any] | None = None) -> bool:
+        """Only evidence-backed detail may update production current location."""
+
+        policy_getter = getattr(self, "_agenda_disclosure_view", None)
+        if not callable(policy_getter):
+            # Lightweight harnesses and legacy callers do not have C3 policy;
+            # preserve their historical local projection behavior.
+            return True
+        payload = detail if isinstance(detail, dict) else {}
+        evidence_kind = _single_line(payload.get("evidence_kind"), 48).lower()
+        eligibility = _single_line(payload.get("fact_eligibility"), 48).lower()
+        refs = payload.get("source_refs")
+        has_refs = isinstance(refs, (list, tuple, set)) and any(_single_line(ref, 160) for ref in refs)
+        if evidence_kind not in {"tool_action", "external_record"} or eligibility != "current_observed" or not has_refs:
+            return False
+        try:
+            view = policy_getter("current_fact", now=self._environment_now(), max_entries=128)
+            entries = view.get("entries", []) if isinstance(view, dict) else getattr(view, "entries", [])
+        except Exception:
+            return False
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            if _single_line(entry.get("subject_actor_id"), 120) != "bot_self":
+                continue
+            if _single_line(entry.get("fact_eligibility"), 48).lower() != "current_observed":
+                continue
+            entry_refs = entry.get("source_refs")
+            if isinstance(entry_refs, str):
+                entry_refs = [entry_refs]
+            if isinstance(entry_refs, (list, tuple, set)) and any(
+                _single_line(ref, 160) in {_single_line(value, 160) for value in refs}
+                for ref in entry_refs
+            ):
+                return True
+        return False
+
     def _refresh_daily_state_location_from_plan(
         self,
         *,
         plan: dict[str, Any] | None = None,
         detail: dict[str, Any] | None = None,
+        segment: dict[str, Any] | None = None,
     ) -> bool:
         state = self.data.get("daily_state")
         if not isinstance(state, dict) or state.get("date") != _today_key():
             return False
+        # Detail generation intentionally runs in a lead window.  A future
+        # candidate may describe a likely place, but it is not current Bot
+        # state until the segment actually starts.
+        if isinstance(detail, dict) and isinstance(segment, dict):
+            plan_date = _single_line((plan or {}).get("date"), 16) if isinstance(plan, dict) else ""
+            now_minutes = self._effective_plan_now_minutes(plan_date)
+            start_minutes = _safe_int(segment.get("start"), -1, minimum=-1)
+            if now_minutes is not None and start_minutes >= 0 and now_minutes < start_minutes:
+                return False
         override_ts = _safe_float(state.get("location_override_ts"), 0)
-        model_location = _single_line(detail.get("location"), 60) if isinstance(detail, dict) else ""
+        model_location = (
+            _single_line(detail.get("location"), 60)
+            if isinstance(detail, dict) and self._detail_model_location_policy_allowed(detail)
+            else ""
+        )
         if override_ts > 0 and _now_ts() - override_ts < 4 * 3600 and not model_location:
             return False
         location = model_location or self._infer_location_from_plan_context(plan=plan, detail=detail)
@@ -11560,6 +11633,8 @@ class DailyStateMixin(DailyStateTickMixin):
         enhanced = self.data.get("detail_enhanced_segments", {})
         snapshot = enhanced.get(str(segment.get("key") or "")) if isinstance(enhanced, dict) else None
         if not isinstance(snapshot, dict) or _single_line(snapshot.get("status"), 24) != "done":
+            return ""
+        if not self._detail_model_location_policy_allowed(snapshot):
             return ""
         return _single_line(snapshot.get("location"), 60)
 
@@ -16262,6 +16337,23 @@ class DailyStateMixin(DailyStateTickMixin):
         items = sorted(items, key=lambda item: self._parse_hhmm_to_minutes(item["time"]) or 0)
         items = items[: self.daily_plan_item_count]
         self._normalize_plan_item_intervals(items)
+        # Pass every generated item through the C3 write gate.  LLM fields such
+        # as status, source_refs, authority and evidence are never trusted;
+        # canonical axes are retained so downstream views cannot silently lose
+        # the distinction between a plan and an observation.
+        today = _today_key()
+        for index, item in enumerate(items):
+            try:
+                canonical = normalize_plan_item(
+                    {**item, "title": item.get("activity"), "date": today, "subject_actor_id": "bot_self", "actor_type": "bot"},
+                    plan_id=f"{today}:{index}",
+                    now=self._environment_now(),
+                )
+            except Exception:
+                continue
+            item.update(canonical)
+            item["activity"] = _single_line(item.get("activity") or item.get("title"), 120)
+            item["date"] = today
         return items
 
     def _skill_levels_for_plan_bounds(self) -> dict[str, int]:
@@ -16485,6 +16577,63 @@ class DailyStateMixin(DailyStateTickMixin):
                 selected_start = item_minutes
                 break
         if isinstance(selected, dict):
+            # A clock window is not execution evidence.  Keep confirmed
+            # schedule commitments available through the future/schedule
+            # policy, but expose current plan text only when a compatible
+            # observation or a short-lived resolver commit exists.
+            policy_allows_current = True
+            policy_getter = getattr(self, "_agenda_disclosure_view", None)
+            if callable(policy_getter):
+                policy_allows_current = False
+                try:
+                    view = policy_getter("current_fact", now=self._environment_now(), max_entries=128)
+                    values = view.get("entries", []) if isinstance(view, dict) else getattr(view, "entries", [])
+                    selected_key = _single_line(selected.get("plan_id"), 120)
+                    selected_pair = (
+                        _single_line(selected.get("time"), 12),
+                        _single_line(selected.get("activity") or selected.get("title"), 120),
+                    )
+                    for value in values if isinstance(values, list) else []:
+                        if not isinstance(value, dict):
+                            continue
+                        value_key = _single_line(value.get("plan_id") or value.get("entry_id"), 120)
+                        value_pair = (
+                            _single_line(value.get("time"), 12),
+                            _single_line(value.get("title") or value.get("activity"), 120),
+                        )
+                        if (selected_key and selected_key == value_key) or (selected_pair == value_pair and all(selected_pair)):
+                            policy_allows_current = True
+                            break
+                except Exception:
+                    policy_allows_current = False
+            evidence_kind = _single_line(selected.get("evidence_kind"), 48).lower()
+            fact_eligibility = _single_line(selected.get("fact_eligibility"), 48).lower()
+            status = _single_line(selected.get("status"), 32).lower()
+            if not policy_allows_current or not (
+                evidence_kind in {"interaction", "tool_action", "external_record"}
+                and fact_eligibility in {"current_observed", "history_observed", ""}
+                and status in {"active", "completed", "partially_completed", ""}
+            ):
+                runtime_getter = getattr(self, "_agenda_runtime_scene", None)
+                if callable(runtime_getter):
+                    try:
+                        runtime = runtime_getter(now=self._environment_now())
+                    except Exception:
+                        runtime = None
+                    if isinstance(runtime, dict):
+                        return {
+                            "time": self._minutes_to_hhmm(current_minutes),
+                            "end": _single_line(runtime.get("valid_until"), 40),
+                            "activity": _single_line(runtime.get("state"), 120),
+                            "mood": "当前状态",
+                            "message_seed": "",
+                            "subject_actor_id": "bot_self",
+                            "evidence_kind": "self_state_commit",
+                            "fact_eligibility": "current_internal",
+                            "materialization_state": "active",
+                            "status": "active",
+                        }
+                return None
             plan_date = str(plan.get("date") or "").strip()
             if (
                 plan_date
@@ -16539,6 +16688,9 @@ class DailyStateMixin(DailyStateTickMixin):
             "completed": "已完成",
             "changed": "已变更",
             "cancelled": "已取消",
+            "deferred": "已顺延",
+            "unknown": "未核实",
+            "overridden": "已被新安排覆盖",
         }
         for index, item in enumerate(plan.get("items", [])):
             if not isinstance(item, dict):

@@ -80,10 +80,11 @@ class SceneContextMixin:
         plan: dict[str, Any],
     ) -> tuple[dict[str, Any], str, str]:
         current_item: dict[str, Any] = {}
-        getter = getattr(self, "_get_current_plan_item", None)
-        if callable(getter):
+        getter = getattr(self, "_agenda_current_context_item", None)
+        legacy_getter = getattr(self, "_get_current_plan_item", None)
+        if callable(getter) or callable(legacy_getter):
             try:
-                value = getter(plan)
+                value = getter() if callable(getter) else legacy_getter(plan)
                 if isinstance(value, dict):
                     current_item = value
             except Exception:
@@ -132,6 +133,34 @@ class SceneContextMixin:
         captured: datetime,
     ) -> list[dict[str, str]]:
         """Return today's started schedule items without treating cancelled plans as facts."""
+
+        disclosure = getattr(self, "_agenda_disclosure_view", None)
+        if callable(disclosure):
+            try:
+                view = disclosure("history_fact", now=captured, max_entries=24)
+                entries = getattr(view, "entries", None)
+                if entries is None and hasattr(view, "get"):
+                    entries = view.get("entries", [])
+            except Exception:
+                entries = []
+            history: list[dict[str, str]] = []
+            for item in entries if isinstance(entries, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                start_at = _single_line(item.get("start_at") or item.get("start"), 48)
+                end_at = _single_line(item.get("end_at") or item.get("end"), 48)
+                start_text = start_at.split("T", 1)[1][:5] if "T" in start_at else _single_line(item.get("time"), 12)
+                end_text = end_at.split("T", 1)[1][:5] if "T" in end_at else _single_line(item.get("end"), 12)
+                history.append(
+                    {
+                        "time": start_text,
+                        "end": end_text,
+                        "status": _single_line(item.get("status"), 32),
+                        "activity": _single_line(item.get("title") or item.get("activity"), 160),
+                        "mood": _single_line(item.get("mood"), 32),
+                    }
+                )
+            return history[:24]
 
         today = captured.strftime("%Y-%m-%d")
         if _single_line(plan.get("date"), 20) != today:

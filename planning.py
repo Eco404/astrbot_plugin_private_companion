@@ -482,6 +482,17 @@ def normalize_story_items(plugin, raw_items: Any, text_key: str) -> list[dict[st
             text_key: text_value,
             "mood": _single_line(raw.get("mood"), 30),
             "lifecycle_status": lifecycle,
+            # Detail output is a temporary scene proposal.  It must never be
+            # mistaken for a current or historical Bot fact.
+            "status": "planned",
+            "source_kind": "planned",
+            "evidence_kind": "none",
+            "commitment_level": "tentative",
+            "content_granularity": "scene",
+            "materialization_state": "candidate",
+            "fact_eligibility": "none",
+            "subject_actor_id": "bot_self",
+            "actor_type": "bot",
             "basis": plugin._normalize_schedule_basis(raw.get("basis"), default=["coarse_plan"]),
             "confidence": min(1.0, max(0.0, float(raw.get("confidence") or 0.72)))
             if str(raw.get("confidence") or "").strip().replace(".", "", 1).isdigit()

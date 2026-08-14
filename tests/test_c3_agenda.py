@@ -130,7 +130,8 @@ def test_normalizers_preserve_contract_fields_and_stable_id() -> None:
     raw = {"title": "x", "status": "completed", "version": 4, "source_refs": ["a"], "visibility": "private", "certainty": "high", "evidence_level": "L3"}
     normalized = normalize_plan_item(raw)
     assert normalized["source_kind"] == "planned"
-    assert normalized["status"] == "completed"
+    assert normalized["status"] == "planned"
+    assert normalized["legacy_status"] == "completed"
     assert normalized["version"] == 4
     assert normalized["source_refs"] == ["a"]
     assert stable_id("x", {"b": 2, "a": 1}) == stable_id("x", {"a": 1, "b": 2})

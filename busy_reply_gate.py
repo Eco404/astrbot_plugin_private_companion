@@ -224,9 +224,16 @@ class BusyReplyGateMixin:
             return {"busy": False, "reason": "disabled", "until": 0.0, "schedule": ""}
         data = getattr(self, "data", None)
         plan = data.get("daily_plan") if isinstance(data, dict) and isinstance(data.get("daily_plan"), dict) else {}
-        current_getter = getattr(self, "_get_current_plan_item", None)
+        current_getter = getattr(self, "_agenda_current_context_item", None)
+        legacy_getter = getattr(self, "_get_current_plan_item", None)
         try:
-            current_item = current_getter(plan) if callable(current_getter) else None
+            current_item = (
+                current_getter()
+                if callable(current_getter)
+                else legacy_getter(plan)
+                if callable(legacy_getter)
+                else None
+            )
         except Exception:
             current_item = None
         busy, reason = self._busy_reply_item_is_busy(current_item)

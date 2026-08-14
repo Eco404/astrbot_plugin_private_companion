@@ -197,7 +197,7 @@ class CreativeMixin:
         now_dt = datetime.now()
         if now_dt.hour < 7:
             return False
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._creative_current_agenda_item()
         if self._is_sleepy_plan_item(current_item):
             return False
         activity = _single_line((current_item or {}).get("activity"), 100)
@@ -579,7 +579,7 @@ class CreativeMixin:
 
     def _creative_inspiration_source(self) -> dict[str, str] | None:
         active_projects = [p for p in self._creative_projects() if p.get("status") == "drafting"]
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._creative_current_agenda_item()
         activity = _single_line((current_item or {}).get("activity"), 90)
         seed = _single_line((current_item or {}).get("message_seed"), 90)
         dream = self.data.get("daily_dream")
@@ -2094,3 +2094,17 @@ class CreativeMixin:
             changed = True
         return changed
 
+    def _creative_current_agenda_item(self) -> dict[str, Any] | None:
+        getter = getattr(self, "_agenda_current_context_item", None)
+        if callable(getter):
+            try:
+                item = getter()
+            except Exception:
+                return None
+            return item if isinstance(item, dict) else None
+        legacy_getter = getattr(self, "_get_current_plan_item", None)
+        try:
+            item = legacy_getter(self.data.get("daily_plan", {})) if callable(legacy_getter) else None
+        except Exception:
+            item = None
+        return item if isinstance(item, dict) else None

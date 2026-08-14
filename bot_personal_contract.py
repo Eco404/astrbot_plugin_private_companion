@@ -23,7 +23,7 @@ import hashlib
 import json
 
 CONTRACT_NAME = "bot_personal_archive"
-CONTRACT_REVISION = 1
+CONTRACT_REVISION = 2
 
 # ---------------------------------------------------------------------------
 # 一、日程分级（原「四段」→ 陪伴分支五段）
@@ -136,7 +136,50 @@ BOT_PERSONAL_MAX_PAYLOAD_BYTES = 16 * 1024
 BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION = "1.0"
 # 信封字段 window 的**值域**变了（四段→五段）→ 能力版本必升，且必须在能力探测里
 # 回传 windows，让调用方启动时就能发现两侧值域不一致，而不是等到归档 invalid_window。
-BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION = "1.1"
+BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION = "1.2"
+
+# Canonical C3 agenda capability surface.  These values are deliberately
+# duplicated in the memory-side contract so startup negotiation can reject a
+# stale reader before it promotes archived payloads to facts.
+BOT_PERSONAL_CANONICAL_SCHEMA_VERSION = 2
+BOT_PERSONAL_CANONICAL_FIELDS: tuple[str, ...] = (
+    "source_kind",
+    "status",
+    "temporal_phase",
+    "evidence_kind",
+    "evidence_level",
+    "canonical_evidence_level",
+    "archive_evidence_level",
+    "evidence_level_mapping",
+    "authority_kind",
+    "commitment_level",
+    "epistemic_status",
+    "content_granularity",
+    "materialization_state",
+    "fact_eligibility",
+    "source_refs",
+    "runtime_origin_refs",
+    "expires_at",
+    "actor_type",
+    "subject_actor_id",
+    "object_actor_id",
+    "source_actor_id",
+    "target_user_id",
+    "participant_roles",
+    "decision_trace",
+)
+BOT_PERSONAL_CANONICAL_SOURCE_KINDS: tuple[str, ...] = ("planned", "observed", "projection", "reconciled")
+BOT_PERSONAL_CANONICAL_STATUSES: tuple[str, ...] = (
+    "planned", "active", "completed", "partially_completed", "overridden",
+    "reconciled", "deferred", "cancelled", "unknown",
+)
+BOT_PERSONAL_CANONICAL_EVIDENCE_KINDS: tuple[str, ...] = (
+    "none", "interaction", "self_state_commit", "tool_action",
+    "external_record", "external_commitment",
+)
+BOT_PERSONAL_CANONICAL_FACT_ELIGIBILITIES: tuple[str, ...] = (
+    "none", "schedule_commitment", "current_internal", "current_observed", "history_observed",
+)
 
 BOT_PERSONAL_MEMORY_TYPES: tuple[str, ...] = (
     "bot_schedule_plan",
@@ -207,6 +250,12 @@ def capability_descriptor(*, available: bool = True, read_only: bool = False) ->
         "contract_revision": CONTRACT_REVISION,
         "contract_fingerprint": CONTRACT_FINGERPRINT,
         "capability_schema_version": BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION,
+        "canonical_schema_version": BOT_PERSONAL_CANONICAL_SCHEMA_VERSION,
+        "canonical_fields": list(BOT_PERSONAL_CANONICAL_FIELDS),
+        "canonical_source_kinds": list(BOT_PERSONAL_CANONICAL_SOURCE_KINDS),
+        "canonical_statuses": list(BOT_PERSONAL_CANONICAL_STATUSES),
+        "canonical_evidence_kinds": list(BOT_PERSONAL_CANONICAL_EVIDENCE_KINDS),
+        "canonical_fact_eligibilities": list(BOT_PERSONAL_CANONICAL_FACT_ELIGIBILITIES),
         "payload_schema_version": BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION,
         "windows": list(WINDOW_SLUGS),
         "memory_types": list(BOT_PERSONAL_MEMORY_TYPES),
@@ -230,6 +279,12 @@ def _fingerprint_source() -> str:
         "max_payload_bytes": BOT_PERSONAL_MAX_PAYLOAD_BYTES,
         "payload_schema_version": BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION,
         "capability_schema_version": BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION,
+        "canonical_schema_version": BOT_PERSONAL_CANONICAL_SCHEMA_VERSION,
+        "canonical_fields": list(BOT_PERSONAL_CANONICAL_FIELDS),
+        "canonical_source_kinds": list(BOT_PERSONAL_CANONICAL_SOURCE_KINDS),
+        "canonical_statuses": list(BOT_PERSONAL_CANONICAL_STATUSES),
+        "canonical_evidence_kinds": list(BOT_PERSONAL_CANONICAL_EVIDENCE_KINDS),
+        "canonical_fact_eligibilities": list(BOT_PERSONAL_CANONICAL_FACT_ELIGIBILITIES),
         "memory_types": list(BOT_PERSONAL_MEMORY_TYPES),
         "type_contracts": {k: list(v) for k, v in TYPE_CONTRACTS.items()},
         "evidence_levels": list(EVIDENCE_LEVELS),
@@ -243,7 +298,7 @@ def compute_contract_fingerprint() -> str:
 
 
 # 由 compute_contract_fingerprint() 生成。改了上面任何常量都要重跑本文件更新它。
-CONTRACT_FINGERPRINT = "5b8a97c1527dcc62"
+CONTRACT_FINGERPRINT = "0ffe3a1ab69b659c"
 
 
 def contract_self_check() -> list[str]:

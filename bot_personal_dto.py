@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import json
 import re
@@ -19,6 +19,11 @@ from .bot_personal_contract import (
     normalize_window,
     window_for_minutes,
 )
+
+try:
+    from .schedule_authority import validate_structured_schedule_ref
+except ImportError:
+    from schedule_authority import validate_structured_schedule_ref
 
 
 FORBIDDEN_KEY_PARTS = {
@@ -149,6 +154,22 @@ def _derive_window(value: Any, occurred_at: str, now: datetime) -> str:
     return window_for_minutes(parsed.hour * 60 + parsed.minute)
 
 
+def _has_trusted_schedule_ref(payload: dict[str, Any], authority: str, now: datetime) -> bool:
+    """Accept only a complete adapter-shaped reference, never a trust label."""
+    try:
+        status, _reason = validate_structured_schedule_ref(
+            payload.get("schedule_ref"),
+            source_refs=payload.get("source_refs"),
+            expected_authority=authority,
+            expected_subject=BOT_PERSONAL_SUBJECT,
+            expected_target=payload.get("target_user_id"),
+            now=now,
+        )
+        return status == "valid"
+    except Exception:
+        return False
+
+
 @dataclass(frozen=True)
 class BotPersonalArchiveDTO:
     record_id: str
@@ -170,6 +191,28 @@ class BotPersonalArchiveDTO:
     idempotency_key: str
     payload_schema_version: str
     payload: dict[str, Any]
+    # Canonical agenda axes are additive.  ``certainty`` above intentionally
+    # remains the legacy numeric field for old memory consumers.
+    evidence_kind: str = "none"
+    canonical_evidence_level: str = "L0"
+    archive_evidence_level: str = "L0"
+    evidence_level_mapping: dict[str, Any] | None = None
+    authority_kind: str = "llm"
+    commitment_level: str = "tentative"
+    epistemic_status: str = "inferred"
+    content_granularity: str = "intent"
+    materialization_state: str = "none"
+    fact_eligibility: str = "none"
+    actor_type: str = "bot"
+    subject_actor_id: str = BOT_PERSONAL_SUBJECT
+    object_actor_id: str = ""
+    source_actor_id: str = "system"
+    target_user_id: str = ""
+    participant_roles: list[Any] | None = None
+    runtime_origin_refs: list[str] | None = None
+    expires_at: str = ""
+    decision_trace: list[dict[str, Any]] | None = None
+    canonical_schema_version: int = 2
 
     def envelope(self) -> dict[str, Any]:
         return {
@@ -192,6 +235,26 @@ class BotPersonalArchiveDTO:
             "idempotency_key": self.idempotency_key,
             "payload_schema_version": self.payload_schema_version,
             "payload": deepcopy(self.payload),
+            "evidence_kind": self.evidence_kind,
+            "canonical_evidence_level": self.canonical_evidence_level,
+            "archive_evidence_level": self.archive_evidence_level,
+            "evidence_level_mapping": deepcopy(self.evidence_level_mapping or {}),
+            "authority_kind": self.authority_kind,
+            "commitment_level": self.commitment_level,
+            "epistemic_status": self.epistemic_status,
+            "content_granularity": self.content_granularity,
+            "materialization_state": self.materialization_state,
+            "fact_eligibility": self.fact_eligibility,
+            "actor_type": self.actor_type,
+            "subject_actor_id": self.subject_actor_id,
+            "object_actor_id": self.object_actor_id,
+            "source_actor_id": self.source_actor_id,
+            "target_user_id": self.target_user_id,
+            "participant_roles": deepcopy(self.participant_roles or []),
+            "runtime_origin_refs": list(self.runtime_origin_refs or []),
+            "expires_at": self.expires_at,
+            "decision_trace": deepcopy(self.decision_trace or []),
+            "canonical_schema_version": self.canonical_schema_version,
         }
 
 
@@ -213,6 +276,16 @@ def build_bot_personal_dto(
     validate_bot_personal_key(idempotency_key)
     current = now or datetime.now().astimezone()
     safe = _safe_value(payload) or {}
+    subject_actor = _text(safe.get("subject_actor_id"), 120) or BOT_PERSONAL_SUBJECT
+    if subject_actor != BOT_PERSONAL_SUBJECT:
+        # This DTO is the Bot-owned archive boundary.  A user assertion or a
+        # foreign actor must not be silently rewritten into Bot history.
+        raise ValueError("subject_actor_id_mismatch")
+    safe["subject_actor_id"] = BOT_PERSONAL_SUBJECT
+    actor_type = _text(safe.get("actor_type"), 32) or "bot"
+    if actor_type != "bot":
+        raise ValueError("actor_type_mismatch")
+    safe["actor_type"] = "bot"
     occurred = _text(occurred_at, 80) or current.isoformat(timespec="seconds")
     date_key = _derive_date(safe.get("date") or safe.get("window_date"), occurred, current)
     window = _derive_window(safe.get("window"), occurred, current)
@@ -227,9 +300,132 @@ def build_bot_personal_dto(
         source_refs = [f"archive:{_text(idempotency_key, 240)}"]
     contract = TYPE_CONTRACTS[memory_type]
     source_kind, default_evidence, default_status = contract
-    evidence = "L0" if memory_type == "bot_schedule_plan" else (_text(safe.get("evidence_level"), 8).upper() or default_evidence)
-    if evidence not in {"L0", "L1", "L2", "L3"}:
-        evidence = default_evidence
+    # The archive envelope is also a write gate.  A plain schedule payload is
+    # an intent regardless of model-provided lifecycle/evidence fields; only a
+    # later C3 evidence adapter may create an observed/completed record.
+    schedule_trusted = False
+    if memory_type == "bot_schedule_plan":
+        raw_status = _text(safe.get("status"), 32).lower()
+        if raw_status and raw_status != "planned":
+            safe["legacy_status"] = raw_status
+        raw_source_kind = _text(safe.get("source_kind"), 32).lower()
+        if raw_source_kind and raw_source_kind != "planned":
+            safe["legacy_source_kind"] = raw_source_kind
+        raw_refs = list(safe.get("source_refs") or []) if isinstance(safe.get("source_refs"), list) else []
+        trusted_refs = _has_trusted_schedule_ref(safe, _text(safe.get("authority_kind"), 48), current)
+        schedule_trusted = trusted_refs
+        if raw_refs and not trusted_refs:
+            safe["legacy_source_refs"] = raw_refs[:30]
+            safe["source_refs"] = []
+        safe.update(
+            {
+                "source_kind": "planned",
+                "status": "planned",
+                "evidence_kind": "none",
+                "evidence_level": "L0",
+                "canonical_evidence_level": "L0",
+                "archive_evidence_level": "L0",
+                "fact_eligibility": "schedule_commitment" if schedule_trusted else "none",
+            }
+        )
+        source_refs = [_text(item, 240) for item in (safe.get("source_refs") or []) if _text(item, 240)]
+        if not source_refs:
+            source_refs = [f"archive:{_text(idempotency_key, 240)}"]
+    elif memory_type in {
+        "bot_window_snapshot",
+        "bot_schedule_reconciliation",
+        "bot_detail_fragment",
+        "bot_calendar_event",
+    }:
+        raw_status = _text(safe.get("status"), 32).lower()
+        raw_evidence_kind = _text(safe.get("evidence_kind"), 48).lower()
+        raw_eligibility = _text(safe.get("fact_eligibility"), 48).lower()
+        if memory_type == "bot_window_snapshot":
+            if raw_status and raw_status != "reconciled":
+                safe["legacy_status"] = raw_status
+            safe.update(
+                {
+                    "status": "reconciled",
+                    "evidence_kind": "none",
+                    "evidence_level": "L0",
+                    "canonical_evidence_level": "L0",
+                    "archive_evidence_level": "L0",
+                    "epistemic_status": "inferred",
+                    "fact_eligibility": "none",
+                }
+            )
+        elif memory_type == "bot_schedule_reconciliation":
+            compatible_fact = (
+                raw_evidence_kind in {"interaction", "tool_action", "external_record"}
+                and raw_eligibility in {"current_observed", "history_observed"}
+                and bool(safe.get("source_refs_trusted") or safe.get("authority_verified"))
+            )
+            if not compatible_fact:
+                if raw_status and raw_status != "reconciled":
+                    safe["legacy_status"] = raw_status
+                safe.update(
+                    {
+                        "status": "reconciled",
+                        "evidence_kind": "none",
+                        "evidence_level": "L0",
+                        "canonical_evidence_level": "L0",
+                        "archive_evidence_level": "L0",
+                        "epistemic_status": "inferred",
+                        "fact_eligibility": "none",
+                    }
+                )
+        elif memory_type == "bot_detail_fragment":
+            if raw_status and raw_status != "planned":
+                safe["legacy_status"] = raw_status
+            flags = [
+                _text(item, 64)
+                for item in (safe.get("legacy_flags") or [])
+                if _text(item, 64)
+            ]
+            for flag in ("short_ttl_candidate", "unverified_plan"):
+                if flag not in flags:
+                    flags.append(flag)
+            safe.update(
+                {
+                    "status": "planned",
+                    "evidence_kind": "none",
+                    "evidence_level": "L0",
+                    "canonical_evidence_level": "L0",
+                    "archive_evidence_level": "L0",
+                    "epistemic_status": "inferred",
+                    "content_granularity": "scene",
+                    "materialization_state": "candidate",
+                    "fact_eligibility": "none",
+                    "legacy_flags": flags,
+                }
+            )
+            if not _text(safe.get("expires_at"), 96):
+                safe["expires_at"] = (current + timedelta(hours=2)).isoformat(timespec="seconds")
+        else:  # bot_calendar_event
+            trusted_calendar = _has_trusted_schedule_ref(safe, "calendar", current)
+            safe.update(
+                {
+                    "status": "planned",
+                    "evidence_kind": "external_commitment",
+                    "epistemic_status": "asserted",
+                    "content_granularity": "commitment",
+                    "materialization_state": "none",
+                    "fact_eligibility": "schedule_commitment" if trusted_calendar else "none",
+                    "commitment_level": "confirmed" if trusted_calendar else "tentative",
+                }
+            )
+    # The archive contract only stores L0-L3.  Keep the original local level
+    # separately so lossy L4/L5 writes cannot be promoted on a later read.
+    requested_evidence = _text(safe.get("canonical_evidence_level") or safe.get("evidence_level"), 8).upper()
+    canonical_evidence = requested_evidence if requested_evidence in {"L0", "L1", "L2", "L3", "L4", "L5"} else default_evidence
+    evidence = "L0" if memory_type == "bot_schedule_plan" else (canonical_evidence if canonical_evidence in {"L0", "L1", "L2", "L3"} else "L3")
+    evidence_mapping = safe.get("evidence_level_mapping") if isinstance(safe.get("evidence_level_mapping"), dict) else {}
+    if not evidence_mapping:
+        evidence_mapping = {
+            "canonical_evidence_level": canonical_evidence,
+            "archive_evidence_level": evidence,
+            "lossy": canonical_evidence != evidence,
+        }
     created_at = _text(safe.get("created_at"), 80) or current.isoformat(timespec="seconds")
     updated_at = _text(safe.get("updated_at"), 80) or created_at
     canonical_key = _text(idempotency_key, 240)
@@ -237,6 +433,34 @@ def build_bot_personal_dto(
         f"{BOT_PERSONAL_MEMORY_DOMAIN}|{memory_type}|{canonical_key}".encode("utf-8")
     ).hexdigest()[:24]
     record_id = f"botmem_{record_digest}"
+    archive_status = (
+        "planned"
+        if memory_type in {"bot_schedule_plan", "bot_detail_fragment", "bot_calendar_event"}
+        else "reconciled"
+        if memory_type in {"bot_window_snapshot", "bot_schedule_reconciliation"}
+        else (_text(safe.get("status"), 32) or default_status)
+    )
+    archive_authority = _text(safe.get("authority_kind"), 48) or (
+        "llm"
+        if memory_type in {"bot_schedule_plan", "bot_detail_fragment"}
+        else "calendar"
+        if memory_type == "bot_calendar_event"
+        else "state"
+    )
+    archive_commitment = _text(safe.get("commitment_level"), 24) or ("tentative" if memory_type == "bot_schedule_plan" else "tentative")
+    if memory_type == "bot_schedule_plan" and not schedule_trusted:
+        if archive_authority in {"calendar", "timetable", "roster", "appointment", "user_confirmation"}:
+            safe["legacy_authority_kind"] = archive_authority
+            archive_authority = "llm"
+        if archive_commitment == "confirmed":
+            safe["legacy_commitment_level"] = archive_commitment
+            archive_commitment = "tentative"
+    if memory_type == "bot_schedule_plan":
+        safe["authority_kind"] = archive_authority
+        safe["commitment_level"] = archive_commitment
+        safe["epistemic_status"] = "inferred"
+        safe["content_granularity"] = "intent"
+        safe["materialization_state"] = "none"
     return BotPersonalArchiveDTO(
         record_id=record_id,
         memory_domain=BOT_PERSONAL_MEMORY_DOMAIN,
@@ -252,11 +476,33 @@ def build_bot_personal_dto(
         source_refs=source_refs,
         certainty=_certainty(safe.get("certainty"), 0.6),
         evidence_level=evidence,
-        status=_text(safe.get("status"), 32) or default_status,
+        status=archive_status,
         version=max(1, int(version or 1)),
         idempotency_key=_text(idempotency_key, 240),
         payload_schema_version=BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION,
         payload=deepcopy(safe),
+        evidence_kind=_text(safe.get("evidence_kind"), 48) or (
+            "none" if memory_type in {"bot_schedule_plan", "bot_window_snapshot", "bot_schedule_reconciliation", "bot_detail_fragment"}
+            else "external_commitment" if memory_type == "bot_calendar_event" else "observed"
+        ),
+        canonical_evidence_level=canonical_evidence,
+        archive_evidence_level=evidence,
+        evidence_level_mapping=deepcopy(evidence_mapping),
+        authority_kind=archive_authority,
+        commitment_level=archive_commitment,
+        epistemic_status=_text(safe.get("epistemic_status"), 24) or ("inferred" if memory_type == "bot_schedule_plan" else "observed"),
+        content_granularity=_text(safe.get("content_granularity"), 24) or "intent",
+        materialization_state=_text(safe.get("materialization_state"), 24) or "none",
+        fact_eligibility=_text(safe.get("fact_eligibility"), 48) or "none",
+        actor_type=_text(safe.get("actor_type"), 32) or "bot",
+        subject_actor_id=_text(safe.get("subject_actor_id"), 120) or BOT_PERSONAL_SUBJECT,
+        object_actor_id=_text(safe.get("object_actor_id"), 120),
+        source_actor_id=_text(safe.get("source_actor_id"), 120) or "system",
+        target_user_id=_text(safe.get("target_user_id"), 120),
+        participant_roles=deepcopy(safe.get("participant_roles")) if isinstance(safe.get("participant_roles"), list) else [],
+        runtime_origin_refs=deepcopy(safe.get("runtime_origin_refs")) if isinstance(safe.get("runtime_origin_refs"), list) else [],
+        expires_at=_text(safe.get("expires_at"), 96),
+        decision_trace=deepcopy(safe.get("decision_trace")) if isinstance(safe.get("decision_trace"), list) else [],
     )
 
 

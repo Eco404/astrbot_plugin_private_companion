@@ -8,6 +8,7 @@ import random
 import re
 import sys
 import time
+from datetime import datetime
 from typing import Any
 
 from astrbot.api import logger
@@ -68,6 +69,37 @@ def _qzone_compat_constant(name: str) -> Any:
 
 class QzoneScheduleMixin:
     """Publish window planning and automated post lifecycle helpers."""
+
+    def _qzone_current_agenda_item(self) -> dict[str, Any] | None:
+        getter = getattr(self, "_agenda_current_context_item", None)
+        if callable(getter):
+            try:
+                item = getter()
+            except Exception:
+                return None
+            return item if isinstance(item, dict) else None
+        legacy_getter = getattr(self, "_get_current_plan_item", None)
+        try:
+            item = legacy_getter(self.data.get("daily_plan", {})) if callable(legacy_getter) else None
+        except Exception:
+            item = None
+        return item if isinstance(item, dict) else None
+
+    @staticmethod
+    def _qzone_agenda_timestamp(value: Any) -> float:
+        if isinstance(value, (int, float)):
+            return max(0.0, float(value))
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.astimezone()
+            return parsed.timestamp()
+        except (TypeError, ValueError, OSError):
+            return 0.0
+
     @classmethod
     def _qzone_parse_windows(cls, raw: Any) -> list[tuple[int, int]]:
         """Parse "HH:MM-HH:MM" lines into (start_minute, end_minute) pairs.
@@ -266,37 +298,43 @@ class QzoneScheduleMixin:
         return hour * 60 + minute
 
     def _qzone_schedule_candidates_for_today(self) -> list[dict[str, Any]]:
-        """Collect today's schedule fragments so each post can use a different one."""
-        data = getattr(self, "data", None)
-        plan = data.get("daily_plan") if isinstance(data, dict) else None
-        if not isinstance(plan, dict):
+        """Collect short-lived Bot current facts for a nearby publish slot."""
+        disclosure = getattr(self, "_agenda_disclosure_view", None)
+        if not callable(disclosure):
             return []
-        if _single_line(plan.get("date"), 24) != _today_key():
+        try:
+            view = disclosure("current_fact", max_entries=32)
+            items = getattr(view, "entries", None)
+            if items is None and hasattr(view, "get"):
+                items = view.get("entries", [])
+        except Exception:
             return []
-        items = plan.get("items")
-        if not isinstance(items, list):
-            return []
-        normalizer = getattr(self, "_normalize_schedule_lifecycle_status", None)
+        now = _now_ts()
         candidates: list[dict[str, Any]] = []
         for index, item in enumerate(items):
             if not isinstance(item, dict):
                 continue
-            if callable(normalizer):
-                try:
-                    if normalizer(item.get("lifecycle_status")) == "cancelled":
-                        continue
-                except Exception:
-                    pass
-            minutes = self._qzone_hhmm_to_minutes(item.get("time"))
-            activity = _single_line(item.get("activity"), 160)
-            if minutes is None or not activity:
+            eligibility = _single_line(item.get("fact_eligibility"), 40).lower()
+            phase = _single_line(item.get("temporal_phase"), 20).lower()
+            if eligibility not in {"current_internal", "current_observed"} or phase != "current":
+                continue
+            activity = _single_line(item.get("title") or item.get("state") or item.get("activity"), 160)
+            valid_from = self._qzone_agenda_timestamp(item.get("start_at") or item.get("committed_at") or item.get("created_at"))
+            valid_until = self._qzone_agenda_timestamp(item.get("end_at") or item.get("valid_until") or item.get("expires_at"))
+            if not activity or valid_until <= now or valid_until <= valid_from:
                 continue
             candidates.append(
                 {
-                    # Index keeps the key unique when two entries share a time.
-                    "key": f"{_single_line(item.get('time'), 8)}#{index}",
+                    "key": _single_line(
+                        item.get("entry_id") or item.get("activity_id") or item.get("id"),
+                        80,
+                    ) or f"current-fact#{index}",
                     "label": activity,
-                    "start_minutes": minutes,
+                    "start_minutes": datetime.fromtimestamp(valid_from).hour * 60 + datetime.fromtimestamp(valid_from).minute,
+                    "valid_from": valid_from,
+                    "valid_until": valid_until,
+                    "fact_eligibility": eligibility,
+                    "evidence_kind": _single_line(item.get("evidence_kind"), 40),
                 }
             )
         return candidates
@@ -315,6 +353,10 @@ class QzoneScheduleMixin:
         best_distance = float("inf")
         for candidate in candidates:
             if candidate.get("key") in used_keys:
+                continue
+            valid_from = _safe_float(candidate.get("valid_from"), 0.0)
+            valid_until = _safe_float(candidate.get("valid_until"), 0.0)
+            if valid_from <= 0 or valid_until <= planned_at or planned_at < valid_from:
                 continue
             distance = abs(float(candidate.get("start_minutes") or 0) - target_minutes)
             if distance < best_distance:
@@ -366,7 +408,7 @@ class QzoneScheduleMixin:
     def _qzone_backfill_plan_schedule_labels(self, plan: dict[str, Any]) -> bool:
         candidates = self._qzone_schedule_candidates_for_today()
         items = plan.get("items") if isinstance(plan, dict) else None
-        if not candidates or not isinstance(items, list):
+        if not isinstance(items, list):
             return False
         used_keys = {
             _single_line(item.get("schedule_key"), 80)
@@ -374,6 +416,40 @@ class QzoneScheduleMixin:
             if isinstance(item, dict) and _single_line(item.get("schedule_key"), 80)
         }
         changed = False
+        now = _now_ts()
+        for item in items:
+            if not isinstance(item, dict) or not _single_line(item.get("schedule_label"), 160):
+                continue
+            planned_at = _safe_float(item.get("planned_at"), 0.0)
+            valid_from = _safe_float(item.get("schedule_valid_from"), 0.0)
+            valid_until = _safe_float(item.get("schedule_valid_until"), 0.0)
+            eligibility = _single_line(item.get("schedule_fact_eligibility"), 40).lower()
+            if (
+                eligibility not in {"current_internal", "current_observed"}
+                or valid_until <= now
+                or valid_until <= valid_from
+                or (planned_at > 0 and (planned_at < valid_from or planned_at >= valid_until))
+            ):
+                item.pop("schedule_key", None)
+                item.pop("schedule_label", None)
+                item.pop("schedule_valid_from", None)
+                item.pop("schedule_valid_until", None)
+                item.pop("schedule_fact_eligibility", None)
+                item.pop("schedule_evidence_kind", None)
+                changed = True
+        used_keys = {
+            _single_line(item.get("schedule_key"), 80)
+            for item in items
+            if isinstance(item, dict) and _single_line(item.get("schedule_key"), 80)
+        }
+        if not candidates:
+            if changed:
+                plan["used_schedule_keys"] = sorted(
+                    _single_line(item.get("schedule_key"), 80)
+                    for item in items
+                    if isinstance(item, dict) and _single_line(item.get("schedule_key"), 80)
+                )
+            return changed
         for item in items:
             if not isinstance(item, dict) or item.get("status") != "planned" or _single_line(item.get("schedule_label"), 160):
                 continue
@@ -387,6 +463,10 @@ class QzoneScheduleMixin:
             key = _single_line(schedule.get("key"), 80)
             item["schedule_key"] = key
             item["schedule_label"] = _single_line(schedule.get("label"), 160)
+            item["schedule_valid_from"] = _safe_float(schedule.get("valid_from"), 0.0)
+            item["schedule_valid_until"] = _safe_float(schedule.get("valid_until"), 0.0)
+            item["schedule_fact_eligibility"] = _single_line(schedule.get("fact_eligibility"), 40)
+            item["schedule_evidence_kind"] = _single_line(schedule.get("evidence_kind"), 40)
             if key:
                 used_keys.add(key)
             changed = True
@@ -475,6 +555,10 @@ class QzoneScheduleMixin:
                     "planned_at": planned_at,
                     "schedule_key": str(schedule.get("key")) if schedule else "",
                     "schedule_label": _single_line(schedule.get("label"), 160) if schedule else "",
+                    "schedule_valid_from": _safe_float(schedule.get("valid_from"), 0.0) if schedule else 0.0,
+                    "schedule_valid_until": _safe_float(schedule.get("valid_until"), 0.0) if schedule else 0.0,
+                    "schedule_fact_eligibility": _single_line(schedule.get("fact_eligibility"), 40) if schedule else "",
+                    "schedule_evidence_kind": _single_line(schedule.get("evidence_kind"), 40) if schedule else "",
                     # Night posts stay short: a sleepless 2am note is a fragment.
                     "length_profile": "short" if night else profiles[index],
                     "night": night,
@@ -738,7 +822,14 @@ class QzoneScheduleMixin:
         schedule_label = ""
         if isinstance(plan_item, dict):
             length_profile = _single_line(plan_item.get("length_profile"), 16) or "medium"
-            schedule_label = _single_line(plan_item.get("schedule_label"), 160)
+            candidate_eligibility = _single_line(plan_item.get("schedule_fact_eligibility"), 40).lower()
+            candidate_valid_until = _safe_float(plan_item.get("schedule_valid_until"), 0.0)
+            schedule_label = (
+                _single_line(plan_item.get("schedule_label"), 160)
+                if candidate_eligibility in {"current_internal", "current_observed"}
+                and candidate_valid_until > now
+                else ""
+            )
             # The item stays "planned" until it reaches a terminal state, so an
             # early return below simply retries on a later tick instead of
             # stranding it. The attempt counter is what stops an endless loop.
@@ -762,7 +853,7 @@ class QzoneScheduleMixin:
             self._save_data_sync()
             return
         daily_state = self.data.get("daily_state", {})
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._qzone_current_agenda_item()
         diary_context = self._recent_diary_context(count=2)
         theme_hint = self._qzone_publish_theme_hint()
         temporal_context = self._qzone_temporal_context()
@@ -1040,7 +1131,7 @@ class QzoneScheduleMixin:
             self._save_data_sync()
             return
         daily_state = self.data.get("daily_state", {})
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._qzone_current_agenda_item()
         public_state_hint = self._qzone_relationship_safe_source(
             self._qzone_public_state_hint(daily_state if isinstance(daily_state, dict) else {}),
             source="qzone.emotional_vent.current_state",

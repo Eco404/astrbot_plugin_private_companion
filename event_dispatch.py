@@ -5308,7 +5308,19 @@ Bot 近期回复：
         fatigue = scene.get("wakeup_fatigue") if isinstance(scene.get("wakeup_fatigue"), dict) else {}
         fatigue_label = _single_line(fatigue.get("label"), 20)
         fatigue_suffix = f"；最近群聊唤醒疲劳为{fatigue_label},回应应更省力" if str(fatigue.get("level") or "") in {"medium", "high"} else ""
-        is_sleep_phase = phase in {"falling_asleep", "light_sleep", "sleeping_again", "woken"} or bool(self._is_sleepy_plan_item(self._get_current_plan_item(self.data.get("daily_plan", {}))))
+        current_getter = getattr(self, "_agenda_current_context_item", None)
+        legacy_getter = getattr(self, "_get_current_plan_item", None)
+        try:
+            current_item = (
+                current_getter()
+                if callable(current_getter)
+                else legacy_getter(self.data.get("daily_plan", {}))
+                if callable(legacy_getter)
+                else None
+            )
+        except Exception:
+            current_item = None
+        is_sleep_phase = phase in {"falling_asleep", "light_sleep", "sleeping_again", "woken"} or bool(self._is_sleepy_plan_item(current_item))
         if is_sleep_phase:
             runtime = self._mark_sleep_woken_by_group_wakeup(text, wakeup_type=wakeup_type)
             prior = _safe_int(runtime.get("woken_count"), 1, 1)

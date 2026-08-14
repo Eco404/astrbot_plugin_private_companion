@@ -7,6 +7,7 @@ import uuid
 import asyncio
 import re
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1120,6 +1121,25 @@ class MemoryCompanionAdapterMixin:
         except Exception:
             return "", 0.0
 
+    def _memory_companion_current_agenda_item(self) -> dict[str, Any] | None:
+        """Return only a disclosed Bot current fact/runtime state."""
+
+        getter = getattr(self, "_agenda_current_context_item", None)
+        if callable(getter):
+            try:
+                item = getter()
+            except Exception:
+                return None
+            return item if isinstance(item, dict) else None
+        # Compatibility for isolated legacy harnesses.  Production instances
+        # always expose the policy/runtime accessor above.
+        legacy_getter = getattr(self, "_get_current_plan_item", None)
+        try:
+            item = legacy_getter(self.data.get("daily_plan", {})) if callable(legacy_getter) else None
+        except Exception:
+            item = None
+        return item if isinstance(item, dict) else None
+
     def _memory_companion_build_private_context(
         self,
         *,
@@ -1140,11 +1160,7 @@ class MemoryCompanionAdapterMixin:
                     role = ""
             except Exception:
                 role = ""
-        current_item = None
-        try:
-            current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
-        except Exception:
-            current_item = None
+        current_item = self._memory_companion_current_agenda_item()
         schedule_text = ""
         if isinstance(current_item, dict):
             try:
@@ -1642,17 +1658,79 @@ class MemoryCompanionAdapterMixin:
             "只在与本轮直接相关时自然接住；不要主动列举记忆、不要提及检索过程，也不要把它当作其他用户的信息。"
         )
 
+    def _memory_companion_agenda_memory_write_entries(
+        self,
+        *,
+        date_text: str = "",
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return only entries admitted by the canonical memory-write view."""
+
+        getter = getattr(self, "_agenda_disclosure_view", None)
+        if not callable(getter):
+            return []
+        current = now
+        if current is None:
+            try:
+                current = self._environment_now()
+            except Exception:
+                current = datetime.now().astimezone()
+        try:
+            try:
+                view = getter(
+                    "memory_write",
+                    now=current,
+                    max_entries=256,
+                    date_key=_single_line(date_text, 20),
+                )
+            except TypeError:
+                view = getter("memory_write", now=current, max_entries=256)
+        except Exception:
+            return []
+        entries = getattr(view, "entries", None)
+        if entries is None and isinstance(view, dict):
+            entries = view.get("entries")
+        return [dict(item) for item in entries if isinstance(item, dict)] if isinstance(entries, list) else []
+
+    @staticmethod
+    def _memory_companion_entry_ids(entries: list[dict[str, Any]]) -> set[str]:
+        ids: set[str] = set()
+        for item in entries:
+            for key in ("entry_id", "plan_id", "activity_id", "event_id"):
+                value = _single_line(item.get(key), 160)
+                if value:
+                    ids.add(value)
+        return ids
+
     async def _memory_companion_record_agenda_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(snapshot, dict):
             return {"ok": False, "state": "invalid", "error_code": "invalid_snapshot"}
         date_text = _single_line(snapshot.get("window_date") or snapshot.get("date"), 20)
         window = _single_line(snapshot.get("window") or snapshot.get("slug"), 32)
         snapshot_id = _single_line(snapshot.get("snapshot_id"), 160) or f"agenda_snapshot:{date_text}:{window}"
+        allowed_entries = self._memory_companion_agenda_memory_write_entries(
+            date_text=date_text,
+        )
+        allowed_ids = self._memory_companion_entry_ids(allowed_entries)
+        if not allowed_ids:
+            return {
+                "ok": False,
+                "state": "filtered",
+                "error_code": "memory_write_filtered",
+                "idempotency_key": snapshot_id,
+            }
 
         def _compact(items: Any, field: str) -> list[dict[str, Any]]:
             result: list[dict[str, Any]] = []
             for item in items if isinstance(items, list) else []:
                 if not isinstance(item, dict):
+                    continue
+                item_ids = {
+                    _single_line(item.get(key), 160)
+                    for key in ("entry_id", "plan_id", "activity_id", "event_id")
+                    if _single_line(item.get(key), 160)
+                }
+                if not item_ids.intersection(allowed_ids):
                     continue
                 value = _single_line(item.get("title") or item.get("summary") or item.get(field), 180)
                 if not value:
@@ -1664,17 +1742,40 @@ class MemoryCompanionAdapterMixin:
                 })
             return result[:16]
 
+        planned = _compact(snapshot.get("planned"), "title")
+        observed = _compact(snapshot.get("observed"), "summary")
+        reconciled = _compact(snapshot.get("reconciled"), "reason")
+        if not planned and not observed and not reconciled:
+            return {
+                "ok": False,
+                "state": "filtered",
+                "error_code": "memory_write_entries_not_in_snapshot",
+                "idempotency_key": snapshot_id,
+            }
         payload = {
             "date": date_text,
             "window": window,
             "summary": f"{date_text} {window} 窗口快照",
-            "planned": _compact(snapshot.get("planned"), "title"),
-            "observed": _compact(snapshot.get("observed"), "summary"),
-            "reconciled": _compact(snapshot.get("reconciled"), "reason"),
+            "planned": planned,
+            "observed": observed,
+            "reconciled": reconciled,
             "open_items": [_single_line(item, 160) for item in (snapshot.get("open_items") or []) if _single_line(item, 160)][:12],
+            "memory_write_entry_ids": sorted(allowed_ids)[:32],
         }
         refs = [snapshot_id]
-        refs.extend(_single_line(item, 160) for item in (snapshot.get("source_refs") or []) if _single_line(item, 160))
+        refs.extend(
+            _single_line(item, 160)
+            for item in (snapshot.get("source_refs") or [])
+            if _single_line(item, 160) in allowed_ids
+        )
+        for item in allowed_entries:
+            raw_refs = item.get("source_refs")
+            if isinstance(raw_refs, str):
+                raw_refs = [raw_refs]
+            for ref in raw_refs if isinstance(raw_refs, (list, tuple, set)) else []:
+                safe_ref = _single_line(ref, 160)
+                if safe_ref and safe_ref not in refs:
+                    refs.append(safe_ref)
         return await self._memory_companion_record_bot_personal(
             memory_type="bot_window_snapshot",
             payload=payload,
@@ -1690,9 +1791,32 @@ class MemoryCompanionAdapterMixin:
         date_text = _single_line(reconciliation.get("window_date") or reconciliation.get("date"), 20)
         window = _single_line(reconciliation.get("window") or reconciliation.get("slug"), 32)
         record_id = _single_line(reconciliation.get("reconciliation_id"), 160) or f"reconciliation:{date_text}:{window}"
+        allowed_entries = self._memory_companion_agenda_memory_write_entries(
+            date_text=date_text,
+        )
+        allowed_ids = self._memory_companion_entry_ids(allowed_entries)
+        if not allowed_ids:
+            return {
+                "ok": False,
+                "state": "filtered",
+                "error_code": "memory_write_filtered",
+                "idempotency_key": record_id,
+            }
         plans = []
         for item in reconciliation.get("plans") if isinstance(reconciliation.get("plans"), list) else []:
             if not isinstance(item, dict):
+                continue
+            item_ids = {
+                _single_line(item.get(key), 160)
+                for key in ("entry_id", "plan_id", "activity_id", "event_id")
+                if _single_line(item.get(key), 160)
+            }
+            activity_ids = {
+                _single_line(value, 160)
+                for value in (item.get("activity_ids") or item.get("reconciled_activity_ids") or [])
+                if _single_line(value, 160)
+            }
+            if not (item_ids | activity_ids).intersection(allowed_ids):
                 continue
             plans.append({
                 "plan_id": _single_line(item.get("plan_id"), 120),
@@ -1700,15 +1824,40 @@ class MemoryCompanionAdapterMixin:
                 "reason": _single_line(item.get("reason") or item.get("reconciliation_reason"), 180),
                 "activity_ids": [_single_line(value, 120) for value in (item.get("activity_ids") or item.get("reconciled_activity_ids") or []) if _single_line(value, 120)][:12],
             })
+        observed_activity_ids = [
+            _single_line(value, 120)
+            for value in (reconciliation.get("observed_activity_ids") or [])
+            if _single_line(value, 120) in allowed_ids
+        ]
+        if not plans and not observed_activity_ids:
+            return {
+                "ok": False,
+                "state": "filtered",
+                "error_code": "memory_write_entries_not_in_reconciliation",
+                "idempotency_key": record_id,
+            }
         payload = {
             "date": date_text,
             "window": window,
             "summary": f"{date_text} {window} 计划与实际对账",
             "plans": plans[:16],
-            "observed_activity_ids": [_single_line(value, 120) for value in (reconciliation.get("observed_activity_ids") or []) if _single_line(value, 120)][:16],
+            "observed_activity_ids": observed_activity_ids[:16],
+            "memory_write_entry_ids": sorted(allowed_ids)[:32],
         }
         refs = [record_id]
-        refs.extend(_single_line(item, 160) for item in (reconciliation.get("source_refs") or []) if _single_line(item, 160))
+        refs.extend(
+            _single_line(item, 160)
+            for item in (reconciliation.get("source_refs") or [])
+            if _single_line(item, 160) in allowed_ids
+        )
+        for item in allowed_entries:
+            raw_refs = item.get("source_refs")
+            if isinstance(raw_refs, str):
+                raw_refs = [raw_refs]
+            for ref in raw_refs if isinstance(raw_refs, (list, tuple, set)) else []:
+                safe_ref = _single_line(ref, 160)
+                if safe_ref and safe_ref not in refs:
+                    refs.append(safe_ref)
         return await self._memory_companion_record_bot_personal(
             memory_type="bot_schedule_reconciliation",
             payload=payload,
@@ -1783,38 +1932,20 @@ class MemoryCompanionAdapterMixin:
                 "items": lines,
                 "source": _single_line(plan.get("source"), 40),
                 "item_count": len(lines),
+                "subject_actor_id": "bot_self",
+                "actor_type": "bot",
+                "content_granularity": "day",
+                "materialization_state": "candidate",
+                "fact_eligibility": "none",
+                "expires_at": (datetime.now().astimezone() + timedelta(hours=24)).isoformat(timespec="seconds"),
+                "legacy_flags": ["short_ttl_plan", "unverified_plan"],
             },
             idempotency_key=f"daily_plan:{date_text}",
             occurred_at=_single_line(plan.get("generated_at"), 80) or self._memory_companion_now_iso(),
             version=int(plan.get("version") or 1),
             source_refs=[f"companion:daily_plan:{date_text}"],
         )
-        bridge = self._memory_companion_bridge()
-        recorder = getattr(bridge, "record_schedule_fragment", None) if bridge is not None else None
-        if not callable(recorder):
-            return
-        content = f"{date_text} 的 Bot 当日生活日程已生成：\n" + "\n".join(f"- {line}" for line in lines)
-        try:
-            await recorder(
-                content=content,
-                scope="unknown",
-                session_id="private_companion:schedule",
-                message_id=f"private_companion_daily_plan_{date_text}",
-                memory_id=f"private_companion_daily_plan_{date_text}",
-                metadata={
-                    "date": date_text,
-                    "source": _single_line(plan.get("source"), 40),
-                    "item_count": len(lines),
-                    "provider_id": _single_line(plan.get("provider_id"), 120),
-                },
-                source_plugin="private_companion",
-                confidence=0.86,
-                importance=0.5,
-            )
-        except Exception as exc:
-            if self._memory_companion_optional_dependency_failed(exc, where="record_daily_plan"):
-                return
-            logger.debug("[PrivateCompanion] MemoryCompanion 日程写入失败: %s", _single_line(exc, 120))
+        return
 
     async def _memory_companion_record_detail_enhancement(
         self,
@@ -1869,45 +2000,18 @@ class MemoryCompanionAdapterMixin:
                 "proactive_events": proactive[:3],
                 "start": start_text,
                 "end": end_text,
+                "subject_actor_id": "bot_self",
+                "actor_type": "bot",
+                "content_granularity": "scene",
+                "materialization_state": "candidate",
+                "fact_eligibility": "none",
+                "expires_at": (datetime.now().astimezone() + timedelta(hours=2)).isoformat(timespec="seconds"),
+                "legacy_flags": ["short_ttl_candidate", "unverified_plan"],
             },
             idempotency_key=f"detail:{date_text}:{start}:{end}",
             occurred_at=self._memory_companion_now_iso(),
             source_refs=[f"companion:detail:{date_text}:{start}:{end}"],
         )
-        bridge = self._memory_companion_bridge()
-        recorder = getattr(bridge, "record_schedule_fragment", None) if bridge is not None else None
-        if not callable(recorder):
-            return
-        parts = [f"{date_text} {start_text}-{end_text} 的 Bot 日程细化："]
-        if summary:
-            parts.append(summary)
-        if events:
-            parts.append("生活片段：" + "；".join(events[:4]))
-        if proactive:
-            parts.append("可能主动念头：" + "；".join(proactive[:3]))
-        try:
-            await recorder(
-                content="\n".join(parts),
-                scope="unknown",
-                session_id="private_companion:schedule",
-                message_id=f"private_companion_detail_{date_text}_{start}_{end}",
-                memory_id=f"private_companion_detail_{date_text}_{start}_{end}",
-                metadata={
-                    "date": date_text,
-                    "start": start_text,
-                    "end": end_text,
-                    "summary": summary,
-                    "event_count": len(events),
-                    "proactive_count": len(proactive),
-                },
-                source_plugin="private_companion",
-                confidence=0.84,
-                importance=0.42,
-            )
-        except Exception as exc:
-            if self._memory_companion_optional_dependency_failed(exc, where="record_detail_enhancement"):
-                return
-            logger.debug("[PrivateCompanion] MemoryCompanion 细化写入失败: %s", _single_line(exc, 120))
 
     def _memory_companion_build_group_context(
         self,
@@ -1919,11 +2023,7 @@ class MemoryCompanionAdapterMixin:
         text: str,
         event: Any | None = None,
     ) -> dict[str, Any]:
-        current_item = None
-        try:
-            current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
-        except Exception:
-            current_item = None
+        current_item = self._memory_companion_current_agenda_item()
         schedule_text = ""
         if isinstance(current_item, dict):
             try:

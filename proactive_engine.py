@@ -243,6 +243,21 @@ _PLATFORM_DISPLAY_NAMES = {
 class ProactiveEngineMixin:
     """主动行为候选、决策、计划事件与动作选择"""
 
+    def _proactive_current_agenda_item(self) -> dict[str, Any] | None:
+        getter = getattr(self, "_agenda_current_context_item", None)
+        if callable(getter):
+            try:
+                item = getter()
+            except Exception:
+                return None
+            return item if isinstance(item, dict) else None
+        legacy_getter = getattr(self, "_get_current_plan_item", None)
+        try:
+            item = legacy_getter(self.data.get("daily_plan", {})) if callable(legacy_getter) else None
+        except Exception:
+            item = None
+        return item if isinstance(item, dict) else None
+
     def _proactive_candidate_pool(self) -> list[dict[str, Any]]:
         raw = self.data.setdefault("proactive_candidate_pool", [])
         if not isinstance(raw, list):
@@ -7128,7 +7143,7 @@ class ProactiveEngineMixin:
             user.get("planned_proactive_reason"),
             user.get("planned_proactive_motive"),
         ]
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._proactive_current_agenda_item()
         if isinstance(current_item, dict):
             text_parts.extend(
                 [
@@ -7579,7 +7594,7 @@ class ProactiveEngineMixin:
         motive: str = "",
         planned_event: dict[str, Any] | None = None,
     ) -> dict[str, str]:
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._proactive_current_agenda_item()
         current_text = self._format_plan_item_for_prompt(current_item)
         event_text = ""
         if isinstance(planned_event, dict):
@@ -7619,7 +7634,7 @@ class ProactiveEngineMixin:
             return "刚看到的一条新闻"
         if reason == "creative_share":
             return "刚写到的小说片段"
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._proactive_current_agenda_item()
         activity = _single_line((current_item or {}).get("activity"), 36)
         if activity:
             return f"{activity}里自然冒出来的小内容"
@@ -7755,7 +7770,7 @@ class ProactiveEngineMixin:
         if reason == "creative_share":
             creative = user.get("creative_share_context") if isinstance(user.get("creative_share_context"), dict) else {}
             return _single_line(creative.get("title"), 48) or "刚写到的小说片段"
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._proactive_current_agenda_item()
         snapshot = self._current_story_plan_snapshot()
         weather = self._weather_summary_text(self.data.get("daily_weather", {}))
         weather_topic_available = self._ordinary_weather_topic_available(user)
@@ -8110,7 +8125,7 @@ class ProactiveEngineMixin:
         action_profile = self._persona_action_profile()
         motive_bias = self._motive_action_bias(motive)
         affinity_bias = self._action_affinity_bias(user)
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._proactive_current_agenda_item()
         current_item_text = self._format_plan_item_for_prompt(current_item)
 
         weighted: list[tuple[str, float]] = [("message", 0.82)]
@@ -8197,7 +8212,7 @@ class ProactiveEngineMixin:
         state = self.data.get("daily_state", {})
         weather = self._weather_summary_text(self.data.get("daily_weather", {}))
         weather_topic_available = self._ordinary_weather_topic_available(user)
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._proactive_current_agenda_item()
         snapshot = self._current_story_plan_snapshot()
         last_user_message = _single_line(user.get("last_user_message"), 48)
         can_do = self.data.get("can_do", [])
@@ -8729,7 +8744,7 @@ class ProactiveEngineMixin:
         state = self.data.get("daily_state", {})
         energy = _safe_int(state.get("energy") if isinstance(state, dict) else 70, 70, 0, 100)
         active_conditions = state.get("conditions", []) if isinstance(state, dict) else []
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._proactive_current_agenda_item()
         can_do = self.data.get("can_do", [])
         important_dates = self._get_relevant_important_dates()
         ignored_streak = _safe_int(user.get("ignored_streak"), 0)

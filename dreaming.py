@@ -385,7 +385,18 @@ def fallback_dream_fragments_for_diary(plugin, state: dict[str, Any]) -> list[di
         _single_line(state.get("mood_bias"), 20),
         _single_line(plugin._weather_summary_text(plugin.data.get("daily_weather", {})), 36),
     ]
-    current_item = plugin._get_current_plan_item(plugin.data.get("daily_plan", {}))
+    current_getter = getattr(plugin, "_agenda_current_context_item", None)
+    legacy_getter = getattr(plugin, "_get_current_plan_item", None)
+    try:
+        current_item = (
+            current_getter()
+            if callable(current_getter)
+            else legacy_getter(plugin.data.get("daily_plan", {}))
+            if callable(legacy_getter)
+            else None
+        )
+    except Exception:
+        current_item = None
     if isinstance(current_item, dict):
         seed_candidates.extend(
             [
@@ -454,16 +465,23 @@ def build_dream_memory_fragments(plugin, count: int = 8) -> list[str]:
                     cleaned = _clean_dream_fragment_text(candidate)
                     if cleaned and _dream_fragment_is_useful(cleaned):
                         fragments.append(cleaned)
-    current_plan = plugin.data.get("daily_plan", {})
-    if isinstance(current_plan, dict):
-        items = current_plan.get("items", [])
-        if isinstance(items, list):
-            for item in items[-3:]:
+    # A raw daily plan is an intent/projection input.  It must not become
+    # dream or long-term memory material merely because its clock window has
+    # elapsed.  Only evidence-backed historical entries are eligible here.
+    disclosure = getattr(plugin, "_agenda_disclosure_view", None)
+    if callable(disclosure):
+        try:
+            view = disclosure("history_fact", max_entries=12)
+            entries = view.get("entries", []) if isinstance(view, dict) else getattr(view, "entries", [])
+        except Exception:
+            entries = []
+        if isinstance(entries, list):
+            for item in entries:
                 if not isinstance(item, dict):
                     continue
                 for candidate in (
-                    _single_line(item.get("activity"), 80),
-                    _single_line(item.get("message_seed"), 80),
+                    _single_line(item.get("title") or item.get("activity"), 80),
+                    _single_line(item.get("summary"), 80),
                 ):
                     cleaned = _clean_dream_fragment_text(candidate)
                     if cleaned and _dream_fragment_is_useful(cleaned):

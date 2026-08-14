@@ -71,6 +71,24 @@ class DetailModelLocationTests(unittest.TestCase):
         self.assertEqual(0.93, state["location_confidence"])
         self.assertEqual(0.0, state["location_override_ts"])
 
+    def test_future_detail_does_not_update_current_location(self) -> None:
+        harness = _DetailLocationHarness()
+        harness._effective_plan_now_minutes = lambda _date: 20 * 60 + 55
+        detail = {
+            "location": "宿舍卧室",
+            "location_basis": ["coarse_plan"],
+            "location_confidence": 0.93,
+        }
+
+        changed = harness._refresh_daily_state_location_from_plan(
+            plan=harness.data["daily_plan"],
+            detail=detail,
+            segment={"start": 21 * 60 + 10},
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual("工作场所", harness.data["daily_state"]["location"])
+
 
 if __name__ == "__main__":
     unittest.main()
