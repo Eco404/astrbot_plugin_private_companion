@@ -96,7 +96,7 @@
       to { opacity: 1; transform: scaleX(1); transform-origin: left; }
     }
   </style>
-  <link rel="stylesheet" href="./app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1&amp;touch=reality-official-reminder-v3" />
+  <link rel="stylesheet" href="./app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1&amp;touch=reality-official-reminder-v3&amp;migration-notice=v1" />
   <!-- Keep the structured roleplay form readable while a WebUI asset is being refreshed. -->
   <style id="roleplay-layout-fallback">
     .roleplay-form,
@@ -825,6 +825,39 @@ QQ空间 = 公开札记
             </form>
           </dialog>
         </section>
+
+        <dialog id="extensionMigrationNoticeDialog" class="pc-dialog extension-migration-dialog" aria-modal="true" aria-labelledby="extensionMigrationNoticeTitle">
+          <form class="stack-form" method="dialog" data-extension-migration-form>
+            <header>
+              <div>
+                <span class="eyebrow">6.2.2 UPDATE</span>
+                <h3 id="extensionMigrationNoticeTitle">部分功能已拆分为独立插件</h3>
+                <p>出于可维护性考量，陪伴插件将部分能力拆分为独立插件。有对应需求时安装即可，均已上架官方插件市场。</p>
+              </div>
+              <button type="button" class="icon-button" data-extension-migration-close aria-label="关闭">×</button>
+            </header>
+            <ul class="extension-migration-list">
+              <li>
+                <div><strong>我会画给你看</strong><span>原生生图功能</span></div>
+                <a href="https://github.com/menglimi/astrbot_plugin_image_companion" target="_blank" rel="noopener noreferrer">查看插件仓库 <span aria-hidden="true">↗</span></a>
+              </li>
+              <li>
+                <div><strong>我会来到你身边</strong><span>摄像头、闹钟、设备联动，以及手机陪伴终端连接服务</span></div>
+                <a href="https://github.com/menglimi/astrbot_plugin_reality_companion" target="_blank" rel="noopener noreferrer">查看插件仓库 <span aria-hidden="true">↗</span></a>
+              </li>
+              <li>
+                <div><strong>我会替你留住故事</strong><span>原书柜与 QQ 空间功能</span></div>
+                <a href="https://github.com/menglimi/astrbot_plugin_content_companion" target="_blank" rel="noopener noreferrer">查看插件仓库 <span aria-hidden="true">↗</span></a>
+              </li>
+            </ul>
+            <p class="extension-migration-footnote">安装对应插件后，依旧建议在陪伴插件的拓展页进行操作。旧配置和用户数据不会被删除，更新后请重启 AstrBot。</p>
+            <footer>
+              <label class="extension-migration-dismiss"><input type="checkbox" data-extension-migration-dismiss /> 不再提示</label>
+              <button type="button" class="secondary-button" data-extension-migration-close>稍后处理</button>
+              <button type="submit" class="primary-button">知道了</button>
+            </footer>
+          </form>
+        </dialog>
 
         <section id="learningPanelSocial" class="learning-section relationship-workspace" role="tabpanel" aria-labelledby="learningTabSocial" data-learning-section-panel="social" hidden data-retired-worldbook="true">
           <div class="section-head relationship-head learning-section-head">
@@ -1919,6 +1952,6 @@ QQ空间 = 公开札记
   <!-- Loaded on demand by app.js through AstrBot's relative dynamic-import rewriting:
        ./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1&amp;manual=provider-input-v2
        ./js/panels/qzone-panel.js?v=20260810-qzone-classic-loader-v1 -->
-  <script src="./app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2&amp;page=lazy-classic-loader-v1&amp;scope=photo-scope-quota-v1&amp;touch=reality-official-reminder-v3&amp;memory-source=memory-companion-v2&amp;user-create=profile-v1&amp;relationship-role-photo=pr125-v1&amp;camera-runtime-scope=v1&amp;config=config-lifecycle-v1&amp;troubleshooting=diagnostic-category-label-v1"></script>
+  <script src="./app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2&amp;page=lazy-classic-loader-v1&amp;scope=photo-scope-quota-v1&amp;touch=reality-official-reminder-v3&amp;memory-source=memory-companion-v2&amp;user-create=profile-v1&amp;relationship-role-photo=pr125-v1&amp;camera-runtime-scope=v1&amp;config=config-lifecycle-v1&amp;troubleshooting=diagnostic-category-label-v1&amp;content-visibility=v1&amp;migration-notice=v1"></script>
 </body>
 </html>

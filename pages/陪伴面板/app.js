@@ -1,5 +1,6 @@
 const HTTP_API = "/astrbot_plugin_private_companion/page";
 const BOOKSHELF_ACCESS_STORAGE_KEY = "pc_bookshelf_access_v1";
+const EXTENSION_MIGRATION_NOTICE_STORAGE_KEY = "pc_extension_migration_notice_6_2_2_dismissed";
 const PAGE_ENDPOINT_PREFIX = "page";
 const PAGE_PLUGIN_NAME = "astrbot_plugin_private_companion";
 const PAGE_PERSONA_STORAGE_KEY = "pc_page_persona_v1";
@@ -9,6 +10,7 @@ let cachedPageEndpointStyle = "";
 let pageBridgeProbePromise = null;
 let pageBridgeReadyPromise = null;
 let loadAllRequestSeq = 0;
+let extensionMigrationNoticeChecked = false;
 let featureDetailDirtyRefreshScheduled = false;
 const inFlightGetRequests = new Map();
 
@@ -6757,6 +6759,42 @@ async function loadUserGroupLists(requestSeq = loadAllRequestSeq, options = {}) 
   }
 }
 
+function persistExtensionMigrationNoticePreference() {
+  const dialog = $("#extensionMigrationNoticeDialog");
+  const checkbox = dialog?.querySelector("[data-extension-migration-dismiss]");
+  if (!checkbox?.checked) return;
+  try {
+    window.localStorage.setItem(EXTENSION_MIGRATION_NOTICE_STORAGE_KEY, "1");
+  } catch (_error) {
+    // Embedded page environments may deny storage; the notice remains available for this session.
+  }
+}
+
+function bindExtensionMigrationNoticeDialog(dialog) {
+  if (!dialog || dialog.dataset.migrationNoticeBound === "1") return;
+  dialog.dataset.migrationNoticeBound = "1";
+  dialog.addEventListener("close", persistExtensionMigrationNoticePreference);
+  dialog.querySelectorAll("[data-extension-migration-close]").forEach((button) => {
+    button.addEventListener("click", () => dialog.close());
+  });
+}
+
+function openExtensionMigrationNoticeIfNeeded() {
+  if (extensionMigrationNoticeChecked) return;
+  extensionMigrationNoticeChecked = true;
+  const dialog = $("#extensionMigrationNoticeDialog");
+  if (!dialog) return;
+  bindExtensionMigrationNoticeDialog(dialog);
+  try {
+    if (window.localStorage.getItem(EXTENSION_MIGRATION_NOTICE_STORAGE_KEY) === "1") return;
+  } catch (_error) {
+    // Continue with an in-session notice when storage is unavailable.
+  }
+  if (dialog.open) return;
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
 async function loadAll(options = {}) {
   const requestSeq = ++loadAllRequestSeq;
   const { waitForLists = false } = options;
@@ -6773,6 +6811,7 @@ async function loadAll(options = {}) {
     applyOverviewData(overview);
     state.overviewRefreshedAt = Date.now();
     renderAll();
+    openExtensionMigrationNoticeIfNeeded();
     void restoreBookshelfAccess();
     void ensureTabData(state.activeTab, true);
     $("#subtitle").textContent = `${overview.plugin?.bot_name || "Private Companion"} · 总览已加载`;

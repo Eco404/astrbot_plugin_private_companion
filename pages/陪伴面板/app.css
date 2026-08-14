@@ -31927,6 +31927,55 @@ pre {
 .pc-dialog textarea:focus { border-color: var(--ortto-blue); outline: 3px solid rgba(36, 89, 222, .12); }
 .pc-dialog footer { justify-content: flex-end; border-top: 1px solid var(--ortto-line); padding-top: 14px; }
 
+.extension-migration-dialog {
+  width: min(680px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow: hidden;
+}
+.extension-migration-dialog > form {
+  max-height: calc(100vh - 26px);
+  overflow: auto;
+}
+.extension-migration-dialog header { display: flex; gap: 18px; }
+.extension-migration-dialog header > div { min-width: 0; }
+.extension-migration-dialog header p { max-width: 560px; line-height: 1.65; }
+.extension-migration-dialog header .icon-button { flex: 0 0 36px; width: 36px; height: 36px; border-radius: 8px; }
+.extension-migration-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.extension-migration-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+  border: 1px solid var(--ortto-line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--ortto-blue, #2459de) 4%, #fff);
+}
+.extension-migration-list li > div { display: grid; gap: 3px; min-width: 0; }
+.extension-migration-list strong { color: var(--ortto-ink); font-size: 14px; }
+.extension-migration-list span:not([aria-hidden]) { color: var(--ortto-muted); font-size: 12px; line-height: 1.5; }
+.extension-migration-list a { flex: 0 0 auto; color: var(--ortto-blue, #2459de); font-size: 12px; font-weight: 700; text-decoration: none; white-space: nowrap; }
+.extension-migration-list a:hover { text-decoration: underline; }
+.extension-migration-footnote { margin: 0; color: var(--ortto-muted); font-size: 12px; line-height: 1.7; }
+.extension-migration-dialog footer { align-items: center; gap: 8px; }
+.extension-migration-dismiss { display: inline-flex !important; grid-auto-flow: column; grid-template-columns: auto auto; align-items: center; gap: 7px !important; margin-right: auto; color: var(--ortto-muted) !important; font-size: 12px !important; font-weight: 600 !important; cursor: pointer; }
+.extension-migration-dismiss input { width: 15px; height: 15px; accent-color: var(--ortto-blue, #2459de); }
+
+@media (max-width: 560px) {
+  .extension-migration-list li { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .extension-migration-list a { white-space: normal; }
+  .extension-migration-dialog footer { align-items: stretch; flex-wrap: wrap; }
+  .extension-migration-dismiss { width: 100%; margin-right: 0; }
+  .extension-migration-dialog footer button { flex: 1 1 120px; }
+}
+
 .expression-library-transfer-actions {
   display: flex;
   align-items: center;
