@@ -644,7 +644,7 @@ class PhotoPromptContextTests(unittest.TestCase):
             700,
         )
         self.assertLessEqual(len(by_name["preset"].positive), 140)
-        self.assertLessEqual(len(by_name["fixed"].positive), 100)
+        self.assertLessEqual(len(by_name["fixed"].positive), 600)
         self.assertLessEqual(len(by_name["recent"].positive), 460)
         self.assertLessEqual(
             sum(len(by_name[name].positive) for name in ("edit", "composition", "recent")),
@@ -888,6 +888,73 @@ class PhotoPromptContextTests(unittest.TestCase):
                 for item in resolved.detected_conflicts
             )
         )
+
+    def test_daily_outfit_negative_contract_keeps_rotation_and_safety_clauses(self) -> None:
+        wardrobe = PhotoWardrobeDecision(
+            rule_id="explicit_prompt",
+            category="daily_outfit",
+            lock_outfit=True,
+        )
+        daily_negative = (
+            "cropped head, headless, faceless, face hidden, extreme close-up, "
+            "arm in foreground, body only, outfit only, back view, mirror selfie, "
+            "nsfw, revealing outfit, "
+            "same outfit as a recent daily outfit photo, "
+            "repeat any recently used outfit element: "
+            "color palettes: red / blue; outer layers: short bomber jacket; silhouettes: slim fit"
+        )
+
+        resolved = resolve_photo_prompt_context(
+            wardrobe=wardrobe,
+            sections=(
+                PhotoPromptSection(
+                    "request",
+                    "user_request",
+                    "daily outfit character illustration",
+                ),
+                PhotoPromptSection(
+                    "contract",
+                    "composition",
+                    negative=daily_negative,
+                ),
+            ),
+            prompt_format="traditional",
+            workflow_kind="selfie",
+        )
+        contract = next(
+            section for section in resolved.prompt_sections if section.name == "contract"
+        )
+
+        self.assertIn("cropped head", contract.negative)
+        self.assertIn("headless", contract.negative)
+        self.assertIn("faceless", contract.negative)
+        self.assertIn("mirror selfie", contract.negative)
+        self.assertIn("nsfw", contract.negative)
+        self.assertIn("same outfit as a recent daily outfit photo", contract.negative)
+        self.assertIn("outer layers", contract.negative)
+        self.assertFalse(
+            any(
+                item["rule"] == "authoritative_wardrobe_negated"
+                for item in resolved.removed_conflicts
+            )
+        )
+
+    def test_final_prompt_never_leaks_compaction_marker(self) -> None:
+        resolved = resolve_photo_prompt_context(
+            wardrobe=PhotoWardrobeDecision(rule_id="none"),
+            sections=(
+                PhotoPromptSection("request", "user_request", "a portrait"),
+                PhotoPromptSection(
+                    "fixed",
+                    "fixed_prompt",
+                    "additional fixed prompt: " + ", ".join(f"tag{index:03d}" for index in range(120)),
+                ),
+            ),
+            prompt_format="traditional",
+            workflow_kind="portrait",
+        )
+        self.assertNotIn("section compacted", resolved.final_prompt)
+        self.assertNotIn("section compacted", resolved.complete_prompt)
 
 
 if __name__ == "__main__":

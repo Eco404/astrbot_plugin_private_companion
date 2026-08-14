@@ -107,6 +107,8 @@ def _value(subject: Any, name: str, default: Any = None) -> Any:
 
 _CLIP_BOUNDARY_CHARS = frozenset(" \t\r\n,.;:!?，。；：！？")
 _CLIP_BOUNDARY_PATTERN = re.compile(r"[\s,.;:!?，。；：！？]+")
+_COMPACTED_MARKER = " ... [section compacted] ... "
+_NEGATIVE_LABEL_MAX_WORDS = 6
 
 
 def _clip_prefix_at_boundary(text: str, limit: int) -> str:
@@ -136,7 +138,7 @@ def _clip(value: Any, limit: int, *, preserve_tail: bool = False) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     if limit <= 0 or len(text) <= limit:
         return text
-    marker = " ... [section compacted] ... "
+    marker = _COMPACTED_MARKER
     if not preserve_tail or limit <= len(marker) + 40:
         return _clip_prefix_at_boundary(text, limit)
     available = limit - len(marker)
@@ -317,7 +319,10 @@ def _negative_conflict(
     categories = _categories(text)
     denied = next((category for category in categories if _compatible(category, active_category)), "")
     if denied:
-        return "authoritative_wardrobe_negated", denied
+        explicit_negation, _ = _wardrobe_rules._negative_clause_content(text)
+        label_like = len(str(text).strip().split()) <= _NEGATIVE_LABEL_MAX_WORDS
+        if explicit_negation or label_like:
+            return "authoritative_wardrobe_negated", denied
     denied_item = next(
         (item for item in _specific_outfit_items(text) if item in authoritative_items),
         "",
@@ -641,7 +646,7 @@ def _budget_sections(sections: list[PhotoPromptSection]) -> list[PhotoPromptSect
     _apply_budget(result, indexes("reference_fallback"), 320)
     _apply_budget(result, indexes("scene_context", "visual_memory"), 700)
     _apply_budget(result, indexes("preset"), 140)
-    _apply_budget(result, indexes("fixed_prompt"), 100)
+    _apply_budget(result, indexes("fixed_prompt"), 600)
 
     for index in indexes("recent_continuity"):
         section = result[index]
@@ -684,6 +689,14 @@ def _join_field(
     )
 
 
+def _strip_compaction_markers(text: Any) -> str:
+    return re.sub(
+        r"\s*\.\.\. \[section compacted\] \.\.\.\s*",
+        ", ",
+        str(text or ""),
+    )
+
+
 def _assemble(sections: Sequence[PhotoPromptSection], prompt_format: str) -> str:
     groups = (
         (
@@ -709,7 +722,7 @@ def _assemble(sections: Sequence[PhotoPromptSection], prompt_format: str) -> str
             ),
         ),
     )
-    positive_blocks = [f"[{label}]\n{text}" for label, text in groups if text]
+    positive_blocks = [f"[{label}]\n{_strip_compaction_markers(text)}" for label, text in groups if text]
     user_negative = _join_field(sections, frozenset({"user_request"}), "negative")
     decision_negative = "\n".join(
         section.negative.strip()
@@ -717,10 +730,13 @@ def _assemble(sections: Sequence[PhotoPromptSection], prompt_format: str) -> str
         if section.source != "user_request" and section.negative.strip()
     )
     negative = ", ".join(value for value in (decision_negative, user_negative) if value)
+    negative = _strip_compaction_markers(negative)
     mode = str(prompt_format or "traditional").strip().lower().replace("-", "_")
     if mode in {"nai", "novelai", "nai4", "nai_4", "nai45", "nai_diffusion", "naidiffusion"}:
         # NAI mode: avoid [] section labels (down-weight syntax) and express negatives via negative weight.
-        prompt = "\n\n".join(f"{label}:\n{text}" for label, text in groups if text)
+        prompt = "\n\n".join(
+            f"{label}:\n{_strip_compaction_markers(text)}" for label, text in groups if text
+        )
         return f"{prompt}\n\n-1.5::{negative}::".strip() if negative else prompt.strip()
     if mode in {"natural", "natural_language", "description", "prose", "自然语言", "自然语言描述"}:
         prompt = "\n\n".join(positive_blocks)
@@ -788,7 +804,7 @@ def _local_visual_section_text(section: PhotoPromptSection) -> str:
             text = "multi-person portrait, distinct referenced people" if "multi-person" in text.lower() else "single character, one person"
         else:
             text = ""
-    text = text.replace(" ... [section compacted] ... ", ", ")
+    text = text.replace(_COMPACTED_MARKER, ", ")
     text = re.sub(r"\s*\n+\s*", ", ", text)
     text = re.sub(r"\s*;\s*", ", ", text)
     text = re.sub(r"(?:\s*,\s*){2,}", ", ", text)
