@@ -338,6 +338,13 @@ _PLATFORM_DISPLAY_NAMES = {
     "discord": "Discord",
 }
 
+# 直接问用户的措辞。复用处：
+#   _trim_performative_self_state_tail 的 asks_user 判据（有问句就不删状态尾巴）
+#   _is_conversational_proactive_text 的对话式守卫（有问句就不收束状态清单）
+_ASK_USER_PROACTIVE_PATTERN = re.compile(
+    r"(你那边|你呢|你那儿|你那里|你现在|你今天|你还|你有没有|你要不要|你是不是)"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class _ProactiveSendOutcome:
@@ -15880,7 +15887,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         tail = units[-1].strip()
         if not tail:
             return cleaned
-        asks_user = bool(re.search(r"(你那边|你呢|你那儿|你那里|你现在|你今天|你还|你有没有|你要不要|你是不是)", tail))
+        asks_user = bool(_ASK_USER_PROACTIVE_PATTERN.search(tail))
         if asks_user:
             return cleaned
         performative_tail = bool(
@@ -15931,6 +15938,31 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             return "state"
         return ""
 
+    def _is_conversational_proactive_text(self, text: str) -> bool:
+        """判断主动消息是否为对话式消息，而非状态清单。
+
+        状态清单收束（_trim_proactive_status_inventory）只应作用于「纯陈述、多段自报」的
+        消息；含问句、颜文字/表情或直接问用户的消息是对话，收束会丢掉称呼、问句与情绪，
+        破坏一句话的完整性（例如一条「场景铺垫＋颜文字＋问句」的完整问候被削成只剩一句
+        场景描述）。
+        """
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return False
+        if _ASK_USER_PROACTIVE_PATTERN.search(cleaned):
+            return True
+        for unit in self._split_proactive_sentence_units(cleaned):
+            unit = unit.strip(" ，,、")
+            if not unit:
+                continue
+            # 问句：以问号结尾，或结尾带疑问语气词（覆盖省略主语的问句）
+            if re.search(r"[？?]$", unit) or re.search(r"[吗呢呀么]$", unit):
+                return True
+            # 颜文字/表情：括号内含非中文散文字符的短表达式，如 (≧▽≦) (◍•ᴗ•◍)
+            if re.search(r"[（(][^（）()\n]*[^一-鿿，。！？、\s][^（）()\n]*[)）]", unit):
+                return True
+        return False
+
     def _trim_proactive_status_inventory(self, text: str) -> str:
         cleaned = str(text or "").strip()
         if not cleaned:
@@ -15948,6 +15980,9 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         if inventory_count < 2:
             return cleaned
         if len(units) == 2 and inventory_count < len(units):
+            return cleaned
+        # 对话式消息（含问句/颜文字/直接问用户）不是状态清单，收束会破坏其完整性，跳过
+        if self._is_conversational_proactive_text(cleaned):
             return cleaned
         opener = ""
         opener_match = re.match(r"^([\w\u4e00-\u9fffぁ-んァ-ヶー]{1,4}[，,])", units[0])
