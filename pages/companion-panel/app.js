@@ -7896,9 +7896,9 @@ const setupGuideAdvancedItems = {
         { key: "daily_outfit_photo_prompt", type: "textarea", label: "每日穿搭提示词", placeholder: "可选：季节、配色、固定饰品", showWhen: (draft) => photoSettingVisibleForValues("daily_outfit_photo_prompt", draft) },
         { key: "daily_outfit_rotation_days", type: "number", label: "穿搭轮换冷却天数", placeholder: "10", min: 1, max: 30, showWhen: (draft) => photoSettingVisibleForValues("daily_outfit_rotation_days", draft) },
         { key: "photo_generation_prompt_format", type: "select", label: "提示词表达方式", options: [["traditional", "传统文生图提示词（标签/短语）"], ["natural_language", "自然语言描述"], ["nai", "NAI 联动模式（NovelAI 标签语法）"]], description: "全局作用于主动拍照、每日穿搭、创作封面、自然语言生图及函数工具生图。" },
-        { key: "photo_generation_style", type: "select", label: "生图风格", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
+        { key: "photo_generation_style", type: "select", label: "生图风格", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]], showWhen: (draft) => photoSettingVisibleForValues("photo_generation_style", draft) },
         { key: "photo_generation_style_custom_prompt", type: "textarea", label: "自定义风格说明", placeholder: "例如：胶片感、浅景深、室内自然光", description: "只有风格选“其他”时重点使用。", showWhen: (draft) => photoSettingVisibleForValues("photo_generation_style_custom_prompt", draft) },
-        { key: "photo_generation_negative_prompt_mode", type: "select", label: "负面提示词策略", options: [["safe_default", "安全默认"], ["merge", "合并自定义"], ["replace", "完全替换"]], description: "替换只影响系统基础负面词；用户明确排除、衣着与参考图一致性约束仍保留。" },
+        { key: "photo_generation_negative_prompt_mode", type: "select", label: "负面提示词策略", options: [["safe_default", "安全默认"], ["merge", "合并自定义"], ["replace", "完全替换"]], description: "替换只影响系统基础负面词；用户明确排除、衣着与参考图一致性约束仍保留。", showWhen: (draft) => photoSettingVisibleForValues("photo_generation_negative_prompt_mode", draft) },
         { key: "photo_generation_negative_prompt", type: "textarea", label: "全局负面提示词", placeholder: "例如：lowres, bad anatomy, text, watermark", description: "作用于全部类型，并与当前类型词去重合并。", showWhen: (draft) => photoSettingVisibleForValues("photo_generation_negative_prompt", draft) },
         { key: "photo_generation_text2img_negative_prompt", type: "textarea", label: "文生图负面提示词", placeholder: "场景、静物与封面专用负面词", showWhen: (draft) => photoSettingVisibleForValues("photo_generation_text2img_negative_prompt", draft) },
         { key: "photo_generation_selfie_negative_prompt", type: "textarea", label: "自拍/人像负面提示词", placeholder: "自拍、人像、每日穿搭专用负面词", showWhen: (draft) => photoSettingVisibleForValues("photo_generation_selfie_negative_prompt", draft) },
@@ -25643,6 +25643,19 @@ function featureRelatedSettings(key) {
 function photoSettingVisibleForValues(settingKey, values = {}) {
   const backend = String(values.photo_generation_backend || "auto").trim().toLowerCase();
   const enabled = (key) => toBool(values[key]);
+  const naiUnavailable = new Set([
+    "enable_photo_reference_image",
+    "enable_p5_structured_reference_assets",
+    "photo_reference_catalog",
+    "photo_generation_style",
+    "photo_generation_style_custom_prompt",
+    "photo_generation_negative_prompt_mode",
+    "photo_generation_negative_prompt",
+    "photo_generation_text2img_negative_prompt",
+    "photo_generation_selfie_negative_prompt",
+    "photo_generation_edit_negative_prompt",
+  ]);
+  if (backend === "nai" && naiUnavailable.has(settingKey)) return false;
   const toolOnly = new Set([
     "custom_photo_tool_name",
     "custom_photo_tool_prompt_param",
