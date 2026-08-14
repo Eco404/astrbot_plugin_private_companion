@@ -1132,6 +1132,9 @@ class IntegrationStatusMixin:
             )
             return f"{prefix} / {external_model or '未填模型'}"
 
+        if preferred == "nai":
+            nai_available = bool(getattr(self, "_nai_image_available", lambda: False)())
+            return "NAI 生图（直连）" if nai_available else "NAI 生图直连（未检测到 NAI 生图插件）"
         if preferred == "external":
             return external_label()
         if preferred == "comfyui":

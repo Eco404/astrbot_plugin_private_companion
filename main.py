@@ -357,6 +357,7 @@ from .atrelay import AtRelayMixin
 from .proactive_engine import ProactiveEngineMixin
 from .proactive_message import ProactiveMessageMixin
 from .image_companion_bridge import ImageCompanionBridgeMixin
+from .nai_image_bridge import NAIImageBridgeMixin
 from .proactive_chat_runtime_bridge import ProactiveChatRuntimeBridge
 from .plugin_bootstrap import (
     DEFAULT_AI_DAILY_JUYA_UID,
@@ -1562,6 +1563,7 @@ class PrivateCompanionPlugin(
     SceneContextMixin,
     ProactiveMessageMixin,
     ImageCompanionBridgeMixin,
+    NAIImageBridgeMixin,
     DailyStateMixin,
     AgendaRuntimeMixin,
     DailyReviewMixin,
@@ -6479,6 +6481,8 @@ class PrivateCompanionPlugin(
             except asyncio.TimeoutError:
                 logger.warning("[PrivateCompanion] SQLite WAL 后台优化超时,已跳过本轮启动优化")
             await self._image_companion_maintenance()
+            if self._nai_image_selected():
+                await self._nai_image_maintenance()
             async with self._data_lock:
                 if self._run_startup_data_maintenance_locked():
                     self._save_data_sync()
