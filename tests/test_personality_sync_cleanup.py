@@ -1,4 +1,22 @@
 # -*- coding: utf-8 -*-
+"""Regression tests for internal ``personality_sync`` metadata cleanup.
+
+Purpose:
+    Ensure internal personality synchronization comments, complete blocks, and
+    truncated blocks never appear in user-visible outbound chat text, while
+    preserving the surrounding visible reply.
+
+Run from the parent directory of this plugin package:
+    python -m pytest -q \
+        astrbot_plugin_private_companion/tests/test_personality_sync_cleanup.py
+
+How it works:
+    Each test passes representative model output directly through the same two
+    cleanup functions used by internal-history and outbound-message pipelines,
+    then compares the result with the exact visible text expected by users.
+    This makes future regressions fail during the test suite before release.
+"""
+
 from __future__ import annotations
 
 import logging
