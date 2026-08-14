@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import unittest
 from copy import deepcopy
 
@@ -126,6 +127,34 @@ class EnvironmentChangeProactiveTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(change["kind"], "precipitation_stopped")
         self.assertIn("停", change["topic"])
+
+    async def test_different_change_within_cooldown_is_blocked_but_urgent_escapes(self) -> None:
+        # 回归：旧代码 cooldown 只对同指纹去重，不同变化（雨停/下雨/雨势变大）指纹不同，
+        # 30-40 分钟就 offer 一条（实测 08-14 从 11:53 到 16:13 连发 6 条），360 分钟设置
+        # 形同虚设。修复后 cooldown 成为距上一次提示的通用间隔：非紧急（score<90）变化在
+        # 冷却内被挡；score>=90 的极端变化保留逃生口。
+        harness = self.harness
+        harness.weather_results = [self._weather("当前天气 晴，约 28°C。", 2)]
+        await harness._maybe_refresh_environment_change()
+        state = harness.data["environment_change_awareness"]
+        # 模拟 34 分钟前刚提示过一次环境变化：超过旧代码写死的 20 分钟窗口（旧代码会放行）、
+        # 但在 90 分钟冷却内（修复后应被挡）——正是实测「30-40 分钟连发」的场景。
+        prompted_at = time.time() - 34 * 60
+        state["last_prompted_at"] = prompted_at
+        state["next_check_at"] = 0
+
+        # 非紧急变化：晴→小雨（weather_to_rain，score 86 < 90）→ 冷却内被挡
+        harness.weather_results = [self._weather("当前天气 小雨，约 20°C。", 3)]
+        await harness._maybe_refresh_environment_change()
+        self.assertEqual(harness.offered, [])
+        self.assertEqual(state["last_prompted_at"], prompted_at)
+
+        # 紧急变化：小雨→大雨（weather_to_heavy_rain，score 92 >= 90）→ 突破冷却
+        state["next_check_at"] = 0
+        harness.weather_results = [self._weather("当前天气 大雨，约 20°C。", 4)]
+        await harness._maybe_refresh_environment_change()
+        self.assertEqual(len(harness.offered), 1)
+        self.assertEqual(harness.offered[0]["kind"], "weather_to_heavy_rain")
 
     async def test_environment_change_is_observation_not_external_share(self) -> None:
         semantics = EnvironmentSemanticHarness()._proactive_candidate_semantics(
