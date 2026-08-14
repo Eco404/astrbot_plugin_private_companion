@@ -527,8 +527,34 @@ def _text_looks_garbled(text: Any) -> bool:
     return control_count >= 2
 
 
+_PERSONALITY_SYNC_COMMENT_PATTERN = re.compile(
+    r"<!--\s*private_companion_personality_sync_v1\s*-->",
+    re.IGNORECASE,
+)
+_PERSONALITY_SYNC_BLOCK_PATTERN = re.compile(
+    r"<\s*personality_sync\b[^>]*>[\s\S]*?<\s*/\s*personality_sync\s*>",
+    re.IGNORECASE,
+)
+
+
+def _strip_personality_sync_blocks(text: Any) -> str:
+    """Remove complete or truncated internal personality synchronization blocks."""
+    normalized = str(text or "")
+    normalized = _PERSONALITY_SYNC_COMMENT_PATTERN.sub("", normalized)
+    normalized = _PERSONALITY_SYNC_BLOCK_PATTERN.sub("", normalized)
+    # A generation can be cut off before the closing tag is produced.
+    normalized = re.sub(
+        r"<\s*personality_sync\b[^>]*>[\s\S]*$",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    return normalized
+
+
 def _strip_internal_message_blocks(text: Any) -> str:
     normalized = str(text or "")
+    normalized = _strip_personality_sync_blocks(normalized)
     normalized = _strip_group_member_safety_markers(normalized)
     normalized = _strip_history_media_markers(normalized)
     normalized = re.sub(r"\[\[TTSBLOCK:[^\]]*\]\]", "", normalized)
@@ -667,6 +693,7 @@ def _strip_outbound_control_blocks(
     allowed_private_tts_tokens: set[str] | None = None,
 ) -> str:
     normalized = str(text or "")
+    normalized = _strip_personality_sync_blocks(normalized)
     normalized = _strip_group_member_safety_markers(normalized)
     normalized = _strip_history_media_markers(normalized)
     normalized = re.sub(r"\[\[TTSBLOCK:[^\]]*\]\]", "", normalized)
