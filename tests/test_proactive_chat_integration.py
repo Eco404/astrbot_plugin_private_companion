@@ -106,6 +106,10 @@ class _BridgeHarness(ProactiveMessageMixin):
         return "语气可以轻快一点"
 
     @staticmethod
+    def _format_mobile_user_location_context_for_proactive(_user) -> str:
+        return "【主动场景位置线索】用户当前位于已标记地点“公司”（工作地点）范围内"
+
+    @staticmethod
     def _format_schedule_context_for_prompt() -> str:
         return "刚收好手边的东西"
 
@@ -304,6 +308,7 @@ class ProactiveChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("关系熟悉度：亲近", prepared["prompt_fragment"])
         self.assertIn("当前是傍晚", prepared["prompt_fragment"])
         self.assertIn("刚收好手边的东西", prepared["prompt_fragment"])
+        self.assertIn("主动场景位置线索", prepared["prompt_fragment"])
         self.assertIn("已审核的表达学习规则", prepared["prompt_fragment"])
         self.assertFalse(wrong)
         self.assertTrue(correct)

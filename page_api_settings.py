@@ -21,6 +21,7 @@ from .photo_generation_scope import (
 from .photo_reference_catalog import CatalogValidationError, validate_and_serialize
 from .relationship_ledger import normalize_relationship_positive_stage_cap_key
 from .relationship_policy import relationship_stage_policy_json
+from .segmented_message import normalize_component_order
 
 _SETTING_UNHANDLED = object()
 
@@ -651,6 +652,8 @@ class PageSettingNormalizerMixin:
         return _SETTING_UNHANDLED
 
     def _normalize_page_delivery_setting(self, key: str, value: Any) -> Any:
+        if key == "segmented_proactive_component_order":
+            return normalize_component_order(value)
         canonical_key = re.sub(
             r"^segmented_proactive_(?:private|group)_",
             "segmented_proactive_",

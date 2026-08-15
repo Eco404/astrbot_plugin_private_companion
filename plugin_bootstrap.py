@@ -41,7 +41,7 @@ from .relationship_policy import normalize_relationship_stage_policy
 from .runtime_compat import probe_runtime_capabilities
 from .migration_coordinator import MigrationCoordinator
 from .migration_outbox import MigrationOutbox
-from .segmented_message import normalize_component_strategy
+from .segmented_message import normalize_component_order, normalize_component_strategy
 from .unified_person_registry import UnifiedPersonRegistry
 
 DEFAULT_AI_DAILY_MORNING_UID = "3706929260006322"
@@ -956,6 +956,9 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
     self.segmented_proactive_other_strategy = normalize_component_strategy(
         self._cfg_str(c, "segmented_proactive_other_strategy", "separate", "separate"),
         "separate",
+    )
+    self.segmented_proactive_component_order = normalize_component_order(
+        self._cfg_raw(c, "segmented_proactive_component_order", [])
     )
     if self.segmented_proactive_interval_max < self.segmented_proactive_interval_min:
         self.segmented_proactive_interval_max = self.segmented_proactive_interval_min

@@ -13165,6 +13165,165 @@ body.daily-outfit-preview-open {
   background: color-mix(in srgb, var(--surface) 94%, var(--accent) 2%);
 }
 
+.segmented-component-order-setting {
+  align-items: start !important;
+}
+
+.segmented-component-section .segmented-component-order-setting {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.segmented-order-control {
+  min-width: 0;
+  width: 100%;
+}
+
+.segmented-order-editor {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+}
+
+.segmented-order-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.segmented-order-toolbar button {
+  min-height: 28px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  padding: 0 9px;
+  background: var(--surface);
+  color: var(--accent-strong);
+  font-size: 11px;
+}
+
+.segmented-order-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 7px;
+  min-width: 0;
+}
+
+.segmented-order-item {
+  display: grid;
+  grid-template-columns: 20px 9px minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  min-height: 38px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 5px 6px;
+  background: color-mix(in srgb, var(--surface) 96%, var(--accent) 2%);
+  transition: border-color .16s var(--ease), background .16s var(--ease), transform .16s var(--ease), box-shadow .16s var(--ease);
+}
+
+.segmented-order-item:hover,
+.segmented-order-item:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line-soft));
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 5%);
+  outline: none;
+}
+
+.segmented-order-item.is-dragging {
+  border-style: dashed;
+  box-shadow: 0 5px 16px rgba(36, 52, 70, .12);
+  opacity: .72;
+  transform: translateY(-1px);
+}
+
+.segmented-order-drag,
+.segmented-order-actions button {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 26px;
+  border: 0;
+  border-radius: 5px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.segmented-order-drag {
+  cursor: grab;
+  letter-spacing: 0;
+}
+
+.segmented-order-drag:active {
+  cursor: grabbing;
+}
+
+.segmented-order-drag:hover,
+.segmented-order-actions button:hover,
+.segmented-order-drag:focus-visible,
+.segmented-order-actions button:focus-visible {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  outline: none;
+}
+
+.segmented-order-item b {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.segmented-order-swatch {
+  width: 8px;
+  height: 22px;
+  border-radius: 4px;
+  background: #edf1f5;
+}
+
+.segmented-order-swatch.is-text { background: #7b9bb7; }
+.segmented-order-swatch.is-reply { background: #b49b78; }
+.segmented-order-swatch.is-at { background: #4e91c5; }
+.segmented-order-swatch.is-voice { background: #4da99a; }
+.segmented-order-swatch.is-image { background: #76a668; }
+.segmented-order-swatch.is-face { background: #d4a53d; }
+.segmented-order-swatch.is-reaction { background: #c66c80; }
+.segmented-order-swatch.is-other { background: #8f929b; }
+
+.segmented-order-actions {
+  display: inline-flex;
+  gap: 1px;
+}
+
+.segmented-order-lock-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.segmented-order-lock-note span {
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.segmented-order-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .segmented-config-hidden {
   display: none !important;
 }
@@ -13310,6 +13469,10 @@ body.daily-outfit-preview-open {
   .segmented-component-setting .feature-param-control,
   .segmented-component-setting .feature-param-control select {
     width: 100%;
+  }
+
+  .segmented-order-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .segmented-preview-panel > header,

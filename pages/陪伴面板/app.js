@@ -4003,9 +4003,9 @@ const featureSettingSections = {
     },
     {
       title: "组件发送位置",
-      note: "嵌入会与相邻正文进入同一消息链；单独会成为独立消息。回复引用固定跟随第一段正文。",
+      note: "先调整组件类型的整体先后，再决定每类组件是否嵌入正文或独立发送；回复引用固定跟随第一段正文。",
       kind: "component-placement",
-      keys: ["segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy"],
+      keys: ["segmented_proactive_component_order", "segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy"],
     },
     {
       title: "共享切分规则与兼容默认值",
@@ -4572,6 +4572,16 @@ function proactiveGaugeMax(used, limit, explicit = false, fallback = 8) {
 
 function collectSettingValue(key, input) {
   if (!input) return "";
+  if (key === "segmented_proactive_component_order") {
+    const raw = String(input.value || "").trim();
+    if (!raw) return ["voice", "at", "text", "face", "image", "other", "reaction"];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : raw.split(/[\s,，、]+/).filter(Boolean);
+    } catch {
+      return raw.split(/[\s,，、]+/).filter(Boolean);
+    }
+  }
   if (key === "multi_persona_ids") {
     const host = input.closest("[data-feature-param-group='multi_persona_ids']");
     return Array.from(host?.querySelectorAll("[data-multi-persona-profile]:checked") || [])
@@ -24199,6 +24209,7 @@ function segmentedPreviewValues(root = document) {
     "segmented_proactive_image_strategy",
     "segmented_proactive_at_strategy",
     "segmented_proactive_face_strategy",
+    "segmented_proactive_component_order",
     "reaction_expression_delivery_mode",
     "segmented_proactive_other_strategy",
     "segmented_proactive_split_mode",
@@ -24419,58 +24430,197 @@ function normalizeSegmentedComponentStrategy(value, fallback = "separate") {
   return ["inline", "separate", "previous", "next"].includes(normalized) ? normalized : fallback;
 }
 
-function segmentedComponentPreviewPlan(values, segments) {
-  const chunks = (segments || []).map((segment, index) => ([{
-    kind: "text",
-    label: `正文 ${index + 1}`,
-    title: String(segment || ""),
-  }]));
-  if (!chunks.length) return { chunks: [], hasMedia: false };
-  const firstTextIndex = () => chunks.findIndex((chunk) => chunk.some((item) => item.kind === "text"));
-  const lastTextIndex = () => {
-    for (let index = chunks.length - 1; index >= 0; index -= 1) {
-      if (chunks[index].some((item) => item.kind === "text")) return index;
-    }
-    return -1;
-  };
-  const placeLeading = (item, strategyValue, fallback) => {
-    const strategy = normalizeSegmentedComponentStrategy(strategyValue, fallback);
-    const target = firstTextIndex();
-    if (["inline", "next"].includes(strategy) && target >= 0) {
-      chunks[target].unshift(item);
-    } else {
-      chunks.splice(Math.max(0, target), 0, [item]);
-    }
-  };
-  const placeTrailing = (item, strategyValue, fallback) => {
-    const strategy = normalizeSegmentedComponentStrategy(strategyValue, fallback);
-    const target = lastTextIndex();
-    if (["inline", "previous"].includes(strategy) && target >= 0) {
-      chunks[target].push(item);
-    } else {
-      chunks.push([item]);
-    }
-  };
+const segmentedComponentOrderDefault = Object.freeze(["voice", "at", "text", "face", "image", "other", "reaction"]);
+const segmentedComponentOrderLabels = Object.freeze({
+  voice: "语音",
+  at: "@",
+  text: "正文",
+  face: "平台表情",
+  image: "图片",
+  other: "附件",
+  reaction: "表情包",
+});
 
-  placeLeading({ kind: "at", label: "@" }, values.segmented_proactive_at_strategy, "inline");
-  placeLeading({ kind: "voice", label: "语音" }, values.segmented_proactive_voice_strategy, "separate");
-  const textTarget = firstTextIndex();
-  if (textTarget >= 0) chunks[textTarget].unshift({ kind: "reply", label: "引用" });
-  placeTrailing({ kind: "image", label: "图片" }, values.segmented_proactive_image_strategy, "separate");
-  placeTrailing({ kind: "face", label: "平台表情" }, values.segmented_proactive_face_strategy, "inline");
-  placeTrailing({ kind: "other", label: "附件" }, values.segmented_proactive_other_strategy, "separate");
-
-  const reactionMode = String(values.reaction_expression_delivery_mode || "separate_after");
-  const reaction = { kind: "reaction", label: "表情包" };
-  if (reactionMode === "same_message") {
-    const target = lastTextIndex();
-    if (target >= 0) chunks[target].push(reaction);
-    else chunks.push([reaction]);
-  } else if (reactionMode === "separate_before") {
-    chunks.unshift([reaction]);
-  } else {
-    chunks.push([reaction]);
+function normalizeSegmentedComponentOrder(value) {
+  let source = value;
+  if (typeof source === "string") {
+    const raw = source.trim();
+    if (!raw) source = [];
+    else {
+      try {
+        const parsed = JSON.parse(raw);
+        source = Array.isArray(parsed) ? parsed : raw.split(/[\s,，、]+/);
+      } catch {
+        source = raw.split(/[\s,，、]+/);
+      }
+    }
   }
+  if (!Array.isArray(source)) source = [];
+  const result = [];
+  source.forEach((item) => {
+    const kind = String(item || "").trim().toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(segmentedComponentOrderLabels, kind) && !result.includes(kind)) result.push(kind);
+  });
+  segmentedComponentOrderDefault.forEach((kind) => {
+    if (!result.includes(kind)) result.push(kind);
+  });
+  return result;
+}
+
+function segmentedComponentOrderEditorHtml(value, accessibility = {}) {
+  const order = normalizeSegmentedComponentOrder(value);
+  const editorAttrs = featureSettingAccessibilityAttrs(accessibility);
+  const items = order.map((kind, index) => `
+    <div class="segmented-order-item" data-order-kind="${escapeHtml(kind)}" draggable="true" tabindex="0" role="listitem" aria-label="${escapeHtml(`${index + 1}. ${segmentedComponentOrderLabels[kind]}`)}">
+      <button type="button" class="segmented-order-drag" data-order-drag title="拖动排序" aria-label="拖动${escapeHtml(segmentedComponentOrderLabels[kind])}">⋮⋮</button>
+      <span class="segmented-order-swatch is-${escapeHtml(kind)}" aria-hidden="true"></span>
+      <b>${escapeHtml(segmentedComponentOrderLabels[kind])}</b>
+      <span class="segmented-order-actions">
+        <button type="button" data-order-move="up" title="上移" aria-label="上移${escapeHtml(segmentedComponentOrderLabels[kind])}">↑</button>
+        <button type="button" data-order-move="down" title="下移" aria-label="下移${escapeHtml(segmentedComponentOrderLabels[kind])}">↓</button>
+      </span>
+    </div>
+  `).join("");
+  return `
+    <div class="segmented-order-editor" data-segmented-component-order-editor${editorAttrs}>
+      <textarea data-feature-param="segmented_proactive_component_order" hidden aria-hidden="true">${escapeHtml(JSON.stringify(order))}</textarea>
+      <div class="segmented-order-toolbar">
+        <span>拖动或使用箭头调整先后</span>
+        <button type="button" data-order-reset title="恢复默认顺序">恢复默认</button>
+      </div>
+      <div class="segmented-order-list" data-order-list role="list" aria-label="组件先后顺序">${items}</div>
+      <p class="segmented-order-lock-note"><span aria-hidden="true">↳</span> 引用固定跟随第一段正文</p>
+      <span class="segmented-order-live" data-order-live aria-live="polite"></span>
+    </div>
+  `;
+}
+
+function bindSegmentedComponentOrderEditor(root = document) {
+  root.querySelectorAll?.("[data-segmented-component-order-editor]").forEach((editor) => {
+    if (editor.dataset.segmentedOrderBound) return;
+    editor.dataset.segmentedOrderBound = "1";
+    const hidden = editor.querySelector("[data-feature-param='segmented_proactive_component_order']");
+    const list = editor.querySelector("[data-order-list]");
+    const live = editor.querySelector("[data-order-live]");
+    if (!hidden || !list) return;
+    const moveItem = (item, delta) => {
+      const items = [...list.querySelectorAll("[data-order-kind]")];
+      const index = items.indexOf(item);
+      const target = index + delta;
+      if (index < 0 || target < 0 || target >= items.length) return false;
+      if (delta < 0) list.insertBefore(item, items[target]);
+      else list.insertBefore(items[target], item);
+      return true;
+    };
+    const sync = (message = "") => {
+      const order = [...list.querySelectorAll("[data-order-kind]")].map((item) => item.dataset.orderKind);
+      hidden.value = JSON.stringify(normalizeSegmentedComponentOrder(order));
+      list.querySelectorAll("[data-order-kind]").forEach((item, index) => {
+        item.setAttribute("aria-label", `${index + 1}. ${segmentedComponentOrderLabels[item.dataset.orderKind] || item.dataset.orderKind}`);
+      });
+      rememberFeatureParamDraft(hidden);
+      markFeatureDetailDirty();
+      if (live && message) live.textContent = message;
+      renderSegmentedPreview();
+    };
+    editor.querySelector("[data-order-reset]")?.addEventListener("click", () => {
+      const current = [...list.querySelectorAll("[data-order-kind]")];
+      const byKind = new Map(current.map((item) => [item.dataset.orderKind, item]));
+      segmentedComponentOrderDefault.forEach((kind) => {
+        const item = byKind.get(kind);
+        if (item) list.appendChild(item);
+      });
+      sync("已恢复默认顺序");
+    });
+    list.querySelectorAll("[data-order-kind]").forEach((item) => {
+      item.querySelectorAll("[data-order-move]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const moved = moveItem(item, button.dataset.orderMove === "up" ? -1 : 1);
+          if (moved) sync(`${segmentedComponentOrderLabels[item.dataset.orderKind]}已${button.dataset.orderMove === "up" ? "上移" : "下移"}`);
+        });
+      });
+      item.addEventListener("keydown", (event) => {
+        if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
+        event.preventDefault();
+        const moved = moveItem(item, event.key === "ArrowUp" ? -1 : 1);
+        if (moved) {
+          item.focus();
+          sync(`${segmentedComponentOrderLabels[item.dataset.orderKind]}已${event.key === "ArrowUp" ? "上移" : "下移"}`);
+        }
+      });
+      item.addEventListener("dragstart", (event) => {
+        item.classList.add("is-dragging");
+        event.dataTransfer?.setData("text/plain", item.dataset.orderKind || "");
+        if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+      });
+      item.addEventListener("dragend", () => {
+        item.classList.remove("is-dragging");
+        const current = [...list.querySelectorAll("[data-order-kind]")].map((entry) => entry.dataset.orderKind);
+        if (hidden.value !== JSON.stringify(normalizeSegmentedComponentOrder(current))) {
+          sync(`${segmentedComponentOrderLabels[item.dataset.orderKind]}已移动`);
+        }
+      });
+      item.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        const dragging = list.querySelector(".is-dragging");
+        if (!dragging || dragging === item) return;
+        const rect = item.getBoundingClientRect();
+        const sameRow = event.clientY >= rect.top && event.clientY <= rect.bottom;
+        const insertBefore = sameRow
+          ? event.clientX < rect.left + rect.width / 2
+          : event.clientY < rect.top + rect.height / 2;
+        list.insertBefore(dragging, insertBefore ? item : item.nextSibling);
+      });
+      item.addEventListener("drop", (event) => {
+        event.preventDefault();
+        const dragging = list.querySelector(".is-dragging");
+        if (dragging) sync(`${segmentedComponentOrderLabels[dragging.dataset.orderKind]}已移动`);
+      });
+    });
+  });
+}
+
+function segmentedComponentPreviewPlan(values, segments) {
+  if (!(segments || []).length) return { chunks: [], hasMedia: false };
+  const order = normalizeSegmentedComponentOrder(values.segmented_proactive_component_order);
+  const itemForKind = {
+    voice: { kind: "voice", label: "语音" },
+    at: { kind: "at", label: "@" },
+    face: { kind: "face", label: "平台表情" },
+    image: { kind: "image", label: "图片" },
+    other: { kind: "other", label: "附件" },
+    reaction: { kind: "reaction", label: "表情包" },
+  };
+  const units = [];
+  order.forEach((kind) => {
+    if (kind === "text") {
+      (segments || []).forEach((segment, index) => units.push([{ kind: "text", label: `正文 ${index + 1}`, title: String(segment || "") }]));
+    } else if (itemForKind[kind]) units.push([itemForKind[kind]]);
+  });
+  const chunks = [];
+  const pendingNext = [];
+  units.forEach((unit) => {
+    const item = unit[0];
+    if (item.kind === "text") {
+      chunks.push([...pendingNext.splice(0), ...unit]);
+      return;
+    }
+    const strategyKey = item.kind === "reaction" ? "reaction_expression_delivery_mode" : `segmented_proactive_${item.kind}_strategy`;
+    const fallback = item.kind === "at" || item.kind === "face" ? "inline" : "separate";
+    let strategy = item.kind === "reaction" && String(values.reaction_expression_delivery_mode || "separate_after") !== "same_message"
+      ? "separate"
+      : normalizeSegmentedComponentStrategy(values[strategyKey], fallback);
+    if (strategy === "separate") chunks.push([...unit]);
+    else if (strategy === "previous") {
+      if (chunks.length) chunks[chunks.length - 1].push(...unit);
+      else chunks.push([...unit]);
+    } else if (strategy === "next") pendingNext.push(...unit);
+    else if (chunks.length && chunks[chunks.length - 1].some((entry) => entry.kind === "text")) chunks[chunks.length - 1].push(...unit);
+    else pendingNext.push(...unit);
+  });
+  if (pendingNext.length) chunks.push([...pendingNext]);
+  const textTarget = chunks.findIndex((chunk) => chunk.some((item) => item.kind === "text"));
+  if (textTarget >= 0) chunks[textTarget].unshift({ kind: "reply", label: "引用" });
   return { chunks, hasMedia: true };
 }
 
@@ -24610,6 +24760,7 @@ function updateSegmentedConfigVisibility(root = document) {
 
 function bindSegmentedPreview(root = document) {
   const scope = root || document;
+  bindSegmentedComponentOrderEditor(scope);
   scope.querySelectorAll("[data-segmented-preview-panel], .segmented-preview-panel").forEach((panel) => {
     const input = panel.querySelector("[data-segmented-preview-input], #segmentedPreviewInput");
     if (input && !input.dataset.segmentedPreviewBound) {
@@ -28613,6 +28764,7 @@ function featureDetailPage(key) {
     .join("");
   const weatherSource = String(state.overview?.settings?.weather_source || "qweather").trim().toLowerCase();
   const segmentedPlacementKeys = new Set([
+    "segmented_proactive_component_order",
     "segmented_proactive_voice_strategy",
     "segmented_proactive_image_strategy",
     "segmented_proactive_at_strategy",
@@ -28621,6 +28773,18 @@ function featureDetailPage(key) {
     "segmented_proactive_other_strategy",
   ]);
   const settingRow = ({ key: name, value, description }) => {
+    if (name === "segmented_proactive_component_order") {
+      const accessibility = featureSettingAccessibility(name, `feature-detail-${key}`);
+      return `
+        <section class="feature-param-row segmented-component-setting segmented-component-order-setting">
+          <div class="feature-param-main">
+            <header><b id="${accessibility.labelId}">${escapeHtml(configLabel(name))}</b></header>
+            <p id="${accessibility.descriptionId}">${escapeHtml(description)}</p>
+          </div>
+          <div class="feature-param-control segmented-order-control">${segmentedComponentOrderEditorHtml(value, accessibility)}</div>
+        </section>
+      `;
+    }
     if (name === "relationship_stage_policy") {
       return `
         <section class="feature-param-row feature-param-row-policy">

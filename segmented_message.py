@@ -1,10 +1,21 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import json
 from typing import Any, Callable, Mapping
 
 
 COMPONENT_STRATEGIES = frozenset({"inline", "separate", "previous", "next"})
+DEFAULT_COMPONENT_ORDER = (
+    "voice",
+    "at",
+    "text",
+    "face",
+    "image",
+    "other",
+    "reaction",
+)
+COMPONENT_ORDER_KINDS = frozenset(DEFAULT_COMPONENT_ORDER)
 
 _COMPONENT_STRATEGY_ALIASES = {
     "inline": "inline",
@@ -43,6 +54,33 @@ def normalize_component_strategy(value: Any, default: str = "inline") -> str:
     if normalized:
         return normalized
     return _COMPONENT_STRATEGY_ALIASES.get(raw.lower(), normalized_default)
+
+
+def normalize_component_order(value: Any) -> list[str]:
+    """Normalize a user-editable component order and append new component kinds."""
+    source: Any = value
+    if isinstance(source, str):
+        raw = source.strip()
+        if not raw:
+            source = []
+        else:
+            try:
+                decoded = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                decoded = None
+            source = decoded if isinstance(decoded, list) else raw.replace(",", " ").split()
+    elif isinstance(source, set):
+        source = [kind for kind in DEFAULT_COMPONENT_ORDER if kind in source]
+    elif not isinstance(source, (list, tuple)):
+        source = []
+
+    normalized: list[str] = []
+    for item in source:
+        kind = str(item or "").strip().lower()
+        if kind in COMPONENT_ORDER_KINDS and kind not in normalized:
+            normalized.append(kind)
+    normalized.extend(kind for kind in DEFAULT_COMPONENT_ORDER if kind not in normalized)
+    return normalized
 
 
 def component_kind(component: Any) -> str:
@@ -92,6 +130,13 @@ def component_strategies_from_owner(owner: Any) -> dict[str, str]:
             "separate",
         ),
     }
+
+
+def component_order_from_owner(owner: Any) -> list[str]:
+    """Read the visual component order with a forward-compatible default."""
+    return normalize_component_order(
+        getattr(owner, "segmented_proactive_component_order", DEFAULT_COMPONENT_ORDER)
+    )
 
 
 def split_plain_component_chain(
@@ -168,6 +213,7 @@ def plan_component_chunks(
     plain_type: type,
     split_text: Callable[[str], list[str]],
     strategies: Mapping[str, str] | None = None,
+    component_order: Any = None,
     classify: Callable[[Any], str] = component_kind,
 ) -> tuple[list[list[Any]], bool, bool, str]:
     """Split text and place media around the nearest text message.
@@ -190,6 +236,17 @@ def plan_component_chunks(
         plain_type=plain_type,
         split_text=split_text,
     )
+    if component_order is not None:
+        order_rank = {
+            kind: index for index, kind in enumerate(normalize_component_order(component_order))
+        }
+        units = sorted(
+            units,
+            key=lambda unit: order_rank.get(
+                "text" if unit and isinstance(unit[0], plain_type) else classify(unit[0]),
+                len(order_rank),
+            ),
+        )
     normalized_strategies = {
         str(key): normalize_component_strategy(value, "inline")
         for key, value in dict(strategies or {}).items()

@@ -31,7 +31,12 @@ from astrbot.core.astr_main_agent import MainAgentBuildConfig, build_main_agent
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .helpers import _missing_optional_model_dependency, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, _url_host_is_public
-from .segmented_message import component_kind, component_strategies_from_owner, plan_component_chunks
+from .segmented_message import (
+    component_kind,
+    component_order_from_owner,
+    component_strategies_from_owner,
+    plan_component_chunks,
+)
 
 
 PREPARED_IMAGE_MAX_AGE_SECONDS = 30 * 60
@@ -4772,6 +4777,7 @@ class PrivateImageMixin:
             plain_type=Plain,
             split_text=split_text,
             strategies=component_strategies_from_owner(self),
+            component_order=component_order_from_owner(self),
             classify=component_kind,
         )
         return chunks

@@ -185,7 +185,11 @@ class PlaceCognitiveMapMixin:
         task.add_done_callback(tasks.discard)
 
     @staticmethod
-    def _place_cognitive_map_summary(state: dict[str, Any]) -> dict[str, Any]:
+    def _place_cognitive_map_summary(
+        state: dict[str, Any],
+        *,
+        include_transition: bool = False,
+    ) -> dict[str, Any]:
         places = state.get("places") if isinstance(state.get("places"), dict) else {}
         routes = state.get("routes") if isinstance(state.get("routes"), dict) else {}
         current_key = _single_line(state.get("current_place_key"), 96)
@@ -200,12 +204,23 @@ class PlaceCognitiveMapMixin:
             key=lambda item: float(item.get("last_seen_ts") or 0),
             reverse=True,
         )[:4]
+        current_place = {
+            "name": _single_line(current.get("name"), 48),
+            "kind": _single_line(current.get("kind"), 24),
+        } if current else {}
+        if include_transition and current_place:
+            arrivals = [
+                item
+                for item in routes.values()
+                if isinstance(item, dict) and _single_line(item.get("to_key"), 96) == current_key
+            ]
+            if arrivals:
+                latest_arrival = max(arrivals, key=lambda item: float(item.get("last_seen_ts") or 0))
+                current_place["transition_at"] = _single_line(latest_arrival.get("last_seen_at"), 40)
+                current_place["previous_place_name"] = _single_line(latest_arrival.get("from_name"), 48)
         return {
             "available": bool(known),
-            "current_place": {
-                "name": _single_line(current.get("name"), 48),
-                "kind": _single_line(current.get("kind"), 24),
-            } if current else {},
+            "current_place": current_place,
             "known_places": [PlaceCognitiveMapMixin._place_cognitive_map_known_place(item) for item in known],
             "recent_routes": [
                 {
@@ -239,6 +254,7 @@ class PlaceCognitiveMapMixin:
         mobile_location: Any,
         *,
         observed_at: float | None = None,
+        include_transition: bool = False,
     ) -> dict[str, Any]:
         """Observe one authorized location snapshot and return a bounded map view.
 
@@ -270,7 +286,7 @@ class PlaceCognitiveMapMixin:
                 saver(delay=0.5)
         if not bool(location.get("available")):
             existing = root.get(store_key)
-            return self._place_cognitive_map_summary(existing) if isinstance(existing, dict) else {
+            return self._place_cognitive_map_summary(existing, include_transition=include_transition) if isinstance(existing, dict) else {
                 "available": False, "current_place": {}, "known_places": [], "recent_routes": [],
             }
         place = self._place_cognitive_map_place(location)
@@ -310,8 +326,11 @@ class PlaceCognitiveMapMixin:
             stored["parent_name"] = place["parent_name"]
             if place["radius_m"] > 0:
                 stored["radius_m"] = place["radius_m"]
-            stored["last_seen_ts"] = timestamp
-            stored["last_seen_at"] = self._place_cognitive_map_iso(timestamp)
+            previous_seen_ts = _safe_float(stored.get("last_seen_ts"), 0)
+            if previous_seen_ts <= 0 or timestamp - previous_seen_ts >= 60:
+                stored["last_seen_ts"] = timestamp
+                stored["last_seen_at"] = self._place_cognitive_map_iso(timestamp)
+                changed = True
 
             if previous_key != key:
                 if previous:
@@ -360,7 +379,7 @@ class PlaceCognitiveMapMixin:
                 except TypeError:
                     # Preserve small third-party/test subclasses implementing the old hook.
                     self._place_cognitive_map_emit_memory_event(event)
-        return self._place_cognitive_map_summary(state)
+        return self._place_cognitive_map_summary(state, include_transition=include_transition)
 
     @staticmethod
     def _format_place_cognitive_map_context(cognitive_map: Any) -> str:

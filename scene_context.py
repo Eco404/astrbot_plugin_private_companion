@@ -792,3 +792,136 @@ class SceneContextMixin:
             "除非用户明确询问位置，否则不要主动复述经纬度、轨迹或声称正在监视用户；"
             "不得把未标记地点猜成具体住址。"
         )
+
+    def _mobile_user_proactive_scene(
+        self,
+        user: dict[str, Any] | None,
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Return a bounded semantic location signal for proactive planning."""
+        current_user = user if isinstance(user, dict) else {}
+        user_id = _single_line(current_user.get("user_id") or current_user.get("id"), 80)
+        getter = getattr(self, "_reality_mobile_context", None)
+        if not user_id or not callable(getter):
+            return {}
+        try:
+            mobile_context = getter(user_id)
+        except Exception:
+            return {}
+        if not isinstance(mobile_context, dict):
+            return {}
+        location = mobile_context.get("location") if isinstance(mobile_context.get("location"), dict) else {}
+        if not bool(location.get("available")):
+            return {}
+        place = location.get("place") if isinstance(location.get("place"), dict) else {}
+        place_name = _single_line(place.get("name"), 40)
+        if not bool(place.get("matched")) or not place_name:
+            return {"available": True, "matched": False}
+
+        map_observer = getattr(self, "_observe_mobile_place_context", None)
+        cognitive_map: dict[str, Any] = {}
+        if callable(map_observer):
+            try:
+                try:
+                    candidate = map_observer(user_id, location, include_transition=True)
+                except TypeError:
+                    candidate = map_observer(user_id, location)
+                if isinstance(candidate, dict):
+                    cognitive_map = candidate
+            except Exception:
+                cognitive_map = {}
+        current_place = cognitive_map.get("current_place") if isinstance(cognitive_map.get("current_place"), dict) else {}
+        updated_at = _single_line(current_place.get("transition_at"), 40)
+        previous_place_name = _single_line(current_place.get("previous_place_name"), 48)
+        arrival_age_minutes: float | None = None
+        if updated_at:
+            try:
+                transition_ts = datetime.fromisoformat(updated_at.replace("Z", "+00:00")).timestamp()
+                check_now = _now_ts() if now is None else float(now)
+                if transition_ts > 0 and check_now >= transition_ts:
+                    arrival_age_minutes = max(0.0, (check_now - transition_ts) / 60.0)
+            except (TypeError, ValueError, OverflowError):
+                arrival_age_minutes = None
+        return {
+            "available": True,
+            "matched": True,
+            "place_name": place_name,
+            "place_kind": _single_line(place.get("kind"), 24),
+            "transition_key": f"{previous_place_name}>{place_name}@{updated_at}" if previous_place_name and updated_at else "",
+            "recent_arrival": bool(previous_place_name) and arrival_age_minutes is not None and arrival_age_minutes <= 90.0,
+            "arrival_age_minutes": arrival_age_minutes,
+        }
+
+    def _format_mobile_user_location_context_for_proactive(self, user: dict[str, Any] | None) -> str:
+        """Format location as a low-pressure scene hint for proactive messages.
+
+        Proactive prompts should not receive the private-dialogue coordinate detail.  They
+        only need a coarse, authorized signal that can make a topic or timing feel natural.
+        """
+        scene = self._mobile_user_proactive_scene(user)
+        if not scene:
+            return ""
+        facts: list[str] = []
+        if bool(scene.get("matched")):
+            place_name = _single_line(scene.get("place_name"), 40)
+            kind = _single_line(scene.get("place_kind"), 24)
+            kind_label = {"home": "家", "work": "工作地点", "custom": "自定义地点"}.get(kind, "已标记地点")
+            facts.append(f"用户当前位于已标记地点“{place_name}”（{kind_label}）范围内")
+            if bool(scene.get("recent_arrival")):
+                facts.append("这是最近一次进入该地点后的短时间窗口，可把它理解为刚到达后的生活节点")
+        else:
+            facts.append("用户已授权手机位置感知，但当前未命中已标记地点（只作为模糊场景背景）")
+
+        # A few user-created place names can help distinguish home/work context, but
+        # routes and coordinates are intentionally excluded from proactive prompts.
+        current_user = user if isinstance(user, dict) else {}
+        user_id = _single_line(current_user.get("user_id") or current_user.get("id"), 80)
+        getter = getattr(self, "_reality_mobile_context", None)
+        location: dict[str, Any] = {}
+        if callable(getter) and user_id:
+            try:
+                mobile_context = getter(user_id)
+                location = mobile_context.get("location") if isinstance(mobile_context, dict) and isinstance(mobile_context.get("location"), dict) else {}
+            except Exception:
+                location = {}
+        map_observer = getattr(self, "_observe_mobile_place_context", None)
+        cognitive_map: dict[str, Any] = {}
+        if callable(map_observer):
+            try:
+                candidate = map_observer(user_id, location)
+                if isinstance(candidate, dict):
+                    cognitive_map = candidate
+            except Exception:
+                cognitive_map = {}
+        known_places = cognitive_map.get("known_places") if isinstance(cognitive_map.get("known_places"), list) else []
+        known_names = [
+            _single_line(item.get("name"), 32)
+            for item in known_places[:4]
+            if isinstance(item, dict) and _single_line(item.get("name"), 32)
+        ]
+        if known_names and not bool(scene.get("matched")):
+            facts.append("用户主动标记过的地点背景包括：" + "、".join(known_names))
+        elif known_names:
+            # Keep the map signal bounded without copying its route history into the prompt.
+            facts.append("地点认知背景：已保存少量用户主动标记地点，不能据此推断当前路线")
+        weather_getter = getattr(self, "_weather_summary_text", None)
+        try:
+            weather = _single_line(
+                weather_getter(self.data.get("daily_weather", {})) if callable(weather_getter) else "",
+                120,
+            )
+        except Exception:
+            weather = ""
+        if weather and bool(scene.get("matched")) and _single_line(scene.get("place_kind"), 24) == "work" and any(
+            token in weather for token in ("雨", "阵雨", "雷雨", "暴雨")
+        ):
+            facts.append("若本轮涉及雨天出行，优先把时机理解为下班或回家前；没有更近事实时，不必写成用户此刻正要出门")
+        if bool(scene.get("recent_arrival")) and _single_line(scene.get("place_kind"), 24) == "home":
+            facts.append("可优先把主动话题落在刚到家后的问候或收尾，避免继续使用上班、在路上等通勤措辞")
+        return (
+            "【主动场景位置线索】\n"
+            + "；".join(facts)
+            + "\n这是用户授权的弱场景证据，只用于调整主动话题、时机和语气（如通勤、到家或工作间隙）。"
+            "不要主动复述地点、坐标或轨迹，不要从位置推断用户正在做的具体动作，也不要把位置本身硬写成主动话题。"
+        )

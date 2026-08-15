@@ -1062,6 +1062,7 @@ class ProactiveEngineMixin:
             "environment_change": 90,
             "pending_followup": 92,
             "followup": 88,
+            "mobile_location": 84,
             "birthday_celebration": 86,
             "daily_greeting": 72,
             "meal_care": 78,
@@ -2294,6 +2295,11 @@ class ProactiveEngineMixin:
         role = self._private_user_role(user)
         nickname = _single_line(user.get("nickname"), 40) or self.default_nickname
         message_freshness = self._format_proactive_user_message_freshness(user, now=now)
+        location_formatter = getattr(self, "_format_mobile_user_location_context_for_proactive", None)
+        try:
+            location_context = location_formatter(user) if callable(location_formatter) else ""
+        except Exception:
+            location_context = ""
         planned_route = PROACTIVE_ROUTE_REGISTRY.route_for(
             reason=user.get("planned_proactive_reason"),
             source=user.get("planned_proactive_source"),
@@ -2349,6 +2355,8 @@ class ProactiveEngineMixin:
 
 【消息时效】
 {message_freshness}
+
+{location_context}
 
 【当前主动计划】
 - route：{planned_route.key}（{planned_route.label}）
@@ -5969,6 +5977,7 @@ class ProactiveEngineMixin:
             self._pick_pending_followup_event(user, now),
             self._pick_meal_care_event(user, now=now),
             self._pick_daily_greeting_event(user, now),
+            self._pick_mobile_location_arrival_event(user, now=now),
             self._habit_proactive_event_for_user(user, now=now),
             self._pick_state_need_event(user, now=now),
             self._pick_story_plan_event(now, user=user),
@@ -6016,6 +6025,65 @@ class ProactiveEngineMixin:
         )
         top = ranked[:3]
         return random.choice(top)[1]
+
+    def _pick_mobile_location_arrival_event(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Offer one gentle arrival anchor when consented location confirms a transition."""
+        scene_getter = getattr(self, "_mobile_user_proactive_scene", None)
+        if not callable(scene_getter):
+            return None
+        check_now = _now_ts() if now is None else now
+        try:
+            scene = scene_getter(user, now=check_now)
+        except TypeError:
+            try:
+                scene = scene_getter(user)
+            except Exception:
+                return None
+        except Exception:
+            return None
+        if not isinstance(scene, dict) or not scene.get("recent_arrival"):
+            return None
+        transition_key = _single_line(scene.get("transition_key"), 80)
+        place_name = _single_line(scene.get("place_name"), 40)
+        place_kind = _single_line(scene.get("place_kind"), 24)
+        if not transition_key or not place_name:
+            return None
+        if _single_line(user.get("last_mobile_location_arrival_key"), 80) == transition_key:
+            return None
+        if place_kind == "home":
+            topic = "刚到家后的这一小段"
+            motive = "刚到家，想顺手跟你说一声"
+            scene_hint = "用户刚进入已标记的家"
+        elif place_kind == "work":
+            topic = "到公司后的这会儿"
+            motive = "到公司后缓下来一点，想顺手跟你说一声"
+            scene_hint = "用户刚进入已标记的工作地点"
+        else:
+            topic = f"到{place_name}后的这会儿"
+            motive = f"刚到{place_name}，想顺手跟你说一声"
+            scene_hint = f"用户刚进入已标记地点{place_name}"
+        priority_key = _single_line(user.get("mobile_location_priority_key"), 80)
+        priority_until = _safe_float(user.get("mobile_location_priority_until"), 0)
+        is_priority_arrival = priority_key and priority_key == transition_key and priority_until > check_now
+        delay_seconds = random.uniform(5, 20) if is_priority_arrival else random.uniform(45, 240)
+        return {
+            "event_id": f"mobile-place-arrival:{place_kind}:{transition_key}",
+            "reason": "check_in",
+            "action": "message",
+            "topic": topic,
+            "motive": motive,
+            "scene": scene_hint,
+            "tone": "轻一点",
+            "impulse": motive,
+            "_scheduled_ts": check_now + delay_seconds,
+            "_mobile_location_transition_key": transition_key,
+            "_mobile_location_priority": bool(is_priority_arrival),
+        }
 
     @staticmethod
     def _food_prompt_cooldown_remaining(user: dict[str, Any], *, now: float) -> float:
@@ -7774,7 +7842,26 @@ class ProactiveEngineMixin:
         snapshot = self._current_story_plan_snapshot()
         weather = self._weather_summary_text(self.data.get("daily_weather", {}))
         weather_topic_available = self._ordinary_weather_topic_available(user)
+        location_scene_getter = getattr(self, "_mobile_user_proactive_scene", None)
+        try:
+            location_scene = location_scene_getter(user) if callable(location_scene_getter) else {}
+        except Exception:
+            location_scene = {}
         last_user_message = _single_line(user.get("last_user_message"), 24)
+        if location_scene.get("recent_arrival") and reason in {
+            "check_in", "quiet_care", "state_share", "morning_greeting", "noon_greeting", "evening_greeting",
+        }:
+            if _single_line(location_scene.get("place_kind"), 24) == "home":
+                return "刚到家后的这一小段"
+            if _single_line(location_scene.get("place_kind"), 24) == "work":
+                return "到公司后的这会儿"
+        if (
+            location_scene.get("matched")
+            and _single_line(location_scene.get("place_kind"), 24) == "work"
+            and reason in {"environment_change", "weather_alert"}
+            and any(token in weather for token in ("雨", "阵雨", "雷雨", "暴雨"))
+        ):
+            return "下班前的这场雨"
         snapshot_topic = self._soften_topic_hook(snapshot.get("topic")) if isinstance(snapshot, dict) else ""
         if snapshot_topic:
             return snapshot_topic
@@ -8243,6 +8330,26 @@ class ProactiveEngineMixin:
             topic = _single_line(random.choice(can_do), 28)
         if not topic:
             topic = self._choose_proactive_topic(reason, user)
+        location_scene_getter = getattr(self, "_mobile_user_proactive_scene", None)
+        try:
+            location_scene = location_scene_getter(user) if callable(location_scene_getter) else {}
+        except Exception:
+            location_scene = {}
+        place_kind = _single_line(location_scene.get("place_kind"), 24)
+        if location_scene.get("recent_arrival") and reason in {
+            "check_in", "quiet_care", "state_share", "morning_greeting", "noon_greeting", "evening_greeting",
+        }:
+            if place_kind == "home":
+                return self._normalize_internal_motive_text("刚到家，想顺手跟你说一声")
+            if place_kind == "work":
+                return self._normalize_internal_motive_text("到公司后缓下来一点，想顺手跟你说一声")
+        if (
+            location_scene.get("matched")
+            and place_kind == "work"
+            and reason in {"environment_change", "weather_alert"}
+            and any(token in weather for token in ("雨", "阵雨", "雷雨", "暴雨"))
+        ):
+            return self._normalize_internal_motive_text("现在人在公司，雨天提醒更适合落在下班回家前")
         if self._private_user_role(user) == "friend":
             if reason in {"quiet_care", "check_in", "state_share"}:
                 return random.choice([
@@ -8348,7 +8455,7 @@ class ProactiveEngineMixin:
             ]
             if topic:
                 motives.append(f"刚碰到“{topic}”时")
-            if weather_topic_available and any(token in weather for token in ("雨", "小雨", "阵雨")):
+            if weather_topic_available and not (place_kind == "work" and location_scene.get("matched")) and any(token in weather for token in ("雨", "小雨", "阵雨")):
                 motives.append("外面在下雨")
             if weather_topic_available and any(token in weather for token in ("晴", "阳光", "晚霞")):
                 motives.append("外面光线不错")

@@ -47,6 +47,32 @@ class _JudgeHarness(ProactiveEngineMixin):
         return ""
 
 
+class _LocationJudgeHarness(_JudgeHarness):
+    def _format_private_user_boundary_hint(self, _user):
+        return "尊重边界"
+
+    def _planned_impulse_window_phase(self, _user):
+        return "open", "当前窗口可开口"
+
+    def _proactive_inner_readiness(self, _user):
+        return {"score": 0.7, "label": "平稳", "detail": "可以自然表达"}
+
+    def _format_proactive_source_model_hint(self, _user):
+        return ""
+
+    def _format_persona_voice_channel_prompt(self, _channel):
+        return ""
+
+    def _format_relationship_summary(self, _user):
+        return "关系稳定"
+
+    def _format_mobile_user_location_context_for_proactive(self, _user):
+        return (
+            "【主动场景位置线索】用户当前位于已标记地点“公司”（工作地点）范围内；"
+            "不要主动复述地点或坐标。"
+        )
+
+
 def _user(**updates):
     value = {
         "role": "primary", "planned_proactive_source": "random", "planned_proactive_reason": "share",
@@ -121,6 +147,15 @@ class ProactivePersonaJudgeEfficiencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("历史原文", context)
         self.assertIn("旧的晚安", context)
         self.assertIn("不能改写成用户刚刚说过", context)
+
+    def test_model_judge_receives_coarse_location_hint(self):
+        harness = _LocationJudgeHarness()
+        prompt = ProactiveEngineMixin._format_proactive_model_judge_prompt(harness, _user())
+
+        self.assertIn("主动场景位置线索", prompt)
+        self.assertIn("已标记地点“公司”", prompt)
+        self.assertNotIn("纬度", prompt)
+        self.assertNotIn("经度", prompt)
 
     def test_multi_entry_cache_survives_current_plan_fields_being_cleared(self):
         harness = _JudgeHarness()

@@ -4498,6 +4498,12 @@
     "default": "inline",
     "invisible": true
   },
+  "segmented_proactive_component_order": {
+    "description": "Legacy flat config: 分段组件先后顺序",
+    "type": "list",
+    "default": ["voice", "at", "text", "face", "image", "other", "reaction"],
+    "invisible": true
+  },
   "segmented_proactive_other_strategy": {
     "description": "Legacy flat config: 其他附件发送位置",
     "type": "string",
@@ -13145,6 +13151,15 @@
         "options": ["inline", "separate", "previous", "next"],
         "labels": ["嵌入正文", "单独发送", "跟随上段", "跟随下段"],
         "default": "inline",
+        "condition": {
+          "enable_segmented_proactive_reply": true
+        }
+      },
+      "segmented_proactive_component_order": {
+        "description": "组件先后顺序",
+        "type": "list",
+        "hint": "拖动组件类型决定整体先后；组件是否和正文同条发送仍由下方位置策略决定。引用固定跟随第一段正文。",
+        "default": ["voice", "at", "text", "face", "image", "other", "reaction"],
         "condition": {
           "enable_segmented_proactive_reply": true
         }

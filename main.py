@@ -269,6 +269,7 @@ from .qzone_integration import QzoneMixin
 from .segmented_message import (
     bind_reply_components_to_first_text,
     component_kind,
+    component_order_from_owner,
     component_strategies_from_owner,
     flatten_component_chunks,
     normalize_component_strategy,
@@ -6214,6 +6215,10 @@ class PrivateCompanionPlugin(
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._scheduler_loop())
             logger.info("[PrivateCompanion] 主动消息循环已启动")
+        self._create_startup_background_task(
+            "mobile_location_watch",
+            self._mobile_location_watch_loop,
+        )
         if self._startup_maintenance_task is None or self._startup_maintenance_task.done():
             self._startup_maintenance_task = asyncio.create_task(self._run_startup_background_maintenance())
         self._create_startup_background_task(
@@ -9259,6 +9264,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             plain_type=Plain,
             split_text=lambda text: self._split_proactive_text(text, event=event),
             strategies=component_strategies_from_owner(self),
+            component_order=component_order_from_owner(self),
             classify=component_kind,
         )
         if not full_text:

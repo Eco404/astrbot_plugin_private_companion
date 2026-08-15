@@ -9,6 +9,7 @@ from astrbot.api.message_components import At, Image, Plain, Record, Reply
 from astrbot_plugin_private_companion.segmented_message import (
     bind_reply_components_to_first_text,
     component_kind,
+    normalize_component_order,
     normalize_component_strategy,
     plan_component_chunks,
 )
@@ -140,6 +141,24 @@ class SegmentedComponentPlannerTests(unittest.TestCase):
         self.assertEqual("previous", normalize_component_strategy("跟随上段", "separate"))
         self.assertEqual("next", normalize_component_strategy("follow_next", "separate"))
         self.assertEqual("separate", normalize_component_strategy("invalid", "separate"))
+
+    def test_component_order_groups_types_stably_and_fills_missing_kinds(self):
+        chain = [Plain("正文"), Image(file="image.png"), At(qq="10001"), Record(file="voice.wav")]
+        chunks, _changed, _split_changed, _text = plan_component_chunks(
+            chain,
+            plain_type=Plain,
+            split_text=lambda value: [value],
+            strategies={**DEFAULT_STRATEGIES, "image": "separate", "at": "separate", "voice": "separate"},
+            component_order=["image", "text", "at", "voice"],
+        )
+        self.assertEqual(
+            [["Image"], ["Plain"], ["At"], ["Record"]],
+            [[type(item).__name__ for item in chunk] for chunk in chunks],
+        )
+        self.assertEqual(
+            ["image", "text", "at", "voice", "face", "other", "reaction"],
+            normalize_component_order(["image", "image", "text", "unknown", "at", "voice"]),
+        )
 
 
 class SegmentedQuoteBindingIntegrationTests(unittest.IsolatedAsyncioTestCase):

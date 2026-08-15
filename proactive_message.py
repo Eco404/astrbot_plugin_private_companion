@@ -155,6 +155,7 @@ from .planning import (
 from .scene_context import infer_companion_scene_category
 from .segmented_message import (
     component_kind,
+    component_order_from_owner,
     component_strategies_from_owner,
     plan_component_chunks,
 )
@@ -784,6 +785,11 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 )
             except Exception:
                 state_context = ""
+        location_formatter = getattr(self, "_format_mobile_user_location_context_for_proactive", None)
+        try:
+            location_context = location_formatter(user) if callable(location_formatter) else ""
+        except Exception:
+            location_context = ""
         schedule_context = ""
         schedule_formatter = getattr(self, "_format_schedule_context_for_prompt", None)
         if callable(schedule_formatter):
@@ -809,6 +815,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 f"【当前时机】\n{time_context}" if time_context else "",
                 f"【当前运行态】\n{runtime_context}" if runtime_context else "",
                 f"【Bot 当前状态底色】\n{state_context}" if state_context else "",
+                location_context,
                 f"【当前生活片段候选】\n{schedule_context[:700]}" if schedule_context and schedule_context != "（暂无）" else "",
                 proactive_voice,
                 expression_voice,
@@ -2683,6 +2690,11 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         )
         state_hint = self._sanitize_owner_environment_context_for_private_user(state_hint, user)
         state_hint = sanitize_relationship_source(state_hint, "proactive.current_state")
+        location_formatter = getattr(self, "_format_mobile_user_location_context_for_proactive", None)
+        try:
+            location_context = location_formatter(user) if callable(location_formatter) else ""
+        except Exception:
+            location_context = ""
         timer_hint = self._format_llm_timer_context(user)
         time_guard = self._proactive_time_guard_hint(reason, current_item)
         deferred_share_tense_hint = self._deferred_immediate_share_tense_hint(user, action)
@@ -2792,6 +2804,8 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         }
         for key, value in replacements.items():
             prompt = prompt.replace(key, value)
+        if location_context and "主动场景位置线索" not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{location_context}"
         if reason == "creative_share":
             prompt = f"{prompt.rstrip()}\n\n{self._creative_share_excerpt_prompt_hint()}"
         route_prompt_getter = getattr(self, "_proactive_route_prompt", None)
@@ -14961,6 +14975,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             plain_type=Plain,
             split_text=lambda _value: list(segments),
             strategies=strategies,
+            component_order=component_order_from_owner(self),
             classify=component_kind,
         )
 

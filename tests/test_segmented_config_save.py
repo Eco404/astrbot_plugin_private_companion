@@ -35,6 +35,9 @@ class SegmentedConfigSaveTests(unittest.TestCase):
             self.assertIn('enable_segmented_proactive_chat_profiles: { type: "checkbox" }', script)
             self.assertIn('segmented_proactive_private_scope: { type: "select"', script)
             self.assertIn('segmented_proactive_group_scope: { type: "select"', script)
+            self.assertIn("function segmentedComponentOrderEditorHtml", script)
+            self.assertIn('data-order-move="up"', script)
+            self.assertIn("segmented_proactive_component_order", script)
 
     def test_frontend_treats_persisted_feature_settings_as_authoritative(self) -> None:
         script = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
@@ -74,6 +77,7 @@ class SegmentedConfigSaveTests(unittest.TestCase):
                 "segmented_proactive_image_strategy": "next",
                 "segmented_proactive_at_strategy": "inline",
                 "segmented_proactive_face_strategy": "previous",
+                "segmented_proactive_component_order": ["image", "text", "voice", "at", "face", "other", "reaction"],
                 "segmented_proactive_other_strategy": "separate",
                 "segmented_proactive_split_mode": "words",
                 "segmented_proactive_match_width_variants": False,
@@ -142,6 +146,7 @@ class SegmentedConfigSaveTests(unittest.TestCase):
             "segmented_proactive_image_strategy": "next",
             "segmented_proactive_at_strategy": "inline",
             "segmented_proactive_face_strategy": "previous",
+            "segmented_proactive_component_order": ["image", "text", "voice", "at", "face", "other", "reaction"],
             "segmented_proactive_other_strategy": "separate",
             "segmented_proactive_split_mode": "words",
             "segmented_proactive_match_width_variants": False,
@@ -201,6 +206,13 @@ class SegmentedConfigSaveTests(unittest.TestCase):
         self.assertEqual(
             "separate",
             api._normalize_setting_value("segmented_proactive_other_strategy", "invalid"),
+        )
+        self.assertEqual(
+            ["image", "text", "voice", "at", "face", "other", "reaction"],
+            api._normalize_setting_value(
+                "segmented_proactive_component_order",
+                '["image", "text", "image", "invalid", "voice", "at"]',
+            ),
         )
 
 

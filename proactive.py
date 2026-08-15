@@ -2972,6 +2972,7 @@ class ProactiveMixin(UserRestGateMixin):
             ("birthday_celebration", self._pick_birthday_celebration_event(user, now)),
             ("meal_care", self._pick_meal_care_event(user, now=now)),
             ("daily_greeting", self._pick_daily_greeting_event(user, now)),
+            ("mobile_location", self._pick_mobile_location_arrival_event(user, now=now)),
             ("birthday_curiosity", self._pick_birthday_curiosity_event(user, now)),
             ("habit", self._habit_proactive_event_for_user(user, now=now)),
             ("state", self._pick_state_need_event(user, now=now)),
@@ -3082,6 +3083,13 @@ class ProactiveMixin(UserRestGateMixin):
                 impulse["expire_at"] = _safe_float(impulse.get("expire_at"), 0) + shift
             if self._queue_proactive_impulse(user, impulse):
                 queued += 1
+                if source == "mobile_location":
+                    transition_key = _single_line(event.get("_mobile_location_transition_key"), 80)
+                    if transition_key:
+                        user["last_mobile_location_arrival_key"] = transition_key
+                        if _single_line(user.get("mobile_location_priority_key"), 80) == transition_key:
+                            user["mobile_location_priority_key"] = ""
+                            user["mobile_location_priority_until"] = 0
         return queued
 
     def _queue_random_proactive_impulse(
@@ -3617,6 +3625,113 @@ class ProactiveMixin(UserRestGateMixin):
                 raise
             except Exception as e:
                 logger.error(f"[PrivateCompanion] 主动消息循环异常: {e}", exc_info=True)
+
+    def _mobile_location_watch_user_ids(self) -> list[str]:
+        users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else {}
+        if not isinstance(users, dict):
+            return []
+        owner_getter = getattr(self, "_relationship_owner_user_ids", None)
+        target_getter = getattr(self, "_configured_target_ids", None)
+        allowed = {
+            _single_line(item, 120)
+            for getter in (owner_getter, target_getter)
+            if callable(getter)
+            for item in (getter() or ())
+            if _single_line(item, 120)
+        }
+        if not allowed:
+            allowed = {
+                _single_line(key, 120)
+                for key, value in users.items()
+                if isinstance(value, dict) and value.get("reality_touch_consent")
+            }
+        return [
+            user_id
+            for user_id, user in users.items()
+            if _single_line(user_id, 120) in allowed
+            and isinstance(user, dict)
+            and bool(user.get("enabled", True))
+        ]
+
+    async def _mobile_location_watch_once(self, *, now: float | None = None) -> bool:
+        api_getter = getattr(self, "_reality_companion_api", None)
+        if callable(api_getter) and api_getter() is None:
+            return False
+        scene_getter = getattr(self, "_mobile_user_proactive_scene", None)
+        user_getter = getattr(self, "_get_user", None)
+        if not callable(scene_getter):
+            return False
+        check_now = _now_ts() if now is None else now
+        triggered = False
+        changed = False
+        for user_id in self._mobile_location_watch_user_ids():
+            users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else {}
+            user = users.get(user_id) if isinstance(users, dict) else None
+            if not isinstance(user, dict) and callable(user_getter):
+                try:
+                    user = user_getter(user_id)
+                except Exception:
+                    user = None
+            if not isinstance(user, dict):
+                continue
+            try:
+                scene = scene_getter(user, now=check_now)
+            except TypeError:
+                scene = scene_getter(user)
+            except Exception:
+                continue
+            transition_key = _single_line(scene.get("transition_key"), 80) if isinstance(scene, dict) else ""
+            if not transition_key:
+                user["mobile_location_watch_initialized"] = True
+                user["mobile_location_watch_pending_key"] = ""
+                user["mobile_location_watch_pending_count"] = 0
+                continue
+            previous_key = _single_line(user.get("mobile_location_watch_transition_key"), 80)
+            user["mobile_location_watch_transition_key"] = transition_key
+            changed = changed or previous_key != transition_key
+            if not bool(user.get("mobile_location_watch_initialized")):
+                user["mobile_location_watch_initialized"] = True
+                user["mobile_location_watch_pending_key"] = transition_key
+                user["mobile_location_watch_pending_count"] = 0
+                user["mobile_location_watch_triggered_key"] = transition_key
+                continue
+            pending_key = _single_line(user.get("mobile_location_watch_pending_key"), 80)
+            pending_count = _safe_int(user.get("mobile_location_watch_pending_count"), 0, 0)
+            if pending_key != transition_key:
+                pending_key = transition_key
+                pending_count = 1
+            else:
+                pending_count += 1
+            user["mobile_location_watch_pending_key"] = pending_key
+            user["mobile_location_watch_pending_count"] = pending_count
+            already_triggered = _single_line(user.get("mobile_location_watch_triggered_key"), 80) == transition_key
+            if pending_count >= 2 and not already_triggered and bool(scene.get("recent_arrival")):
+                user["mobile_location_priority_key"] = transition_key
+                user["mobile_location_priority_until"] = check_now + 180
+                user["mobile_location_watch_triggered_key"] = transition_key
+                triggered = True
+        if changed:
+            saver = getattr(self, "_schedule_data_save", None)
+            if callable(saver):
+                saver(delay=0.5)
+        if triggered:
+            kicker = getattr(self, "_kick_proactive_loop_once", None)
+            if callable(kicker):
+                await kicker()
+        return triggered
+
+    async def _mobile_location_watch_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                await self._mobile_location_watch_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 移动位置主动监视暂时失败: %s", _single_line(exc, 160))
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=15.0)
+            except asyncio.TimeoutError:
+                continue
 
     async def _kick_proactive_loop_once(self) -> None:
         try:

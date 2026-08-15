@@ -29,7 +29,12 @@ from astrbot.core.message.message_event_result import ResultContentType
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .helpers import _normalize_outbound_punctuation_flow, _safe_int, _single_line, _strip_nonstandard_chat_control_tags
-from .segmented_message import component_kind, component_strategies_from_owner, plan_component_chunks
+from .segmented_message import (
+    component_kind,
+    component_order_from_owner,
+    component_strategies_from_owner,
+    plan_component_chunks,
+)
 
 
 TTS_BLOCK_PATTERN = re.compile(r"<t{2,}s\b[^>]*>.*?</t{2,}s>", re.IGNORECASE | re.DOTALL)
@@ -3274,6 +3279,7 @@ TTS 朗读文本：
             plain_type=Plain,
             split_text=lambda text: [text],
             strategies=component_strategies_from_owner(self),
+            component_order=component_order_from_owner(self),
             classify=component_kind,
         )
         return chunks or [chain]
