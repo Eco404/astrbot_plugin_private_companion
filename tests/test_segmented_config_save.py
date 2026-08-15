@@ -38,6 +38,14 @@ class SegmentedConfigSaveTests(unittest.TestCase):
             self.assertIn("function segmentedComponentOrderEditorHtml", script)
             self.assertIn('data-order-move="up"', script)
             self.assertIn("segmented_proactive_component_order", script)
+            self.assertIn(
+                'segmented_proactive_component_order: ["voice", "at", "text", "face", "image", "other", "reaction"]',
+                script,
+            )
+            self.assertRegex(
+                script,
+                r'enable_segmented_proactive_reply: \[[^\]]*segmented_proactive_component_order',
+            )
 
     def test_frontend_treats_persisted_feature_settings_as_authoritative(self) -> None:
         script = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
