@@ -18,7 +18,10 @@ from astrbot_plugin_private_companion.final_response_persistence import (
     collect_proactive_delivery,
 )
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
-from astrbot_plugin_private_companion.helpers import _strip_outbound_control_blocks
+from astrbot_plugin_private_companion.helpers import (
+    _strip_internal_message_blocks,
+    _strip_outbound_control_blocks,
+)
 
 
 UMO = "default:FriendMessage:10001"
@@ -178,6 +181,19 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
         raw = "[affectionate]嗯……\n[shy]才没有呢。[公告]明天见。"
 
         self.assertEqual("嗯……\n才没有呢。[公告]明天见。", _strip_outbound_control_blocks(raw))
+
+    def test_cleanup_removes_photo_tool_silent_sentinel_only(self):
+        marker = "[[PC_PHOTO_SENT_NO_FOLLOWUP]]"
+        mixed = f"图片已经发出。{marker}"
+        visible_brackets = "图片已经发出。[[正常备注]]"
+
+        for cleaner in (_strip_internal_message_blocks, _strip_outbound_control_blocks):
+            with self.subTest(cleaner=cleaner.__name__, case="marker_only"):
+                self.assertEqual("", cleaner(marker))
+            with self.subTest(cleaner=cleaner.__name__, case="mixed"):
+                self.assertEqual("图片已经发出。", cleaner(mixed))
+            with self.subTest(cleaner=cleaner.__name__, case="unrelated_brackets"):
+                self.assertEqual(visible_brackets, cleaner(visible_brackets))
 
     def test_proactive_archive_uses_internal_marker_instead_of_visible_placeholder(self):
         harness = _Harness()

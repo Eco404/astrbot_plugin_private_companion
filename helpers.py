@@ -543,6 +543,10 @@ _PERSONALITY_SYNC_CLOSING_TAG_PATTERN = re.compile(
     r"<\s*/\s*personality_sync\s*>",
     re.IGNORECASE,
 )
+_PHOTO_TOOL_SILENT_SENTINEL_PATTERN = re.compile(
+    r"\[\[PC_PHOTO_SENT_NO_FOLLOWUP\]\]",
+    re.IGNORECASE,
+)
 
 
 def _strip_personality_sync_blocks(text: Any) -> str:
@@ -567,6 +571,7 @@ def _strip_internal_message_blocks(text: Any) -> str:
     normalized = _strip_personality_sync_blocks(normalized)
     normalized = _strip_group_member_safety_markers(normalized)
     normalized = _strip_history_media_markers(normalized)
+    normalized = _PHOTO_TOOL_SILENT_SENTINEL_PATTERN.sub("", normalized)
     normalized = re.sub(r"\[\[TTSBLOCK:[^\]]*\]\]", "", normalized)
     normalized = re.sub(r"\[\[PCTTS:[^\]]*\]\]", "", normalized)
     normalized = re.sub(r"<timer\b[^>]*>.*?</timer>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
@@ -709,6 +714,7 @@ def _strip_outbound_control_blocks(
     normalized = _strip_personality_sync_blocks(normalized)
     normalized = _strip_group_member_safety_markers(normalized)
     normalized = _strip_history_media_markers(normalized)
+    normalized = _PHOTO_TOOL_SILENT_SENTINEL_PATTERN.sub("", normalized)
     normalized = re.sub(r"\[\[TTSBLOCK:[^\]]*\]\]", "", normalized)
     if preserve_private_tts_tokens and allowed_private_tts_tokens:
         allowed = {str(token) for token in allowed_private_tts_tokens if str(token)}
