@@ -7,46 +7,26 @@ contract while image execution moves out of the core companion package.
 """
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 from astrbot.api import logger
 
 from .helpers import _single_line
+from .external_bridge_resolver import resolve_external_bridge
 
 
 class ImageCompanionBridgeMixin:
     def _image_companion_api(self) -> Any | None:
-        module_names = (
-            "data.plugins.astrbot_plugin_image_companion.main",
-            "astrbot_plugin_image_companion.main",
+        return resolve_external_bridge(
+            self,
+            cache_key="image_companion",
+            module_names=(
+                "data.plugins.astrbot_plugin_image_companion.main",
+                "astrbot_plugin_image_companion.main",
+            ),
+            getter_name="get_image_companion_api",
+            star_name="astrbot_plugin_image_companion",
         )
-        suffixes = tuple(name.removeprefix("data.plugins.") for name in module_names)
-        modules = [sys.modules.get(name) for name in module_names]
-        modules.extend(
-            module
-            for name, module in list(sys.modules.items())
-            if module is not None and any(name.endswith(suffix) for suffix in suffixes)
-        )
-        for module in modules:
-            getter = getattr(module, "get_image_companion_api", None) if module is not None else None
-            try:
-                api = getter() if callable(getter) else None
-            except Exception:
-                api = None
-            if api is not None:
-                return api
-        getter = getattr(getattr(self, "context", None), "get_registered_star", None)
-        if callable(getter):
-            try:
-                metadata = getter("astrbot_plugin_image_companion")
-                instance = getattr(metadata, "star_cls", None) if metadata is not None else None
-                api = getattr(instance, "extension_api", None)
-                if api is not None:
-                    return api
-            except Exception:
-                pass
-        return None
 
     def _image_companion_required(self) -> bool:
         """Return whether this object is the production companion host."""

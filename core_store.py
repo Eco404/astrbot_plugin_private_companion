@@ -2880,6 +2880,13 @@ class CoreStoreMixin:
     def _note_private_inbound_activity(self, user: dict[str, Any], ts: float, *, text: str = "") -> None:
         if not isinstance(user, dict):
             return
+        previous_message_at = _safe_float(user.get("last_user_message_at"), 0)
+        if text and previous_message_at > 0 and ts > previous_message_at:
+            user["last_inbound_gap_seconds"] = min(
+                365 * 24 * 3600,
+                max(0.0, ts - previous_message_at),
+            )
+            user["last_inbound_gap_observed_at"] = ts
         user["last_private_seen"] = ts
         user["last_private_activity_at"] = ts
         if text:

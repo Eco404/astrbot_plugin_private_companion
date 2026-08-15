@@ -1713,6 +1713,22 @@ QQ空间 = 公开札记
                 </section>
                 <section class="runtime-settings-section">
                   <header class="runtime-settings-section-head">
+                    <h3>主动节奏</h3>
+                    <p>爆发模式默认关闭；开启后只对普通主动念头追加独立短消息，不影响定时、安全和未完话题路线。</p>
+                  </header>
+                  <div class="runtime-settings-grid">
+                    <label class="toggle-row"><input name="enable_proactive_burst" type="checkbox" /> <span>启用爆发式主动消息</span></label>
+                    <label>一次最多消息数 <input name="proactive_burst_max_messages" type="number" min="2" max="3" /></label>
+                    <label>爆发最小间隔秒 <input name="proactive_burst_gap_min_seconds" type="number" min="10" max="600" /></label>
+                    <label>爆发最大间隔秒 <input name="proactive_burst_gap_max_seconds" type="number" min="20" max="900" /></label>
+                    <label class="runtime-settings-wide">小时活跃曲线
+                      <input name="proactive_hour_activity_curve" type="text" maxlength="240" placeholder="0.22,0.16,0.12,...,0.32" />
+                      <small>按 0 点到 23 点填写 24 个逗号分隔权重；留空或数量不对时使用默认曲线。</small>
+                    </label>
+                  </div>
+                </section>
+                <section class="runtime-settings-section">
+                  <header class="runtime-settings-section-head">
                     <h3>资源配额</h3>
                   </header>
                   <div class="runtime-settings-grid">

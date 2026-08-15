@@ -57,6 +57,7 @@ class ProactiveChatRuntimeBridge:
         self._last_event = "等待发现 Proactive Chat 运行实例"
         self._last_event_at = 0.0
         self._attached_at = 0.0
+        self._missing_methods: list[str] = []
         self._counters = {
             "preflight_allowed": 0,
             "preflight_blocked": 0,
@@ -149,6 +150,7 @@ class ProactiveChatRuntimeBridge:
     def attach(self, instance: Any) -> bool:
         missing = [name for name in self.REQUIRED_METHODS if not callable(getattr(instance, name, None))]
         if missing:
+            self._missing_methods = list(missing)
             self._last_error = "缺少兼容方法: " + ", ".join(missing)
             self._last_event = "当前 Proactive Chat 版本仅能使用发送装饰降级联动"
             self._last_event_at = time.time()
@@ -179,6 +181,7 @@ class ProactiveChatRuntimeBridge:
         self.version = _short(getattr(instance, "version", ""), 40) or "未知"
         self._attached_at = time.time()
         self._last_error = ""
+        self._missing_methods = []
         self._last_event = "生成前、终审、平台发送与结算链路已接管"
         self._last_event_at = self._attached_at
         logger.info(
@@ -214,6 +217,7 @@ class ProactiveChatRuntimeBridge:
         self.version = ""
         self._originals = {}
         self._wrappers = {}
+        self._missing_methods = []
         if reason:
             self._last_event = reason
             self._last_event_at = time.time()
@@ -630,6 +634,9 @@ class ProactiveChatRuntimeBridge:
         elif attached:
             mode = "deep"
             label = "深度联动"
+        elif self._last_error:
+            mode = "degraded"
+            label = "深度联动降级"
         elif self._discover_instance() is not None:
             mode = "fallback"
             label = "发送前兼容"
@@ -644,6 +651,9 @@ class ProactiveChatRuntimeBridge:
             "methods": list(self.REQUIRED_METHODS) if attached else [],
             "method_count": len(self.REQUIRED_METHODS) if attached else 0,
             "last_error": self._last_error,
+            "degraded": mode == "degraded",
+            "required_methods": list(self.REQUIRED_METHODS),
+            "missing_methods": list(self._missing_methods),
             "last_event": self._last_event,
             "last_event_at": self._last_event_at,
             "attached_at": self._attached_at,

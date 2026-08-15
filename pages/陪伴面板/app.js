@@ -2244,6 +2244,11 @@ const configLabels = {
   proactive_intensity_preset: "主动强度预设",
   idle_minutes: "空闲门槛分钟",
   min_interval_minutes: "最小主动间隔分钟",
+  enable_proactive_burst: "启用主动消息爆发式发送",
+  proactive_burst_max_messages: "爆发式发送最多消息数",
+  proactive_burst_gap_min_seconds: "爆发消息最小间隔秒数",
+  proactive_burst_gap_max_seconds: "爆发消息最大间隔秒数",
+  proactive_hour_activity_curve: "主动小时活跃曲线",
   proactive_unanswered_slowdown_start: "未回应降频起点",
   proactive_unanswered_max_interval_multiplier: "未回应最大间隔倍率",
   friend_unanswered_max_cooldown_hours: "次要用户未回应最长冷却",
@@ -25268,7 +25273,7 @@ function renderIsolationModeCards() {
   const proactiveChatState = proactiveChat.enabled
     ? (proactiveChat.runtime_mode_label || (proactiveChat.installed ? "发送前兼容" : "等待运行实例"))
     : "联动已关闭";
-  const proactiveChatTone = proactiveChat.deep_active ? "on" : proactiveChat.installed ? "paused" : "off";
+  const proactiveChatTone = proactiveChat.deep_active ? "on" : proactiveChat.runtime_degraded ? "error" : proactiveChat.installed ? "paused" : "off";
   const proactiveRuntimeVersion = String(proactiveChat.runtime_version || "未知").replace(/^v/i, "");
   const proactiveRuntimeMeta = proactiveChat.deep_active
     ? `v${proactiveRuntimeVersion} · 已接管 ${Number(proactiveChat.runtime_method_count || 0)} 个关键方法`
@@ -26671,7 +26676,7 @@ function featureDependencyLines(key) {
     dependencies.push(["注意", "只跳过本插件的普通被动增强，不会阻止默认回复或其他插件"]);
     const proactiveChat = state.overview?.proactive_chat || {};
     if (proactiveChat.deep_active) dependencies.push(["Proactive Chat", `深度联动；生成前上下文与调度互斥、生成后复核、平台发送结算均已接管（${proactiveChat.runtime_method_count || 0} 个方法），最近同步 ${proactiveChat.last_sent || "暂无记录"}`]);
-    else if (proactiveChat.active) dependencies.push(["Proactive Chat", `当前为${proactiveChat.runtime_mode_label || "发送前兼容"}；${proactiveChat.runtime_last_error || proactiveChat.runtime_last_event || "等待兼容运行实例"}`]);
+    else if (proactiveChat.active) dependencies.push(["Proactive Chat", `${proactiveChat.runtime_degraded ? "深度联动已降级；" : `当前为${proactiveChat.runtime_mode_label || "发送前兼容"}；`}${proactiveChat.runtime_last_error || proactiveChat.runtime_last_event || "等待兼容运行实例"}`]);
     else if (proactiveChat.installed) dependencies.push(["Proactive Chat", "已检测到插件；开启联动后会优先建立深度运行时桥接"]);
     else dependencies.push(["Proactive Chat", "未检测到；安装后无需修改对方插件，本页联动开关会自动生效"]);
   }

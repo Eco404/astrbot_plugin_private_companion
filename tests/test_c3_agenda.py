@@ -5,6 +5,7 @@ from datetime import datetime
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -26,6 +27,9 @@ from agenda_contracts import (
     window_for_plan_minutes,
 )
 from agenda_runtime import AgendaRuntimeMixin
+if str(PACKAGE_DIR.parent) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_DIR.parent))
+from astrbot_plugin_private_companion.daily_state import DailyStateMixin
 from schedule_reconciler import reconcile
 from unified_agenda import format_agenda_context
 
@@ -148,6 +152,30 @@ class Host(AgendaRuntimeMixin):
         return self.fixed_now
 
 
+class PlanParserHost(DailyStateMixin):
+    daily_plan_item_count = 24
+    enable_skill_growth_simulation = False
+    enable_skill_growth_schedule_influence = False
+
+    def _environment_now(self) -> datetime:
+        return dt("2026-07-30T08:00:00+08:00")
+
+    def _align_plan_text_with_skill_bounds(self, value: str) -> str:
+        return value
+
+    def _sanitize_daily_plan_social_fact_text(self, value: str, **_kwargs) -> str:
+        return value
+
+    def _soften_destructive_daily_plan_text(self, value: str) -> str:
+        return value
+
+    def _deemphasize_state_report_preamble(self, value: str, **_kwargs) -> str:
+        return value
+
+    def _sanitize_empty_daily_plan_message_seed(self, value: str) -> str:
+        return value
+
+
 def test_runtime_snapshot_is_idempotent_and_context_is_formatted() -> None:
     host = Host({"daily_plan": {"date": "2026-07-30", "items": [{"time": "21:00", "end": "22:00", "activity": "阅读"}]}})
     first = host._agenda_snapshot_window(date_key="2026-07-30", window="late_night")
@@ -156,6 +184,43 @@ def test_runtime_snapshot_is_idempotent_and_context_is_formatted() -> None:
     assert len(host.data["window_snapshots"]) == 1
     assert len(host.data["agenda_reconciliation_history"]) == 1
     assert "C3日程" in format_agenda_context(host._agenda_build())
+
+
+def test_plan_parser_accepts_common_aliases_and_time_ranges() -> None:
+    host = PlanParserHost()
+    payload = """```json
+    {"tasks": [{"start_time": "09:00-10:30", "title": "整理资料"},
+                {"time": "14点", "activity": "散步", "until": "14:40"}]}
+    ```"""
+    items = host._parse_plan_items(payload)
+    assert [(item["time"], item["end"], item["activity"]) for item in items] == [
+        ("09:00", "10:30", "整理资料"),
+        ("14:00", "14:40", "散步"),
+    ]
+
+
+def test_disclosure_view_is_memoized_until_plan_or_activity_changes() -> None:
+    host = Host({"daily_plan": {"date": "2026-07-30", "items": [{"time": "21:00", "end": "22:00", "activity": "阅读"}]}})
+    with patch.object(host, "_agenda_build", wraps=host._agenda_build) as build:
+        first = host._agenda_disclosure_view("future_schedule", now=host.fixed_now)
+        second = host._agenda_disclosure_view("future_schedule", now=host.fixed_now)
+        assert first == second
+        assert build.call_count == 1
+
+        host.data["daily_plan"]["items"][0]["activity"] = "写作"
+        host.data["daily_plan"]["items"][0]["changed_at"] = "21:10"
+        host._agenda_disclosure_view("future_schedule", now=host.fixed_now)
+        assert build.call_count == 2
+
+        host.data["observed_activities"] = [{
+            "activity_id": "activity-1",
+            "title": "临时聊天",
+            "start_at": "2026-07-30T21:15:00+08:00",
+            "end_at": "2026-07-30T21:20:00+08:00",
+            "version": 1,
+        }]
+        host._agenda_disclosure_view("future_schedule", now=host.fixed_now)
+        assert build.call_count == 3
 
 
 def test_closed_windows_use_window_date_and_maintenance_is_local_only() -> None:

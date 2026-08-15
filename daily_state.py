@@ -16284,7 +16284,14 @@ class DailyStateMixin(DailyStateTickMixin):
         if payload is None:
             return []
         if isinstance(payload, dict):
-            raw_items = payload.get("schedule") or payload.get("items") or []
+            raw_items = (
+                payload.get("schedule")
+                or payload.get("items")
+                or payload.get("tasks")
+                or payload.get("events")
+                or payload.get("plan")
+                or []
+            )
         elif isinstance(payload, list):
             raw_items = payload
         else:
@@ -16294,10 +16301,18 @@ class DailyStateMixin(DailyStateTickMixin):
         for item in raw_items:
             if not isinstance(item, dict):
                 continue
-            item_time = _single_line(item.get("time"), 8)
+            raw_time = item.get("time") or item.get("start") or item.get("start_time") or item.get("begin_time") or item.get("开始时间")
+            item_time, range_end = self._normalize_plan_clock_range(raw_time)
             if self._parse_hhmm_to_minutes(item_time) is None:
                 continue
-            raw_activity = _single_line(item.get("activity"), 120)
+            raw_activity = _single_line(
+                item.get("activity")
+                or item.get("title")
+                or item.get("task")
+                or item.get("event")
+                or item.get("内容"),
+                120,
+            )
             activity = self._align_plan_text_with_skill_bounds(
                 self._sanitize_daily_plan_social_fact_text(
                     self._soften_destructive_daily_plan_text(raw_activity),
@@ -16326,7 +16341,14 @@ class DailyStateMixin(DailyStateTickMixin):
             items.append(
                 {
                     "time": item_time,
-                    "end": _single_line(item.get("end") or item.get("end_time"), 8),
+                    "end": self._normalize_plan_clock(
+                        item.get("end")
+                        or item.get("end_time")
+                        or item.get("finish_time")
+                        or item.get("until")
+                        or item.get("结束时间")
+                        or range_end
+                    ),
                     "activity": activity,
                     "mood": mood,
                     "message_seed": message_seed,
@@ -16355,6 +16377,27 @@ class DailyStateMixin(DailyStateTickMixin):
             item["activity"] = _single_line(item.get("activity") or item.get("title"), 120)
             item["date"] = today
         return items
+
+    def _normalize_plan_clock_range(self, value: Any) -> tuple[str, str]:
+        """Normalize common model time forms and extract an optional range end."""
+
+        text = _single_line(value, 32).strip()
+        if not text:
+            return "", ""
+        matches = re.findall(r"(?<!\d)(\d{1,2})\s*[:：点时]\s*(\d{1,2})?", text)
+        clocks: list[str] = []
+        for hour_text, minute_text in matches[:2]:
+            hour = int(hour_text)
+            minute = int(minute_text or 0)
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                clocks.append(f"{hour:02d}:{minute:02d}")
+        if not clocks:
+            return "", ""
+        return clocks[0], clocks[1] if len(clocks) > 1 else ""
+
+    def _normalize_plan_clock(self, value: Any) -> str:
+        start, _end = self._normalize_plan_clock_range(value)
+        return start
 
     def _skill_levels_for_plan_bounds(self) -> dict[str, int]:
         if not self.enable_skill_growth_simulation or not self.enable_skill_growth_schedule_influence:

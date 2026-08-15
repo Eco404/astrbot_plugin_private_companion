@@ -994,6 +994,36 @@
     "default": 8,
     "invisible": true
   },
+  "enable_proactive_burst": {
+    "description": "Legacy flat config: 主动消息爆发式发送",
+    "type": "bool",
+    "default": false,
+    "invisible": true
+  },
+  "proactive_burst_max_messages": {
+    "description": "Legacy flat config: 爆发式发送最多消息数",
+    "type": "int",
+    "default": 2,
+    "invisible": true
+  },
+  "proactive_burst_gap_min_seconds": {
+    "description": "Legacy flat config: 爆发消息最小间隔秒数",
+    "type": "int",
+    "default": 45,
+    "invisible": true
+  },
+  "proactive_burst_gap_max_seconds": {
+    "description": "Legacy flat config: 爆发消息最大间隔秒数",
+    "type": "int",
+    "default": 180,
+    "invisible": true
+  },
+  "proactive_hour_activity_curve": {
+    "description": "Legacy flat config: 主动小时活跃曲线",
+    "type": "string",
+    "default": "0.22,0.16,0.12,0.10,0.10,0.14,0.28,0.50,0.66,0.72,0.78,0.92,1.0,0.94,0.82,0.74,0.78,0.92,1.0,0.98,0.88,0.70,0.48,0.32",
+    "invisible": true
+  },
   "proactive_intensity_preset": {
     "description": "Legacy flat config: 主动强度预设",
     "type": "string",
@@ -5883,6 +5913,54 @@
           "step": 10
         },
         "default": 120
+      },
+      "enable_proactive_burst": {
+        "description": "主动消息爆发式发送",
+        "type": "bool",
+        "hint": "开启后，普通非事务主动消息在每日额度允许时，偶尔会在几十秒到几分钟内追加一条独立短消息。它不是分段发送；默认关闭以保持升级后的节奏稳定。",
+        "default": false
+      },
+      "proactive_burst_max_messages": {
+        "description": "爆发式发送最多消息数",
+        "type": "int",
+        "hint": "一次主动念头最多发送几条独立消息，建议保持 2 条。不会突破每日主动配额。",
+        "slider": {
+          "min": 2,
+          "max": 3,
+          "step": 1
+        },
+        "default": 2,
+        "condition": "enable_proactive_burst"
+      },
+      "proactive_burst_gap_min_seconds": {
+        "description": "爆发消息最小间隔（秒）",
+        "type": "int",
+        "hint": "同一阵主动念头内两条独立消息的最短间隔。",
+        "slider": {
+          "min": 10,
+          "max": 600,
+          "step": 5
+        },
+        "default": 45,
+        "condition": "enable_proactive_burst"
+      },
+      "proactive_burst_gap_max_seconds": {
+        "description": "爆发消息最大间隔（秒）",
+        "type": "int",
+        "hint": "同一阵主动念头内两条独立消息的最长间隔，必须不小于最小间隔。",
+        "slider": {
+          "min": 20,
+          "max": 900,
+          "step": 5
+        },
+        "default": 180,
+        "condition": "enable_proactive_burst"
+      },
+      "proactive_hour_activity_curve": {
+        "description": "主动小时活跃曲线",
+        "type": "string",
+        "hint": "按 0 点到 23 点填写 24 个逗号分隔权重，数值越大越容易在该时段安排主动候选；凌晨建议较低，午休、晚饭后和睡前可较高。留空或格式不完整时使用默认曲线。",
+        "default": "0.22,0.16,0.12,0.10,0.10,0.14,0.28,0.50,0.66,0.72,0.78,0.92,1.0,0.94,0.82,0.74,0.78,0.92,1.0,0.98,0.88,0.70,0.48,0.32"
       },
       "proactive_unanswered_slowdown_start": {
         "description": "未回应几次后开始降频",

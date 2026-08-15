@@ -1,8 +1,10 @@
 import unittest
 import time
 from datetime import datetime
+from unittest.mock import patch
 
 from astrbot_plugin_private_companion.user_memory import UserMemoryMixin
+from astrbot_plugin_private_companion.core_store import CoreStoreMixin
 
 
 class _FactAttributionHarness(UserMemoryMixin):
@@ -83,6 +85,79 @@ class PrivateFactAttributionTests(unittest.IsolatedAsyncioTestCase):
         )
         user["private_inbound_count"] = 13
         self.assertEqual(self.harness._active_private_fact_correction(user, "换个话题"), "")
+        self.assertEqual("明明是小星想的呢", user["memory_corrections"][-1]["text"])
+
+    def test_emotion_inertia_keeps_a_decaying_previous_day_residue(self):
+        now = 2_000_000.0
+        occurred = datetime.fromtimestamp(now - 20 * 3600).astimezone().isoformat()
+        user = {
+            "emotion_event_ledger": [
+                {
+                    "event_type": "hurt",
+                    "status": "applied",
+                    "target_ref": {"kind": "bot", "role": "bot_self"},
+                    "occurred_at": occurred,
+                    "intensity": 95,
+                    "confidence": 1.0,
+                }
+            ]
+        }
+        prompt = self.harness._format_emotion_inertia_prompt(user, now=now)
+        self.assertIn("衰减余温", prompt)
+        self.assertIn("最多让外显情绪移动一档", prompt)
+
+    def test_reunion_prompt_is_emitted_once_for_the_return_turn(self):
+        now = 2_000_000.0
+        user = {
+            "last_inbound_gap_seconds": 8 * 86400,
+            "last_inbound_gap_observed_at": now,
+            "last_reunion_ack_at": 0,
+        }
+        prompt = self.harness._format_private_reunion_prompt(user, "帮我看下这个问题", now=now)
+        self.assertIn("约 8 天", prompt)
+        self.assertIn("随后立即回答正事", prompt)
+        user["last_reunion_ack_at"] = now
+        self.assertEqual("", self.harness._format_private_reunion_prompt(user, "又见面了", now=now))
+
+    def test_private_inbound_activity_keeps_the_previous_message_gap(self):
+        user = {"last_user_message_at": 1000.0, "private_inbound_count": 2}
+        CoreStoreMixin._note_private_inbound_activity(None, user, 1000.0 + 4 * 86400, text="回来啦")
+        self.assertEqual(4 * 86400, user["last_inbound_gap_seconds"])
+        self.assertEqual(1000.0 + 4 * 86400, user["last_inbound_gap_observed_at"])
+
+    def test_confirmed_reply_persists_preferences_and_bot_departure(self):
+        now = 2_000_000.0
+        user = {
+            "conversation_departure_offer_at": now - 60,
+            "episode_message_count": 9,
+        }
+        changed = self.harness._record_confirmed_bot_continuity(
+            user,
+            "我一直很喜欢听轻爵士。那我先去休息一会儿，晚点再聊。",
+            now=now,
+        )
+        self.assertTrue(changed)
+        self.assertEqual("music", user["bot_self_preferences"][-1]["category"])
+        self.assertEqual("bot_initiated_close", user["conversation_departure"]["kind"])
+        self.assertEqual(0, user["episode_message_count"])
+        prompt = self.harness._format_bot_self_preference_consistency(user, "你喜欢听什么歌")
+        self.assertIn("我一直很喜欢听轻爵士", prompt)
+
+    def test_departure_offer_is_low_frequency_and_optional(self):
+        self.harness._private_user_role = lambda _user: "owner"
+        user = {
+            "episode_message_count": 8,
+            "conversation_departure_offer_at": 0,
+        }
+        with patch("astrbot_plugin_private_companion.user_memory.random.random", return_value=0.0):
+            prompt = self.harness._format_conversation_departure_prompt(
+                user,
+                "嗯嗯",
+                {"energy": 35, "mood_bias": "疲惫"},
+                now=2_000_000.0,
+            )
+        self.assertIn("允许像真人一样主动收尾", prompt)
+        self.assertIn("不再追加问题", prompt)
 
     def test_guard_explains_memory_narrator_and_current_correction(self):
         user = {"private_inbound_count": 1}

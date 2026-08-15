@@ -195,15 +195,87 @@ class AgendaRuntimeMixin:
             result.append(normalized)
         return result
 
-    def _agenda_build(self, *, date_key: str = "") -> dict[str, Any]:
+    def _agenda_cache_signature(self) -> tuple[Any, ...]:
+        """Return a cheap signature for the stores feeding disclosure views.
+
+        The signature deliberately tracks replacement, version, lifecycle and
+        interval changes without serializing the full plan/raw model output.
+        This keeps repeated consumers from re-normalizing unchanged stores
+        while still invalidating on the edits that affect agenda eligibility.
+        """
+
         self._agenda_prepare_store()
-        return build_unified_agenda(
+        plan = self.data.get("daily_plan") if isinstance(self.data.get("daily_plan"), dict) else {}
+        plan_items = plan.get("items") if isinstance(plan.get("items"), list) else []
+        plan_item_signature = tuple(
+            (
+                id(item),
+                str(item.get("plan_id") or ""),
+                item.get("version"),
+                str(item.get("date") or ""),
+                str(item.get("time") or item.get("start") or item.get("start_at") or ""),
+                str(item.get("end") or item.get("end_time") or item.get("end_at") or ""),
+                str(item.get("activity") or item.get("title") or ""),
+                str(item.get("status") or ""),
+                str(item.get("lifecycle_status") or ""),
+                str(item.get("changed_at") or ""),
+                str(item.get("evidence_kind") or ""),
+                str(item.get("fact_eligibility") or ""),
+                str(item.get("subject_actor_id") or ""),
+            )
+            for item in plan_items
+            if isinstance(item, dict)
+        )
+        activities = self.data.get("observed_activities")
+        activity_items = activities if isinstance(activities, list) else []
+        activity_signature = tuple(
+            (
+                id(item),
+                str(item.get("activity_id") or ""),
+                item.get("version"),
+                str(item.get("start_at") or ""),
+                str(item.get("end_at") or ""),
+                str(item.get("title") or item.get("summary") or ""),
+                str(item.get("status") or ""),
+                str(item.get("updated_at") or item.get("captured_at") or ""),
+                str(item.get("evidence_kind") or ""),
+                str(item.get("subject_actor_id") or ""),
+            )
+            for item in activity_items
+            if isinstance(item, dict)
+        )
+        return (
+            id(plan),
+            str(plan.get("date") or ""),
+            str(plan.get("generated_at") or ""),
+            len(plan_items),
+            plan_item_signature,
+            id(activities),
+            len(activity_items),
+            activity_signature,
+        )
+
+    def _agenda_build(self, *, date_key: str = "", now: datetime | None = None) -> dict[str, Any]:
+        self._agenda_prepare_store()
+        current = now or self._agenda_now()
+        cache_key = (
+            self._agenda_cache_signature(),
+            current.isoformat(timespec="minutes"),
+            str(date_key or ""),
+            self._agenda_timezone_name(),
+        )
+        cached = getattr(self, "_agenda_build_cache", None)
+        if isinstance(cached, dict) and cached.get("key") == cache_key:
+            return deepcopy(cached.get("agenda") or {})
+        agenda = build_unified_agenda(
             plans=self._agenda_current_plan_items(),
             activities=self._agenda_activities_store(),
-            now=self._agenda_now(),
+            now=current,
             date_key=date_key,
             timezone_name=self._agenda_timezone_name(),
         )
+        self._agenda_build_cache = {"key": cache_key, "agenda": deepcopy(agenda)}
+        return agenda
 
     def _agenda_disclosure_view(
         self,
@@ -217,14 +289,31 @@ class AgendaRuntimeMixin:
         """Return the only agenda view that should cross a module boundary."""
 
         self._agenda_prepare_store()
-        agenda = self._agenda_build(date_key=str(date_key or ""))
-        return self._agenda_disclosure_policy.build_view(
+        current = now or self._agenda_now()
+        minute_key = current.isoformat(timespec="minutes")
+        cache_key = (
+            self._agenda_cache_signature(),
+            minute_key,
+            str(purpose or "future_schedule"),
+            str(target_user_id or ""),
+            int(max_entries),
+            str(date_key or ""),
+            self._agenda_timezone_name(),
+        )
+        cached = getattr(self, "_agenda_disclosure_cache", None)
+        if isinstance(cached, dict) and cached.get("key") == cache_key:
+            return deepcopy(cached.get("view") or {})
+
+        agenda = self._agenda_build(date_key=str(date_key or ""), now=current)
+        view = self._agenda_disclosure_policy.build_view(
             agenda,
-            now=now or self._agenda_now(),
+            now=current,
             purpose=purpose,
             target_user_id=target_user_id,
             max_entries=max_entries,
         )
+        self._agenda_disclosure_cache = {"key": cache_key, "view": deepcopy(view)}
+        return view
 
     def _agenda_runtime_scene(
         self,
@@ -236,7 +325,7 @@ class AgendaRuntimeMixin:
         """Resolve a short-lived Bot-only current state without mutating plans."""
 
         self._agenda_prepare_store()
-        agenda = self._agenda_build()
+        agenda = self._agenda_build(now=now or self._agenda_now())
         # A clock window or a soft plan is not a runtime state.  The resolver
         # may only consume entries that the disclosure layer has already
         # qualified as a Bot current fact.  This prevents ordinary planned

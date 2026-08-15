@@ -17,7 +17,7 @@ from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
 
-from .helpers import _format_history_media_marker, _now_ts, _single_line
+from .helpers import _format_history_media_marker, _now_ts, _safe_float, _single_line
 
 
 _DELIVERY_TASK_LABELS = frozenset({"segmented_llm_remainder"})
@@ -924,6 +924,63 @@ class FinalResponsePersistenceMixin:
             )
             return False
 
+    async def _record_confirmed_private_bot_continuity(
+        self,
+        event: Any,
+        *,
+        response_text: str,
+    ) -> bool:
+        recorder = getattr(self, "_record_confirmed_bot_continuity", None)
+        if not callable(recorder) or not response_text:
+            return False
+        try:
+            if not bool(getattr(event, "is_private_chat", lambda: False)()):
+                return False
+            resolver = getattr(self, "_private_user_id_for_event", None)
+            user_id = (
+                resolver(event)
+                if callable(resolver)
+                else self._canonical_private_user_id(str(event.get_sender_id()))
+            )
+        except Exception:
+            return False
+
+        def record() -> bool:
+            users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+            user = users.get(user_id) if isinstance(users, dict) else None
+            if not isinstance(user, dict):
+                return False
+            changed = bool(recorder(user, response_text, now=_now_ts()))
+            reunion_observed_at = _safe_float(
+                getattr(event, "_private_companion_reunion_observed_at", 0),
+                0,
+            )
+            if reunion_observed_at > _safe_float(user.get("last_reunion_ack_at"), 0):
+                user["last_reunion_ack_at"] = reunion_observed_at
+                changed = True
+            return changed
+
+        lock = getattr(self, "_data_lock", None)
+        try:
+            if lock is not None and hasattr(lock, "__aenter__"):
+                async with lock:
+                    changed = record()
+                    if changed:
+                        self._save_data_sync()
+            else:
+                changed = record()
+                if changed:
+                    scheduler = getattr(self, "_schedule_data_save", None)
+                    if callable(scheduler):
+                        scheduler()
+            return changed
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] Bot 连续性状态记录失败: %s",
+                _single_line(exc, 120),
+            )
+            return False
+
     async def _finalize_passive_delivered_response(
         self,
         event: AstrMessageEvent,
@@ -956,6 +1013,11 @@ class FinalResponsePersistenceMixin:
         )
         if not response_text:
             return False
+
+        await self._record_confirmed_private_bot_continuity(
+            event,
+            response_text=response_text,
+        )
 
         official_written = self._stage_delivered_assistant_for_official_history(
             event=event,

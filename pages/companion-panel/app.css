@@ -20835,6 +20835,12 @@ textarea {
   color: #875d19;
 }
 
+.proactive-chat-status.error {
+  border-color: rgba(180, 64, 52, 0.28);
+  background: rgba(251, 232, 228, 0.9);
+  color: #9b3f34;
+}
+
 .proactive-mode-main h3 {
   margin: 7px 0 5px;
   font-size: 18px;

@@ -121,6 +121,15 @@ from .proactive_routes import PROACTIVE_ROUTE_REGISTRY
 
 DEFAULT_AI_DAILY_NEWS_SOURCE = "B站 AI早报|bilibili:285286947"
 
+# Low-frequency personal-context routes: probabilities are intentionally
+# conservative, while the age/cooldown windows keep a residue from resurfacing.
+MOOD_CHECKIN_PROBABILITY = 0.48
+MEMORY_ECHO_PROBABILITY = 0.24
+ABSENCE_MISS_PROBABILITY = 0.56
+MEMORY_ECHO_MIN_SILENCE_SECONDS = 8 * 3600
+MOOD_CHECKIN_MIN_SILENCE_SECONDS = 8 * 3600
+ABSENCE_MISS_MIN_PROACTIVE_SILENCE_SECONDS = 36 * 3600
+
 DEFAULT_NEWS_SOURCES = "\n".join(
     [
         "BBC中文|https://feeds.bbci.co.uk/zhongwen/simp/rss.xml",
@@ -1407,6 +1416,11 @@ class ProactiveEngineMixin:
         )
         score += _safe_float(kind_policy.get("score_bias"), 0.0)
         score += _safe_float(quota_policy.get("candidate_score_bias"), 0.0)
+        source_feedback = self._proactive_source_feedback_modifier(
+            user,
+            _single_line(impulse.get("source"), 40),
+        )
+        score += source_feedback
         quota_tier = _safe_int(quota_policy.get("tier"), 0, 0, 5)
         if quota_tier >= 4 and proactive_kind in {"self_life", "content_share"}:
             score += 0.05
@@ -1487,6 +1501,24 @@ class ProactiveEngineMixin:
                 unanswered_penalty = 0.0
             score -= unanswered_penalty
         return score
+
+    def _proactive_source_feedback_modifier(self, user: dict[str, Any], source: str) -> float:
+        """Bias candidates using reply quality for their own source, not global silence."""
+        normalized = _single_line(source, 40) or "unknown"
+        feedback = user.get("proactive_source_feedback") if isinstance(user, dict) else None
+        bucket = feedback.get(normalized) if isinstance(feedback, dict) else None
+        if not isinstance(bucket, dict):
+            return 0.0
+        sent = _safe_float(bucket.get("weighted_sent"), _safe_float(bucket.get("sent"), 0.0), 0.0)
+        if sent < 2.0:
+            return 0.0
+        replied = min(sent, _safe_float(bucket.get("weighted_replied"), _safe_float(bucket.get("replied"), 0.0), 0.0))
+        positive = min(replied, _safe_float(bucket.get("weighted_positive"), _safe_float(bucket.get("positive"), 0.0), 0.0))
+        negative = min(replied, _safe_float(bucket.get("weighted_negative"), _safe_float(bucket.get("negative"), 0.0), 0.0))
+        reply_rate = replied / max(1, sent)
+        feedback_rate = (positive - negative) / max(1, sent)
+        # Keep the learnt effect bounded; the route and hard gates remain authoritative.
+        return max(-0.18, min(0.18, (reply_rate - 0.35) * 0.24 + feedback_rate * 0.08))
 
     def _proactive_persona_alignment(
         self,
@@ -1641,7 +1673,10 @@ class ProactiveEngineMixin:
             kind = "greeting"
         elif normalized_reason in {"meal_care", "meal_care_followup"}:
             kind = "care"
-        elif normalized_reason in {"quiet_care", "state_share", "post_goodnight_group_activity"}:
+        elif normalized_reason in {
+            "quiet_care", "state_share", "post_goodnight_group_activity",
+            "memory_echo", "mood_checkin", "absence_miss",
+        }:
             kind = "care"
         elif normalized_reason in {"activity_share", "diary_share", "background_schedule", "creative_share", "personal_goal_progress"}:
             kind = "self_share"
@@ -1649,7 +1684,7 @@ class ProactiveEngineMixin:
             kind = "reminder"
         elif normalized_reason in {"environment_change", "weather_alert"}:
             kind = "observation"
-        elif normalized_reason in {"group_share", "bili_video_share", "news_share", "web_exploration_share"}:
+        elif normalized_reason in {"group_share", "bili_video_share", "news_share", "web_exploration_share", "game_invite"}:
             kind = "external_share"
         elif normalized_source in {"pending_followup", "followup"}:
             kind = "continuation"
@@ -1660,7 +1695,11 @@ class ProactiveEngineMixin:
 
         anchor_type = "vague"
         anchor_score = 0.28
-        if normalized_source in {"pending_followup", "followup"} or has_trigger or has_chain or "前面提过" in evidence_text:
+        if normalized_reason == "memory_echo":
+            anchor_type, anchor_score = "cross_day_memory", 0.76
+        elif normalized_reason in {"mood_checkin", "absence_miss"}:
+            anchor_type, anchor_score = "recent_context", 0.76
+        elif normalized_source in {"pending_followup", "followup"} or has_trigger or has_chain or "前面提过" in evidence_text:
             anchor_type, anchor_score = "recent_context", 0.78
         elif normalized_reason in {"group_share", "post_goodnight_group_activity"} or "群" in evidence_text:
             anchor_type, anchor_score = "group_context", 0.72
@@ -4200,7 +4239,12 @@ class ProactiveEngineMixin:
             min_interval = min(min_interval, 2 * 60.0)
         elif timeliness == "timely":
             min_interval = min(min_interval, 10 * 60.0)
-        if not is_troubleshooting and not due_timer_active and now - _safe_float(user.get("last_sent"), 0) < min_interval:
+        if (
+            not is_troubleshooting
+            and not due_timer_active
+            and not bool(user.get("planned_proactive_burst"))
+            and now - _safe_float(user.get("last_sent"), 0) < min_interval
+        ):
             if self._is_sticky_greeting_reason(planned_reason):
                 self._reschedule_greeting_within_window(user, planned_reason, now=now)
             else:
@@ -5979,6 +6023,10 @@ class ProactiveEngineMixin:
             self._pick_daily_greeting_event(user, now),
             self._pick_mobile_location_arrival_event(user, now=now),
             self._habit_proactive_event_for_user(user, now=now),
+            self._pick_mood_checkin_event(user, now=now),
+            self._pick_memory_echo_event(user, now=now),
+            self._pick_absence_miss_event(user, now=now),
+            self._pick_game_invite_event(user, now=now),
             self._pick_state_need_event(user, now=now),
             self._pick_story_plan_event(now, user=user),
         ):
@@ -6083,6 +6131,371 @@ class ProactiveEngineMixin:
             "_scheduled_ts": check_now + delay_seconds,
             "_mobile_location_transition_key": transition_key,
             "_mobile_location_priority": bool(is_priority_arrival),
+        }
+
+    def _pick_mood_checkin_event(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Follow up only on a clearly negative user-state residue from yesterday."""
+        if self._private_user_role(user) != "owner":
+            return None
+        check_now = _now_ts() if now is None else now
+        summary = self.data.get("yesterday_conversation_summary", {})
+        if (
+            not isinstance(summary, dict)
+            or summary.get("date") != _today_key()
+            or summary.get("scope") != "owner_private_only"
+            or _safe_int(summary.get("raw_excerpt_chars"), 0, 0) <= 0
+        ):
+            return None
+        residues = summary.get("residues")
+        items = [item for item in residues if isinstance(item, dict)] if isinstance(residues, list) else []
+        negative_tokens = (
+            "低落", "焦虑", "难受", "压力", "紧张", "失眠", "疲惫", "不舒服",
+            "担心", "烦躁", "委屈", "害怕", "心情不好", "身体不适",
+        )
+        candidates = [
+            item
+            for item in items
+            if _single_line(item.get("content"), 140)
+            and (
+                _single_line(item.get("type"), 24) in {"情绪", "身体"}
+                or any(token in _single_line(item.get("content"), 140) for token in negative_tokens)
+            )
+        ]
+        if not candidates:
+            return None
+        source_date = _single_line(summary.get("source_date"), 20)
+        residue = candidates[0]
+        residue_text = _single_line(residue.get("content"), 140)
+        check_key = hashlib.sha1(f"{source_date}|{residue_text}".encode("utf-8")).hexdigest()[:20]
+        if check_key in {
+            _single_line(user.get("last_mood_checkin_key"), 40),
+            _single_line(user.get("mood_checkin_checked_key"), 40),
+        }:
+            return None
+        if _safe_int(user.get("ignored_streak"), 0, 0) > 0:
+            return None
+        last_user_at = _safe_float(user.get("last_user_message_at"), 0)
+        if last_user_at <= 0 or check_now - last_user_at > 3 * 24 * 3600:
+            return None
+        last_sent = _safe_float(user.get("last_sent"), 0)
+        if last_sent > 0 and check_now - last_sent < MOOD_CHECKIN_MIN_SILENCE_SECONDS:
+            return None
+        user["mood_checkin_checked_key"] = check_key
+        if random.random() > MOOD_CHECKIN_PROBABILITY:
+            return None
+        scheduled = self._move_timestamp_into_reason_window(
+            check_now + random.randint(25, 110) * 60,
+            "mood_checkin",
+        )
+        context = {
+            "check_key": check_key,
+            "source_date": source_date,
+            "residue_type": _single_line(residue.get("type"), 24) or "情绪",
+            "residue": residue_text,
+        }
+        return {
+            "window": self._window_from_delay_minutes(max(5, int((scheduled - check_now) / 60)), width_minutes=50),
+            "reason": "mood_checkin",
+            "action": "message",
+            "why": "昨天对方明确留下了一点负面情绪或身体状态，隔天轻声接一下",
+            "topic": residue_text,
+            "motive": "还惦记昨天那点不舒服，想轻轻问一句今天有没有好一点",
+            "_scheduled_ts": scheduled,
+            "context_key": "mood_checkin_context",
+            "context": context,
+            "origin_event_id": f"mood_checkin:{check_key}",
+        }
+
+    def _pick_corrected_memory_echo_event(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float,
+    ) -> dict[str, Any] | None:
+        correction_getter = getattr(self, "_recent_memory_correction_for_echo", None)
+        correction = correction_getter(user, now=now) if callable(correction_getter) else {}
+        if not isinstance(correction, dict) or not correction:
+            return None
+        correction_text = _single_line(correction.get("text"), 180)
+        correction_key = _single_line(correction.get("correction_key"), 40)
+        if not correction_text or not correction_key:
+            return None
+        echo_key = f"correction:{correction_key}"
+        if echo_key in {
+            _single_line(user.get("last_memory_echo_key"), 40),
+            _single_line(user.get("memory_echo_checked_key"), 40),
+        }:
+            return None
+        if _safe_int(user.get("ignored_streak"), 0, 0) > 0:
+            return None
+        last_user_at = _safe_float(user.get("last_user_message_at"), 0)
+        if last_user_at <= 0 or now - last_user_at > 7 * 24 * 3600:
+            return None
+        last_sent = _safe_float(user.get("last_sent"), 0)
+        if last_sent > 0 and now - last_sent < MEMORY_ECHO_MIN_SILENCE_SECONDS:
+            return None
+        user["memory_echo_checked_key"] = echo_key
+        if random.random() > 0.18:
+            return None
+        scheduled = self._move_timestamp_into_reason_window(
+            now + random.randint(45, 180) * 60,
+            "memory_echo",
+        )
+        context = {
+            "echo_key": echo_key,
+            "source_date": datetime.fromtimestamp(
+                _safe_float(correction.get("at"), now)
+            ).date().isoformat(),
+            "summary": "用户后来纠正了 Bot 对一件事的记忆或事实归属",
+            "residue_type": "修正版记忆",
+            "residue": correction_text,
+            "correction": correction_text,
+            "strength": "中",
+        }
+        return {
+            "window": self._window_from_delay_minutes(
+                max(5, int((scheduled - now) / 60)),
+                width_minutes=55,
+            ),
+            "reason": "memory_echo",
+            "action": "message",
+            "why": "之前记岔过一件事并被用户纠正，现在想以修正版轻轻承接一次",
+            "topic": correction_text,
+            "motive": "想起之前被纠正的那件事，想让对方知道这次记住的是修正版",
+            "_scheduled_ts": scheduled,
+            "context_key": "memory_echo_context",
+            "context": context,
+            "origin_event_id": f"memory_echo:{echo_key}",
+        }
+
+    def _pick_memory_echo_event(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Build a low-frequency echo grounded in yesterday's owner-private summary."""
+        if self._private_user_role(user) != "owner":
+            return None
+        check_now = _now_ts() if now is None else now
+        corrected_echo = ProactiveEngineMixin._pick_corrected_memory_echo_event(
+            self,
+            user,
+            now=check_now,
+        )
+        if corrected_echo is not None:
+            return corrected_echo
+        summary = self.data.get("yesterday_conversation_summary", {})
+        if (
+            not isinstance(summary, dict)
+            or summary.get("date") != _today_key()
+            or summary.get("scope") != "owner_private_only"
+            or _safe_int(summary.get("raw_excerpt_chars"), 0, 0) <= 0
+        ):
+            return None
+        source_date = _single_line(summary.get("source_date"), 20)
+        overview = _single_line(summary.get("summary"), 180)
+        residues = summary.get("residues")
+        residue_items = [item for item in residues if isinstance(item, dict)] if isinstance(residues, list) else []
+        residue_items = [item for item in residue_items if _single_line(item.get("content"), 140)]
+        if not source_date or not overview or "暂无可用" in overview or not residue_items:
+            return None
+        negative_state_tokens = (
+            "低落", "焦虑", "难受", "压力", "紧张", "失眠", "疲惫", "不舒服",
+            "担心", "烦躁", "委屈", "害怕", "心情不好", "身体不适",
+        )
+        if any(
+            any(token in _single_line(item.get("content"), 140) for token in negative_state_tokens)
+            for item in residue_items
+        ):
+            return None
+        signature_source = "|".join(
+            [source_date, overview]
+            + [_single_line(item.get("content"), 140) for item in residue_items[:4]]
+        )
+        echo_key = hashlib.sha1(signature_source.encode("utf-8")).hexdigest()[:20]
+        if echo_key in {
+            _single_line(user.get("last_memory_echo_key"), 40),
+            _single_line(user.get("memory_echo_checked_key"), 40),
+        }:
+            return None
+        if _safe_int(user.get("ignored_streak"), 0, 0) > 0:
+            return None
+        last_user_at = _safe_float(user.get("last_user_message_at"), 0)
+        if last_user_at <= 0 or check_now - last_user_at > 7 * 24 * 3600:
+            return None
+        last_sent = _safe_float(user.get("last_sent"), 0)
+        if last_sent > 0 and check_now - last_sent < MEMORY_ECHO_MIN_SILENCE_SECONDS:
+            return None
+        user["memory_echo_checked_key"] = echo_key
+        if random.random() > MEMORY_ECHO_PROBABILITY:
+            return None
+        strength_rank = {"强": 3, "中": 2, "轻": 1}
+        residue = max(
+            residue_items,
+            key=lambda item: strength_rank.get(_single_line(item.get("strength"), 8), 0),
+        )
+        residue_text = _single_line(residue.get("content"), 140)
+        residue_type = _single_line(residue.get("type"), 24) or "聊天余韵"
+        scheduled = self._move_timestamp_into_reason_window(
+            check_now + random.randint(35, 150) * 60,
+            "memory_echo",
+        )
+        context = {
+            "echo_key": echo_key,
+            "source_date": source_date,
+            "summary": overview,
+            "residue_type": residue_type,
+            "residue": residue_text,
+            "strength": _single_line(residue.get("strength"), 8) or "轻",
+        }
+        return {
+            "window": self._window_from_delay_minutes(
+                max(5, int((scheduled - check_now) / 60)),
+                width_minutes=55,
+            ),
+            "reason": "memory_echo",
+            "action": "message",
+            "why": "昨天聊过的一件小事今天又自然浮上来，想轻轻接一下，不要求对方回应",
+            "topic": residue_text,
+            "motive": f"想起昨天留下的{residue_type}，想顺手提一句",
+            "_scheduled_ts": scheduled,
+            "context_key": "memory_echo_context",
+            "context": context,
+            "origin_event_id": f"memory_echo:{echo_key}",
+        }
+
+    def _pick_absence_miss_event(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Express one low-pressure miss when silence is not an ignored bot message."""
+        if self._private_user_role(user) != "owner":
+            return None
+        check_now = _now_ts() if now is None else now
+        last_user_at = _safe_float(user.get("last_user_message_at"), 0)
+        if last_user_at <= 0:
+            return None
+        absent_days = (check_now - last_user_at) / 86400
+        if absent_days < 3 or absent_days > 21:
+            return None
+        if _safe_int(user.get("ignored_streak"), 0, 0) > 0:
+            return None
+        # ``last_sent`` also moves for passive replies.  Only a proactive send
+        # should make this look like an unanswered bot message.
+        last_proactive_sent = _safe_float(user.get("last_proactive_sent_at"), 0)
+        if last_proactive_sent > last_user_at or (
+            last_proactive_sent > 0 and check_now - last_proactive_sent < ABSENCE_MISS_MIN_PROACTIVE_SILENCE_SECONDS
+        ):
+            return None
+        relation_mode_getter = getattr(self, "_current_relationship_gate_mode", None)
+        emotion_mode_getter = getattr(self, "_current_emotion_gate_mode", None)
+        relation_mode = relation_mode_getter(user, now=check_now) if callable(relation_mode_getter) else ""
+        emotion_mode = emotion_mode_getter(user, now=check_now) if callable(emotion_mode_getter) else ""
+        if relation_mode in {"refusing", "backoff", "hurt", "avoidant"} or emotion_mode in {"hurt", "avoidant"}:
+            return None
+        episode_key = hashlib.sha1(f"{int(last_user_at)}".encode("utf-8")).hexdigest()[:20]
+        if episode_key in {
+            _single_line(user.get("last_absence_miss_key"), 40),
+            _single_line(user.get("absence_miss_checked_key"), 40),
+        }:
+            return None
+        user["absence_miss_checked_key"] = episode_key
+        if random.random() > ABSENCE_MISS_PROBABILITY:
+            return None
+        scheduled = self._move_timestamp_into_reason_window(
+            check_now + random.randint(20, 100) * 60,
+            "absence_miss",
+        )
+        context = {
+            "episode_key": episode_key,
+            "last_user_message_at": last_user_at,
+            "absent_days": round(absent_days, 1),
+        }
+        return {
+            "window": self._window_from_delay_minutes(max(5, int((scheduled - check_now) / 60)), width_minutes=55),
+            "reason": "absence_miss",
+            "action": "message",
+            "why": "双方自然停聊了几天，且没有一条未回复的 Bot 主动消息，想低压力地表达一点想念",
+            "topic": "隔了几天没聊留下的一点想念",
+            "motive": "有点想念对方，但不想让这句话变成催回复",
+            "_scheduled_ts": scheduled,
+            "context_key": "absence_miss_context",
+            "context": context,
+            "origin_event_id": f"absence_miss:{episode_key}",
+        }
+
+    def _pick_game_invite_event(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Turn a strong, recent game afterglow into one optional rematch invite."""
+        check_now = _now_ts() if now is None else now
+        if _safe_int(user.get("ignored_streak"), 0, 0) > 0:
+            return None
+        state_getter = getattr(self, "_game_afterglow_for_user", None)
+        view_getter = getattr(self, "_game_afterglow_public_view", None)
+        if not callable(state_getter) or not callable(view_getter):
+            return None
+        try:
+            view = view_getter(state_getter(user), now=check_now)
+        except Exception:
+            return None
+        interest = _safe_int(view.get("invite_interest"), 0, 0, 100)
+        last_event_at = _safe_float(view.get("last_event_at"), 0)
+        if not view.get("active") or interest < 70 or last_event_at <= 0:
+            return None
+        event_age = check_now - last_event_at
+        if event_age < 30 * 60 or event_age > 5 * 24 * 3600:
+            return None
+        last_sent = _safe_float(user.get("last_sent"), 0)
+        if last_sent > 0 and check_now - last_sent < 10 * 3600:
+            return None
+        game = _single_line(view.get("game"), 40)
+        game_label = _single_line(view.get("game_label"), 40) or game or "上次那局游戏"
+        invite_key = hashlib.sha1(f"{game}|{int(last_event_at)}".encode("utf-8")).hexdigest()[:20]
+        if invite_key in {
+            _single_line(user.get("last_game_invite_key"), 40),
+            _single_line(user.get("game_invite_checked_key"), 40),
+        }:
+            return None
+        user["game_invite_checked_key"] = invite_key
+        invite_probability = min(0.78, 0.28 + max(0, interest - 70) / 100)
+        if random.random() > invite_probability:
+            return None
+        scheduled = self._move_timestamp_into_reason_window(
+            check_now + random.randint(30, 120) * 60,
+            "game_invite",
+        )
+        context = {
+            "invite_key": invite_key,
+            "game": game,
+            "game_label": game_label,
+            "last_event_at": last_event_at,
+            "invite_interest": interest,
+            "tone": _single_line(view.get("tone"), 120),
+            "reflection": _single_line(view.get("reflection"), 160),
+        }
+        return {
+            "window": self._window_from_delay_minutes(max(5, int((scheduled - check_now) / 60)), width_minutes=60),
+            "reason": "game_invite",
+            "action": "message",
+            "why": "最近一局游戏留下了明确的再玩意愿，想发一次可拒绝、无催促的邀约",
+            "topic": f"再玩一局{game_label}",
+            "motive": f"想起上次的{game_label}，有点想再约一局",
+            "_scheduled_ts": scheduled,
+            "context_key": "game_invite_context",
+            "context": context,
+            "origin_event_id": f"game_invite:{invite_key}",
         }
 
     @staticmethod
@@ -6344,6 +6757,68 @@ class ProactiveEngineMixin:
             return None
         candidates.sort(key=lambda item: item[0])
         return candidates[0][1]
+
+    def _pick_open_loop_followup_event(
+        self,
+        user: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Turn an unresolved conversation thread into a normal, expiring impulse."""
+        if not bool(getattr(self, "enable_open_loop_tracking", True)):
+            return None
+        if self._private_user_role(user) == "friend":
+            return None
+        check_now = _now_ts() if now is None else now
+        if _safe_float(user.get("awaiting_reply_since"), 0) > 0:
+            return None
+        loops = user.get("open_loops")
+        if not isinstance(loops, list):
+            return None
+        candidates: list[tuple[float, float, dict[str, Any]]] = []
+        for item in loops:
+            if not isinstance(item, dict) or str(item.get("status") or "") in {"已完成", "已取消"}:
+                continue
+            text = _single_line(item.get("text"), 120)
+            created_at = _safe_float(item.get("created_ts"), 0)
+            if not text or created_at <= 0:
+                continue
+            age = check_now - created_at
+            if age < 4 * 3600 or age > 14 * 86400:
+                continue
+            last_candidate_at = _safe_float(item.get("proactive_candidate_at"), 0)
+            if last_candidate_at > 0 and check_now - last_candidate_at < 36 * 3600:
+                continue
+            score_getter = getattr(self, "_open_loop_relevance_score", None)
+            score = _safe_float(score_getter(item) if callable(score_getter) else 0.5, 0.5)
+            candidates.append((score, created_at, item))
+        if not candidates:
+            return None
+        _, created_at, selected = max(candidates, key=lambda value: (value[0], value[1]))
+        text = _single_line(selected.get("text"), 120)
+        sampler = getattr(self, "_sample_proactive_timestamp", None)
+        scheduled = (
+            sampler(user, now=check_now, delay_hours=(0.25, 2.0), reason="open_loop_followup")
+            if callable(sampler)
+            else check_now + random.uniform(15 * 60, 2 * 3600)
+        )
+        selected["proactive_candidate_at"] = check_now
+        return {
+            "date": _today_key(),
+            "window": self._window_from_delay_minutes(max(15, int((scheduled - check_now) / 60)), width_minutes=75),
+            "reason": "open_loop_followup",
+            "action": "message",
+            "why": "用户之前提过一件还没有下文的事，隔了一段时间后自然想起",
+            "topic": text,
+            "motive": self._normalize_internal_motive_text(f"想自然问问之前提到的这件事后来怎么样了：{text}"),
+            "scene": "日常聊天间隙忽然想起对方之前说过的事",
+            "tone": "像朋友随口问起，不像提醒或查岗",
+            "impulse": "想知道那件事后来有没有新进展",
+            "_scheduled_ts": scheduled,
+            "origin_event_id": "open-loop:" + hashlib.sha1(f"{created_at}:{text}".encode("utf-8")).hexdigest()[:16],
+            "context_key": "open_loop_followup_context",
+            "context": {"text": text, "created_ts": created_at, "source": selected.get("source")},
+            "followup_kind": "open_loop",
+        }
 
     def _pick_pending_followup_event(
         self, user: dict[str, Any], now: float | None = None
@@ -7838,6 +8313,17 @@ class ProactiveEngineMixin:
         if reason == "creative_share":
             creative = user.get("creative_share_context") if isinstance(user.get("creative_share_context"), dict) else {}
             return _single_line(creative.get("title"), 48) or "刚写到的小说片段"
+        if reason == "memory_echo":
+            echo = user.get("memory_echo_context") if isinstance(user.get("memory_echo_context"), dict) else {}
+            return _single_line(echo.get("residue"), 48) or _single_line(echo.get("summary"), 48) or "昨天聊天留下的一点余韵"
+        if reason == "mood_checkin":
+            mood = user.get("mood_checkin_context") if isinstance(user.get("mood_checkin_context"), dict) else {}
+            return _single_line(mood.get("residue"), 48) or "昨天那点不舒服"
+        if reason == "absence_miss":
+            return "隔了几天没聊留下的一点想念"
+        if reason == "game_invite":
+            game = user.get("game_invite_context") if isinstance(user.get("game_invite_context"), dict) else {}
+            return f"再玩一局{_single_line(game.get('game_label'), 36) or '上次那款游戏'}"
         current_item = self._proactive_current_agenda_item()
         snapshot = self._current_story_plan_snapshot()
         weather = self._weather_summary_text(self.data.get("daily_weather", {}))
@@ -8468,6 +8954,17 @@ class ProactiveEngineMixin:
                 "有句话不算重要，但一直记着，想给你看看",
                 "今天有个小片段还记着",
             ])
+        if reason == "memory_echo":
+            echo = user.get("memory_echo_context") if isinstance(user.get("memory_echo_context"), dict) else {}
+            residue_type = _single_line(echo.get("residue_type"), 24) or "聊天余韵"
+            return f"昨天聊过的{residue_type}今天又自然浮上来，想轻轻接一句"
+        if reason == "mood_checkin":
+            return "还惦记昨天那点不舒服，想轻轻问一句今天有没有好一点"
+        if reason == "absence_miss":
+            return "隔了几天没聊，有一点想念，但不想让对方有必须回应的压力"
+        if reason == "game_invite":
+            game = user.get("game_invite_context") if isinstance(user.get("game_invite_context"), dict) else {}
+            return f"想起上次的{_single_line(game.get('game_label'), 36) or '那局游戏'}，有点想再约一局"
         if reason == "important_date_share":
             return random.choice([
                 "怕用户转头又忘，就先提醒一句",
@@ -8740,6 +9237,10 @@ class ProactiveEngineMixin:
             "health_alert": [(0, 24 * 60)],
             "jm_cosmos_recommendation_request": [(10 * 60, 23 * 60)],
             "creative_share": [(10 * 60, 23 * 60)],
+            "memory_echo": [(10 * 60, 21 * 60 + 30)],
+            "mood_checkin": [(9 * 60 + 30, 21 * 60 + 30)],
+            "absence_miss": [(10 * 60, 21 * 60 + 30)],
+            "game_invite": [(10 * 60, 22 * 60)],
             "personal_goal_progress": [(8 * 60, 22 * 60)],
             "memo_note_reminder": [(7 * 60, 23 * 60)],
             "state_share": [(8 * 60, 22 * 60 + 30)],
@@ -8952,6 +9453,49 @@ class ProactiveEngineMixin:
         if reason == "creative_share":
             creative_context = self._format_creative_share_action_context(user)
             raw_action_context = "\n".join(part for part in (raw_action_context, creative_context) if part).strip()
+        if reason == "memory_echo":
+            echo = user.get("memory_echo_context") if isinstance(user.get("memory_echo_context"), dict) else {}
+            echo_summary = _single_line(echo.get("summary"), 180)
+            echo_residue = _single_line(echo.get("residue"), 140)
+            echo_correction = _single_line(echo.get("correction"), 180)
+            echo_source_date = _single_line(echo.get("source_date"), 20) or "昨日"
+            echo_context = (
+                f"记忆回响证据（{echo_source_date}，摘要而非逐字原话）：概括={echo_summary}；残留={echo_residue}。"
+                "只可把它当作轻微承接背景，不得添加摘要中没有的事实，不得使用引号伪装成用户原话，"
+                "不要说‘系统记录/记忆库显示’，也不要要求用户必须回应。"
+                + (
+                    f"这是一次纠正后的记忆：{echo_correction}。必须沿用修正版，不要再次复述或维护原来的错误；"
+                    "可以自然承认自己之前记岔过，但不要把故意出错写成表演。"
+                    if echo_correction
+                    else "若细节置信不足，使用‘我是不是记得……’这类留有余地的表达，允许用户自然纠正。"
+                )
+            )
+            raw_action_context = "\n".join(part for part in (raw_action_context, echo_context) if part).strip()
+        if reason == "mood_checkin":
+            mood = user.get("mood_checkin_context") if isinstance(user.get("mood_checkin_context"), dict) else {}
+            mood_context = (
+                f"隔日情绪回访证据（摘要而非逐字原话）：{_single_line(mood.get('residue'), 160)}。"
+                "只围绕这项已知状态轻声问一句今天是否好一点；不得诊断，不得扩大严重程度，"
+                "不得声称用户现在仍处于昨天的状态，也不要连续追问。"
+            )
+            raw_action_context = "\n".join(part for part in (raw_action_context, mood_context) if part).strip()
+        if reason == "absence_miss":
+            absence = user.get("absence_miss_context") if isinstance(user.get("absence_miss_context"), dict) else {}
+            absence_context = (
+                f"自然停聊时长约 {_safe_float(absence.get('absent_days'), 0):.1f} 天。"
+                "可以直接、简短地表达一点想念，但不得写成控诉、查岗、索取安抚或催促回复；"
+                "不要虚构这几天用户的经历。"
+            )
+            raw_action_context = "\n".join(part for part in (raw_action_context, absence_context) if part).strip()
+        if reason == "game_invite":
+            game = user.get("game_invite_context") if isinstance(user.get("game_invite_context"), dict) else {}
+            game_context = (
+                f"游戏邀约证据：游戏={_single_line(game.get('game_label'), 40) or '上次那款游戏'}；"
+                f"余韵={_single_line(game.get('reflection'), 160)}；语气={_single_line(game.get('tone'), 120)}。"
+                "只发一次轻量、可拒绝的邀约；不要声称已经开房、已开始对局或现在轮到用户操作，"
+                "也不要暴露 invite_interest 等内部评分。"
+            )
+            raw_action_context = "\n".join(part for part in (raw_action_context, game_context) if part).strip()
         extra_components = list(action_payload.get("extra_components") or [])
         action_summary = _single_line(action_payload.get("summary") or planned_action, 80)
         if not bool(action_payload.get("success", True)):

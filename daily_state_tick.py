@@ -22,6 +22,24 @@ from .helpers import (
 
 
 class DailyStateTickMixin:
+    @staticmethod
+    def _proactive_similarity_guard_enabled(
+        user: dict[str, Any],
+        *,
+        is_troubleshooting: bool,
+        action: str,
+        timeliness: str,
+        duplicate_policy: str,
+    ) -> bool:
+        """Burst follow-ups intentionally use a second angle, not duplicate text."""
+        return bool(
+            not is_troubleshooting
+            and (action or "message") == "message"
+            and not bool(user.get("planned_proactive_burst"))
+            and timeliness == "routine"
+            and duplicate_policy in {"semantic", "content_fingerprint", "life_event"}
+        )
+
     """Execute one user's proactive tick outside the daily-state capability module."""
 
     def _route_recent_chat_guard_reason(
@@ -998,11 +1016,13 @@ class DailyStateTickMixin:
                 )
                 similar_note = ""
                 duplicate_policy = _single_line(route_options_for_send.get("duplicate_policy"), 40)
-                if timeliness == "routine" and duplicate_policy in {
-                    "semantic",
-                    "content_fingerprint",
-                    "life_event",
-                }:
+                if self._proactive_similarity_guard_enabled(
+                    current_for_similarity_guard,
+                    is_troubleshooting=is_troubleshooting_for_send,
+                    action=effective_action_for_send or planned_action_for_send or "message",
+                    timeliness=timeliness,
+                    duplicate_policy=duplicate_policy,
+                ):
                     similar_note = self._recent_proactive_text_duplicate_reason(
                         current_for_similarity_guard,
                         text=text,
@@ -1594,6 +1614,45 @@ class DailyStateTickMixin:
             current["last_proactive_reason"] = reason
             if reason in {"bili_video_share", "news_share", "web_exploration_share"}:
                 current["last_external_link_share_at"] = current["last_sent"]
+            if reason == "memory_echo":
+                memory_echo_context = (
+                    current.get("memory_echo_context")
+                    if isinstance(current.get("memory_echo_context"), dict)
+                    else {}
+                )
+                current["last_memory_echo_key"] = _single_line(
+                    memory_echo_context.get("echo_key"),
+                    40,
+                )
+                current["last_memory_echo_at"] = current["last_sent"]
+                current["memory_echo_context"] = {}
+            if reason == "mood_checkin":
+                mood_context = (
+                    current.get("mood_checkin_context")
+                    if isinstance(current.get("mood_checkin_context"), dict)
+                    else {}
+                )
+                current["last_mood_checkin_key"] = _single_line(mood_context.get("check_key"), 40)
+                current["last_mood_checkin_at"] = current["last_sent"]
+                current["mood_checkin_context"] = {}
+            if reason == "absence_miss":
+                absence_context = (
+                    current.get("absence_miss_context")
+                    if isinstance(current.get("absence_miss_context"), dict)
+                    else {}
+                )
+                current["last_absence_miss_key"] = _single_line(absence_context.get("episode_key"), 40)
+                current["last_absence_miss_at"] = current["last_sent"]
+                current["absence_miss_context"] = {}
+            if reason == "game_invite":
+                game_context = (
+                    current.get("game_invite_context")
+                    if isinstance(current.get("game_invite_context"), dict)
+                    else {}
+                )
+                current["last_game_invite_key"] = _single_line(game_context.get("invite_key"), 40)
+                current["last_game_invite_at"] = current["last_sent"]
+                current["game_invite_context"] = {}
             if reason in {"birthday_eve_hint", "birthday_celebration", "birthday_makeup", "birthday_afterglow"}:
                 birthday_event = current.get("birthday_event") if isinstance(current.get("birthday_event"), dict) else {}
                 birthday_context = current.get("planned_birthday_event_context") if isinstance(current.get("planned_birthday_event_context"), dict) else {}
@@ -1797,6 +1856,7 @@ class DailyStateTickMixin:
                     text=text,
                     motive=planned_motive_for_send,
                     action_summary=action_summary,
+                    source=_single_line(current.get("planned_proactive_source"), 40),
                 )
                 existing_followup = current.get("pending_followup_event")
                 if self._private_user_role(current) == "friend":
@@ -1828,8 +1888,38 @@ class DailyStateTickMixin:
                     current["morning_greeting_reply_at"] = 0
                 self._mark_textual_greeting_sent(current, visible_text or text, sent_at=current["last_sent"])
                 self._clear_llm_timer_event(current, event_id=due_timer_id)
+                burst_was_active = bool(current.get("planned_proactive_burst"))
+                burst_index_before_send = _safe_int(current.get("proactive_burst_index"), 0, 0)
+                max_burst_getter = getattr(self, "_proactive_burst_max_messages", None)
+                max_burst_messages = (
+                    max_burst_getter()
+                    if callable(max_burst_getter)
+                    else _safe_int(getattr(self, "proactive_burst_max_messages", 2), 2, 2, 3)
+                )
+                if burst_was_active:
+                    current["planned_proactive_burst"] = False
+                    current["proactive_burst_origin_id"] = ""
+                    if burst_index_before_send + 1 >= max_burst_messages:
+                        current["proactive_burst_index"] = 0
                 next_timer = self._get_active_llm_timer(current)
-                if (
+                burst_scheduled = False
+                burst_has_followup_slot = burst_was_active and burst_index_before_send + 1 < max_burst_messages
+                if not burst_was_active or burst_has_followup_slot:
+                    burst_scheduler = getattr(self, "_maybe_schedule_proactive_burst", None)
+                    if callable(burst_scheduler):
+                        burst_scheduled = bool(
+                            burst_scheduler(
+                                current,
+                                now=_now_ts(),
+                                reason=reason,
+                                source=_single_line(current.get("last_proactive_source"), 40)
+                                or _single_line(current.get("planned_proactive_source"), 40),
+                                action=_single_line(current.get("last_proactive_action"), 40),
+                                motive=_single_line(current.get("last_proactive_motive"), 160),
+                                topic=_single_line(current.get("planned_proactive_topic"), 80),
+                            )
+                        )
+                if not burst_scheduled and (
                     isinstance(next_timer, dict)
                     and self._llm_timer_can_use_internal_scheduler(next_timer)
                     and _safe_float(next_timer.get("scheduled_ts"), 0) > _now_ts()

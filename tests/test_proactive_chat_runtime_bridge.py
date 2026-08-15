@@ -188,6 +188,32 @@ class _Owner:
 
 
 class RuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_upstream_methods_are_reported_as_degraded(self):
+        class IncompleteProactiveChat:
+            async def check_and_chat(self, _session_id):
+                return None
+
+        proactive = IncompleteProactiveChat()
+        owner = SimpleNamespace(
+            enable_proactive_chat_integration=True,
+            context=SimpleNamespace(
+                get_all_stars=lambda: [
+                    SimpleNamespace(
+                        module_path="astrbot_plugin_proactive_chat.main",
+                        name="astrbot_plugin_proactive_chat",
+                        star_cls=proactive,
+                    )
+                ]
+            ),
+        )
+        bridge = ProactiveChatRuntimeBridge(owner)
+
+        self.assertFalse(await bridge.refresh())
+        status = bridge.status()
+        self.assertTrue(status["degraded"])
+        self.assertEqual("degraded", status["mode"])
+        self.assertIn("_prepare_llm_request", status["missing_methods"])
+
     async def test_deep_bridge_injects_reviews_confirms_and_restores_methods(self):
         platform = _Platform()
         proactive = _ProactiveChat(platform)

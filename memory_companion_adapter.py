@@ -747,6 +747,34 @@ class MemoryCompanionAdapterMixin:
         if result.get("available") is not True:
             mismatches.append("available")
         if mismatches:
+            compatible_superset = (
+                set(mismatches).issubset({"contract_fingerprint", "windows", "memory_types"})
+                and result.get("contract_revision") == CONTRACT_REVISION
+                and result.get("capability_schema_version") == BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION
+                and result.get("payload_schema_version") == BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION
+                and observed_domain == BOT_PERSONAL_MEMORY_DOMAIN
+                and isinstance(observed_windows, (list, tuple))
+                and isinstance(observed_memory_types, (list, tuple))
+                and set(expected_windows).issubset(set(observed_windows))
+                and set(expected_memory_types).issubset(set(observed_memory_types))
+                and (
+                    len(set(observed_windows)) > len(expected_windows)
+                    or len(set(observed_memory_types)) > len(expected_memory_types)
+                )
+            )
+            if compatible_superset:
+                status = dict(result)
+                status.update(
+                    {
+                        "state": "ready_compatible",
+                        "degraded": False,
+                        "available": True,
+                        "contract_compatibility": "superset",
+                        "negotiated_mismatches": tuple(mismatches),
+                    }
+                )
+                self._bridge_last_status = status
+                return status
             return self._memory_companion_degraded_status(
                 "capability_contract_mismatch",
                 mismatches=tuple(mismatches),

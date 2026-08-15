@@ -9,6 +9,7 @@ from typing import Any, Mapping
 DYNAMICS_VERSION = "interaction_dynamics.v1"
 NEGATIVE_BANDS = {"avoidant", "hurt"}
 POSITIVE_BANDS = {"lively", "warm", "close", "affectionate"}
+POSITIVE_BAND_SEQUENCE = ("relaxed", "lively", "warm", "close", "affectionate")
 
 
 def _finite(value: Any, default: float = 0.0) -> float:
@@ -92,7 +93,16 @@ def settle_interaction_dynamics(
         base = prior_load if prior_polarity > 0 else 0.0
         load = min(100.0, base * 0.75 + max(10.0, event_intensity * 0.65))
         polarity = 1
-        base_band = requested
+        prior_band = str(prior.get("base_band") or "relaxed") if prior_polarity > 0 else "relaxed"
+        if prior_band not in POSITIVE_BAND_SEQUENCE:
+            prior_band = "relaxed"
+        prior_index = POSITIVE_BAND_SEQUENCE.index(prior_band)
+        requested_index = POSITIVE_BAND_SEQUENCE.index(requested)
+        # A single event may warm or cool the expression by one band. Stronger
+        # movement needs repeated events, so the visible voice cannot jump from
+        # flat/low straight to intimate excitement in one turn.
+        next_index = max(prior_index - 1, min(prior_index + 1, requested_index))
+        base_band = POSITIVE_BAND_SEQUENCE[next_index]
         half_life = 7200.0
     else:
         return prior

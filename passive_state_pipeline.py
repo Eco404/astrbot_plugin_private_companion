@@ -538,6 +538,44 @@ async def inject_humanized_state(
             priority=11,
             source="identity",
         )
+    emotion_inertia_getter = getattr(self, "_format_emotion_inertia_prompt", None)
+    if callable(emotion_inertia_getter):
+        emotion_inertia = emotion_inertia_getter(current_user)
+        if emotion_inertia:
+            prompt_surface.add(
+                "state.emotion_inertia",
+                emotion_inertia,
+                priority=29,
+                source="emotion_ledger",
+            )
+    reunion_getter = getattr(self, "_format_private_reunion_prompt", None)
+    if callable(reunion_getter):
+        reunion_prompt = reunion_getter(current_user, inbound_text)
+        if reunion_prompt:
+            prompt_surface.add(
+                "conversation.reunion",
+                reunion_prompt,
+                priority=27,
+                source="conversation",
+            )
+            try:
+                setattr(
+                    event,
+                    "_private_companion_reunion_observed_at",
+                    _safe_float(current_user.get("last_inbound_gap_observed_at"), 0),
+                )
+            except Exception:
+                pass
+    preference_getter = getattr(self, "_format_bot_self_preference_consistency", None)
+    if callable(preference_getter):
+        preference_prompt = preference_getter(current_user, inbound_text)
+        if preference_prompt:
+            prompt_surface.add(
+                "persona.preference_continuity",
+                preference_prompt,
+                priority=16,
+                source="bot_self_history",
+            )
     state_changed = False
     state_update_reason = "legacy"
     if bool(getattr(self, "enable_passive_state_delta_injection", True)):
@@ -585,6 +623,17 @@ async def inject_humanized_state(
         worldview_context = self._sanitize_owner_environment_context_for_private_user(worldview_context, current_user)
         if worldview_context:
             prompt_surface.add("worldview.adaptation", worldview_context, priority=37, source="worldview")
+    departure_getter = getattr(self, "_format_conversation_departure_prompt", None)
+    if callable(departure_getter):
+        departure_prompt = departure_getter(current_user, inbound_text, state)
+        if departure_prompt:
+            prompt_surface.add(
+                "conversation.departure",
+                departure_prompt,
+                priority=28,
+                source="conversation",
+            )
+            self._schedule_data_save()
     identity_anchor = self._format_private_identity_anchor_for_prompt(user_id, current_user, event)
     if identity_anchor:
         prompt_surface.add("identity.anchor", identity_anchor, priority=10, source="identity")

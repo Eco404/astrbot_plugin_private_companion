@@ -217,8 +217,8 @@ class SafetyEventRoute(ProactiveRoute):
 class ContinuationRoute(ProactiveRoute):
     key = "continuation"
     label = "对话延续"
-    source_names = frozenset({"pending_followup", "followup", "atrelay"})
-    reason_names = frozenset({"activity_followup"})
+    source_names = frozenset({"pending_followup", "followup", "atrelay", "open_loop"})
+    reason_names = frozenset({"activity_followup", "open_loop_followup"})
     semantic_names = frozenset({"continuation"})
     active_window_seconds = 75 * 60.0
     grace_window_seconds = 90 * 60.0
@@ -248,7 +248,7 @@ class ContinuationRoute(ProactiveRoute):
 
     def settlement(self, plan: dict[str, Any]) -> dict[str, Any]:
         settlement = super().settlement(plan)
-        if self._is_activity_followup(plan):
+        if self._is_activity_followup(plan) or _text(plan.get("reason"), 40) == "open_loop_followup":
             settlement["await_reply"] = False
             settlement["allow_automatic_followup"] = False
         return settlement
@@ -370,7 +370,15 @@ class ContentShareRoute(ProactiveRoute):
         {"group_share", "news_share", "bili_video_share", "web_exploration_share", "creative_writing"}
     )
     reason_names = frozenset(
-        {"group_share", "news_share", "bili_video_share", "web_exploration_share", "creative_share"}
+        {
+            "group_share",
+            "news_share",
+            "bili_video_share",
+            "web_exploration_share",
+            "creative_share",
+            "jm_cosmos_recommendation_request",
+            "game_invite",
+        }
     )
     active_window_seconds = 45 * 60.0
     grace_window_seconds = 60 * 60.0
@@ -391,6 +399,8 @@ class ContentShareRoute(ProactiveRoute):
         "news_share": "news_context",
         "web_exploration_share": "web_exploration_context",
         "creative_share": "creative_share_context",
+        "jm_cosmos_recommendation_request": "jm_cosmos_recommendation_context",
+        "game_invite": "game_invite_context",
     }
 
     def dedupe_key(self, candidate: dict[str, Any], *, date_key: str) -> str:
@@ -463,8 +473,47 @@ class RelationalRoute(ProactiveRoute):
     key = "relational"
     label = "关系关怀"
     source_names = frozenset({"habit", "balance", "random"})
-    reason_names = frozenset({"quiet_care", "check_in", "low_balance"})
+    reason_names = frozenset(
+        {"quiet_care", "check_in", "low_balance", "memory_echo", "mood_checkin", "absence_miss"}
+    )
     response_expectation = "expected"
+
+    _ONE_SHOT_CONTEXT_KEYS = {
+        "memory_echo": "memory_echo_context",
+        "mood_checkin": "mood_checkin_context",
+        "absence_miss": "absence_miss_context",
+    }
+
+    def prepare_candidate(
+        self,
+        candidate: dict[str, Any],
+        *,
+        source: str,
+        now: float,
+        date_key: str,
+    ) -> dict[str, Any]:
+        prepared = super().prepare_candidate(
+            candidate,
+            source=source,
+            now=now,
+            date_key=date_key,
+        )
+        if _text(prepared.get("reason"), 40) in self._ONE_SHOT_CONTEXT_KEYS:
+            prepared["response_expectation"] = "none"
+            prepared["route_allow_automatic_followup"] = False
+        return prepared
+
+    def settlement(self, plan: dict[str, Any]) -> dict[str, Any]:
+        reason = _text(plan.get("reason"), 40)
+        context_key = self._ONE_SHOT_CONTEXT_KEYS.get(reason)
+        if context_key:
+            return {
+                "await_reply": False,
+                "allow_automatic_followup": False,
+                "clear_context_keys": (context_key,),
+                "quota_bucket": self.key,
+            }
+        return super().settlement(plan)
 
     def render_directive(self, *, quota_tier: int) -> str:
         frequency_note = (

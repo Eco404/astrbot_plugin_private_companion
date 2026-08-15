@@ -987,6 +987,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 current["last_proactive_reason"] = "proactive_chat_bridge"
                 current["last_proactive_action"] = "message"
                 current["last_proactive_motive"] = "Proactive Chat 即时触发"
+                current["last_proactive_source"] = "proactive_chat"
                 current["proactive_chat_bridge_last_sent_at"] = now
                 current["proactive_chat_bridge_last_attempt_id"] = normalized_attempt
                 reset_daily = getattr(self, "_reset_daily_counter_if_needed", None)
@@ -1010,6 +1011,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         text=visible or text,
                         motive="Proactive Chat 即时触发",
                         action_summary="外部主动插件已完成发送",
+                        source="proactive_chat",
                     )
                 topic_recorder = getattr(self, "_remember_proactive_topic", None)
                 if callable(topic_recorder):
@@ -1945,6 +1947,31 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         )
         return "；".join(parts) if parts else "只作为语气底色：整体平稳,不要在正文里汇报状态。"
 
+    def _proactive_expression_shape_hint(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str,
+        action: str,
+    ) -> str:
+        """让当前能量影响表达形状，而不是只影响是否发送。"""
+        state = self.data.get("daily_state", {})
+        energy = _safe_int(state.get("energy"), 70, 0, 100) if isinstance(state, dict) else 70
+        lines = [
+            "【主动消息的表达形状】",
+            "主动消息通常比正式回复更碎、更口语；大多数控制在 20 个汉字左右，能停在半句就不要补成完整段落。",
+            "除非语义确实需要，不要每句都用完整句号收尾；不要为了显得自然而堆叠解释、背景和客套。",
+        ]
+        if energy <= 42:
+            lines.append("当前能量偏低：优先一条短句或一个轻问候，少用感叹号，最多一到两段，不要连续铺陈。")
+        elif energy >= 85:
+            lines.append("当前能量偏高：可以用两三个很短的口语句连着说，允许轻微兴奋感，但不要写成长段独白。")
+        else:
+            lines.append("当前能量平稳：优先一到两句短消息，保留一点停顿和留白，避免客服式完整陈述。")
+        if reason in {"check_in", "quiet_care", "state_share"} and "photo" not in action:
+            lines.append("如果本轮只是想起对方或顺手分享一点感受，低信息量的短句也可以成立；不要为了增加信息而硬塞新事实。")
+        return "\n".join(lines)
+
     def _format_plan_item_for_framework_prompt(self, item: dict[str, Any] | None) -> str:
         if not isinstance(item, dict):
             return ""
@@ -2463,6 +2490,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
 此刻状态：{{state_hint}}。生活片段（只作叙事背景，不等同于已执行事实）：{{current_schedule}}。时段边界：{{time_guard}}。
 最近已经主动聊过：{{recent_topics}}。关系事实：{{relationship_fact}}。
 {{timer_hint}}
+{{expression_shape_hint}}
 
 【先判断，再开口】
 - 从线索中只选一个此刻最真实、最具体、最值得说的切口；无关线索直接忽略。
@@ -2743,6 +2771,27 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         )
         unanswered_count = _safe_int(user.get("ignored_streak"), 0)
         unanswered_hint = f"此前连续 {unanswered_count} 次主动还没等到回复。" if unanswered_count > 0 else ""
+        awaiting_since = _safe_float(user.get("awaiting_reply_since"), 0)
+        unanswered_afterglow_hint = ""
+        if unanswered_count > 0 and awaiting_since > 0:
+            unanswered_afterglow_hint = (
+                "【上一条主动的余波】\n"
+                "上一条主动消息目前还没有收到回应。这只是背景事实，不要求你在正文里点破；"
+                "由你根据当前关系和动机决定是否轻轻带过。若提及，只能像熟人自然察觉到对方沉默，"
+                "不能质问、催促、索取解释或写成‘你怎么不回我’。"
+            )
+        burst_hint = ""
+        if bool(user.get("planned_proactive_burst")):
+            burst_hint = (
+                "【同一阵念头的短连发】\n"
+                "这是同一阵主动念头里的后一条独立消息，不是上一条的分段；换一个更短、更口语的角度，"
+                "不要复述上一条，也不要因此连续追问。"
+            )
+        expression_shape_hint = self._proactive_expression_shape_hint(
+            user,
+            reason=reason,
+            action=action,
+        )
         current_time = self._environment_now().strftime("%Y-%m-%d %H:%M")
         persona = await self._resolve_proactive_persona_prompt(user)
         recent_history_hint = ""
@@ -2799,11 +2848,17 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "{{action_context}}": action_prompt_context if action_prompt_context and action_prompt_context != "（无额外上下文）" else "什么都没做,就是忽然想来找你",
             "{{unanswered_count}}": str(unanswered_count) if unanswered_count > 0 else "",
             "{{unanswered_hint}}": unanswered_hint,
+            "{{unanswered_afterglow_hint}}": unanswered_afterglow_hint,
+            "{{burst_hint}}": burst_hint,
+            "{{expression_shape_hint}}": expression_shape_hint,
             "{{open_loops_hint}}": open_loops_hint,
             "{{current_time}}": current_time,
         }
         for key, value in replacements.items():
             prompt = prompt.replace(key, value)
+        for optional_hint in (unanswered_afterglow_hint, burst_hint, expression_shape_hint):
+            if optional_hint and optional_hint not in prompt:
+                prompt = f"{prompt.rstrip()}\n\n{optional_hint}"
         if location_context and "主动场景位置线索" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{location_context}"
         if reason == "creative_share":
@@ -11557,7 +11612,7 @@ Output:
     ) -> tuple[str, str, str]:
         """Run image generation through the selected backend service."""
         nai_selected = getattr(self, "_nai_image_selected", None)
-        if callable(nai_selected) and nai_selected():
+        if callable(nai_selected) and nai_selected(kwargs.get("workflow_kind", "")):
             nai_bridge = getattr(self, "_nai_image_generate", None)
             if callable(nai_bridge):
                 return await nai_bridge(**kwargs)

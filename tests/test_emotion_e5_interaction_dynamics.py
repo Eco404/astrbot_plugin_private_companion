@@ -119,6 +119,20 @@ class EmotionE5InteractionDynamicsTests(unittest.TestCase):
         self.assertIn(recovered["expression_band"], {"hurt", "avoidant"})
         self.assertEqual("recovering", recovered["recovery_band"])
 
+    def test_positive_expression_advances_one_band_per_event(self) -> None:
+        state: dict = {}
+        observed = []
+        for offset in range(4):
+            state = settle_interaction_dynamics(
+                state,
+                requested_band="affectionate",
+                event_kind="intimacy",
+                intensity=95,
+                now=1000.0 + offset,
+            )
+            observed.append(state["expression_band"])
+        self.assertEqual(["lively", "warm", "close", "affectionate"], observed)
+
     def test_relationship_stage_uses_enter_and_exit_margins(self) -> None:
         self.assertEqual(
             "acquaintance",

@@ -102,6 +102,23 @@ def test_missing_or_mismatched_capability_probe_is_degraded_without_remote_use()
     assert "contract_fingerprint" in status["mismatches"]
 
 
+def test_capability_probe_allows_backward_compatible_superset():
+    class _SupersetBridge(_ProbeBridge):
+        def probe_bot_personal_memory_capabilities(self):
+            result = super().probe_bot_personal_memory_capabilities()
+            result["windows"] = [*result["windows"], "midday_extended"]
+            result["memory_types"] = [*result["memory_types"], "bot_new_optional_type"]
+            result["contract_fingerprint"] = "future-compatible-superset"
+            return result
+
+    plugin = _Plugin(True, False, _SupersetBridge())
+    bridge = plugin._memory_companion_bridge()
+    assert bridge is not None
+    status = plugin._bridge_last_status
+    assert status["state"] == "ready_compatible"
+    assert status["contract_compatibility"] == "superset"
+
+
 def test_bot_personal_sender_passes_registered_producer_capability():
     capability = object()
 

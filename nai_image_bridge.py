@@ -7,53 +7,53 @@ keep their existing delivery contract.
 """
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 from astrbot.api import logger
 
 from .helpers import _single_line
+from .external_bridge_resolver import resolve_external_bridge
 
 
 class NAIImageBridgeMixin:
     def _nai_image_api(self) -> Any | None:
-        module_names = (
-            "data.plugins.astrbot_plugin_nai_image.main",
-            "astrbot_plugin_nai_image.main",
+        return resolve_external_bridge(
+            self,
+            cache_key="nai_image",
+            module_names=(
+                "data.plugins.astrbot_plugin_nai_image.main",
+                "astrbot_plugin_nai_image.main",
+            ),
+            getter_name="get_nai_image_api",
+            star_name="astrbot_plugin_nai_image",
         )
-        suffixes = tuple(name.removeprefix("data.plugins.") for name in module_names)
-        modules = [sys.modules.get(name) for name in module_names]
-        modules.extend(
-            module
-            for name, module in list(sys.modules.items())
-            if module is not None and any(name.endswith(suffix) for suffix in suffixes)
-        )
-        for module in modules:
-            getter = getattr(module, "get_nai_image_api", None) if module is not None else None
-            try:
-                api = getter() if callable(getter) else None
-            except Exception:
-                api = None
-            if api is not None:
-                return api
-        getter = getattr(getattr(self, "context", None), "get_registered_star", None)
-        if callable(getter):
-            try:
-                metadata = getter("astrbot_plugin_nai_image")
-                instance = getattr(metadata, "star_cls", None) if metadata is not None else None
-                api = getattr(instance, "extension_api", None)
-                if api is not None:
-                    return api
-            except Exception:
-                pass
-        return None
 
-    def _nai_image_selected(self) -> bool:
+    def _nai_image_selected(self, operation: str = "") -> bool:
         """Return whether the configured photo backend is the NAI direct link."""
-        return (
+        selected = (
             str(getattr(self, "photo_generation_backend", "") or "").strip().lower()
             == "nai"
         )
+        if not selected:
+            return False
+        image_api_getter = getattr(self, "_image_companion_api", None)
+        try:
+            image_api = image_api_getter() if callable(image_api_getter) else None
+            claims = getattr(image_api, "claims_model_profile", None)
+            if callable(claims):
+                claimed = (
+                    claims("nai", operation=str(operation or "").strip().lower())
+                    if str(operation or "").strip()
+                    else claims("nai")
+                )
+                if claimed:
+                    return False
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 查询统一 NAI 路线所有权失败，保留官方直连: error=%s",
+                _single_line(exc, 120),
+            )
+        return True
 
     def _nai_image_status(self) -> dict[str, Any]:
         api = self._nai_image_api()

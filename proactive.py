@@ -2576,6 +2576,97 @@ class ProactiveMixin(UserRestGateMixin):
             return tune((0.5, 1.6))
         return tune((0.9, 2.4))
 
+    def _proactive_hour_activity_weights(self) -> list[float]:
+        raw = getattr(self, "proactive_hour_activity_curve", "")
+        values = list(raw) if isinstance(raw, (list, tuple)) else str(raw or "").replace("，", ",").split(",")
+        parsed: list[float] = []
+        for value in values[:24]:
+            try:
+                parsed.append(max(0.05, min(2.0, float(value))))
+            except (TypeError, ValueError):
+                parsed.append(1.0)
+        if len(parsed) != 24:
+            parsed = [0.22, 0.16, 0.12, 0.10, 0.10, 0.14, 0.28, 0.50, 0.66, 0.72, 0.78, 0.92, 1.0, 0.94, 0.82, 0.74, 0.78, 0.92, 1.0, 0.98, 0.88, 0.70, 0.48, 0.32]
+        return parsed
+
+    def _sample_proactive_timestamp(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float,
+        delay_hours: tuple[float, float],
+        reason: str = "",
+    ) -> float:
+        """Sample future slots by activity preference instead of uniform wall time."""
+        low = max(0.05, _safe_float(delay_hours[0], 0.25, 0.05))
+        high = max(low + 0.05, _safe_float(delay_hours[1], low + 0.5, low + 0.05))
+        start = now + low * 3600
+        end = now + high * 3600
+        weights = self._proactive_hour_activity_weights()
+        slots: list[tuple[float, float]] = []
+        slot = math.ceil(start / 1800.0) * 1800.0
+        while slot <= end and len(slots) < 160:
+            local = self._environment_fromtimestamp(slot)
+            slots.append((slot, weights[local.hour]))
+            slot += 1800.0
+        if not slots:
+            return now + random.uniform(low, high) * 3600
+        return random.choices([item[0] for item in slots], weights=[item[1] for item in slots], k=1)[0]
+
+    def _maybe_schedule_proactive_burst(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float,
+        reason: str,
+        source: str,
+        action: str,
+        motive: str,
+        topic: str,
+    ) -> bool:
+        if not bool(getattr(self, "enable_proactive_burst", False)) or bool(user.get("planned_proactive_burst")):
+            return False
+        if source in {"timer", "troubleshooting", "simulation", "weather_alert", "body_monitor", "environment_change"}:
+            return False
+        if reason in {"open_loop_followup", "activity_followup", "goodnight_screen_check"}:
+            return False
+        limit = self._effective_user_daily_limit(user)
+        if limit <= 0 or _safe_int(user.get("sent_today"), 0, 0) + 1 >= limit:
+            return False
+        max_messages_getter = getattr(self, "_proactive_burst_max_messages", None)
+        max_messages = (
+            max_messages_getter()
+            if callable(max_messages_getter)
+            else _safe_int(getattr(self, "proactive_burst_max_messages", 2), 2, 2, 3)
+        )
+        current_index = _safe_int(user.get("proactive_burst_index"), 0, 0, max_messages)
+        if current_index + 1 >= max_messages:
+            return False
+        low = max(10, _safe_int(getattr(self, "proactive_burst_gap_min_seconds", 45), 45, 10, 600))
+        high = max(low, _safe_int(getattr(self, "proactive_burst_gap_max_seconds", 180), 180, low, 900))
+        scheduled = now + random.uniform(low, high)
+        user["next_proactive_at"] = scheduled
+        user["planned_proactive_burst"] = True
+        user["proactive_burst_index"] = current_index + 1
+        user["proactive_burst_origin_id"] = _single_line(user.get("planned_proactive_impulse_id"), 20)
+        user["planned_proactive_source"] = _single_line(source, 40) or "proactive"
+        user["planned_proactive_reason"] = _single_line(reason, 40) or "check_in"
+        user["planned_proactive_action"] = _single_line(action, 40) or "message"
+        user["planned_proactive_topic"] = _single_line(topic, 80)
+        burst_motive = f"{motive}；这是同一阵念头里的第{current_index + 2}条短消息，换一个角度，不重复上一条。"
+        normalizer = getattr(self, "_normalize_internal_motive_text", None)
+        normalized_burst_motive = normalizer(burst_motive) if callable(normalizer) else burst_motive
+        user["planned_proactive_motive"] = _single_line(normalized_burst_motive, 180)
+        active_span, grace_span = self._proactive_impulse_default_window_seconds(reason, source=source)
+        user["planned_proactive_window_start_at"] = scheduled
+        user["planned_proactive_best_until_at"] = scheduled + min(active_span, 20 * 60)
+        user["planned_proactive_expire_at"] = scheduled + min(grace_span, 45 * 60)
+        user["planned_proactive_delivery_state"] = "burst"
+        return True
+
+    def _proactive_burst_max_messages(self) -> int:
+        return _safe_int(getattr(self, "proactive_burst_max_messages", 2), 2, 2, 3)
+
     def _friend_proactive_spread_delay_hours(
         self,
         user: dict[str, Any],
@@ -2969,6 +3060,7 @@ class ProactiveMixin(UserRestGateMixin):
         queued = 0
         event_sources = (
             ("pending_followup", self._pick_pending_followup_event(user, now)),
+            ("open_loop", self._pick_open_loop_followup_event(user, now)),
             ("birthday_celebration", self._pick_birthday_celebration_event(user, now)),
             ("meal_care", self._pick_meal_care_event(user, now=now)),
             ("daily_greeting", self._pick_daily_greeting_event(user, now)),
@@ -3114,7 +3206,12 @@ class ProactiveMixin(UserRestGateMixin):
             motive=motive,
             planned_event=None,
         )
-        scheduled = now + random.uniform(delay_hours[0] * 3600, delay_hours[1] * 3600)
+        scheduled = self._sample_proactive_timestamp(
+            user,
+            now=now,
+            delay_hours=delay_hours,
+            reason=reason,
+        )
         scheduled = self._move_timestamp_into_reason_window(scheduled, reason)
         topic = self._choose_proactive_topic(reason, user)
         emotion_adjustment = self._apply_emotion_to_planned_proactive(
@@ -3424,6 +3521,9 @@ class ProactiveMixin(UserRestGateMixin):
         user["planned_proactive_route_allow_automatic_followup"] = False
         user["planned_proactive_route_disable_segmenting"] = False
         user["planned_proactive_response_expectation"] = ""
+        user["planned_proactive_burst"] = False
+        user["proactive_burst_index"] = 0
+        user["proactive_burst_origin_id"] = ""
         user["planned_proactive_origin_event_id"] = ""
         user["planned_proactive_route_preflight_action"] = ""
         user["planned_proactive_route_preflight_note"] = ""

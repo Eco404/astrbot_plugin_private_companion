@@ -241,6 +241,17 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.check_interval_seconds = self._cfg_int(c, "check_interval_seconds", 60, 30)
     self.idle_minutes = self._cfg_int(c, "idle_minutes", 60, 5)
     self.min_interval_minutes = self._cfg_int(c, "min_interval_minutes", 120, 10)
+    self.enable_proactive_burst = self._cfg_bool(c, "enable_proactive_burst", False)
+    self.proactive_burst_max_messages = self._cfg_int(c, "proactive_burst_max_messages", 2, 2, 3)
+    self.proactive_burst_gap_min_seconds = self._cfg_int(c, "proactive_burst_gap_min_seconds", 45, 10, 600)
+    self.proactive_burst_gap_max_seconds = self._cfg_int(c, "proactive_burst_gap_max_seconds", 180, 20, 900)
+    if self.proactive_burst_gap_max_seconds < self.proactive_burst_gap_min_seconds:
+        self.proactive_burst_gap_max_seconds = self.proactive_burst_gap_min_seconds
+    self.proactive_hour_activity_curve = self._cfg_str(
+        c,
+        "proactive_hour_activity_curve",
+        "0.22,0.16,0.12,0.10,0.10,0.14,0.28,0.50,0.66,0.72,0.78,0.92,1.0,0.94,0.82,0.74,0.78,0.92,1.0,0.98,0.88,0.70,0.48,0.32",
+    )
     self.proactive_unanswered_slowdown_start = self._cfg_int(c, "proactive_unanswered_slowdown_start", 1, 1, 10)
     self.proactive_unanswered_max_interval_multiplier = min(
         8.0,
