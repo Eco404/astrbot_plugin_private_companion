@@ -14647,12 +14647,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return True
 
     def _append_passive_reply_tool_boundary(self, event: AstrMessageEvent, req: ProviderRequest) -> list[str]:
-        """Keep ordinary inbound replies on the direct assistant-response path.
+        """Guide ordinary replies without removing AstrBot's media sender.
 
-        AstrBot may emit assistant text before executing a tool call. The generic
-        same-session sender is unnecessary for passive replies and can therefore
-        turn an empty tool retry into a duplicate visible message. Cron and
-        explicitly external proactive events retain the tool for delivery.
+        Plain text stays on the final assistant-response path so it cannot be
+        delivered twice. The official sender remains available for real files,
+        images, records and videos that the current turn needs to deliver.
         """
         if req is None:
             return []
@@ -14674,42 +14673,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         prompt = str(getattr(req, "system_prompt", "") or "")
         instruction = (
             "【当前会话回复边界】这是普通私聊或群聊的被动回复。请直接输出一次最终正文；"
-            "不要调用 `send_message_to_user` 给当前会话发文字，也不要在工具调用后重复输出同一正文。"
-            "该工具已从本次请求中移除；即使历史消息里出现过它，也不要调用、补写或猜测该工具调用。"
+            "普通文字不要调用 `send_message_to_user`，同一正文也不要在工具调用后再次输出。"
+            "只有本轮确实需要投递已经存在、且带有真实 path 或 url 的图片、音频、视频或文件时，"
+            "才可使用该官方工具；messages 至少包含一个非 plain 媒体组件。"
+            "媒体消息中的 plain 只写必要附言，工具调用后不要重复输出附言或发送结果。"
+            "不要猜测文件路径，也不要把该工具当成生成、搜索或读取文件的能力。"
             "需要跨会话主动发送时，使用 PrivateCompanion 专用发送工具；官方 Cron 任务不受此边界影响。"
         )
         if marker not in prompt and hasattr(req, "system_prompt"):
             req.system_prompt = f"{prompt}\n\n{marker}\n{instruction}".strip()
-
-        tool_set = getattr(req, "func_tool", None)
-        if tool_set is None:
-            return []
-        names = set(self._tool_set_tool_names(tool_set))
-        if "send_message_to_user" not in names and not self._tool_set_has_named_tool(tool_set, "send_message_to_user"):
-            return []
-        remove_tool = getattr(tool_set, "remove_tool", None)
-        try:
-            if callable(remove_tool):
-                remove_tool("send_message_to_user")
-            elif isinstance(getattr(tool_set, "tools", None), list):
-                tool_set.tools = [
-                    tool
-                    for tool in tool_set.tools
-                    if _single_line(getattr(tool, "name", ""), 120) != "send_message_to_user"
-                ]
-            else:
-                return []
-        except Exception as exc:
-            logger.debug(
-                "[PrivateCompanion] 被动回复移除 send_message_to_user 失败: %s",
-                _single_line(exc, 160),
-            )
-            return []
-        logger.info(
-            "[PrivateCompanion] 已为被动回复关闭当前会话 send_message_to_user: session=%s",
-            umo,
-        )
-        return ["send_message_to_user"]
+            if self._tool_set_has_named_tool(getattr(req, "func_tool", None), "send_message_to_user"):
+                logger.info(
+                    "[PrivateCompanion] 已约束被动回复的 send_message_to_user 仅用于媒体投递: session=%s",
+                    umo,
+                )
+        return []
 
     def _finalize_passive_reply_tool_boundary(self, event: AstrMessageEvent) -> list[str]:
         if not bool(getattr(event, "_private_companion_passive_reply_tool_boundary", False)):

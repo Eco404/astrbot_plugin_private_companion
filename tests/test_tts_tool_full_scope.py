@@ -85,7 +85,7 @@ class _CronEvent:
 
 
 class TtsToolFullScopeTests(unittest.IsolatedAsyncioTestCase):
-    def test_passive_reply_boundary_removes_sender_added_after_request_hook(self):
+    def test_passive_reply_boundary_keeps_sender_added_after_request_hook_for_media(self):
         harness = _PassiveBoundaryHarness()
         initial_req = SimpleNamespace(func_tool=_ToolSet("pc_manage_memo"), system_prompt="原提示")
         final_req = SimpleNamespace(
@@ -104,10 +104,13 @@ class TtsToolFullScopeTests(unittest.IsolatedAsyncioTestCase):
 
         removed = harness._finalize_passive_reply_tool_boundary(event)
 
-        self.assertEqual(["send_message_to_user"], removed)
-        self.assertEqual(["pc_manage_memo"], [tool.name for tool in final_req.func_tool.tools])
+        self.assertEqual([], removed)
+        self.assertEqual(
+            ["send_message_to_user", "pc_manage_memo"],
+            [tool.name for tool in final_req.func_tool.tools],
+        )
 
-    def test_passive_reply_boundary_removes_current_session_sender(self):
+    def test_passive_reply_boundary_keeps_current_session_sender_for_media(self):
         harness = _PassiveBoundaryHarness()
         event = SimpleNamespace(unified_msg_origin="default:GroupMessage:10001")
         req = SimpleNamespace(
@@ -117,11 +120,14 @@ class TtsToolFullScopeTests(unittest.IsolatedAsyncioTestCase):
 
         removed = harness._append_passive_reply_tool_boundary(event, req)
 
-        self.assertEqual(["send_message_to_user"], removed)
-        self.assertEqual(["pc_manage_memo"], [tool.name for tool in req.func_tool.tools])
+        self.assertEqual([], removed)
+        self.assertEqual(
+            ["send_message_to_user", "pc_manage_memo"],
+            [tool.name for tool in req.func_tool.tools],
+        )
         self.assertIn("直接输出一次最终正文", req.system_prompt)
-        self.assertIn("该工具已从本次请求中移除", req.system_prompt)
-        self.assertIn("即使历史消息里出现过它", req.system_prompt)
+        self.assertIn("已经存在、且带有真实 path 或 url", req.system_prompt)
+        self.assertIn("messages 至少包含一个非 plain 媒体组件", req.system_prompt)
 
     def test_passive_reply_boundary_keeps_official_cron_sender(self):
         harness = _PassiveBoundaryHarness()
@@ -285,6 +291,24 @@ class TtsToolFullScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("deferred", result)
         platform_send.assert_not_awaited()
         self.assertEqual(event._private_companion_same_session_tool_text, "只发一次。")
+
+    async def test_same_session_file_tool_send_is_left_for_framework_delivery(self):
+        harness = _ToolHarness()
+        event = SimpleNamespace(unified_msg_origin="default:FriendMessage:10001")
+        context = SimpleNamespace(context=SimpleNamespace(event=event))
+        kwargs = {
+            "messages": [
+                {"type": "plain", "text": "文件在这里。"},
+                {"type": "file", "path": "/tmp/report.txt", "text": "report.txt"},
+            ]
+        }
+
+        result = await harness._send_message_to_user_tool_with_tts_processing(
+            SimpleNamespace(), context, kwargs
+        )
+
+        self.assertIsNone(result)
+        self.assertFalse(hasattr(event, "_private_companion_same_session_tool_pending"))
 
     async def test_tool_call_intermediate_text_is_hidden_and_restored_once_as_final(self):
         harness = _ResponseHarness()
