@@ -156,7 +156,7 @@ async def test_split_runtime_accepts_image_service_reference_catalog(
     service = _image_service(
         image_data_dir,
         settings={"photo_reference_catalog": _reference_catalog()},
-        reuse_private_companion_assets=False,
+        reuse_private_companion_assets=True,
     )
     owner = SimpleNamespace(
         context=None,
@@ -181,6 +181,7 @@ async def test_split_runtime_accepts_image_service_reference_catalog(
         isinstance(item, ImagePhotoReference)
         for item in runtime.photo_reference_catalog
     )
+    assert Path(runtime.data_dir) == private_data_dir
     assert set(by_id) == {"persona", "sleepwear"}
     assert Path(by_id["persona"]["path"]) == (image_data_dir / "persona.png").resolve()
     assert (
@@ -325,11 +326,15 @@ async def test_split_runtime_does_not_write_service_catalog_to_owner(
     image_data_dir = tmp_path / "image"
     private_data_dir.mkdir()
     image_data_dir.mkdir()
-    stable_persona_path = image_data_dir / "cached-persona.png"
+    image_reference_dir = image_data_dir / "photo_reference_images"
+    image_reference_dir.mkdir()
+    stable_persona_path = image_reference_dir / "cached-persona.png"
     stable_persona_path.write_bytes(b"png")
-    stable_path = image_data_dir / "cached-sleepwear.png"
+    stable_path = image_reference_dir / "cached-sleepwear.png"
     stable_path.write_bytes(b"png")
     owner_writes: list[object] = []
+    service_writes: list[object] = []
+    resolve_calls: list[str] = []
 
     async def save_owner_catalog(payload) -> bool:
         owner_writes.append(("catalog", payload))
@@ -338,6 +343,20 @@ async def test_split_runtime_does_not_write_service_catalog_to_owner(
     async def save_owner_persona(path) -> bool:
         owner_writes.append(("persona", path))
         return True
+
+    async def persist_remote(
+        _source: str,
+        target_dir: Path,
+        stem: str,
+        **_kwargs,
+    ) -> str:
+        resolve_calls.append(stem)
+        assert Path(target_dir).resolve() == image_reference_dir.resolve()
+        return str(
+            stable_persona_path
+            if stem.startswith("config_url_reference")
+            else stable_path
+        )
 
     service = _image_service(
         image_data_dir,
@@ -349,6 +368,17 @@ async def test_split_runtime_does_not_write_service_catalog_to_owner(
         },
         reuse_private_companion_assets=False,
     )
+
+    async def save_service_catalog(payload) -> bool:
+        service_writes.append(("catalog", payload))
+        return True
+
+    async def save_service_persona(path) -> bool:
+        service_writes.append(("persona", path))
+        return True
+
+    service._set_photo_reference_catalog_config = save_service_catalog
+    service._set_photo_reference_config_path = save_service_persona
     owner = SimpleNamespace(
         context=None,
         data_dir=str(private_data_dir),
@@ -358,31 +388,32 @@ async def test_split_runtime_does_not_write_service_catalog_to_owner(
         photo_reference_catalog=None,
         _set_photo_reference_catalog_config=save_owner_catalog,
         _set_photo_reference_config_path=save_owner_persona,
+        _persist_private_remote_image_source=persist_remote,
     )
     runtime = ImageGenerationRuntime(service, owner)
     _isolate_reference_candidates(runtime, monkeypatch)
 
-    async def resolve_remote(_source: str, *, stem: str) -> str:
-        return str(
-            stable_persona_path if stem == "config_url_reference" else stable_path
-        )
-
-    monkeypatch.setattr(
-        runtime,
-        "_photo_reference_source_to_stable_path",
-        resolve_remote,
-        raising=False,
-    )
-
     candidates = await runtime._photo_reference_candidates_async(
+        allow_daily_outfit=False,
+    )
+    cached_candidates = await runtime._photo_reference_candidates_async(
         allow_daily_outfit=False,
     )
 
     assert owner_writes == []
+    assert [kind for kind, _payload in service_writes] == ["catalog", "persona"]
+    catalog_payload = service_writes[0][1]
+    persisted = {
+        item["id"]: item for item in catalog_payload if isinstance(item, dict)
+    }
+    assert persisted["sleepwear"]["source"] == str(stable_path)
+    assert service_writes[1] == ("persona", str(stable_persona_path))
+    assert resolve_calls == ["sleepwear_remote", "config_url_reference_remote"]
     persona_candidate = next(item for item in candidates if item["id"] == "persona")
     assert Path(persona_candidate["path"]) == stable_persona_path.resolve()
     candidate = next(item for item in candidates if item["id"] == "sleepwear")
     assert Path(candidate["path"]) == stable_path.resolve()
+    assert {item["id"] for item in cached_candidates} == {"persona", "sleepwear"}
 
 
 @pytest.mark.asyncio
