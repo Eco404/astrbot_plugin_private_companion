@@ -511,6 +511,10 @@ class PrivateCompanionExtensionAPI:
             }
         )
 
+    async def notify_mobile_location_update(self, user_id: str) -> dict[str, Any]:
+        """Let the mobile gateway wake location-aware proactive planning promptly."""
+        return await self._plugin._handle_mobile_location_update(user_id)
+
     def get_reality_touch_host_context(self, user_id: str) -> dict[str, Any]:
         """Expose bounded identity and relationship context to the device plugin."""
         plugin = self._plugin

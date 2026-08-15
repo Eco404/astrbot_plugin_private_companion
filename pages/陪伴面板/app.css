@@ -32128,14 +32128,16 @@ pre {
 .extension-migration-list a:hover { text-decoration: underline; }
 .extension-migration-footnote { margin: 0; color: var(--ortto-muted); font-size: 12px; line-height: 1.7; }
 .extension-migration-dialog footer { align-items: center; gap: 8px; }
-.extension-migration-dismiss { display: inline-flex !important; grid-auto-flow: column; grid-template-columns: auto auto; align-items: center; gap: 7px !important; margin-right: auto; color: var(--ortto-muted) !important; font-size: 12px !important; font-weight: 600 !important; cursor: pointer; }
-.extension-migration-dismiss input { width: 15px; height: 15px; accent-color: var(--ortto-blue, #2459de); }
+.extension-migration-reminder-choice { display: inline-flex; align-items: center; gap: 10px; margin: 0 auto 0 0; padding: 0; border: 0; color: var(--ortto-muted); font-size: 12px; font-weight: 600; }
+.extension-migration-reminder-choice legend { margin-right: 2px; padding: 0; color: var(--ortto-ink); font-size: 12px; font-weight: 700; }
+.extension-migration-reminder-choice label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.extension-migration-reminder-choice input { width: 15px; height: 15px; margin: 0; accent-color: var(--ortto-blue, #2459de); }
 
 @media (max-width: 560px) {
   .extension-migration-list li { align-items: flex-start; flex-direction: column; gap: 8px; }
   .extension-migration-list a { white-space: normal; }
   .extension-migration-dialog footer { align-items: stretch; flex-wrap: wrap; }
-  .extension-migration-dismiss { width: 100%; margin-right: 0; }
+  .extension-migration-reminder-choice { width: 100%; margin-right: 0; }
   .extension-migration-dialog footer button { flex: 1 1 120px; }
 }
 

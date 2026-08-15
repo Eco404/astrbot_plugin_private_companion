@@ -43,6 +43,15 @@ class ExternalAbilityControlsUiTests(unittest.TestCase):
         self.assertEqual(self.css, self.localized_css)
         self.assertEqual(self.html, self.localized_html)
 
+    def test_extension_migration_notice_has_explicit_reminder_choice(self) -> None:
+        for source in (self.script, self.localized_script):
+            self.assertIn('input[name=extension_migration_reminder]:checked', source)
+            self.assertIn('selected !== "never"', source)
+        for source in (self.html, self.localized_html):
+            self.assertIn('value="remind" checked', source)
+            self.assertIn('value="never"', source)
+            self.assertIn("后续提示", source)
+
     def test_content_extension_owns_legacy_qzone_and_bookshelf_entrypoints(self) -> None:
         for source in (self.script, self.localized_script):
             self.assertIn("if (qzoneTab) qzoneTab.hidden = linked;", source)

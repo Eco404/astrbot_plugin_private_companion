@@ -6791,8 +6791,8 @@ async function loadUserGroupLists(requestSeq = loadAllRequestSeq, options = {}) 
 
 function persistExtensionMigrationNoticePreference() {
   const dialog = $("#extensionMigrationNoticeDialog");
-  const checkbox = dialog?.querySelector("[data-extension-migration-dismiss]");
-  if (!checkbox?.checked) return;
+  const selected = dialog?.querySelector("input[name=extension_migration_reminder]:checked")?.value;
+  if (selected !== "never") return;
   try {
     window.localStorage.setItem(EXTENSION_MIGRATION_NOTICE_STORAGE_KEY, "1");
   } catch (_error) {
@@ -6823,6 +6823,10 @@ function openExtensionMigrationNoticeIfNeeded() {
   } catch (_error) {
     // Continue with an in-session notice when storage is unavailable.
   }
+  const remindChoice = dialog.querySelector('input[name="extension_migration_reminder"][value="remind"]');
+  if (remindChoice) remindChoice.checked = true;
+  const neverChoice = dialog.querySelector('input[name="extension_migration_reminder"][value="never"]');
+  if (neverChoice) neverChoice.checked = false;
   if (dialog.open) return;
   if (typeof dialog.showModal === "function") dialog.showModal();
   else dialog.setAttribute("open", "");

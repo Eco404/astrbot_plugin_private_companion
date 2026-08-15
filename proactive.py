@@ -3653,7 +3653,12 @@ class ProactiveMixin(UserRestGateMixin):
             and bool(user.get("enabled", True))
         ]
 
-    async def _mobile_location_watch_once(self, *, now: float | None = None) -> bool:
+    async def _mobile_location_watch_once(
+        self,
+        *,
+        now: float | None = None,
+        user_ids: set[str] | None = None,
+    ) -> bool:
         api_getter = getattr(self, "_reality_companion_api", None)
         if callable(api_getter) and api_getter() is None:
             return False
@@ -3664,7 +3669,10 @@ class ProactiveMixin(UserRestGateMixin):
         check_now = _now_ts() if now is None else now
         triggered = False
         changed = False
-        for user_id in self._mobile_location_watch_user_ids():
+        watched_user_ids = self._mobile_location_watch_user_ids()
+        if user_ids is not None:
+            watched_user_ids = [user_id for user_id in watched_user_ids if user_id in user_ids]
+        for user_id in watched_user_ids:
             users = self.data.get("users") if isinstance(getattr(self, "data", None), dict) else {}
             user = users.get(user_id) if isinstance(users, dict) else None
             if not isinstance(user, dict) and callable(user_getter):
@@ -3719,6 +3727,21 @@ class ProactiveMixin(UserRestGateMixin):
             if callable(kicker):
                 await kicker()
         return triggered
+
+    async def _handle_mobile_location_update(self, user_id: Any) -> dict[str, Any]:
+        """Process one gateway location event without trusting it as a send command."""
+        normalized = _single_line(user_id, 120)
+        if not normalized:
+            return {"handled": False, "reason": "user_missing"}
+        try:
+            triggered = await self._mobile_location_watch_once(
+                now=_now_ts(),
+                user_ids={normalized},
+            )
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 手机位置事件处理暂时失败: %s", _single_line(exc, 160))
+            return {"handled": False, "reason": "watch_failed"}
+        return {"handled": True, "triggered": bool(triggered)}
 
     async def _mobile_location_watch_loop(self):
         while not self._stop_event.is_set():

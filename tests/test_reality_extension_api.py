@@ -42,6 +42,18 @@ def test_reality_extension_api_recognizes_configured_primary_targets() -> None:
     assert target["eligible"] is True
 
 
+def test_reality_extension_api_forwards_mobile_location_updates() -> None:
+    class Host(_Host):
+        async def _handle_mobile_location_update(self, user_id: str) -> dict:
+            return {"handled": user_id == "target-1"}
+
+    api = PrivateCompanionExtensionAPI(Host())
+
+    result = asyncio.run(api.notify_mobile_location_update("target-1"))
+
+    assert result == {"handled": True}
+
+
 class _RecordingHost(RealityCompanionBridgeMixin):
     def __init__(self) -> None:
         self.data = {"users": {"u": {"user_id": "u"}}}

@@ -96,7 +96,7 @@
       to { opacity: 1; transform: scaleX(1); transform-origin: left; }
     }
   </style>
-  <link rel="stylesheet" href="./app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1&amp;touch=reality-official-reminder-v3&amp;migration-notice=v2&amp;component-order=v1" />
+  <link rel="stylesheet" href="./app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1&amp;touch=reality-official-reminder-v3&amp;migration-notice=v2&amp;component-order=v1&amp;release=6.2.4" />
   <!-- Keep the structured roleplay form readable while a WebUI asset is being refreshed. -->
   <style id="roleplay-layout-fallback">
     .roleplay-form,
@@ -852,7 +852,11 @@ QQ空间 = 公开札记
             </ul>
             <p class="extension-migration-footnote">安装对应插件后，依旧建议在陪伴插件的拓展页进行操作。旧配置和用户数据不会被删除，更新后请重启 AstrBot。</p>
             <footer>
-              <label class="extension-migration-dismiss"><input type="checkbox" data-extension-migration-dismiss /> 不再提示</label>
+              <fieldset class="extension-migration-reminder-choice" aria-label="后续提示方式">
+                <legend>后续提示</legend>
+                <label><input type="radio" name="extension_migration_reminder" value="remind" checked /> 继续提醒</label>
+                <label><input type="radio" name="extension_migration_reminder" value="never" /> 不再提醒</label>
+              </fieldset>
               <button type="button" class="secondary-button" data-extension-migration-close>稍后处理</button>
               <button type="submit" class="primary-button">知道了</button>
             </footer>
@@ -1952,6 +1956,6 @@ QQ空间 = 公开札记
   <!-- Loaded on demand by app.js through AstrBot's relative dynamic-import rewriting:
        ./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1&amp;manual=provider-input-v2
        ./js/panels/qzone-panel.js?v=20260810-qzone-classic-loader-v1 -->
-  <script src="./app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2&amp;page=lazy-classic-loader-v1&amp;scope=photo-scope-quota-v1&amp;touch=reality-official-reminder-v3&amp;memory-source=memory-companion-v2&amp;user-create=profile-v1&amp;relationship-role-photo=pr125-v1&amp;camera-runtime-scope=v1&amp;config=config-lifecycle-v1&amp;troubleshooting=diagnostic-category-label-v1&amp;content-visibility=v1&amp;migration-notice=v3&amp;component-order=v1"></script>
+  <script src="./app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2&amp;page=lazy-classic-loader-v1&amp;scope=photo-scope-quota-v1&amp;touch=reality-official-reminder-v3&amp;memory-source=memory-companion-v2&amp;user-create=profile-v1&amp;relationship-role-photo=pr125-v1&amp;camera-runtime-scope=v1&amp;config=config-lifecycle-v1&amp;troubleshooting=diagnostic-category-label-v1&amp;content-visibility=v1&amp;migration-notice=v3&amp;component-order=v1&amp;release=6.2.4"></script>
 </body>
 </html>
