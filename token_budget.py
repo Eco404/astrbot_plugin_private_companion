@@ -1547,17 +1547,22 @@ class TokenBudgetMixin:
         if not strict_provider and callable(peak_router) and (str(provider_id or "").strip() or str(getattr(self, "llm_provider_id", "") or "").strip()):
             selected_provider = peak_router(selected_provider)
         task_key = _single_line(task, 40) or self._classify_llm_prompt(prompt)
+        usage_prompt = (
+            f"{str(system_prompt or '').strip()}\n\n{str(prompt or '').strip()}".strip()
+            if str(system_prompt or "").strip()
+            else str(prompt or "")
+        )
         budget_exempt = self._is_llm_budget_exempt_task(task_key)
         if not budget_exempt and self._daily_token_soft_limit_should_defer(task_key):
             self._record_llm_budget_skip(
                 provider_id=selected_provider,
                 task=task_key,
-                prompt=prompt,
+                prompt=usage_prompt,
                 error="daily_token_soft_limit_deferred",
             )
             return None
         if not budget_exempt and self._llm_daily_budget_remaining() == 0:
-            self._record_llm_budget_skip(provider_id=selected_provider, task=task_key, prompt=prompt)
+            self._record_llm_budget_skip(provider_id=selected_provider, task=task_key, prompt=usage_prompt)
             return None
         if strict_provider:
             provider_key, fallback_provider = str(timeout_key or task_key), ""
@@ -1623,7 +1628,7 @@ class TokenBudgetMixin:
                             self._record_llm_usage(
                                 provider_id=attempt_provider,
                                 task=task_key,
-                                prompt=prompt,
+                                prompt=usage_prompt,
                                 completion=completion,
                                 elapsed_ms=int((time.time() - start) * 1000),
                                 success=False,
@@ -1651,7 +1656,7 @@ class TokenBudgetMixin:
                         self._record_llm_usage(
                             provider_id=attempt_provider,
                             task=task_key,
-                            prompt=prompt,
+                            prompt=usage_prompt,
                             completion=completion,
                             elapsed_ms=int((time.time() - start) * 1000),
                             success=True,
@@ -1670,7 +1675,7 @@ class TokenBudgetMixin:
                 self._record_llm_usage(
                     provider_id=attempt_provider,
                     task=task_key,
-                    prompt=prompt,
+                    prompt=usage_prompt,
                     completion="",
                     elapsed_ms=int((time.time() - start) * 1000),
                     success=False,
@@ -1690,7 +1695,7 @@ class TokenBudgetMixin:
                 self._record_llm_usage(
                     provider_id=attempt_provider,
                     task=task_key,
-                    prompt=prompt,
+                    prompt=usage_prompt,
                     completion="",
                     elapsed_ms=int((time.time() - start) * 1000),
                     success=False,

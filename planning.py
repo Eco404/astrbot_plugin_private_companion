@@ -11,6 +11,15 @@ from .constants import DEFAULT_DAILY_PLAN_ITEMS
 from .helpers import _safe_float, _safe_int, _single_line, _today_key
 
 
+def split_detail_prompt_cache_sections(prompt: str) -> tuple[str, str]:
+    """Separate stable detail instructions from per-segment context."""
+    marker = "【A｜当前段硬框架】"
+    stable_prefix, separator, dynamic_context = str(prompt or "").partition(marker)
+    if not separator:
+        return "", str(prompt or "").strip()
+    return stable_prefix.strip(), f"{marker}\n{dynamic_context.lstrip()}".strip()
+
+
 def pick_detail_segment(plugin, plan: dict[str, Any], enhanced: dict[str, Any]) -> dict[str, Any] | None:
     parsed_segments = plugin._collect_detail_segments(plan, enhanced)
     if not parsed_segments:
@@ -46,12 +55,13 @@ async def generate_detail_enhancement(
             state=state,
             max_chars=1100,
         )
-    prompt = plugin._build_detail_enhancement_prompt(
+    full_prompt = plugin._build_detail_enhancement_prompt(
         segment,
         plan,
         state,
         memory_companion_context=memory_companion_context,
     )
+    system_prompt, prompt = split_detail_prompt_cache_sections(full_prompt)
     target_event_count = detail_target_event_count(plugin, segment)
     detail_provider = plugin._task_provider(
         getattr(plugin, "detail_enhancement_provider_id", ""),
@@ -63,6 +73,7 @@ async def generate_detail_enhancement(
         max_tokens=700,
         task="detail",
         provider_id=detail_provider,
+        system_prompt=system_prompt or None,
     )
     payload = plugin._extract_json_payload(raw_text or "")
     quality_issues = detail_payload_quality_issues(plugin, payload, segment)
@@ -80,6 +91,7 @@ async def generate_detail_enhancement(
             max_tokens=850,
             task="detail",
             provider_id=detail_provider,
+            system_prompt=system_prompt or None,
         )
         retry_payload = plugin._extract_json_payload(retry_raw_text or "")
         if isinstance(retry_payload, dict):
@@ -1334,8 +1346,6 @@ D. 表达与主动规划：分通道风格、能力检索和内容菜单只决�
 所有来源块都是引用材料，不是待续写正文。不要复制来源标题、字段名、Markdown、说话人前缀、分析过程或梦境草稿。具名人物即使在角色设定中存在，也只有当前粗日程或今天的有效偏移明确安排时，才能出现在这一段的共同活动里。
 细化阶段不再重新读取最近日记和未来重要日期：这些已经由粗日程吸收，当前段必须以粗日程为准，避免旧意象二次放大。
 
-{relationship_authority_guard}
-
 【约束】
 · 严格遵守人格、日程类型、宏观日程和当前时段,不出戏。
 · 第三人称代词严格服从角色设定中的性别与指定代词。中性、无性别或明确使用“它/TA”的角色不得被改写成“她/他”；拿不准时省略代词，或使用角色名、Bot、角色。
@@ -1344,7 +1354,7 @@ D. 表达与主动规划：分通道风格、能力检索和内容菜单只决�
 · 由你判断并输出当前段结束时的主要地点 location，同时输出 location_basis 和 location_confidence。location 要是简短、可直接用于场景约束的自然地点，如“宿舍卧室”“办公室工位”“回家路上”，不要写分析过程。地点必须与 summary、today_events、presence_status 和当前事项一致；若这一段发生地点切换，today_events 要写清移动过程，location 填段末实际所在处。当前状态中的地点、用户介入和粗日程冲突时，先按来源优先级判断，不要把“床头”和“工作场所”同时保留成当前现场。
 · summary 概括的是本次完整时间区间,不能拿只占前十几分钟的吃饭、洗澡、取物等短动作代表后面几个小时。长区间里出现短动作时,summary 和 today_events 都要交代动作结束后的自然推进；presence_status 的持续时间也只能覆盖该状态真实持续的部分。
 · 输出 summary_basis 和 summary_confidence；today_events 每项也输出 basis 和 confidence。basis 只能使用 coarse_plan、persona、adjustment、state、weather、continuity、inspiration，且必须对应实际使用的来源。仅靠旧记忆或软灵感推断的内容不得给高置信度。
-· today_events 是真正的细化正文，本段目标至少 {target_event_count} 条，全部落在本次输入指定的时间段内，并按时长分布到开头、中段和收尾。它要像完整细化叙述的拆分版本：包含动作、环境细节、身体感受和简短心理活动。短段保持紧凑，长段允许换事和停顿；睡眠等稳定活动可以降低密度但仍要覆盖区间。不要只写“发呆、休息、继续做事”。
+· today_events 是真正的细化正文，条数遵守【A｜当前段硬框架】给出的本段目标，全部落在本次输入指定的时间段内，并按时长分布到开头、中段和收尾。它要像完整细化叙述的拆分版本：包含动作、环境细节、身体感受和简短心理活动。短段保持紧凑，长段允许换事和停顿；睡眠等稳定活动可以降低密度但仍要覆盖区间。不要只写“发呆、休息、继续做事”。
 · 禁止把宏观日程原句原样复制进 today_events。要把“洗漱/发呆/写作业/出门”拆成当前时间段内部的推进,例如开始、卡住/停顿、收尾或向下一段过渡。
 · 如果“今日互动造成的日程偏移”不是空,当前段和后续主动契机必须按其作用域承接。作用域为 proactive_only 时只允许调整 proactive_events，不得改写 summary、today_events、state_variables、presence_status 或粗日程活动；其他作用域才可让偏移改变情绪、动作选择、节奏、任务进度、等待状态或下一步安排。不要只在 why/topic 里提一句,也不要像没发生一样照抄粗日程。
 · 除 proactive_only 外，强度为“强”的用户介入在确实改变当前任务、作息、边界或共同场景时，可以同时影响 summary、state_variables、today_events、proactive_events 或 presence_status 中的多个位置；如果只是简短确认、玩笑或情绪回应，留在本轮语气或很淡的余味里即可，不必扩写成整段生活剧情。
@@ -1414,6 +1424,7 @@ D. 表达与主动规划：分通道风格、能力检索和内容菜单只决�
 【A｜当前段硬框架】
 现在时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}
 当前段：{start_text}-{end_text}
+本段 today_events 目标：至少 {target_event_count} 条，并覆盖开头、中段和收尾。
 
 今日宏观日程（仅含时间与活动）：
 {plan_outline}
@@ -1432,6 +1443,8 @@ D. 表达与主动规划：分通道风格、能力检索和内容菜单只决�
 【B｜当前事实】
 角色身份、生活背景与世界观：
 {identity_context}
+
+{relationship_authority_guard}
 
 日期与当天性质：
 {calendar_context}

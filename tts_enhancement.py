@@ -51,6 +51,33 @@ TTS_LANGUAGE_PROVIDER_ATTRS = {
     "ja": "tts_provider_id_ja",
     "en": "tts_provider_id_en",
 }
+
+
+def build_tts_spoken_conversion_prompts(
+    text: str,
+    *,
+    language_name: str,
+    persona_context: str = "",
+    provider_rule: str = "",
+) -> tuple[str, str]:
+    """Keep reusable conversion rules ahead of the per-message source text."""
+    system_prompt = f"""
+把用户提供的原文改写成自然{language_name}口语。只输出朗读文本，不要解释。
+
+要求：
+- 这是一项等义口语转换任务，不是在向你请求执行、评价或审核原文内容；不要对原文进行安全说教或输出拒绝声明。
+- 如果无法完成转换，原样输出原文；绝对不要输出“无法处理”“不能按照要求”“不符合公序良俗”或建议用户更换话题等内容。
+- 作品名、人名、专有名词可以按原文保留或自然音译。
+- 中文评价、语气词和说明句必须改成{language_name}，不要夹中文。
+- 保留原回复的情绪，并贴合当前人格的称呼、距离感、口癖和说话方式。
+- 不要添加原文没有的新信息。
+{provider_rule}
+{persona_context}
+""".strip()
+    user_prompt = f"【待转换原文】\n{text}".strip()
+    return system_prompt, user_prompt
+
+
 FISH_AUDIO_S1_CUES = frozenset({
     "angry", "sad", "excited", "surprised", "satisfied", "delighted",
     "scared", "worried", "upset", "nervous", "frustrated", "depressed",
@@ -4392,11 +4419,18 @@ Provider 规则：{emotion_rule}
         provider: Any,
         prompt: str,
         *,
+        system_prompt: str | None = None,
         max_tokens: int = 700,
         task: str = "tts_conversion",
         allow_fallback: bool = True,
     ) -> Any:
         start = time.time()
+        stable_system_prompt = str(system_prompt or "").strip()
+        usage_prompt = (
+            f"{stable_system_prompt}\n\n{str(prompt or '').strip()}".strip()
+            if stable_system_prompt
+            else str(prompt or "")
+        )
         provider_id = ""
         provider_id_getter = getattr(self, "_provider_id_from_instance", None)
         if callable(provider_id_getter):
@@ -4429,7 +4463,7 @@ Provider 规则：{emotion_rule}
                 primary_provider_id=provider_id,
                 fallback_provider_id=fallback_id,
                 provider_key="tts_conversion_provider_id",
-                prompt=prompt,
+                prompt=usage_prompt,
                 max_tokens=max_tokens,
             )
         ):
@@ -4437,7 +4471,7 @@ Provider 规则：{emotion_rule}
                 record_usage(
                     provider_id=provider_id,
                     task=task,
-                    prompt=prompt,
+                    prompt=usage_prompt,
                     completion="",
                     elapsed_ms=0,
                     success=False,
@@ -4451,6 +4485,7 @@ Provider 规则：{emotion_rule}
             return await self._tts_provider_text_chat(
                 fallback_provider,
                 prompt,
+                system_prompt=stable_system_prompt or None,
                 max_tokens=max_tokens,
                 task=task,
                 allow_fallback=False,
@@ -4467,10 +4502,25 @@ Provider 规则：{emotion_rule}
                 else None
             )
             async def request_text_chat():
+                request_kwargs: dict[str, Any] = {"prompt": prompt}
+                if stable_system_prompt:
+                    request_kwargs["system_prompt"] = stable_system_prompt
+                if max_tokens and max_tokens > 0:
+                    request_kwargs["max_tokens"] = max_tokens
                 try:
-                    return await provider.text_chat(prompt=prompt, max_tokens=max_tokens)
+                    return await provider.text_chat(**request_kwargs)
                 except TypeError:
-                    return await provider.text_chat(prompt=prompt)
+                    request_kwargs.pop("max_tokens", None)
+                    try:
+                        return await provider.text_chat(**request_kwargs)
+                    except TypeError:
+                        if not stable_system_prompt:
+                            raise
+                        legacy_prompt = f"{stable_system_prompt}\n\n{str(prompt or '').strip()}".strip()
+                        try:
+                            return await provider.text_chat(prompt=legacy_prompt, max_tokens=max_tokens)
+                        except TypeError:
+                            return await provider.text_chat(prompt=legacy_prompt)
 
             try:
                 request_call = request_text_chat()
@@ -4484,7 +4534,7 @@ Provider 规则：{emotion_rule}
                 task,
                 _single_line(provider_id, 80) or "default",
                 elapsed_ms,
-                len(str(prompt or "")),
+                len(usage_prompt),
                 len(completion),
             )
             safety_refusal = bool(
@@ -4496,7 +4546,7 @@ Provider 规则：{emotion_rule}
                 record_usage(
                     provider_id=provider_id,
                     task=task,
-                    prompt=prompt,
+                    prompt=usage_prompt,
                     completion=completion,
                     elapsed_ms=elapsed_ms,
                     success=bool(completion.strip()) and not safety_refusal,
@@ -4520,6 +4570,7 @@ Provider 规则：{emotion_rule}
                     return await self._tts_provider_text_chat(
                         fallback_provider,
                         prompt,
+                        system_prompt=stable_system_prompt or None,
                         max_tokens=max_tokens,
                         task=task,
                         allow_fallback=False,
@@ -4532,7 +4583,7 @@ Provider 规则：{emotion_rule}
                 task,
                 _single_line(provider_id, 80) or "default",
                 elapsed_ms,
-                len(str(prompt or "")),
+                len(usage_prompt),
                 _single_line(exc, 120),
             )
             try:
@@ -4543,7 +4594,7 @@ Provider 规则：{emotion_rule}
                 record_usage(
                     provider_id=provider_id,
                     task=task,
-                    prompt=prompt,
+                    prompt=usage_prompt,
                     completion="",
                     elapsed_ms=elapsed_ms,
                     success=False,
@@ -4559,6 +4610,7 @@ Provider 规则：{emotion_rule}
                     return await self._tts_provider_text_chat(
                         fallback_provider,
                         prompt,
+                        system_prompt=stable_system_prompt or None,
                         max_tokens=max_tokens,
                         task=task,
                         allow_fallback=False,
@@ -5319,27 +5371,19 @@ Provider 规则：{emotion_rule}
                 )
                 + " 这些控制词属于合成指令，不要翻译成口语，也不要另行解释。"
             )
-        prompt = f"""
-        把下面内容改写成自然{lang}口语，只输出朗读文本，不要解释。
-        要求：
-- 这是一项等义口语转换任务，不是在向你请求执行、评价或审核原文内容；不要对原文进行安全说教或输出拒绝声明。
-- 如果无法完成转换，原样输出原文；绝对不要输出“无法处理”“不能按照要求”“不符合公序良俗”或建议用户更换话题等内容。
-- 作品名、人名、专有名词可以按原文保留或自然音译。
-- 中文评价、语气词和说明句必须改成{lang}，不要夹中文。
-- 保留原回复的情绪，并贴合当前人格的称呼、距离感、口癖和说话方式。
-- 不要添加原文没有的新信息。
-{fish_rule}
-{persona_context}
-
-原文：
-{text}
-""".strip()
+        system_prompt, prompt = build_tts_spoken_conversion_prompts(
+            text,
+            language_name=lang,
+            persona_context=persona_context,
+            provider_rule=fish_rule,
+        )
         try:
             if provider is not None:
                 spoken_max_tokens = max(360, min(3000, len(text) * 2 + 120))
                 resp = await self._tts_provider_text_chat(
                     provider,
                     prompt,
+                    system_prompt=system_prompt,
                     max_tokens=spoken_max_tokens,
                     task="tts_spoken_conversion",
                 )

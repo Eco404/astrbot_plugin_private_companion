@@ -74,7 +74,9 @@ class _ConversionHarness(_TtsHarness):
         return ""
 
     async def _tts_provider_text_chat(self, provider, prompt: str, **kwargs):
-        self.conversion_prompt = prompt
+        self.conversion_prompt = "\n\n".join(
+            part for part in (str(kwargs.get("system_prompt") or "").strip(), prompt.strip()) if part
+        )
         return type("Response", (), {"completion_text": self.conversion_text})()
 
 

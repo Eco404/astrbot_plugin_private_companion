@@ -130,6 +130,25 @@ class ProviderFallbackTests(unittest.TestCase):
         recent = host.data["token_usage"]["recent"]
         self.assertTrue(any(item["provider"] == "fallback-provider" and item["success"] for item in recent))
 
+    def test_system_prompt_is_included_in_fallback_usage_estimate(self):
+        context = _Context(responses=[_Response("ok")])
+        host = _Host(context=context, provider_id="primary-provider")
+
+        result = asyncio.run(
+            host._llm_call(
+                "dynamic user prompt",
+                system_prompt="stable system prompt",
+                task="detail",
+            )
+        )
+
+        self.assertEqual("ok", result)
+        self.assertEqual("stable system prompt", context.calls[0]["system_prompt"])
+        self.assertEqual(
+            len("stable system prompt\n\ndynamic user prompt"),
+            host.data["token_usage"]["recent"][-1]["prompt_chars"],
+        )
+
 
 class TokenLogBoundaryTests(unittest.TestCase):
     def test_usage_merges_partial_sources_and_provider_aliases(self):

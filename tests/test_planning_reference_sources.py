@@ -16,6 +16,7 @@ from astrbot_plugin_private_companion.planning import (
     evaluate_daily_plan_quality,
     generate_daily_plan,
     normalize_detail_location,
+    split_detail_prompt_cache_sections,
 )
 from astrbot_plugin_private_companion.daily_state import DailyStateMixin
 from astrbot_plugin_private_companion.helpers import _today_key
@@ -358,6 +359,34 @@ class PlanningReferenceSourceTests(unittest.TestCase):
         self.assertIn("location_basis", prompt)
         self.assertIn("地点必须与 summary、today_events、presence_status 和当前事项一致", prompt)
         self.assertIn("新的换装会替换旧换装", prompt)
+
+    def test_detail_prompt_keeps_segment_values_out_of_cache_prefix(self):
+        plan = {
+            "items": [
+                {"time": "08:00", "activity": "吃早饭"},
+                {"time": "09:00", "activity": "整理房间"},
+            ]
+        }
+        first = build_detail_enhancement_prompt(
+            self.plugin,
+            {"start": 8 * 60, "end": 9 * 60, "item": plan["items"][0]},
+            plan,
+            self.plugin.data["daily_state"],
+        )
+        second = build_detail_enhancement_prompt(
+            self.plugin,
+            {"start": 9 * 60, "end": 10 * 60, "item": plan["items"][1]},
+            plan,
+            self.plugin.data["daily_state"],
+        )
+
+        first_system, first_user = split_detail_prompt_cache_sections(first)
+        second_system, second_user = split_detail_prompt_cache_sections(second)
+
+        self.assertEqual(first_system, second_system)
+        self.assertNotIn("08:00-09:00", first_system)
+        self.assertIn("08:00-09:00", first_user)
+        self.assertIn("09:00-10:00", second_user)
 
     def test_detail_prompt_preserves_custom_status_when_sync_is_disabled(self):
         self.plugin.enable_qq_custom_presence_sync = False
