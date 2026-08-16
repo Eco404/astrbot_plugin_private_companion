@@ -13,7 +13,7 @@ _NEGATIVE_TTL = 10.0
 
 
 def _lifecycle_active(api: Any) -> bool:
-    """Return whether an API is still usable without requiring new contracts."""
+    """Return whether an API explicitly reports that its instance has stopped."""
     if api is None:
         return False
     lifecycle = getattr(api, "bridge_lifecycle_status", None)
@@ -22,10 +22,14 @@ def _lifecycle_active(api: Any) -> bool:
             status = lifecycle()
         except Exception:
             return False
-        return isinstance(status, dict) and status.get("active") is True
+        if isinstance(status, dict) and status.get("active") is False:
+            return False
+        if isinstance(status, dict) and status.get("active") is True:
+            return True
 
-    # Older split plugins do not expose a lifecycle probe. Their status DTO is
-    # still enough to avoid calling an instance that is explicitly disabled.
+    # Feature status and lifecycle are different signals. A disabled plugin is
+    # still installed and must remain discoverable so the panel can report and
+    # configure it. Only an explicit active=false marks an old API as stale.
     status_getter = getattr(api, "status", None)
     if callable(status_getter):
         try:
@@ -35,14 +39,53 @@ def _lifecycle_active(api: Any) -> bool:
             # pre-resolver compatibility behavior for those APIs.
             return True
         except Exception:
+            # A broken status payload is reported by the bridge-specific
+            # status call. It must not erase the fact that the API was found.
+            return True
+        if isinstance(status, dict) and status.get("active") is False:
             return False
-        if isinstance(status, dict):
-            if status.get("active") is False or status.get("enabled") is False:
-                return False
     return True
 
 
-def _module_candidates(module_names: tuple[str, ...]) -> list[Any]:
+def _identity_segments(value: Any) -> set[str]:
+    text = str(value or "").strip().casefold().replace("\\", "/")
+    if not text:
+        return set()
+    for separator in ("/", ":"):
+        text = text.replace(separator, ".")
+    return {part.strip().replace("-", "_") for part in text.split(".") if part.strip()}
+
+
+def _metadata_matches_star(metadata: Any, star_name: str) -> bool:
+    expected = str(star_name or "").strip().casefold().replace("-", "_")
+    if not expected:
+        return False
+    values = (
+        getattr(metadata, "name", ""),
+        getattr(metadata, "root_dir_name", ""),
+        getattr(metadata, "module_path", ""),
+        getattr(getattr(metadata, "module", None), "__name__", ""),
+        getattr(getattr(metadata, "module", None), "PLUGIN_NAME", ""),
+        getattr(getattr(metadata, "star_cls", None), "plugin_id", ""),
+        getattr(type(getattr(metadata, "star_cls", None)), "__module__", ""),
+    )
+    return any(expected in _identity_segments(value) for value in values)
+
+
+def _api_from_module(module: Any, getter_name: str) -> Any | None:
+    getter = getattr(module, getter_name, None) if module is not None else None
+    try:
+        return getter() if callable(getter) else None
+    except Exception:
+        return None
+
+
+def _module_candidates(
+    module_names: tuple[str, ...],
+    *,
+    getter_name: str,
+    star_name: str,
+) -> list[Any]:
     suffixes = tuple(name.removeprefix("data.plugins.") for name in module_names)
     candidates: list[Any] = []
     seen: set[int] = set()
@@ -54,9 +97,45 @@ def _module_candidates(module_names: tuple[str, ...]) -> list[Any]:
     for name, module in list(sys.modules.items()):
         if module is None or id(module) in seen:
             continue
-        if any(name.endswith(suffix) for suffix in suffixes):
+        module_identity = getattr(module, "PLUGIN_NAME", "")
+        if (
+            any(name.endswith(suffix) for suffix in suffixes)
+            or str(star_name or "").casefold().replace("-", "_") in _identity_segments(module_identity)
+            or callable(getattr(module, getter_name, None))
+        ):
             candidates.append(module)
             seen.add(id(module))
+    return candidates
+
+
+def _registered_star_candidates(owner: Any, star_name: str) -> list[tuple[Any, bool]]:
+    context = getattr(owner, "context", None)
+    candidates: list[tuple[Any, bool]] = []
+    positions: dict[int, int] = {}
+
+    get_all = getattr(context, "get_all_stars", None)
+    if callable(get_all):
+        try:
+            stars = list(get_all() or [])
+        except Exception:
+            stars = []
+        for metadata in stars:
+            if metadata is not None and id(metadata) not in positions:
+                positions[id(metadata)] = len(candidates)
+                candidates.append((metadata, False))
+
+    get_one = getattr(context, "get_registered_star", None)
+    if callable(get_one):
+        try:
+            metadata = get_one(star_name)
+        except Exception:
+            metadata = None
+        if metadata is not None:
+            position = positions.get(id(metadata))
+            if position is None:
+                candidates.append((metadata, True))
+            else:
+                candidates[position] = (metadata, True)
     return candidates
 
 
@@ -67,24 +146,32 @@ def _uncached_resolve(
     getter_name: str,
     star_name: str,
 ) -> Any | None:
-    for module in _module_candidates(module_names):
-        getter = getattr(module, getter_name, None)
-        try:
-            api = getter() if callable(getter) else None
-        except Exception:
-            api = None
+    # Prefer AstrBot's current registry. A stale module alias may survive a hot
+    # reload, while get_all_stars() points at the active instance and module.
+    for metadata, exact_registry_match in _registered_star_candidates(owner, star_name):
+        if not bool(getattr(metadata, "activated", True)):
+            continue
+        module = getattr(metadata, "module", None)
+        api = _api_from_module(module, getter_name)
+        if api is not None and api is not owner and _lifecycle_active(api):
+            return api
+        if not exact_registry_match and not _metadata_matches_star(metadata, star_name):
+            continue
+        instance = getattr(metadata, "star_cls", None)
+        api = getattr(instance, "extension_api", None) if instance is not None else None
         if api is not None and api is not owner and _lifecycle_active(api):
             return api
 
-    context = getattr(owner, "context", None)
-    getter = getattr(context, "get_registered_star", None)
-    if callable(getter):
-        try:
-            metadata = getter(star_name)
-            instance = getattr(metadata, "star_cls", None) if metadata is not None else None
-            api = getattr(instance, "extension_api", None)
-        except Exception:
-            api = None
+    # Fixed names remain the fast compatibility path. The candidate scan also
+    # accepts the plugin's canonical PLUGIN_NAME or its unique getter, covering
+    # custom directory names and hot-reload module aliases without broad fuzzy
+    # matching against unrelated plugin descriptions.
+    for module in _module_candidates(
+        module_names,
+        getter_name=getter_name,
+        star_name=star_name,
+    ):
+        api = _api_from_module(module, getter_name)
         if api is not None and api is not owner and _lifecycle_active(api):
             return api
     return None
