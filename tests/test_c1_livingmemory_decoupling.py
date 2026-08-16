@@ -184,6 +184,30 @@ def test_bridge_discovery_uses_astrbot_registered_plugin_instance():
     assert presence["display_name"] == "我会牢牢记住你"
 
 
+def test_registered_plugin_wins_over_stale_module_alias(monkeypatch):
+    active_bridge = _ProbeBridge()
+    stale_bridge = object()
+    stale_module = types.ModuleType("data.plugins.astrbot_plugin_memory_companion.main")
+    stale_module.PLUGIN_NAME = "astrbot_plugin_memory_companion"
+    stale_module.get_active_bridge = lambda: stale_bridge
+    monkeypatch.setitem(sys.modules, stale_module.__name__, stale_module)
+
+    metadata = SimpleNamespace(
+        name="astrbot_plugin_memory_companion",
+        display_name="我会牢牢记住你",
+        root_dir_name="astrbot_plugin_remember_you",
+        module_path=stale_module.__name__,
+        module=stale_module,
+        activated=True,
+        star_cls=SimpleNamespace(memory_companion=active_bridge),
+        version="1.7.3",
+    )
+    plugin = _Plugin(True, False, None)
+    plugin.context = SimpleNamespace(get_all_stars=lambda: [metadata])
+
+    assert MemoryCompanionAdapterMixin._memory_companion_bridge_uncached(plugin) is active_bridge
+
+
 def test_legacy_public_bridge_getter_is_supported(monkeypatch):
     bridge = _ProbeBridge()
     module_name = "data.plugins.astrbot_plugin_memory_companion.main"

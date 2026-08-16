@@ -2631,6 +2631,57 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "过程中的执行状态只供系统判断，不需要写进正文。"
         )
 
+    def _format_proactive_future_schedule_hint(self, *, reason: str) -> str:
+        """Expose a small, policy-filtered future schedule hint to select routes."""
+
+        if reason not in {
+            "background_schedule",
+            "activity_share",
+            "diary_share",
+            "state_share",
+            "check_in",
+            "quiet_care",
+        }:
+            return ""
+        disclosure = getattr(self, "_agenda_disclosure_view", None)
+        if not callable(disclosure):
+            return ""
+        try:
+            view = disclosure("future_schedule", max_entries=4)
+        except Exception:
+            return ""
+        entries = view.get("entries", []) if isinstance(view, dict) else getattr(view, "entries", [])
+        if not isinstance(entries, list):
+            return ""
+        lines: list[str] = []
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            phase = str(item.get("temporal_phase") or "").lower()
+            if phase and phase != "future":
+                continue
+            title = _single_line(item.get("title") or item.get("activity"), 80)
+            if not title:
+                continue
+            start = _single_line(item.get("time") or item.get("start_at"), 16)
+            end = _single_line(item.get("end") or item.get("end_at"), 16)
+            if "T" in start:
+                start = start.split("T", 1)[1][:5]
+            if "T" in end:
+                end = end.split("T", 1)[1][:5]
+            clock = f"{start}-{end}" if start and end else start
+            lines.append(f"- {clock + ' ' if clock else ''}{title}")
+            if len(lines) >= 2:
+                break
+        if not lines:
+            return ""
+        return (
+            "【接下来可参考的日程】\n"
+            "以下内容已通过日程披露层筛选，只是未来安排，不是已经发生的事实。"
+            "如果和本轮动机自然贴合，可以像顺口提到明天或等会儿一样带一句；不贴合就忽略。\n"
+            + "\n".join(lines)
+        )
+
     def _proactive_troubleshooting_request_hint(self, user: dict[str, Any] | None) -> str:
         if not isinstance(user, dict) or _single_line(user.get("planned_proactive_source"), 40).lower() != "troubleshooting":
             return ""
@@ -2726,6 +2777,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         timer_hint = self._format_llm_timer_context(user)
         time_guard = self._proactive_time_guard_hint(reason, current_item)
         deferred_share_tense_hint = self._deferred_immediate_share_tense_hint(user, action)
+        future_schedule_hint = self._format_proactive_future_schedule_hint(reason=reason)
         recent_topics_hint = self._format_recent_proactive_topics_hint(user)
         # Search for unresolved open-loop / promise memories from the memory plugin
         open_loops_hint = ""
@@ -2852,6 +2904,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "{{burst_hint}}": burst_hint,
             "{{expression_shape_hint}}": expression_shape_hint,
             "{{open_loops_hint}}": open_loops_hint,
+            "{{future_schedule_hint}}": future_schedule_hint,
             "{{current_time}}": current_time,
         }
         for key, value in replacements.items():
@@ -2861,6 +2914,8 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 prompt = f"{prompt.rstrip()}\n\n{optional_hint}"
         if location_context and "主动场景位置线索" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{location_context}"
+        if future_schedule_hint and "【接下来可参考的日程】" not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{future_schedule_hint}"
         if reason == "creative_share":
             prompt = f"{prompt.rstrip()}\n\n{self._creative_share_excerpt_prompt_hint()}"
         route_prompt_getter = getattr(self, "_proactive_route_prompt", None)
@@ -16414,7 +16469,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             reasons.append("check_in")
         elif _safe_int(user.get("ignored_streak"), 0, 0) <= 0 and random.random() < 0.12:
             reasons.append("check_in")
-        reason = planned_reason if planned_reason and self._is_reason_allowed_now(planned_reason) else random.choice(reasons)
+        reason = planned_reason if planned_reason and self._is_reason_allowed_now(planned_reason, user) else random.choice(reasons)
 
         if reason == "insomnia_night":
             return reason, "夜间清醒时的一句短开场；不报时、不追问、不拉长。"

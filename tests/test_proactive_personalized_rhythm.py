@@ -49,7 +49,7 @@ class PersonalizedRhythmTests(unittest.TestCase):
         return SimpleNamespace(
             data={"yesterday_conversation_summary": summary or {}},
             _private_user_role=lambda _user: "owner",
-            _move_timestamp_into_reason_window=lambda timestamp, _reason: timestamp,
+            _move_timestamp_into_reason_window=lambda timestamp, _reason, user=None: timestamp,
             _window_from_delay_minutes=lambda minutes, width_minutes=55: f"{minutes}:{width_minutes}",
             _current_relationship_gate_mode=lambda _user, now=None: "",
             _current_emotion_gate_mode=lambda _user, now=None: "",

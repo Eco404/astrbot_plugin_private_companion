@@ -120,7 +120,7 @@ class _TimerHarness(UserMemoryMixin, DailyStateMixin):
     def _is_initial_wakeup_greeting(self, _user) -> bool:
         return False
 
-    def _inbound_satisfies_greeting(self, reason: str, *, now=None) -> bool:
+    def _inbound_satisfies_greeting(self, reason: str, *, now=None, user=None) -> bool:
         return reason == "morning_greeting"
 
     def _mark_greeting_satisfied_by_inbound(self, user, reason: str) -> bool:

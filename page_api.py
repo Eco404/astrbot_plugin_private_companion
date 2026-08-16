@@ -4508,16 +4508,10 @@ class PrivateCompanionPageApi(
             except Exception as exc:
                 logger.error("[PrivateCompanionPage] 获取现实触及联动状态失败: %s", exc, exc_info=True)
                 return self._exception_error("获取现实触及联动状态失败")
-        snapshotter = getattr(self.plugin, "_reality_touch_page_snapshot", None)
-        if not callable(snapshotter):
-            return self._error("当前插件实例不支持现实触及控制台", status_code=503)
-        try:
-            async with self.plugin._data_lock:
-                snapshot = deepcopy(snapshotter())
-            return self._ok(snapshot)
-        except Exception as exc:
-            logger.error("[PrivateCompanionPage] 获取现实触及状态失败: %s", exc, exc_info=True)
-            return self._exception_error("获取现实触及状态失败")
+        return self._error(
+            "现实触及已由“我会来到你身边”管理，请先安装并启用 astrbot_plugin_reality_companion。",
+            status_code=503,
+        )
 
     async def update_reality_touch(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}

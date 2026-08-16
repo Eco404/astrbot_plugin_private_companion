@@ -193,6 +193,54 @@ class CreativeMixin:
             budget = int(budget * 1.12)
         return max(60, min(1200, budget))
 
+    def _creative_advance_gap_minutes(
+        self,
+        project: dict[str, Any] | None = None,
+        now: float | None = None,
+        *,
+        initial: bool = False,
+    ) -> int:
+        """拟人化写作节奏：按时段与人格决定下次推进间隔（分钟）。
+
+        晚间是随手写两笔的黄金档，早晨在忙别的事；慢热型人格提笔更慢，
+        偶尔"写得顺手"会在很短时间内再写一段，但不连续爆发。
+        """
+        now = _now_ts() if now is None else float(now)
+        low, high = (35, 130) if initial else (95, 320)
+        now_dt = datetime.fromtimestamp(now)
+        if 20 <= now_dt.hour < 23 or (now_dt.hour == 23 and now_dt.minute <= 30):
+            low, high = max(25, int(low * 0.7)), int(high * 0.62)
+        elif 7 <= now_dt.hour < 10:
+            low, high = int(low * 1.8), int(high * 1.3)
+        persona = " ".join(
+            str(getattr(self, name, "") or "")
+            for name in ("schedule_persona_prompt", "default_style", "bot_name")
+        )
+        if any(token in persona for token in ("慢热", "寡言", "内敛", "病弱", "疲惫", "懒", "迟钝")):
+            low, high = int(low * 1.35), int(high * 1.35)
+        elif any(token in persona for token in ("活泼", "话多", "元气", "急性子")):
+            low, high = int(low * 0.8), int(high * 0.8)
+        project_dict = project if isinstance(project, dict) else {}
+        last_burst = _safe_float(project_dict.get("last_creative_burst_at"), 0, 0)
+        if (
+            not initial
+            and (not last_burst or now - last_burst >= 3 * 3600)
+            and random.random() < 0.15
+        ):
+            project_dict["last_creative_burst_at"] = now
+            return random.randint(25, 60)
+        return random.randint(low, high)
+
+    def _creative_chunk_budget_for(self, project: dict[str, Any] | None, base_budget: int) -> int:
+        """按作品类型收紧单段字数：短诗小步快写，长叙事维持原有节奏。"""
+        work_type = self._creative_work_type(project)
+        budget = max(60, int(base_budget))
+        if any(token in work_type for token in ("诗", "歌词", "短句")):
+            return min(budget, 150)
+        if any(token in work_type for token in ("随笔", "散文", "札记", "观察", "设定", "图鉴", "怪谈")):
+            return min(budget, 400)
+        return budget
+
     def _bot_currently_idle_for_creative_writing(self) -> bool:
         now_dt = datetime.now()
         if now_dt.hour < 7:
@@ -326,7 +374,7 @@ class CreativeMixin:
                 f"日程/生活人设补充：{schedule_persona}" if schedule_persona else "",
                 f"默认对话风格：{style}" if style else "",
                 creative_voice,
-                "创作要求：作品类型、题材、叙事声音、比喻密度、说话习惯、关注点和节奏都要像这个人格会写出来的东西。",
+                "创作要求：从人格日常在意的事物里取细节——人格关注什么,笔下的名词就落在什么上；句子的节奏、比喻的习惯和收束方式,都从这个人格的说话方式里长出来,不要写成谁都能写的通用文本。",
                 "性别与代词边界：只有人格资料明确指定性别或代词时才使用；未指定时不要默认女性或男性，可用角色名、Bot、角色或省略代词。温柔、细腻、理性、锋利等表达气质不绑定任何性别。",
                 "身份边界：如果人格没有学生、职场、异世界、职业、年龄、身体特征等设定,不要凭空添加；如果人格明确不是人类,不要写成人类日常生理经验。",
                 "文风边界：不要套用通用网文腔、营销文案腔或过度华丽散文腔；不要为了梦境感牺牲可读性。",
@@ -647,7 +695,8 @@ class CreativeMixin:
 7. 不要为了题材方便凭空改变 Bot 身份,也不要写出和人格不相称的成熟度、职业经验或生活经验。
 8. 作者人格只决定选题、审美、句子节奏和观察方式,不等于正文必须用第一人称。
 9. 如果 work_type 不是叙事类,point_of_view 可写“无固定叙事视角”。
-10. 输出 JSON。
+10. 开场要落在故事内一个具体时刻（如"初秋的傍晚""期末考前一周的深夜"）,写进 opening_story_time,不要写"某个平常的日子"这类模糊时间。
+11. 输出 JSON。
 
 格式：
 {{
@@ -657,6 +706,7 @@ class CreativeMixin:
   "tone": "行文气质,2到5个词",
   "point_of_view": "第三人称有限视角/第三人称全知视角/多视角/第一人称角色视角/书信体/无固定叙事视角之一",
   "target_chars": 目标字数数字,
+  "opening_story_time": "故事开场的具体时刻,10到20字",
   "next_hint": "第一段准备写什么"
 }}
 """.strip()
@@ -681,11 +731,12 @@ class CreativeMixin:
             "unresolved_threads": [_single_line(payload.get("next_hint"), 40)] if _single_line(payload.get("next_hint"), 40) else [],
             "important_facts": [],
             "next_direction": _single_line(payload.get("next_hint"), 120) or "先写一个很小的开场画面",
+            "story_time": _single_line(payload.get("opening_story_time"), 60),
             "recent_keywords": self._extract_creative_keywords(source_text, limit=6),
             "recent_outlines": [],
             "last_updated_chunk": 0,
         }
-        return {
+        project = {
             "id": project_id,
             "title": title,
             "work_type": work_type,
@@ -712,10 +763,11 @@ class CreativeMixin:
             "next_hint": _single_line(payload.get("next_hint"), 120) or "先写一个很小的开场画面",
             "created_at": now,
             "last_advanced_at": now,
-            "next_advance_at": now + random.randint(45, 140) * 60,
             "last_share_at": 0,
             "share_count": 0,
         }
+        project["next_advance_at"] = now + self._creative_advance_gap_minutes(project, now, initial=True) * 60
+        return project
 
     # ============================================================
     # Outline Generation
@@ -760,6 +812,7 @@ class CreativeMixin:
 标题：{_single_line(project.get('title'), 40)}
 核心设定：{_single_line(project.get('premise'), 180)}
 当前主线：{_single_line(story_bible.get('mainline_direction'), 140)}
+故事内时间：{_single_line(story_bible.get('story_time'), 60) or '尚未确定,本段应顺手定下一个具体时刻。'}
 人工维护大纲（优先级最高,不能推翻）：
 {manual_outline_ctx or '暂无人工大纲。'}
 角色表（优先级高,不要擅自改名或改设定）：
@@ -780,10 +833,11 @@ class CreativeMixin:
 
 要求：
 1. 输出 3 到 5 条短项目符号,每条不超过 22 字。
-2. 本段必须推进至少一个叙事元素,不要原地踏步。
-3. 如果人工大纲/角色表/人工修订存在,本次大纲必须顺着它们走。
-4. 不要解释,不要写正文,不要 JSON。
-5. 本次字数预算大约 {budget} 字。
+2. 第一条必须写明本段的时间处理：接上一段继续,还是推进到故事内的下一个时刻（写清推进到什么时候）。
+3. 本段必须推进至少一个叙事元素,不要原地踏步；也不要每段都靠时间跳跃推进,同一场景内可以有动作进展。
+4. 如果人工大纲/角色表/人工修订存在,本次大纲必须顺着它们走。
+5. 不要解释,不要写正文,不要 JSON。
+6. 本次字数预算大约 {budget} 字。
 """.strip()
         text = await self._llm_call(
             prompt, max_tokens=200,
@@ -836,6 +890,7 @@ class CreativeMixin:
 作品类型：{self._creative_work_type(project)}
 核心设定：{_single_line(project.get('premise'), 160)}
 当前主线：{_single_line(story_bible.get('mainline_direction'), 140)}
+故事内时间（写这段之前）：{_single_line(story_bible.get('story_time'), 60) or '尚未确定'}
 未解决线索：{', '.join(_single_line(t, 20) for t in story_bible.get('unresolved_threads', []) if _single_line(t, 20)) or '暂无'}
 人工维护大纲：
 {manual_outline_ctx or '暂无人工大纲。'}
@@ -861,6 +916,8 @@ class CreativeMixin:
 3. 是否出现反复抒情、重复句式、重复画面、重复心理活动。
 4. 是否和最近几段太像。
 5. 是否违背人工维护的大纲、角色表、人工修订或用户配置的创作方向。
+6. 文风是否自然、像人写的：排比堆叠、四字词连用、"感到一阵X"式直陈情绪、比喻过密、结尾升华总结或"或许……吧"式感慨收束，都算 AI 味。
+7. 故事内时间是否顺着推进：无故倒流、或连续几段原地停在同一个时刻都算问题。
 
 只输出 JSON：
 {{
@@ -868,6 +925,7 @@ class CreativeMixin:
   "persona_score": 0,
   "progress_score": 0,
   "repetition_score": 0,
+  "style_score": 0,
   "issues": ["问题"],
   "rewrite_focus": "如果需要重写，用一句话说清楚怎么改"
 }}
@@ -913,6 +971,7 @@ class CreativeMixin:
 当前主线：{_single_line(story_bible.get('mainline_direction'), 140)}
 未解决线索：{', '.join(_single_line(t, 24) for t in story_bible.get('unresolved_threads', []) if _single_line(t, 24)) or '暂无'}
 下一步方向：{_single_line(story_bible.get('next_direction') or project.get('next_hint'), 140)}
+故事内时间（写新片段之前）：{_single_line(story_bible.get('story_time'), 60) or '尚未确定'}
 人工维护大纲：
 {manual_outline_ctx or '暂无人工大纲。'}
 角色表：
@@ -934,6 +993,7 @@ class CreativeMixin:
   "new_threads": ["最多2条新埋下的线索"],
   "important_facts": ["最多3条后续必须记住的事实"],
   "keywords": ["最多6个关键词"],
+  "story_time": "写完这个片段后,故事内现在处于什么时刻,10到24字",
   "next_direction": "一句话描述下一段最自然该写什么"
 }}
 """.strip()
@@ -966,6 +1026,7 @@ class CreativeMixin:
         keywords = _limit(payload.get("keywords"), 6, 16)
         mainline_direction = _single_line(payload.get("mainline_direction"), 140)
         next_direction = _single_line(payload.get("next_direction"), 140)
+        story_time = _single_line(payload.get("story_time"), 60)
 
         active_themes = [t for t in story_bible.get("active_themes", []) if _single_line(t, 20)]
         unresolved = [t for t in story_bible.get("unresolved_threads", []) if _single_line(t, 40)]
@@ -998,6 +1059,8 @@ class CreativeMixin:
         story_bible["important_facts"] = imp_facts[-12:]
         if next_direction:
             story_bible["next_direction"] = next_direction
+        if story_time:
+            story_bible["story_time"] = story_time
         story_bible["recent_keywords"] = recent_kw[-20:]
         story_bible["last_updated_chunk"] = _safe_int(chunk_index, chunk_index, 0)
         return {
@@ -1009,6 +1072,7 @@ class CreativeMixin:
             "keywords": keywords,
             "mainline_direction": mainline_direction,
             "next_direction": next_direction,
+            "story_time": story_time,
         }
 
     # ============================================================
@@ -1208,8 +1272,9 @@ class CreativeMixin:
                 logger.debug("[PrivateCompanion] 创作续写 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
 
         async def _do_generate(extra_notice: str = "") -> str:
+            story_time = _single_line(story_bible.get("story_time"), 60)
             prompt = f"""
-你正在模拟拟人化 Bot 在闲暇时慢慢创作一个文本作品。请只写本次随手能写下的一小段。
+你就是下面这个人格,此刻正在闲暇时写自己想写的作品。请只写本次随手能写下的一小段。
 
 【作者人格与身份】
 {persona_context}
@@ -1220,6 +1285,7 @@ class CreativeMixin:
 行文气质：{_single_line(project.get("tone"), 60)}
 叙事视角：{point_of_view}
 灵感来源：{_single_line(project.get("source_text"), 180)}
+故事内时间：{story_time or "尚未确定,本段可以顺手定下一个具体时刻。"}
 项目结构：{bible_ctx or '先顺着刚萌生的主线推进。'}
 人工维护大纲（优先级高于本段临时大纲）：
 {manual_outline_ctx or '暂无人工大纲。'}
@@ -1239,18 +1305,19 @@ class CreativeMixin:
 下一步念头：{_single_line(project.get("next_hint"), 140)}
 本段大纲：{outline or '先写一个具体画面,并推进一条线索。'}
 
-本次字数上限：{budget} 个中文字符左右。
+本次字数上限：{budget} 个中文字符左右,写完一个自然的小节就停。
 要求：
-1. {output_rule}
-2. 不要标题、说明、JSON、系统旁白或"下面是"。
-3. 这是一次可选的闲暇创作行为,只写一个片段,不要一口气完成整个作品。
-4. 文风要像这个人格与身份自然写出的作品：用词、观察角度、人物成熟度、知识范围都不能越过人设。
-5. 作者人格影响文风,但作者不等于必须直接出现在作品里；不要把所有作品都写成 Bot 的日记或对用户的自白。
-6. 细节要具体,但不要堆辞藻；可以有一点梦境感或生活感。
-7. {finish_hint}
-8. 本段至少推进一个叙事元素,不能只是换皮重复前文。
-9. 严格参考本段大纲,但要写得自然,不是提纲照抄。
-10. 如果人工维护大纲、角色表或人工修订存在,必须优先服从；同时遵守用户配置的创作方向。本段临时大纲只用于安排这一次写什么。
+1. {output_rule} 不要标题、说明、JSON、系统旁白或"下面是"。
+2. 文风要像这个人格本人写的：从人格日常在意的事物里取细节,人格关注什么,笔下的名词就落在什么上；用词、观察角度、人物成熟度、知识范围都不能越过人设。
+3. 写作工艺（重要,逐条自查）：
+   - 连续两句不要用相同结构开头,长短句交替,允许不完整的短句；
+   - 全段最多一个明喻,"像/仿佛/宛如"只允许出现一次,且必须贴切；
+   - 段落收尾停在动作、对话或一个感官细节上,禁止总结句、升华句和"或许……吧"式感慨收束；
+   - 情绪用动作和感官呈现,不写"感到一阵X""心里涌起Y"这类直陈情绪；
+   - 用带时间、地点、物件细节的具体名词,不用"时光""岁月""心底""灵魂"式空词,不堆四字词。
+4. 作者人格影响文风,但作者不等于必须出现在作品里；不要把所有作品都写成 Bot 的日记或对用户的自白。
+5. 顺着故事内时间写：本段接续"故事内时间"或自然向前推进；有意的倒叙、闪回要在文内自然交代,不能无声倒流,也不要原地停在同一个时刻。
+6. {finish_hint} 本段至少推进一个叙事元素,不能只是换皮重复前文；严格参考本段大纲,但要写得自然,不是提纲照抄。如果人工维护大纲、角色表或人工修订存在,必须优先服从；同时遵守用户配置的创作方向。
 {extra_notice}
 """.strip()
             text = await self._llm_call(
@@ -1275,6 +1342,8 @@ class CreativeMixin:
             ps = _safe_int(review.get("persona_score"), 8, 0, 10) if isinstance(review, dict) else 8
             prs = _safe_int(review.get("progress_score"), 8, 0, 10) if isinstance(review, dict) else 8
             rs = _safe_int(review.get("repetition_score"), 8, 0, 10) if isinstance(review, dict) else 8
+            # 兼容未返回 style_score 的旧版审校输出：缺省按通过档计。
+            ss = _safe_int(review.get("style_score"), 8, 0, 10) if isinstance(review, dict) else 8
             passed = bool(review.get("passed", True)) if isinstance(review, dict) else True
             focus = _single_line(review.get("rewrite_focus"), 140) if isinstance(review, dict) else ""
             if (
@@ -1284,6 +1353,7 @@ class CreativeMixin:
                 and ps >= CREATIVE_REVIEW_MIN_SCORE
                 and prs >= CREATIVE_REVIEW_MIN_SCORE
                 and rs >= CREATIVE_REVIEW_MIN_SCORE
+                and ss >= CREATIVE_REVIEW_MIN_SCORE
             ):
                 return cleaned
             notes: list[str] = []
@@ -1299,6 +1369,8 @@ class CreativeMixin:
                 notes.append("必须真正推进一条线索，不要空转抒情。")
             if rs < CREATIVE_REVIEW_MIN_SCORE:
                 notes.append("减少重复，不要反复写相同心理和画面。")
+            if ss < CREATIVE_REVIEW_MIN_SCORE:
+                notes.append("去掉AI味：删排比和四字词堆叠，砍掉多余比喻，情绪改用动作和感官细节呈现，结尾停在动作或细节上，不要总结升华。")
             extra_notice = "注意重写：" + " ".join(notes)
         return ""
 
@@ -1849,7 +1921,7 @@ class CreativeMixin:
             if now < _safe_float(project.get("next_advance_at"), 0):
                 continue
             budget = int(self._creative_chars_per_session() * random.uniform(0.72, 1.18))
-            budget = max(60, min(1200, budget))
+            budget = max(60, min(1200, self._creative_chunk_budget_for(project, budget)))
             remaining = _safe_int(project.get("target_chars"), 2400, 300, 5200) - _safe_int(project.get("current_chars"), 0, 0)
             if remaining <= 0:
                 project["status"] = "finished"
@@ -1914,7 +1986,7 @@ class CreativeMixin:
                     project["next_hint"] = nd
             project["current_chars"] = _safe_int(project.get("current_chars"), 0, 0) + len(chunk)
             project["last_advanced_at"] = now
-            project["next_advance_at"] = now + random.randint(95, 320) * 60
+            project["next_advance_at"] = now + self._creative_advance_gap_minutes(project, now) * 60
             project["advance_failure_count"] = 0
             project.pop("last_advance_failed_at", None)
             project.pop("last_advance_error", None)

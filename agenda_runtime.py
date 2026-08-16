@@ -431,6 +431,34 @@ class AgendaRuntimeMixin:
             "message_seed": "",
         }
 
+    def _agenda_current_interruption_context(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Return a tentative chat-overlap hint without promoting execution."""
+
+        current = now or self._agenda_now()
+        agenda = self._agenda_build(now=current)
+        candidates = [
+            item
+            for item in agenda.get("reconciliation_candidates", [])
+            if isinstance(item, dict) and item.get("status") == "possible_interruption"
+        ]
+        if not candidates:
+            return None
+        selected = candidates[0]
+        plan_title = str(selected.get("plan_title") or "").strip()[:120] or "原定日程"
+        activity_summary = str(selected.get("activity_summary") or "").strip()[:160] or "一段持续聊天"
+        return {
+            "active": True,
+            "confidence": "low",
+            "plan_title": plan_title,
+            "activity_summary": activity_summary,
+            "activity_ids": [str(item) for item in selected.get("activity_ids", []) if str(item)][:3],
+            "reason": "聊天可能占用了原定日程，但不能据此判断日程已完成",
+        }
+
     def _agenda_context_for_prompt(self, *, max_entries: int = 8) -> str:
         # Prompt consumers receive a filtered future view; diagnostics remain
         # available through ``_agenda_disclosure_view('diagnostic')`` only.

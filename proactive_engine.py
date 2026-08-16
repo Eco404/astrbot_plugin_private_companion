@@ -4378,7 +4378,7 @@ class ProactiveEngineMixin:
                 ignored_streak,
                 impulse_value,
             )
-        if not is_troubleshooting and not self._is_reason_allowed_now(planned_reason):
+        if not is_troubleshooting and not self._is_reason_allowed_now(planned_reason, user):
             if self._is_sticky_greeting_reason(planned_reason):
                 self._reschedule_greeting_within_window(user, planned_reason, now=now)
                 return False, "问候仍在窗口内,稍后再试"
@@ -4949,7 +4949,7 @@ class ProactiveEngineMixin:
         )
 
         if planned_reason:
-            reason_allowed = due_timer_active or self._is_reason_allowed_now(planned_reason)
+            reason_allowed = due_timer_active or self._is_reason_allowed_now(planned_reason, user)
             add(
                 "reason_window",
                 "时段适配",
@@ -5329,7 +5329,7 @@ class ProactiveEngineMixin:
         effective_daily_limit = self._effective_user_daily_limit(probe)
         daily_limit_text = self._format_proactive_daily_limit(effective_daily_limit)
         soft_target_text = "不限" if self._proactive_daily_limit_is_unlimited(effective_daily_limit) else f"{self._soft_daily_target(probe):.1f}"
-        reason_allowed = self._is_reason_allowed_now(planned_reason)
+        reason_allowed = self._is_reason_allowed_now(planned_reason, probe)
         moment_ok = True
         if reason == "未到候选主动时间":
             reason_allowed_text = "到点后再检查"
@@ -6191,6 +6191,7 @@ class ProactiveEngineMixin:
         scheduled = self._move_timestamp_into_reason_window(
             check_now + random.randint(25, 110) * 60,
             "mood_checkin",
+            user,
         )
         context = {
             "check_key": check_key,
@@ -6245,6 +6246,7 @@ class ProactiveEngineMixin:
         scheduled = self._move_timestamp_into_reason_window(
             now + random.randint(45, 180) * 60,
             "memory_echo",
+            user,
         )
         context = {
             "echo_key": echo_key,
@@ -6345,6 +6347,7 @@ class ProactiveEngineMixin:
         scheduled = self._move_timestamp_into_reason_window(
             check_now + random.randint(35, 150) * 60,
             "memory_echo",
+            user,
         )
         context = {
             "echo_key": echo_key,
@@ -6413,6 +6416,7 @@ class ProactiveEngineMixin:
         scheduled = self._move_timestamp_into_reason_window(
             check_now + random.randint(20, 100) * 60,
             "absence_miss",
+            user,
         )
         context = {
             "episode_key": episode_key,
@@ -6475,6 +6479,7 @@ class ProactiveEngineMixin:
         scheduled = self._move_timestamp_into_reason_window(
             check_now + random.randint(30, 120) * 60,
             "game_invite",
+            user,
         )
         context = {
             "invite_key": invite_key,
@@ -7373,7 +7378,7 @@ class ProactiveEngineMixin:
         if random.random() > 0.16:
             return None
         scheduled = now + random.randint(35, 130) * 60
-        scheduled = self._move_timestamp_into_reason_window(scheduled, "birthday_curiosity")
+        scheduled = self._move_timestamp_into_reason_window(scheduled, "birthday_curiosity", user)
         return {
             "window": self._window_from_delay_minutes(max(5, int((scheduled - now) / 60)), width_minutes=42),
             "reason": "birthday_curiosity",
@@ -7886,17 +7891,28 @@ class ProactiveEngineMixin:
             return True
         return False
 
-    def _is_now_in_reason_window(self, reason: str, now: float | None = None) -> bool:
+    def _is_now_in_reason_window(
+        self,
+        reason: str,
+        now: float | None = None,
+        user: dict[str, Any] | None = None,
+    ) -> bool:
         if not reason:
             return False
         now_dt = self._environment_fromtimestamp(now or _now_ts())
         minute_of_day = now_dt.hour * 60 + now_dt.minute
-        for start, end in self._reason_windows(reason):
+        for start, end in self._reason_windows(reason, user):
             if start <= minute_of_day <= end:
                 return True
         return False
 
-    def _inbound_satisfies_greeting(self, reason: str, *, now: float | None = None) -> bool:
+    def _inbound_satisfies_greeting(
+        self,
+        reason: str,
+        *,
+        now: float | None = None,
+        user: dict[str, Any] | None = None,
+    ) -> bool:
         if not self._is_greeting_reason(reason):
             return False
         now_dt = self._environment_fromtimestamp(now or _now_ts())
@@ -7906,7 +7922,7 @@ class ProactiveEngineMixin:
             "noon_greeting": 10,
             "evening_greeting": 10,
         }.get(reason, 10)
-        for start, end in self._reason_windows(reason):
+        for start, end in self._reason_windows(reason, user):
             if start - lead_minutes <= minute_of_day < end:
                 return True
         return False
@@ -7928,14 +7944,14 @@ class ProactiveEngineMixin:
         recent_dt = self._environment_fromtimestamp(recent_at)
         if check_dt.date() != recent_dt.date():
             return False
-        if self._inbound_satisfies_greeting(reason, now=recent_at):
+        if self._inbound_satisfies_greeting(reason, now=recent_at, user=user):
             return True
         idle_seconds = self._effective_user_greeting_idle_minutes(user) * 60
         elapsed = check_now - recent_at
         return (
             idle_seconds > 0
             and 0 <= elapsed < idle_seconds
-            and self._is_now_in_reason_window(reason, now=check_now)
+            and self._is_now_in_reason_window(reason, now=check_now, user=user)
         )
 
     def _proactive_text_greeting_reason(self, text: str, *, now: float | None = None) -> str:
@@ -8049,7 +8065,7 @@ class ProactiveEngineMixin:
             return False
         changed = False
         for reason in ("morning_greeting", "noon_greeting", "evening_greeting"):
-            if self._inbound_satisfies_greeting(reason, now=activity_ts):
+            if self._inbound_satisfies_greeting(reason, now=activity_ts, user=user):
                 changed = self._mark_greeting_satisfied_by_inbound(user, reason) or changed
         return changed
 
@@ -9221,11 +9237,16 @@ class ProactiveEngineMixin:
             "voicey": any(marker in text for marker in voice_markers),
         }
 
-    def _reason_windows(self, reason: str) -> list[tuple[int, int]]:
+    def _reason_windows(
+        self,
+        reason: str,
+        user: dict[str, Any] | None = None,
+    ) -> list[tuple[int, int]]:
         reason = self._normalize_legacy_proactive_text(reason, limit=40)
         if reason == "morning_greeting":
-            return [self._morning_greeting_window()]
-        return {
+            windows: list[tuple[int, int]] = [self._morning_greeting_window()]
+        else:
+            windows = {
             "insomnia_night": [(23 * 60, 24 * 60), (0, 6 * 60)],
             "post_goodnight_group_activity": [(20 * 60, 24 * 60), (0, 2 * 60)],
             "group_share": [(9 * 60, 23 * 60)],
@@ -9260,6 +9281,27 @@ class ProactiveEngineMixin:
             "meal_care": [(7 * 60 + 50, 20 * 60 + 35)],
             "meal_care_followup": [(8 * 60 + 5, 22 * 60)],
         }.get(reason, [(9 * 60, 22 * 60)])
+        return self._apply_chronotype_shift_to_windows(windows, user)
+
+    def _apply_chronotype_shift_to_windows(
+        self,
+        windows: list[tuple[int, int]],
+        user: dict[str, Any] | None,
+    ) -> list[tuple[int, int]]:
+        """按用户作息画像平移 reason 窗；无画像或无平移时原样返回。"""
+        if not isinstance(user, dict):
+            return list(windows)
+        shift_getter = getattr(self, "_chronotype_reason_shift", None)
+        shifter = getattr(self, "_shift_reason_windows", None)
+        if not callable(shift_getter) or not callable(shifter):
+            return list(windows)
+        try:
+            shift = shift_getter(user)
+        except Exception:
+            return list(windows)
+        if not shift:
+            return list(windows)
+        return shifter(windows, shift)
 
     def _post_goodnight_group_activity_is_fresh(
         self,
@@ -9280,14 +9322,52 @@ class ProactiveEngineMixin:
             and 0 <= check_now - activity_at <= 50 * 60
         )
 
-    def _is_reason_allowed_now(self, reason: str) -> bool:
+    # Bot 自己睡着的相位；staying_up（临时晚睡）/woken/natural_wake 属于清醒，不拦。
+    _PROACTIVE_SLEEP_BLOCK_PHASES = frozenset({"falling_asleep", "light_sleep", "sleeping_again"})
+    # 睡着期间仍允许发出的少数事务/安全类 reason，与 busy 闸门的豁免语义对齐。
+    _PROACTIVE_SLEEP_EXEMPT_REASONS = frozenset(
+        {"weather_alert", "health_alert", "memo_note_reminder", "environment_change", "timer"}
+    )
+
+    def _proactive_sleep_phase_block_reason(self, reason: str) -> str:
+        """睡眠相位门：Bot 睡着时不放行非豁免的主动消息。返回空串表示放行。"""
+        if reason in self._PROACTIVE_SLEEP_EXEMPT_REASONS:
+            return ""
+        if not bool(getattr(self, "enable_rest_reply_simulation", False)):
+            return ""
+        state_getter = getattr(self, "_sleep_runtime_state", None)
+        if not callable(state_getter):
+            return ""
+        try:
+            runtime = state_getter()
+        except Exception:
+            return ""
+        phase = str((runtime or {}).get("phase") or "awake")
+        if phase in self._PROACTIVE_SLEEP_BLOCK_PHASES:
+            return f"sleep_phase:{phase}"
+        return ""
+
+    def _is_reason_allowed_now(
+        self,
+        reason: str,
+        user: dict[str, Any] | None = None,
+    ) -> bool:
         reason = self._normalize_legacy_proactive_text(reason, limit=40)
         now = self._environment_now()
         minute = now.hour * 60 + now.minute
-        for start, end in self._reason_windows(reason):
+        for start, end in self._reason_windows(reason, user):
             if start <= minute < end:
                 if reason == "insomnia_night":
+                    # 失眠场景本就发生在入睡边缘相位，由失眠状态自身判定。
                     return self._has_active_insomnia_state()
+                sleep_block = self._proactive_sleep_phase_block_reason(reason)
+                if sleep_block:
+                    logger.debug(
+                        "[PrivateCompanion] 主动消息被 Bot 睡眠相位拦下: reason=%s phase=%s",
+                        reason,
+                        sleep_block,
+                    )
+                    return False
                 if reason == "diary_share":
                     return bool(self.data.get("bot_diaries"))
                 if reason == "important_date_share":
@@ -9295,10 +9375,15 @@ class ProactiveEngineMixin:
                 return True
         return False
 
-    def _move_timestamp_into_reason_window(self, timestamp: float, reason: str) -> float:
+    def _move_timestamp_into_reason_window(
+        self,
+        timestamp: float,
+        reason: str,
+        user: dict[str, Any] | None = None,
+    ) -> float:
         dt = self._environment_fromtimestamp(timestamp)
         minute = dt.hour * 60 + dt.minute
-        windows = self._reason_windows(reason)
+        windows = self._reason_windows(reason, user)
         for start, end in windows:
             if start <= minute < end:
                 return timestamp + random.randint(0, 17 * 60)
@@ -9400,7 +9485,7 @@ class ProactiveEngineMixin:
         planned_motive = _single_line(user.get("planned_proactive_motive"), 140)
         due_timer_active = self._has_due_llm_timer(user)
         troubleshooting_active = self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40) == "troubleshooting"
-        reason = planned_reason if planned_reason and (troubleshooting_active or due_timer_active or self._is_reason_allowed_now(planned_reason)) else ""
+        reason = planned_reason if planned_reason and (troubleshooting_active or due_timer_active or self._is_reason_allowed_now(planned_reason, user)) else ""
         if not reason:
             reason, _ = self._choose_proactive_message(user, name, planned_reason)
             planned_motive = self._choose_proactive_motive(reason, user, action=planned_action)

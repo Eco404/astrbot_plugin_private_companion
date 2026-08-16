@@ -465,6 +465,7 @@ _DEFAULT_USER_TEMPLATE = {
     "last_proactive_motive": "",
     "last_proactive_sent_at": 0,
     "last_proactive_source": "",
+    "chronotype_profile": {},
     "proactive_source_feedback": {},
     "planned_proactive_burst": False,
     "proactive_burst_index": 0,
@@ -647,6 +648,8 @@ CREATIVE_STORY_BIBLE_TEMPLATE = {
     "unresolved_threads": [],
     "important_facts": [],
     "next_direction": "",
+    # 故事内时间锚点（如"初秋的傍晚"），用于防止连续片段时间倒流或原地打转。
+    "story_time": "",
     "recent_keywords": [],
     "recent_outlines": [],
     "last_updated_chunk": 0,

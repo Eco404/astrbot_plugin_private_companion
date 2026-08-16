@@ -239,12 +239,3 @@ class RealityCompanionBridgeMixin:
         api = self._reality_companion_api()
         handler = getattr(api, "apply_pending_confirmation", None) if api is not None else None
         return handler(self._reality_bridge_user_id(user), text) if callable(handler) else None
-
-    async def _acknowledge_official_reality_touch_trigger(self, event: Any) -> bool:
-        return False
-
-    async def _record_official_reality_touch_tool_result(self, event: Any, tool: Any, tool_result: Any) -> bool:
-        return False
-
-    async def _complete_official_reality_touch_reminder(self, event: Any) -> bool:
-        return False

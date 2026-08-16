@@ -300,6 +300,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         safe_text = self._sanitize_orphan_tts_placeholders(text)
         fast_user["last_user_message"] = safe_text or text
         fast_user["last_user_message_at"] = received_ts
+        self._note_user_chronotype_from_inbound(fast_user, safe_text or text, received_ts)
         fast_intent_profile = self._analyze_inbound_intent(text)
         boundary_enricher = getattr(self, "_enrich_boundary_feedback_intent", None)
         if callable(boundary_enricher):
@@ -754,6 +755,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             safe_text = self._sanitize_orphan_tts_placeholders(text)
             user["last_user_message"] = safe_text or text
             user["last_user_message_at"] = received_ts
+            self._note_user_chronotype_from_inbound(user, safe_text or text, received_ts)
             if is_target_user and self._clear_state_share_proactive_after_user_status_question(user, user_id=user_id, text=safe_text or text, now=received_ts):
                 if not self._simulation_active(user) and _safe_float(user.get("next_proactive_at"), 0) <= 0:
                     self._schedule_next_proactive(user, now=received_ts)

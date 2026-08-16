@@ -143,7 +143,7 @@ class _ShouldSendHarness(ProactiveEngineMixin):
         return dict(self.persona)
 
     @staticmethod
-    def _is_reason_allowed_now(_reason) -> bool:
+    def _is_reason_allowed_now(_reason, user=None) -> bool:
         return True
 
     @staticmethod
@@ -186,7 +186,7 @@ class _RenderBudgetHarness(ProactiveEngineMixin):
         return False
 
     @staticmethod
-    def _is_reason_allowed_now(_reason) -> bool:
+    def _is_reason_allowed_now(_reason, user=None) -> bool:
         return True
 
     @staticmethod

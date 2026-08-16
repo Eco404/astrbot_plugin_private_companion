@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-from astrbot_plugin_private_companion.main import PrivateCompanionExtensionAPI
+from astrbot_plugin_private_companion.main import PrivateCompanionExtensionAPI, PrivateCompanionPlugin
 from astrbot_plugin_private_companion.reality_companion_bridge import RealityCompanionBridgeMixin
 
 
@@ -132,3 +132,124 @@ def test_missing_reality_plugin_does_not_write_new_runtime_state_to_core() -> No
     assert result == {"recorded": False, "reason": "reality_companion_unavailable"}
     assert "last_reality_touch_output" not in host.data["users"]["u"]
     assert host.saved == 0
+
+
+class _PreflightEvent:
+    def __init__(self, text: str = "早") -> None:
+        self.message_str = text
+        self.stopped = False
+        self.replies: list[str] = []
+
+    def get_sender_id(self) -> str:
+        return "u"
+
+    def stop_event(self) -> None:
+        self.stopped = True
+
+
+class _PreflightRealityApi:
+    def __init__(self, *, eligible: bool = True, reply: str | None = None, raise_on_apply: bool = False) -> None:
+        self.eligible = eligible
+        self.reply = reply
+        self.raise_on_apply = raise_on_apply
+        self.apply_calls: list[tuple[str, str]] = []
+
+    def camera_user_eligible(self, _user_id: str) -> bool:
+        return self.eligible
+
+    def apply_pending_confirmation(self, user_id: str, text: str) -> str | None:
+        self.apply_calls.append((user_id, text))
+        if self.raise_on_apply:
+            raise RuntimeError("external plugin failure")
+        return self.reply
+
+
+class _PreflightHost(RealityCompanionBridgeMixin):
+    # 直接读取插件类的契约常量：若插件侧丢失该常量，本文件在收集阶段即失败。
+    _REALITY_TOUCH_CAMERA_CAPABILITY = PrivateCompanionPlugin._REALITY_TOUCH_CAMERA_CAPABILITY
+
+    def __init__(self, api: _PreflightRealityApi) -> None:
+        self.data = {"users": {"u": {"user_id": "u"}}}
+        self._data_lock = asyncio.Lock()
+        self._api = api
+        self.saves = 0
+
+    def _reality_companion_api(self) -> _PreflightRealityApi:
+        return self._api
+
+    def _save_data_sync(self) -> None:
+        self.saves += 1
+
+    async def _reply(self, event: _PreflightEvent, text: str, **_kwargs) -> None:
+        event.replies.append(text)
+
+    async def preflight(self, event: _PreflightEvent) -> bool:
+        return await PrivateCompanionPlugin._handle_private_message_preflight(self, event)
+
+
+def _legacy_camera_pending() -> dict:
+    return {
+        "capability": "camera_single_frame",
+        "requested_at": 1000.0,
+        "expires_at": 1600.0,
+    }
+
+
+def test_plugin_class_keeps_camera_capability_contract_constant() -> None:
+    assert PrivateCompanionPlugin._REALITY_TOUCH_CAMERA_CAPABILITY == "camera_single_frame"
+
+
+def test_preflight_clears_legacy_camera_pending_for_ineligible_user() -> None:
+    api = _PreflightRealityApi(eligible=False, reply="不应到达")
+    host = _PreflightHost(api)
+    host.data["users"]["u"]["reality_touch_pending_consent"] = _legacy_camera_pending()
+    event = _PreflightEvent("我理解风险并确认授权")
+
+    handled = asyncio.run(host.preflight(event))
+
+    assert handled is True
+    assert event.stopped is True
+    assert event.replies == ["主机摄像头只允许 AstrBot 管理员或主要用户本人授权和使用。"]
+    assert "reality_touch_pending_consent" not in host.data["users"]["u"]
+    assert host.saves == 1
+    assert api.apply_calls == []
+
+
+def test_preflight_forwards_legacy_camera_pending_for_eligible_user() -> None:
+    api = _PreflightRealityApi(eligible=True, reply="现实触及摄像头独立授权已记录。")
+    host = _PreflightHost(api)
+    host.data["users"]["u"]["reality_touch_pending_consent"] = _legacy_camera_pending()
+    event = _PreflightEvent("我理解风险并确认授权")
+
+    handled = asyncio.run(host.preflight(event))
+
+    assert handled is True
+    assert event.replies == ["现实触及摄像头独立授权已记录。"]
+    assert api.apply_calls == [("u", "我理解风险并确认授权")]
+    assert "reality_touch_pending_consent" in host.data["users"]["u"]
+    assert host.saves == 0
+
+
+def test_preflight_external_handler_failure_does_not_break_private_chat() -> None:
+    api = _PreflightRealityApi(raise_on_apply=True)
+    host = _PreflightHost(api)
+    event = _PreflightEvent("在吗")
+
+    handled = asyncio.run(host.preflight(event))
+
+    assert handled is False
+    assert event.stopped is False
+    assert event.replies == []
+    assert api.apply_calls == [("u", "在吗")]
+
+
+def test_preflight_without_pending_still_consults_external_handler() -> None:
+    api = _PreflightRealityApi(reply=None)
+    host = _PreflightHost(api)
+    event = _PreflightEvent("在吗")
+
+    handled = asyncio.run(host.preflight(event))
+
+    assert handled is False
+    assert event.replies == []
+    assert api.apply_calls == [("u", "在吗")]

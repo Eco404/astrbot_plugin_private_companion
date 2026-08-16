@@ -107,6 +107,23 @@ class ProactiveHistoryContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("limit=5", generation_source)
         self.assertNotIn("limit=10", review_source)
 
+    def test_future_schedule_hint_is_limited_to_relevant_routes(self):
+        harness = ProactiveMessageMixin()
+        harness._agenda_disclosure_view = lambda *_args, **_kwargs: {
+            "entries": [
+                {
+                    "temporal_phase": "future",
+                    "start_at": "2026-07-30T22:30:00+08:00",
+                    "end_at": "2026-07-30T23:00:00+08:00",
+                    "title": "整理桌面",
+                }
+            ]
+        }
+        hint = harness._format_proactive_future_schedule_hint(reason="background_schedule")
+        assert "整理桌面" in hint
+        assert "不是已经发生的事实" in hint
+        assert harness._format_proactive_future_schedule_hint(reason="news_share") == ""
+
     def test_generation_tool_boundary_allows_only_proactive_photo_tool(self):
         generation_source = inspect.getsource(ProactiveMessageMixin._build_framework_proactive_prompt)
 

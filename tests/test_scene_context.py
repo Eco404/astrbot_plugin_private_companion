@@ -187,6 +187,23 @@ class SceneContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(("outdoor", "外出"), infer_companion_scene_category("去图书馆看书", ""))
         self.assertEqual(("", ""), infer_companion_scene_category("看账号运营内容", ""))
 
+    def test_scene_snapshot_exposes_tentative_schedule_interruption_hint(self) -> None:
+        harness = _SceneHarness(str(self.outfit_path))
+        harness._agenda_current_interruption_context = lambda *, now=None: {
+            "active": True,
+            "confidence": "low",
+            "plan_title": "整理今天的笔记",
+            "activity_summary": "和用户持续聊天",
+        }
+        snapshot = harness._build_companion_scene_snapshot(
+            harness.data["users"]["10001"],
+            now=datetime(2026, 7, 19, 16, 20, tzinfo=timezone.utc),
+        )
+        assert snapshot["schedule"]["interruption"]["plan_title"] == "整理今天的笔记"
+        formatted = harness._format_companion_scene_snapshot(snapshot)
+        assert "日程打断线索" in formatted
+        assert "不代表计划已完成" in formatted
+
     def test_extension_api_exposes_structured_snapshot(self) -> None:
         harness = _SceneHarness(str(self.outfit_path))
         api = PrivateCompanionExtensionAPI(harness)

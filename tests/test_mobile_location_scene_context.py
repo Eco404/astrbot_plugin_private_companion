@@ -166,6 +166,37 @@ def test_proactive_mobile_location_is_coarse_and_does_not_expose_coordinates() -
     assert "不要把位置本身硬写成主动话题" in unmatched
 
 
+class _CountingBridgeHarness(MobileSceneHarness):
+    """Count reality-bridge round trips so the formatter cannot silently regress."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.mobile_context_calls = 0
+        self.map_observer_calls = 0
+
+    def _reality_mobile_context(self, user_id: str):
+        self.mobile_context_calls += 1
+        return MobileSceneHarness._reality_mobile_context(user_id)
+
+    def _observe_mobile_place_context(self, user_id, mobile_location, **kwargs):
+        self.map_observer_calls += 1
+        return super()._observe_mobile_place_context(user_id, mobile_location, **kwargs)
+
+
+def test_proactive_location_formatter_queries_reality_bridge_once_per_pass() -> None:
+    matched_harness = _CountingBridgeHarness()
+    unmatched_harness = _CountingBridgeHarness()
+
+    matched = matched_harness._format_mobile_user_location_context_for_proactive({"user_id": "owner-1"})
+    unmatched = unmatched_harness._format_mobile_user_location_context_for_proactive({"user_id": "owner-unmatched"})
+
+    assert "主动场景位置线索" in matched and "主动场景位置线索" in unmatched
+    assert matched_harness.mobile_context_calls == 1
+    assert matched_harness.map_observer_calls == 1
+    assert unmatched_harness.mobile_context_calls == 1
+    assert unmatched_harness.map_observer_calls == 1
+
+
 def test_proactive_weather_timing_uses_workplace_as_context() -> None:
     harness = ProactiveLocationHarness()
     user = {"user_id": "owner-1"}

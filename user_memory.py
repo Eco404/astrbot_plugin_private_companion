@@ -5384,7 +5384,7 @@ class UserMemoryMixin:
         if not isinstance(suppressed, list):
             return False
         return any(
-            reason in suppressed and self._inbound_satisfies_greeting(reason, now=now)
+            reason in suppressed and self._inbound_satisfies_greeting(reason, now=now, user=user)
             for reason in ("morning_greeting", "noon_greeting", "evening_greeting")
         )
 
@@ -8807,7 +8807,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
             and self._recent_activity_suppresses_habit_greeting(user, now=now, topic=planned_topic)
         )
         if (
-            self._inbound_satisfies_greeting(planned_reason, now=now)
+            self._inbound_satisfies_greeting(planned_reason, now=now, user=user)
             or planned_is_greeting_habit
         ):
             next_at = _safe_float(user.get("next_proactive_at"), 0)
@@ -8823,14 +8823,14 @@ Character-specific bottom-line baseline (reference only; empty means use the con
                 changed = True
             else:
                 follow_reason = str(raw_followup.get("reason") or "")
-                if self._inbound_satisfies_greeting(follow_reason, now=now):
+                if self._inbound_satisfies_greeting(follow_reason, now=now, user=user):
                     changed = self._mark_greeting_satisfied_by_inbound(user, follow_reason) or changed
                     user["pending_followup_event"] = {}
                     changed = True
         raw_timer = user.get("llm_timer_event")
         if isinstance(raw_timer, dict):
             timer_reason = str(raw_timer.get("reason") or "")
-            if self._inbound_satisfies_greeting(timer_reason, now=now):
+            if self._inbound_satisfies_greeting(timer_reason, now=now, user=user):
                 if _single_line(raw_timer.get("backend"), 40) == "astrbot_cron":
                     queue_cancel = getattr(self, "_queue_official_llm_timer_cancel", None)
                     queued = bool(

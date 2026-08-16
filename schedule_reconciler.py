@@ -650,6 +650,55 @@ def reconcile(
                 _trace_event("reconciler.similarity_withheld", "similarity candidate withheld from execution status")
             )
 
+        # A sustained conversation can occupy a live plan window without
+        # proving that the planned activity was completed. Keep this as a
+        # diagnostic-only interruption hint so prompt consumers may gently
+        # acknowledge it without turning chat into execution evidence.
+        interruptions = [
+            activity
+            for activity in normalized_activities
+            if str(activity.get("activity_id")) not in {str(item.get("activity_id")) for item in explicit}
+            and _actor_compatible(plan, activity)
+            and _temporal_phase(plan, now) == "current"
+            and _evidence_kind(activity) in CHAT_EVIDENCE_KINDS
+            and _overlaps(plan, activity, now)
+            and not _is_chat_plan(plan)
+        ]
+        if interruptions:
+            interruptions = interruptions[:3]
+            interruption_ids = [str(item.get("activity_id")) for item in interruptions]
+            reconciliation_candidates.append(
+                {
+                    "candidate_id": stable_id(
+                        "reconciliation_interruption",
+                        plan_id,
+                        interruption_ids,
+                    ),
+                    "plan_id": plan_id,
+                    "plan_title": str(plan.get("title") or plan.get("activity") or "当前计划")[:120],
+                    "activity_ids": interruption_ids,
+                    "activity_summary": str(
+                        interruptions[-1].get("title")
+                        or interruptions[-1].get("summary")
+                        or "一段持续聊天"
+                    )[:180],
+                    "status": "possible_interruption",
+                    "source_kind": "reconciled",
+                    "temporal_phase": "current",
+                    "evidence_kind": "interaction",
+                    "epistemic_status": "inferred",
+                    "fact_eligibility": "none",
+                    "subject_actor_id": plan.get("subject_actor_id", ""),
+                    "reason": "conversation overlapped a live plan window; plan completion remains unproven",
+                    "decision_trace": [
+                        _trace_event(
+                            "reconciler.interaction_interruption_hint",
+                            "chat overlap is a possible interruption, not execution evidence",
+                        )
+                    ],
+                }
+            )
+
         if executable:
             ids = [str(item.get("activity_id")) for item in executable]
             matched[plan_id] = ids

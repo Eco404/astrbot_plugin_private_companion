@@ -149,6 +149,46 @@ class SegmentedRemainderActivityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("第二段。", first_call.args[1][0].text)
         self.assertFalse(first_call.kwargs["apply_decorating_hooks"])
 
+    async def test_synthetic_proactive_remainder_uses_delivery_umo_platform_sender(self) -> None:
+        plugin = self._build_remainder_harness(activity=False)
+        plugin._send_chain_components = AsyncMock(return_value=True)
+        event = _RemainderEvent()
+        event._private_companion_proactive_delivery_umo = "default:GroupMessage:10001"
+
+        await PrivateCompanionPlugin._send_segmented_llm_chain_remainder(
+            plugin,
+            event,
+            [[Plain("第二段。")], [Plain("第三段。")]],
+            previous_segment="第一段。",
+            source="decorating_result",
+            started_at=1.0,
+        )
+
+        self.assertEqual([], event.sent)
+        self.assertEqual(2, plugin._send_chain_components.await_count)
+        first_call = plugin._send_chain_components.await_args_list[0]
+        self.assertEqual("default:GroupMessage:10001", first_call.args[0])
+        self.assertEqual("第二段。", first_call.args[1][0].text)
+        self.assertFalse(first_call.kwargs["apply_decorating_hooks"])
+
+    async def test_synthetic_proactive_remainder_does_not_fallback_to_fake_event(self) -> None:
+        plugin = self._build_remainder_harness(activity=False)
+        plugin._send_chain_components = AsyncMock(return_value=False)
+        event = _RemainderEvent()
+        event._private_companion_proactive_delivery_umo = "default:GroupMessage:10001"
+
+        await PrivateCompanionPlugin._send_segmented_llm_chain_remainder(
+            plugin,
+            event,
+            [[Plain("第二段。")]],
+            previous_segment="第一段。",
+            source="decorating_result",
+            started_at=1.0,
+        )
+
+        self.assertEqual([], event.sent)
+        plugin._send_chain_components.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

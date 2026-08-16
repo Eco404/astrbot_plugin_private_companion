@@ -128,7 +128,7 @@ class _DeferredPhotoRenderHarness(ProactiveEngineMixin, ProactiveMessageMixin):
     def _has_due_llm_timer(self, _user) -> bool:
         return False
 
-    def _is_reason_allowed_now(self, _reason: str) -> bool:
+    def _is_reason_allowed_now(self, _reason: str, user=None) -> bool:
         return True
 
     def _should_use_name_only_opener(self, *_args, **_kwargs) -> bool:

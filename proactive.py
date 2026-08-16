@@ -2603,6 +2603,10 @@ class ProactiveMixin(UserRestGateMixin):
         start = now + low * 3600
         end = now + high * 3600
         weights = self._proactive_hour_activity_weights()
+        chronotype_blend = getattr(self, "_chronotype_hour_weights", None)
+        if callable(chronotype_blend):
+            # 全局曲线与该用户自己的活跃直方图混合，冷启动（样本不足）时保持全局。
+            weights = chronotype_blend(user, weights)
         slots: list[tuple[float, float]] = []
         slot = math.ceil(start / 1800.0) * 1800.0
         while slot <= end and len(slots) < 160:
@@ -3212,7 +3216,7 @@ class ProactiveMixin(UserRestGateMixin):
             delay_hours=delay_hours,
             reason=reason,
         )
-        scheduled = self._move_timestamp_into_reason_window(scheduled, reason)
+        scheduled = self._move_timestamp_into_reason_window(scheduled, reason, user)
         topic = self._choose_proactive_topic(reason, user)
         emotion_adjustment = self._apply_emotion_to_planned_proactive(
             user,
@@ -3254,7 +3258,7 @@ class ProactiveMixin(UserRestGateMixin):
         )
         if vague_seek_user:
             scheduled = max(scheduled, now + random.uniform(1.5 * 3600, 3.5 * 3600))
-            scheduled = self._move_timestamp_into_reason_window(scheduled, reason)
+            scheduled = self._move_timestamp_into_reason_window(scheduled, reason, user)
         active_span, grace_span = self._proactive_impulse_default_window_seconds(reason, source="random")
         impulse = self._build_proactive_impulse(
             user,

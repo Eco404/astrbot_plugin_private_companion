@@ -98,6 +98,38 @@ def test_similarity_only_activity_is_diagnostic_and_does_not_complete_plan() -> 
     assert result["reconciliation_candidates"][0]["status"] == "pending_verification"
 
 
+def test_live_plan_chat_overlap_creates_interruption_hint_without_completion() -> None:
+    result = reconcile(
+        [
+            {
+                "plan_id": "writing-1",
+                "title": "写作业",
+                "actor_type": "bot",
+                "subject_actor_id": "bot-1",
+                "start_at": "2026-07-30T21:00:00+08:00",
+                "end_at": "2026-07-30T22:00:00+08:00",
+            }
+        ],
+        [
+            {
+                "activity_id": "chat-live-1",
+                "title": "和用户持续聊天",
+                "start_at": "2026-07-30T21:20:00+08:00",
+                "end_at": "2026-07-30T21:40:00+08:00",
+                "source": "conversation",
+                "actor_type": "bot",
+                "subject_actor_id": "bot-1",
+            }
+        ],
+        now=_dt("2026-07-30T21:34:00+08:00"),
+    )
+    hints = [item for item in result["reconciliation_candidates"] if item.get("status") == "possible_interruption"]
+    assert len(hints) == 1
+    assert hints[0]["plan_title"] == "写作业"
+    assert result["plans"][0]["status"] == "planned"
+    assert result["reconciliations"] == []
+
+
 def test_future_tool_activity_cannot_materialize_a_future_plan() -> None:
     result = reconcile(
         [

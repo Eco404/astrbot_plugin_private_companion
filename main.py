@@ -256,6 +256,7 @@ def _multi_persona_event_context(function):
                 deactivator(token)
     return async_wrapper
 from .busy_reply_gate import BusyReplyGateMixin
+from .chronotype import ChronotypeMixin
 from .memory_companion_adapter import MemoryCompanionAdapterMixin
 from .p5_attestation import P5AttestationError, REASON_CODES as P5_ATTESTATION_REASON_CODES
 from .p5_source_observer import evaluate_source
@@ -1557,6 +1558,7 @@ class PrivateCompanionPlugin(
     AstrBotKnowledgeMixin,
     IntegrationStatusMixin,
     BusyReplyGateMixin,
+    ChronotypeMixin,
     MemoryCompanionAdapterMixin,
     PrivateImageMixin,
     ForwardMessageMixin,
@@ -1595,6 +1597,10 @@ class PrivateCompanionPlugin(
     AtRelayMixin,
     Star,
 ):
+    # 与 astrbot_plugin_reality_companion 的 capability 契约一致；仅用于识别
+    # 拆分前版本遗留在本插件用户数据中的摄像头待授权记录。
+    _REALITY_TOUCH_CAMERA_CAPABILITY = "camera_single_frame"
+
     @staticmethod
     def _cfg_raw(config: AstrBotConfig, key: str, default: Any = None) -> Any:
         return _flat_get(config, key, default)
@@ -9287,8 +9293,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             str(getattr(event, "_private_companion_external_proactive_source", "") or "")
             == "proactive_chat"
         )
-        if external_proactive:
-            umo = _single_line(getattr(event, "unified_msg_origin", ""), 240)
+        proactive_delivery_umo = _single_line(
+            getattr(event, "_private_companion_proactive_delivery_umo", ""),
+            240,
+        )
+        if external_proactive or proactive_delivery_umo:
+            umo = proactive_delivery_umo or _single_line(
+                getattr(event, "unified_msg_origin", ""),
+                240,
+            )
             sender = getattr(self, "_send_chain_components", None)
             if not umo or not callable(sender):
                 raise RuntimeError("主动分段补发缺少可用的平台发送入口")
@@ -9320,6 +9333,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         total = len([item for item in chunks if item])
         sent_index = 0
         case_id = _single_line(getattr(event, "_private_companion_daily_review_case_id", ""), 20)
+        proactive_delivery_umo = _single_line(
+            getattr(event, "_private_companion_proactive_delivery_umo", ""),
+            240,
+        )
         scope = self._event_scope_key(event)
         started_at = _safe_float(started_at, 0.0, 0.0) or self._event_inbound_activity_ts(event)
         async with self._segmented_remainder_lock(scope):
@@ -9514,6 +9531,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     if (
                         str(getattr(event, "_private_companion_external_proactive_source", "") or "")
                         == "proactive_chat"
+                        or proactive_delivery_umo
                     ):
                         if case_id:
                             self._update_daily_review_case(
@@ -12391,7 +12409,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if self is None or event is None:
             return
         await self._acknowledge_official_llm_timer_trigger(event)
-        await self._acknowledge_official_reality_touch_trigger(event)
         self._finalize_passive_reply_tool_boundary(event)
         if self._finalize_memo_request_tool_boundary(event):
             logger.info(
@@ -12414,7 +12431,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if self is None or event is None:
             return
         await self._record_official_llm_timer_tool_result(event, tool, tool_result)
-        await self._record_official_reality_touch_tool_result(event, tool, tool_result)
         if self._record_future_task_result(event, tool, tool_args, tool_result):
             logger.info(
                 "[PrivateCompanion] 已记录本轮 future_task 成功: action=%s session=%s",
@@ -12444,7 +12460,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if self is None or event is None:
             return
         await self._complete_official_llm_timer_event(event)
-        await self._complete_official_reality_touch_reminder(event)
 
     def _is_lightweight_private_passive_inbound(self, text: str) -> bool:
         cleaned = _single_line(text, 80)
@@ -16060,7 +16075,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             planned_reason = str(user.get("planned_proactive_reason") or "")
             planned_action = str(user.get("planned_proactive_action") or "message")
             planned_motive = _single_line(user.get("planned_proactive_motive"), 140)
-            reason = planned_reason if planned_reason and self._is_reason_allowed_now(planned_reason) else ""
+            reason = planned_reason if planned_reason and self._is_reason_allowed_now(planned_reason, user) else ""
             if not reason:
                 reason, _ = self._choose_proactive_message(user, name, planned_reason)
                 planned_motive = self._choose_proactive_motive(reason, user, action=planned_action)
@@ -16655,11 +16670,18 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             and wakeup_test_requested.get("camera_snapshot")
         ):
             camera_snapshotter = getattr(self, "_reality_touch_camera_snapshot_for_user", None)
-            result = (
-                await camera_snapshotter(user_id, wakeup_test_requested.get("purpose"))
-                if callable(camera_snapshotter)
-                else {"status": "unavailable", "message": "当前插件实例没有摄像头单帧能力"}
-            )
+            try:
+                result = (
+                    await camera_snapshotter(user_id, wakeup_test_requested.get("purpose"))
+                    if callable(camera_snapshotter)
+                    else {"status": "unavailable", "message": "当前插件实例没有摄像头单帧能力"}
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanion] 摄像头单帧读取异常: %s",
+                    _single_line(exc, 160),
+                )
+                result = {"status": "error", "message": "摄像头单帧读取失败，请稍后再试或检查设备连接。"}
             observation = result.get("observation") if isinstance(result.get("observation"), dict) else {}
             detail = _single_line(observation.get("summary"), 180)
             await self._reply(
@@ -16951,18 +16973,40 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             resolver = getattr(self, "_private_user_id_for_event", None)
             user_id = resolver(event) if callable(resolver) else str(event.get_sender_id() or "").strip()
             confirmation_reply = None
+            camera_pending = False
+            # 锁内只读数据并判定是否为遗留的摄像头待授权；外部插件调用一律
+            # 放到锁外，避免拉长全局数据锁的持有时间。
             async with self._data_lock:
                 users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
                 user = users.get(user_id) if isinstance(users, dict) else None
                 if isinstance(user, dict):
                     pending = user.get("reality_touch_pending_consent")
                     camera_pending = isinstance(pending, dict) and pending.get("capability") == self._REALITY_TOUCH_CAMERA_CAPABILITY
-                    if camera_pending and not self._reality_touch_camera_user_eligible(user_id):
-                        user.pop("reality_touch_pending_consent", None)
-                        self._save_data_sync()
-                        confirmation_reply = "主机摄像头只允许 AstrBot 管理员或主要用户本人授权和使用。"
-                    else:
+            if camera_pending:
+                if self._reality_touch_camera_user_eligible(user_id):
+                    try:
                         confirmation_reply = pending_confirmation_handler(user, feedback_text)
+                    except Exception as exc:
+                        logger.warning(
+                            "[PrivateCompanion] 现实触及待授权确认处理失败: %s",
+                            _single_line(exc, 160),
+                        )
+                else:
+                    async with self._data_lock:
+                        users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+                        user = users.get(user_id) if isinstance(users, dict) else None
+                        if isinstance(user, dict):
+                            user.pop("reality_touch_pending_consent", None)
+                            self._save_data_sync()
+                    confirmation_reply = "主机摄像头只允许 AstrBot 管理员或主要用户本人授权和使用。"
+            elif isinstance(user, dict):
+                try:
+                    confirmation_reply = pending_confirmation_handler(user, feedback_text)
+                except Exception as exc:
+                    logger.warning(
+                        "[PrivateCompanion] 现实触及待授权确认处理失败: %s",
+                        _single_line(exc, 160),
+                    )
             if confirmation_reply:
                 await self._reply(event, confirmation_reply)
                 event.stop_event()

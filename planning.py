@@ -626,10 +626,21 @@ def evaluate_daily_plan_quality(plugin, items: Any) -> dict[str, Any]:
         issues.append("全天有效日程段过少")
     if parsed:
         last_start, last_end, _ = parsed[-1]
-        if last_start < 17 * 60 or last_end < 20 * 60:
-            deductions += 24
-            issues.append("日程在傍晚前结束，没有覆盖晚间生活")
-        evening_count = sum(1 for start, _, _ in parsed if start >= 17 * 60)
+        # 从日程里最后一段睡眠推导该人格的"晚间"：早睡/夜型人格的晚间是
+        # 睡前最后三小时，而不是硬编码的 17:00 之后，否则合法作息被误罚。
+        sleepy_starts = [start for (start, _e, item) in parsed if plugin._is_sleepy_plan_item(item)]
+        bedtime = max(sleepy_starts) if sleepy_starts and max(sleepy_starts) >= 17 * 60 else None
+        if bedtime is not None:
+            evening_threshold = max(12 * 60, bedtime - 3 * 60)
+            if last_start < evening_threshold or last_end < evening_threshold + 2 * 60:
+                deductions += 24
+                issues.append("日程在睡前活跃段前结束，没有覆盖就寝前的生活")
+        else:
+            evening_threshold = 17 * 60
+            if last_start < evening_threshold or last_end < 20 * 60:
+                deductions += 24
+                issues.append("日程在傍晚前结束，没有覆盖晚间生活")
+        evening_count = sum(1 for start, _, _ in parsed if start >= evening_threshold)
         expected_evening = max(2, (len(parsed) + 2) // 3)
         if evening_count < expected_evening:
             deductions += 16

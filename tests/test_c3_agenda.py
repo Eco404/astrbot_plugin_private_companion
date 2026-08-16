@@ -223,6 +223,40 @@ def test_disclosure_view_is_memoized_until_plan_or_activity_changes() -> None:
         assert build.call_count == 3
 
 
+def test_current_interruption_context_is_diagnostic_only() -> None:
+    host = Host(
+        {
+            "daily_plan": {
+                "date": "2026-07-30",
+                "items": [{
+                    "time": "21:00",
+                    "end": "22:00",
+                    "activity": "写作业",
+                    "subject_actor_id": "bot_self",
+                    "actor_type": "bot",
+                }],
+            },
+            "observed_activities": [{
+                "activity_id": "chat-live-1",
+                "title": "和用户持续聊天",
+                "start_at": "2026-07-30T21:20:00+08:00",
+                "end_at": "2026-07-30T21:40:00+08:00",
+                "source": "conversation",
+                "subject_actor_id": "bot_self",
+                "actor_type": "bot",
+            }],
+        }
+    )
+    host.fixed_now = dt("2026-07-30T21:34:00+08:00")
+    context = host._agenda_current_interruption_context(now=host.fixed_now)
+    assert context["active"] is True
+    assert context["plan_title"] == "写作业"
+    assert context["confidence"] == "low"
+    agenda = host._agenda_build(now=host.fixed_now)
+    assert agenda["plans"][0]["status"] == "planned"
+    assert agenda["reconciliations"] == []
+
+
 def test_closed_windows_use_window_date_and_maintenance_is_local_only() -> None:
     host = Host({})
     host.fixed_now = dt("2026-07-30T06:00:00+08:00")

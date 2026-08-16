@@ -396,6 +396,13 @@ class SceneContextMixin:
         plan = plan if isinstance(plan, dict) else {}
         current_item, schedule_text, runtime_status = self._scene_context_current_schedule(plan)
         schedule_history = self._scene_context_schedule_history(plan, captured=captured)
+        interruption_getter = getattr(self, "_agenda_current_interruption_context", None)
+        interruption_context = None
+        if callable(interruption_getter):
+            try:
+                interruption_context = interruption_getter(now=captured)
+            except Exception:
+                interruption_context = None
 
         location = ""
         location_getter = getattr(self, "_current_location_state_text", None)
@@ -600,6 +607,7 @@ class SceneContextMixin:
                 "message_seed": _single_line(current_item.get("message_seed"), 160),
                 "text": schedule_text,
                 "history": schedule_history,
+                "interruption": interruption_context if isinstance(interruption_context, dict) else {},
             },
             "location": {
                 "raw": location,
@@ -690,6 +698,14 @@ class SceneContextMixin:
             parts.append(f"状态余波：{'、'.join(_single_line(item, 32) for item in conditions[:4] if _single_line(item, 32))}")
         if _single_line(schedule.get("text"), 320):
             parts.append(f"当前日程：{_single_line(schedule.get('text'), 320)}")
+        interruption = schedule.get("interruption") if isinstance(schedule.get("interruption"), dict) else {}
+        if interruption.get("active"):
+            plan_title = _single_line(interruption.get("plan_title"), 100) or "原定日程"
+            activity_summary = _single_line(interruption.get("activity_summary"), 140) or "一段持续聊天"
+            parts.append(
+                f"日程打断线索（仅低置信参考，不代表计划已完成）：原定“{plan_title}”期间可能被{activity_summary}占用；"
+                "如需提起，只能用试探语气询问，不能替用户断言结果。"
+            )
         if _single_line(location.get("text"), 80):
             parts.append(f"当前位置：{_single_line(location.get('text'), 80)}")
         if _single_line(location.get("category_label"), 24):
@@ -875,8 +891,14 @@ class SceneContextMixin:
         user: dict[str, Any] | None,
         *,
         now: float | None = None,
+        include_map: bool = False,
     ) -> dict[str, Any]:
-        """Return a bounded semantic location signal for proactive planning."""
+        """Return a bounded semantic location signal for proactive planning.
+
+        ``include_map`` additionally reports user-marked place names so callers
+        that need the cognitive-map background reuse this pass instead of
+        querying the reality bridge and map observer a second time.
+        """
         current_user = user if isinstance(user, dict) else {}
         user_id = _single_line(current_user.get("user_id") or current_user.get("id"), 80)
         getter = getattr(self, "_reality_mobile_context", None)
@@ -894,20 +916,14 @@ class SceneContextMixin:
         place = location.get("place") if isinstance(location.get("place"), dict) else {}
         place_name = _single_line(place.get("name"), 40)
         if not bool(place.get("matched")) or not place_name:
-            return {"available": True, "matched": False}
+            scene: dict[str, Any] = {"available": True, "matched": False}
+            if include_map:
+                scene["known_places"] = self._known_places_from_map(
+                    self._mobile_cognitive_map(user_id, location)
+                )
+            return scene
 
-        map_observer = getattr(self, "_observe_mobile_place_context", None)
-        cognitive_map: dict[str, Any] = {}
-        if callable(map_observer):
-            try:
-                try:
-                    candidate = map_observer(user_id, location, include_transition=True)
-                except TypeError:
-                    candidate = map_observer(user_id, location)
-                if isinstance(candidate, dict):
-                    cognitive_map = candidate
-            except Exception:
-                cognitive_map = {}
+        cognitive_map = self._mobile_cognitive_map(user_id, location, include_transition=True)
         current_place = cognitive_map.get("current_place") if isinstance(cognitive_map.get("current_place"), dict) else {}
         updated_at = _single_line(current_place.get("transition_at"), 40)
         previous_place_name = _single_line(current_place.get("previous_place_name"), 48)
@@ -920,7 +936,7 @@ class SceneContextMixin:
                     arrival_age_minutes = max(0.0, (check_now - transition_ts) / 60.0)
             except (TypeError, ValueError, OverflowError):
                 arrival_age_minutes = None
-        return {
+        scene = {
             "available": True,
             "matched": True,
             "place_name": place_name,
@@ -929,6 +945,32 @@ class SceneContextMixin:
             "recent_arrival": bool(previous_place_name) and arrival_age_minutes is not None and arrival_age_minutes <= 90.0,
             "arrival_age_minutes": arrival_age_minutes,
         }
+        if include_map:
+            scene["known_places"] = self._known_places_from_map(cognitive_map)
+        return scene
+
+    def _mobile_cognitive_map(
+        self,
+        user_id: str,
+        location: dict[str, Any],
+        *,
+        include_transition: bool = False,
+    ) -> dict[str, Any]:
+        map_observer = getattr(self, "_observe_mobile_place_context", None)
+        if not callable(map_observer):
+            return {}
+        try:
+            try:
+                candidate = map_observer(user_id, location, include_transition=include_transition)
+            except TypeError:
+                candidate = map_observer(user_id, location)
+            return candidate if isinstance(candidate, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _known_places_from_map(cognitive_map: dict[str, Any]) -> list[Any]:
+        return cognitive_map.get("known_places") if isinstance(cognitive_map.get("known_places"), list) else []
 
     def _format_mobile_user_location_context_for_proactive(self, user: dict[str, Any] | None) -> str:
         """Format location as a low-pressure scene hint for proactive messages.
@@ -936,7 +978,7 @@ class SceneContextMixin:
         Proactive prompts should not receive the private-dialogue coordinate detail.  They
         only need a coarse, authorized signal that can make a topic or timing feel natural.
         """
-        scene = self._mobile_user_proactive_scene(user)
+        scene = self._mobile_user_proactive_scene(user, include_map=True)
         if not scene:
             return ""
         facts: list[str] = []
@@ -952,26 +994,7 @@ class SceneContextMixin:
 
         # A few user-created place names can help distinguish home/work context, but
         # routes and coordinates are intentionally excluded from proactive prompts.
-        current_user = user if isinstance(user, dict) else {}
-        user_id = _single_line(current_user.get("user_id") or current_user.get("id"), 80)
-        getter = getattr(self, "_reality_mobile_context", None)
-        location: dict[str, Any] = {}
-        if callable(getter) and user_id:
-            try:
-                mobile_context = getter(user_id)
-                location = mobile_context.get("location") if isinstance(mobile_context, dict) and isinstance(mobile_context.get("location"), dict) else {}
-            except Exception:
-                location = {}
-        map_observer = getattr(self, "_observe_mobile_place_context", None)
-        cognitive_map: dict[str, Any] = {}
-        if callable(map_observer):
-            try:
-                candidate = map_observer(user_id, location)
-                if isinstance(candidate, dict):
-                    cognitive_map = candidate
-            except Exception:
-                cognitive_map = {}
-        known_places = cognitive_map.get("known_places") if isinstance(cognitive_map.get("known_places"), list) else []
+        known_places = scene.get("known_places") if isinstance(scene.get("known_places"), list) else []
         known_names = [
             _single_line(item.get("name"), 32)
             for item in known_places[:4]

@@ -375,19 +375,10 @@ class MemoryCompanionAdapterMixin:
 
     def _memory_companion_bridge_uncached(self) -> Any | None:
         inspected_module_ids: set[int] = set()
-        for module_name in (
-            "data.plugins.astrbot_plugin_remember_you.main",
-            "astrbot_plugin_remember_you.main",
-            "data.plugins.astrbot_plugin_memory_companion.main",
-            "astrbot_plugin_memory_companion.main",
-        ):
-            module = sys.modules.get(module_name)
-            if module is not None:
-                inspected_module_ids.add(id(module))
-            bridge = self._memory_companion_bridge_from_module(module)
-            if bridge is not None:
-                return bridge
 
+        # Prefer AstrBot's currently registered live instance. During plugin
+        # reloads, an old module alias can remain in sys.modules and expose a
+        # stale bridge contract even though the active plugin is up to date.
         context = getattr(self, "context", None)
         get_all_stars = getattr(context, "get_all_stars", None)
         if callable(get_all_stars):
@@ -404,6 +395,19 @@ class MemoryCompanionAdapterMixin:
                 module = getattr(metadata, "module", None)
                 if module is not None:
                     inspected_module_ids.add(id(module))
+
+        for module_name in (
+            "data.plugins.astrbot_plugin_remember_you.main",
+            "astrbot_plugin_remember_you.main",
+            "data.plugins.astrbot_plugin_memory_companion.main",
+            "astrbot_plugin_memory_companion.main",
+        ):
+            module = sys.modules.get(module_name)
+            if module is not None:
+                inspected_module_ids.add(id(module))
+            bridge = self._memory_companion_bridge_from_module(module)
+            if bridge is not None:
+                return bridge
 
         # Older AstrBot builds and some hot-reload paths may expose a different
         # module alias. Scan only modules that identify themselves exactly as

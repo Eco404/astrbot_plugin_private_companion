@@ -8,7 +8,8 @@ from typing import Any
 
 
 _POSITIVE_TTL = 15.0
-_NEGATIVE_TTL = 3.0
+# 未安装外部插件时负向结果可缓存更久，避免频繁全量扫描 sys.modules。
+_NEGATIVE_TTL = 10.0
 
 
 def _lifecycle_active(api: Any) -> bool:
