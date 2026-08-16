@@ -1054,6 +1054,32 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
         "external_image_download_use_environment_proxy",
         False,
     )
+    self.proactive_dedup_enabled = self._cfg_bool(c, "proactive_dedup_enabled", True)
+    self.proactive_dedup_policies = self._cfg_str(
+        c,
+        "proactive_dedup_policies",
+        "semantic,content_fingerprint,life_event",
+        "semantic,content_fingerprint,life_event",
+    )
+    self.proactive_dedup_sent_window_minutes = self._cfg_int(
+        c, "proactive_dedup_sent_window_minutes", 240, 0, 2880
+    )
+    self.proactive_dedup_last_message_window_minutes = self._cfg_int(
+        c, "proactive_dedup_last_message_window_minutes", 240, 0, 2880
+    )
+    self.proactive_dedup_last_message_enabled = self._cfg_bool(
+        c, "proactive_dedup_last_message_enabled", True
+    )
+    self.proactive_dedup_weather_window_minutes = self._cfg_int(
+        c, "proactive_dedup_weather_window_minutes", 1080, 0, 8640
+    )
+    self.proactive_dedup_min_shared_tokens = self._cfg_int(
+        c, "proactive_dedup_min_shared_tokens", 1, 1, 4
+    )
+    self.proactive_dedup_min_overlap_ratio = min(
+        1.0,
+        max(0.0, self._cfg_float(c, "proactive_dedup_min_overlap_ratio", 0.0, 0.0)),
+    )
 
 def _initialize_photo_and_expression_config(self: Any, c: Any) -> None:
     self._external_image_download_session = None

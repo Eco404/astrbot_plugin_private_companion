@@ -6025,6 +6025,86 @@
       }
     }
   },
+  "proactive_dedup_config": {
+    "description": "主动消息相似度去重",
+    "type": "object",
+    "hint": "控制发送前正文相似度去重守卫的开关、作用策略、窗口与严格度。默认值与旧版写死行为一致；调低窗口或调高严格度可减少对关系关怀类主动消息的误拦。",
+    "items": {
+      "proactive_dedup_enabled": {
+        "description": "启用发送前相似度去重",
+        "type": "bool",
+        "hint": "关闭后主动消息发送前不再做正文相似度去重（仍保留时间复核、问候去重、人格判定、发送前复核等其他门禁）。",
+        "default": true
+      },
+      "proactive_dedup_policies": {
+        "description": "应用去重的路由策略",
+        "type": "string",
+        "hint": "逗号分隔的 duplicate_policy 列表，只有列出的策略参与正文相似度去重。默认 semantic,content_fingerprint,life_event（与旧版一致）。想放行关系关怀/习惯关心类主动消息就删掉 semantic，内容与生活类去重仍保留。",
+        "default": "semantic,content_fingerprint,life_event"
+      },
+      "proactive_dedup_sent_window_minutes": {
+        "description": "已发送主动话题去重窗口（分钟）",
+        "type": "int",
+        "hint": "在该窗口内，与近期主动发送过的话题相似的候选会被去重。默认 240（4 小时）。调小可减少误拦，0 = 不按时间限制。",
+        "slider": {
+          "min": 0,
+          "max": 1440,
+          "step": 30
+        },
+        "default": 240
+      },
+      "proactive_dedup_last_message_window_minutes": {
+        "description": "最后一条 Bot 消息去重窗口（分钟）",
+        "type": "int",
+        "hint": "在该窗口内，与 Bot 最后一条消息（含被动回复）相似的候选会被去重。默认 240（4 小时）。这是最严格的一层——被动回复也算；调小可让 Bot 在被动提过某话题几小时后仍能主动关心。",
+        "slider": {
+          "min": 0,
+          "max": 1440,
+          "step": 30
+        },
+        "default": 240
+      },
+      "proactive_dedup_last_message_enabled": {
+        "description": "对比最后一条 Bot 消息",
+        "type": "bool",
+        "hint": "关闭后不再对比 Bot 最后一条消息（含被动回复），只对比主动发送历史。想保留主动去重但放行「刚被动提过的话题」时关闭。",
+        "default": true
+      },
+      "proactive_dedup_weather_window_minutes": {
+        "description": "天气话题长时窗口（分钟）",
+        "type": "int",
+        "hint": "天气是特殊长活话题，窗口独立设置。默认 1080（18 小时），与旧版一致。",
+        "slider": {
+          "min": 0,
+          "max": 2880,
+          "step": 120
+        },
+        "default": 1080
+      },
+      "proactive_dedup_min_shared_tokens": {
+        "description": "小签名最少共享锚点数",
+        "type": "int",
+        "hint": "签名锚点数不超过 2 的小话题，达到多少个共享锚点才判重复。默认 1（1 个词重叠即判重复，与旧版一致）；调成 2 可显著减少不同话题的误判。",
+        "slider": {
+          "min": 1,
+          "max": 4,
+          "step": 1
+        },
+        "default": 1
+      },
+      "proactive_dedup_min_overlap_ratio": {
+        "description": "大签名最小重叠比例",
+        "type": "float",
+        "hint": "签名锚点数大于 2 的大话题，重叠比例达到多少才判重复（作为各分档阈值的下限）。默认 0 表示沿用原有 0.5/0.3/0.18 分档；调高（如 0.6）更难判重复。",
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
+        "default": 0.0
+      }
+    }
+  },
   "proactive_generation_config": {
     "description": "主动生成与人格判定",
     "type": "object",

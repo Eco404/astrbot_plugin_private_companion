@@ -2590,13 +2590,15 @@ class DailyStateMixin(DailyStateTickMixin):
             return False
         common = left_set & right_set
         smaller_size = min(len(left_set), len(right_set))
+        min_shared_tokens = int(getattr(self, "proactive_dedup_min_shared_tokens", 1))
         if smaller_size <= 2:
-            return len(common) >= 1
+            return len(common) >= min_shared_tokens
+        overlap_floor = float(getattr(self, "proactive_dedup_min_overlap_ratio", 0.0))
         overlap = len(common) / smaller_size
         return bool(
-            (len(common) >= 2 and overlap >= 0.5)
-            or (len(common) >= 3 and overlap >= 0.3)
-            or (len(common) >= 4 and overlap >= 0.18)
+            (len(common) >= 2 and overlap >= max(0.5, overlap_floor))
+            or (len(common) >= 3 and overlap >= max(0.3, overlap_floor))
+            or (len(common) >= 4 and overlap >= max(0.18, overlap_floor))
             or len(common) >= 6
         )
 
@@ -2633,6 +2635,12 @@ class DailyStateMixin(DailyStateTickMixin):
         )
         del recent[:-12]
 
+    def _proactive_dedup_enabled_policies(self) -> frozenset[str]:
+        raw = str(getattr(self, "proactive_dedup_policies", "") or "").strip()
+        if not raw:
+            return frozenset({"semantic", "content_fingerprint", "life_event"})
+        return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
     def _recent_proactive_text_duplicate_reason(
         self,
         user: dict[str, Any],
@@ -2642,6 +2650,8 @@ class DailyStateMixin(DailyStateTickMixin):
         motive: str = "",
         now: float | None = None,
     ) -> str:
+        if not bool(getattr(self, "proactive_dedup_enabled", True)):
+            return ""
         signature = self._proactive_topic_signature(text, topic, motive)
         if not signature:
             return ""
@@ -2651,7 +2661,11 @@ class DailyStateMixin(DailyStateTickMixin):
             if not self._topic_signature_similar(signature, old_signature):
                 continue
             age = check_now - _safe_float(item.get("ts"), 0)
-            duplicate_window = 18 * 3600 if signature == "ordinary_weather_topic" else 4 * 3600
+            duplicate_window = (
+                int(getattr(self, "proactive_dedup_weather_window_minutes", 1080)) * 60
+                if signature == "ordinary_weather_topic"
+                else int(getattr(self, "proactive_dedup_sent_window_minutes", 240)) * 60
+            )
             if age > duplicate_window:
                 continue
             old_text = _single_line(item.get("text"), 80)
@@ -2669,10 +2683,12 @@ class DailyStateMixin(DailyStateTickMixin):
             and user.get("proactive_sending")
         )
         if (
-            not unconfirmed_current_candidate
+            bool(getattr(self, "proactive_dedup_last_message_enabled", True))
+            and not unconfirmed_current_candidate
             and last_message
             and last_at > 0
-            and check_now - last_at <= 4 * 3600
+            and check_now - last_at
+            <= int(getattr(self, "proactive_dedup_last_message_window_minutes", 240)) * 60
         ):
             last_signature = self._proactive_topic_signature(last_message)
             if self._topic_signature_similar(signature, last_signature):
