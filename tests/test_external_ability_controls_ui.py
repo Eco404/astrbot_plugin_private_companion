@@ -47,6 +47,9 @@ class ExternalAbilityControlsUiTests(unittest.TestCase):
         for source in (self.script, self.localized_script):
             self.assertIn('input[name=extension_migration_reminder]:checked', source)
             self.assertIn('selected !== "never"', source)
+            self.assertIn('fetchJson("/extension-migration-notice/update"', source)
+            self.assertIn('fetchJson("/extension-migration-notice"', source)
+            self.assertIn('EXTENSION_MIGRATION_NOTICE_VERSION', source)
         for source in (self.html, self.localized_html):
             self.assertIn('value="remind" checked', source)
             self.assertIn('value="never"', source)

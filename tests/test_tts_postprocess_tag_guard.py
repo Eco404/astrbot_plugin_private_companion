@@ -1341,7 +1341,7 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
             [[type(item).__name__ for item in chunk] for chunk in chunks],
         )
 
-    def test_reply_and_at_follow_text_instead_of_first_voice(self):
+    def test_voice_reply_drops_quote_but_keeps_at_with_visible_text(self):
         harness = _TtsHarness()
         reply = Reply(id="quoted-message")
         chunks = harness._split_tts_chain_for_ordered_send(
@@ -1349,9 +1349,23 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(
-            [["Record"], ["Reply", "At", "Plain"]],
+            [["Record"], ["At", "Plain"]],
             [[type(item).__name__ for item in chunk] for chunk in chunks],
         )
+
+    def test_non_voice_chain_preserves_reply(self):
+        harness = _TtsHarness()
+        reply = Reply(id="quoted-message")
+
+        chunks = harness._split_tts_chain_for_ordered_send(
+            [reply, At(qq="10001"), Plain("普通文字回复")]
+        )
+
+        self.assertEqual(
+            [["Reply", "At", "Plain"]],
+            [[type(item).__name__ for item in chunk] for chunk in chunks],
+        )
+        self.assertIs(reply, chunks[0][0])
 
     def test_voice_only_chain_drops_reply_instead_of_sending_orphan_quote(self):
         harness = _TtsHarness()

@@ -125,6 +125,7 @@ from .reaction_asset_library import get_reaction_asset_library
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
+EXTENSION_MIGRATION_NOTICE_VERSION = "6.2.2"
 IMAGE_CACHE_THUMBNAIL_MAX_EDGE = 160
 IMAGE_CACHE_THUMBNAIL_QUALITY = 78
 PHOTO_REFERENCE_PREVIEW_MAX_BYTES = 20 * 1024 * 1024
@@ -699,6 +700,8 @@ class PrivateCompanionPageApi(
         register = self.plugin.context.register_web_api
         routes = [
             ("/overview", self.get_overview, ["GET"], "Private Companion Page overview"),
+            ("/extension-migration-notice", self.get_extension_migration_notice, ["GET"], "Private Companion Page extension migration notice preference"),
+            ("/extension-migration-notice/update", self.update_extension_migration_notice, ["POST"], "Private Companion Page update extension migration notice preference"),
             ("/expression-library", self.get_expression_library, ["GET"], "Private Companion Page expression library"),
             ("/expression-library/update", self.update_expression_library, ["POST"], "Private Companion Page update expression library"),
             ("/expression-library/share", self.share_expression_library, ["POST"], "Private Companion Page share expression library"),
@@ -870,6 +873,8 @@ class PrivateCompanionPageApi(
             ("/tts/provider/test", self.test_tts_provider_config, ["POST"], "Private Companion Page test TTS provider"),
         ]
         persona_control_routes = {
+            "/extension-migration-notice",
+            "/extension-migration-notice/update",
             "/roleplay/personas",
             "/persona/switch",
             "/persona/migrate",
@@ -883,6 +888,47 @@ class PrivateCompanionPageApi(
             )
             registered_handler = self._http_status_route_handler(scoped_handler)
             register(f"{PAGE_API_PREFIX}{path}", registered_handler, methods, desc)
+
+    async def get_extension_migration_notice(self) -> dict[str, Any]:
+        """Read the persisted dismissal state for the extension migration notice."""
+        version = EXTENSION_MIGRATION_NOTICE_VERSION
+        try:
+            async with self.plugin._data_lock:
+                raw = self.plugin.data.get("extension_migration_notice_preferences")
+                record = raw.get(version) if isinstance(raw, dict) else None
+                dismissed = bool(record.get("dismissed")) if isinstance(record, dict) else False
+            return self._ok({"version": version, "dismissed": dismissed})
+        except Exception as exc:
+            logger.debug("[PrivateCompanionPage] 读取拓展迁移提示偏好失败: %s", self._single_line(exc, 160))
+            return self._ok({"version": version, "dismissed": False, "persistent": False})
+
+    async def update_extension_migration_notice(self) -> dict[str, Any]:
+        """Persist the user's choice so embedded Page containers do not re-show it."""
+        payload = await request.get_json(silent=True) or {}
+        version = self._single_line(payload.get("version"), 40) or EXTENSION_MIGRATION_NOTICE_VERSION
+        if version != EXTENSION_MIGRATION_NOTICE_VERSION:
+            return self._error("无效的迁移提示版本")
+        dismissed = payload.get("dismissed") is True
+        try:
+            async with self.plugin._data_lock:
+                preferences = self.plugin.data.get("extension_migration_notice_preferences")
+                if not isinstance(preferences, dict):
+                    preferences = {}
+                preferences = {
+                    str(key): value
+                    for key, value in preferences.items()
+                    if isinstance(value, dict)
+                }
+                preferences[version] = {
+                    "dismissed": dismissed,
+                    "updated_at": time.time(),
+                }
+                self.plugin.data["extension_migration_notice_preferences"] = dict(list(preferences.items())[-12:])
+                self.plugin._save_data_sync()
+            return self._ok({"version": version, "dismissed": dismissed, "persistent": True})
+        except Exception as exc:
+            logger.warning("[PrivateCompanionPage] 保存拓展迁移提示偏好失败: %s", self._single_line(exc, 160))
+            return self._exception_error("保存迁移提示偏好失败")
 
     @_multi_persona_page_context
     async def get_overview(self) -> dict[str, Any]:
@@ -26543,6 +26589,10 @@ class PrivateCompanionPageApi(
                 "created": self.plugin._format_timestamp_elapsed(raw.get("created_ts", 0)),
                 "updated_ts": updated_ts,
                 "updated": self.plugin._format_timestamp_elapsed(raw.get("updated_ts", 0)),
+                "expects_reply": bool(raw.get("expects_reply")),
+                "outcome": self._single_line(raw.get("outcome"), 32),
+                "outcome_at": self._float(raw.get("outcome_at")),
+                "outcome_latency_seconds": self._int(raw.get("outcome_latency_seconds")),
                 "candidate_id": self._single_line(raw.get("candidate_id"), 40),
                 "has_image": bool(_path_text(raw.get("image_path"), 1000)),
                 "extra_count": self._int(raw.get("extra_count")),
@@ -26556,6 +26606,10 @@ class PrivateCompanionPageApi(
         last_tick_finished = self._float(runtime.get("last_tick_finished_at")) if runtime else 0
         tick_age = now - max(last_tick_started, last_tick_finished) if max(last_tick_started, last_tick_finished) > 0 else -1
         expected_interval = max(30, self._int(getattr(self.plugin, "check_interval_seconds", 60)))
+        review_summary_getter = getattr(self.plugin, "_proactive_review_audit_summary", None)
+        review_summary = review_summary_getter(now=now, window_days=7) if callable(review_summary_getter) else {}
+        if not isinstance(review_summary, dict):
+            review_summary = {}
         return {
             "total": len(items),
             "source_counts": source_counts,
@@ -26564,6 +26618,7 @@ class PrivateCompanionPageApi(
             "audit_total": len(audit_items),
             "audit_status_counts": audit_status_counts,
             "audit_items": audit_items[:40],
+            "review_summary": review_summary,
             "user_states": sorted(
                 user_states,
                 key=lambda item: (

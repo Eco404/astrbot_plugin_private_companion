@@ -162,7 +162,7 @@ class SegmentedComponentPlannerTests(unittest.TestCase):
 
 
 class SegmentedQuoteBindingIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_quote_moves_from_leading_voice_to_pending_text_chunk(self):
+    async def test_voice_reply_drops_quote_from_pending_text_chunk(self):
         from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 
         plugin = object.__new__(PrivateCompanionPlugin)
@@ -201,7 +201,7 @@ class SegmentedQuoteBindingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             [type(component).__name__ for component in result.chain],
         )
         self.assertEqual(
-            [["Reply", "At", "Plain"]],
+            [["At", "Plain"]],
             [
                 [type(component).__name__ for component in chunk]
                 for chunk in event._private_companion_tts_reply_remainder["chunks"]

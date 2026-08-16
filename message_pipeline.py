@@ -358,6 +358,13 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         )
         fast_user["episode_message_count"] = _safe_int(fast_user.get("episode_message_count"), 0, 0) + 1
         if _safe_float(fast_user.get("awaiting_reply_since"), 0) > 0:
+            audit_outcome_recorder = getattr(self, "_mark_proactive_audit_reply_outcome", None)
+            if callable(audit_outcome_recorder):
+                audit_outcome_recorder(
+                    fast_user,
+                    received_at=received_ts,
+                    message_id=self._event_message_id(event),
+                )
             fast_user["reply_count"] = _safe_int(fast_user.get("reply_count"), 0) + 1
             self._note_action_reply_feedback(
                 fast_user,
@@ -730,6 +737,13 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             user["pending_followup_event"] = {}
             user["planned_proactive_quota_exempt"] = False
         if _safe_float(user.get("awaiting_reply_since"), 0) > 0:
+            audit_outcome_recorder = getattr(self, "_mark_proactive_audit_reply_outcome", None)
+            if callable(audit_outcome_recorder):
+                audit_outcome_recorder(
+                    user,
+                    received_at=received_ts,
+                    message_id=self._event_message_id(event),
+                )
             user["reply_count"] = _safe_int(user.get("reply_count"), 0) + 1
             self._note_action_reply_feedback(
                 user,

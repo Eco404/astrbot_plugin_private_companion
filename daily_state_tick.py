@@ -704,7 +704,12 @@ class DailyStateTickMixin:
                                 failure_count,
                                 _single_line(exc, 120),
                             )
-                            review_decision = {"decision": "send", "reason": "发送前价值复核连续失败，已按当前强度放行"}
+                            review_decision = {
+                                "decision": "send",
+                                "reason": "发送前价值复核连续失败，已按当前强度放行",
+                                "review_fallback": True,
+                                "review_fallback_reason": _single_line(exc, 180),
+                            }
                     else:
                         delay_minutes = min(240, 45 * (2 ** max(0, failure_count - 1)))
                         logger.warning(
@@ -722,12 +727,128 @@ class DailyStateTickMixin:
                     logger.debug("[PrivateCompanion] 主动消息发送前本地复核失败,按原文继续: %s", _single_line(exc, 120))
                     review_decision = {"decision": "send"}
             decision = str(review_decision.get("decision") or "send").lower() if isinstance(review_decision, dict) else "send"
-            if decision in {"send", "rewrite"}:
+            review_fallback_release = bool(
+                isinstance(review_decision, dict)
+                and review_decision.get("review_fallback")
+                and decision in {"send", "rewrite"}
+            )
+            if review_fallback_release:
+                async with self._data_lock:
+                    review_runtime = self.data.setdefault("proactive_review_runtime", {})
+                    if not isinstance(review_runtime, dict):
+                        review_runtime = {}
+                        self.data["proactive_review_runtime"] = review_runtime
+                    release_count = _safe_int(review_runtime.get("consecutive_fallback_releases"), 0, 0) + 1
+                    review_runtime["consecutive_fallback_releases"] = release_count
+                    review_runtime["last_fallback_release_at"] = _now_ts()
+                    review_runtime["last_fallback_reason"] = _single_line(
+                        review_decision.get("review_fallback_reason") or review_decision.get("reason"),
+                        180,
+                    )
+                    self._save_data_sync()
+                if release_count == 10 or release_count % 10 == 0:
+                    logger.warning(
+                        "[PrivateCompanion] 主动复核模型已连续放行 %s 条原文，请检查 RESPONSE_REVIEW_PROVIDER_ID",
+                        release_count,
+                    )
+            review_model_ok = bool(
+                isinstance(review_decision, dict) and review_decision.get("review_model_ok")
+            )
+            ordinary_release = decision in {"send", "rewrite"} and not bool(
+                isinstance(review_decision, dict) and review_decision.get("review_fallback")
+            )
+            if review_model_ok or ordinary_release:
                 async with self._data_lock:
                     current_for_review_ok = self._get_user(user_id)
                     if isinstance(current_for_review_ok.get("proactive_review_failure_backoff"), dict):
                         current_for_review_ok["proactive_review_failure_backoff"] = {}
-                        self._save_data_sync()
+                    review_runtime = self.data.get("proactive_review_runtime")
+                    if isinstance(review_runtime, dict) and _safe_int(review_runtime.get("consecutive_fallback_releases"), 0) > 0:
+                        review_runtime["consecutive_fallback_releases"] = 0
+                        review_runtime["last_recovered_at"] = _now_ts()
+                    self._save_data_sync()
+            if decision == "defer":
+                delay_minutes = max(
+                    5,
+                    min(240, _safe_int(review_decision.get("delay_minutes"), 60, 5, 240)),
+                )
+                note = _single_line(review_decision.get("reason"), 180) or f"发送前复核建议延后 {delay_minutes} 分钟"
+                stale_checker = getattr(self, "_stale_proactive_review_defer_release_reason", None)
+                stale_note = ""
+                if callable(stale_checker):
+                    try:
+                        stale_note = _single_line(
+                            stale_checker(
+                                user,
+                                note=note,
+                                reason=reason or normalize_legacy_tag_text(user.get("planned_proactive_reason")),
+                            ),
+                            180,
+                        )
+                    except Exception:
+                        stale_note = ""
+                stale_candidate = bool(stale_note)
+                if stale_candidate:
+                    note = stale_note
+                async with self._data_lock:
+                    current_for_review_defer = self._get_user(user_id)
+                    current_for_review_defer["proactive_sending"] = False
+                    current_for_review_defer["proactive_sending_started_at"] = 0
+                    if is_troubleshooting_for_send and not stale_candidate:
+                        self._append_troubleshooting_proactive_step(
+                            current_for_review_defer,
+                            "发送前价值复核",
+                            "ok",
+                            f"候选已延后 {delay_minutes} 分钟：{note}",
+                        )
+                        self._restore_troubleshooting_proactive_plan(current_for_review_defer)
+                    else:
+                        replacer = getattr(self, "_defer_or_replace_planned_impulse", None)
+                        handled = False
+                        replacer_called = False
+                        if callable(replacer):
+                            try:
+                                replacer_called = True
+                                handled = bool(
+                                    replacer(
+                                        current_for_review_defer,
+                                        now=_now_ts(),
+                                        note=note,
+                                        delay_minutes=(float(delay_minutes), float(delay_minutes) + 3.0),
+                                        block_current=stale_candidate,
+                                    )
+                                )
+                            except Exception as exc:
+                                replacer_called = False
+                                logger.debug("[PrivateCompanion] 复核延后更新候选失败，回退直接排程: %s", _single_line(exc, 120))
+                        if stale_candidate and not replacer_called:
+                            self._mark_planned_candidate_status(current_for_review_defer, "cancelled", note)
+                            self._clear_pending_proactive_plan(current_for_review_defer)
+                        if not handled and _safe_float(current_for_review_defer.get("next_proactive_at"), 0) <= _now_ts():
+                            self._schedule_next_proactive(
+                                current_for_review_defer,
+                                now=_now_ts(),
+                                delay_hours=(delay_minutes / 60.0, (delay_minutes + 3) / 60.0),
+                            )
+                        if not stale_candidate:
+                            self._mark_planned_candidate_status(current_for_review_defer, "deferred", note)
+                        self._clear_pending_proactive_send_retry(current_for_review_defer)
+                    self._update_proactive_audit(
+                        audit_id,
+                        status="cancelled" if stale_candidate else "deferred",
+                        note=note,
+                        text=text or review_candidate_text,
+                    )
+                    self._save_data_sync()
+                logger.info(
+                    "[PrivateCompanion] 主动消息发送前复核%s: user=%s delay=%s reason=%s",
+                    "作废过期候选" if stale_candidate else "延后",
+                    user_id,
+                    delay_minutes,
+                    note,
+                )
+                self._debug_tick_skip(user_id, note, prefix="作废" if stale_candidate else "延后")
+                return
             if decision == "rewrite":
                 rewritten_text = str(review_decision.get("text") or "").strip()
                 if rewritten_text:
@@ -1736,6 +1857,8 @@ class DailyStateTickMixin:
                 extra_count=len(extra_components),
                 action=current["last_proactive_action"],
                 reason="troubleshooting_test" if is_troubleshooting_for_send else reason,
+                sent_at=current["last_sent"],
+                expects_reply=bool(route_settlement_for_send.get("await_reply")),
             )
             if is_troubleshooting_for_send:
                 self._record_troubleshooting_proactive_result(
@@ -1763,6 +1886,11 @@ class DailyStateTickMixin:
                 sent_at=current["last_sent"],
                 count_delivery=not simulation_active,
             )
+            if bool(route_settlement_for_send.get("await_reply")) and audit_id:
+                current["last_proactive_reply_audit_id"] = str(audit_id)
+                current["last_proactive_reply_audit_sent_at"] = current["last_sent"]
+                current["last_proactive_reply_audit_outcome"] = "pending"
+                current["last_proactive_reply_audit_outcome_at"] = 0
             if self._private_user_role(current) == "friend":
                 current["pending_followup_event"] = {}
                 current["suspended_proactive"] = {}

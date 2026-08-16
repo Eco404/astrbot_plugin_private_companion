@@ -2382,7 +2382,12 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         return candidates[:24]
 
     def _proactive_forbidden_recipient_addresses(self, user: dict[str, Any] | None, name: str = "") -> list[str]:
-        if not isinstance(user, dict) or self._private_user_role(user) != "friend":
+        role_getter = getattr(self, "_private_user_role", None)
+        if (
+            not isinstance(user, dict)
+            or not callable(role_getter)
+            or role_getter(user) != "friend"
+        ):
             return []
         allowed = self._proactive_recipient_allowed_names(user, name)
         forbidden: list[str] = []
@@ -2952,7 +2957,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             prompt = (
                 f"{prompt.rstrip()}\n\n{persona_marker}\n"
                 "【当前主动消息必须遵循的人格】\n"
-                f"{persona[:2600]}\n"
+                f"{self._truncate_proactive_context(persona, 2600)}\n"
                 "这份人格约束最终说话者的身份、性格、关系站位、称呼和措辞。"
                 "日程、记忆、主动动机及工具结果只能提供本轮内容，不能覆盖或改写人格。"
             )
@@ -5045,17 +5050,36 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         user: dict[str, Any],
         *,
         note: str = "",
+        reason: str = "",
         now: float | None = None,
     ) -> str:
         note_text = _single_line(note, 120)
-        if not note_text or not re.search(r"(早安|今早|早上|睡前|晚安)", note_text):
+        reason_key = _single_line(reason, 40).lower()
+        time_sensitive_reasons = {
+            "morning_greeting": 12 * 60,
+            "noon_greeting": 15 * 60,
+            "evening_greeting": 23 * 60 + 30,
+            "environment_change": 120,
+            "creative_share": 180,
+            "reminder": 180,
+            "meal_care": 120,
+            "meal_care_followup": 120,
+            "weather_alert": 180,
+        }
+        if not note_text and not reason_key:
             return ""
         check_now = _now_ts() if now is None else now
+        if reason_key in time_sensitive_reasons:
+            window_start = _safe_float(user.get("planned_proactive_window_start_at"), 0)
+            expire_at = _safe_float(user.get("planned_proactive_expire_at"), 0)
+            if expire_at > 0 and check_now >= expire_at:
+                return "主动候选的有效窗口已结束，放弃过期复核结果并重新编排"
+            if window_start > 0 and check_now - window_start >= time_sensitive_reasons[reason_key] * 60:
+                return "主动候选已超过当前场景有效期，放弃过期复核结果并重新编排"
+        if not re.search(r"(早安|今早|早上|睡前|晚安)", note_text):
+            return ""
         now_minutes = datetime.fromtimestamp(check_now).hour * 60 + datetime.fromtimestamp(check_now).minute
-        if "睡前" in note_text or "晚安" in note_text:
-            stale_after = 9 * 60
-        else:
-            stale_after = 12 * 60
+        stale_after = 9 * 60 if ("睡前" in note_text or "晚安" in note_text) else 12 * 60
         if now_minutes < stale_after:
             return ""
         recent_private_at = max(
@@ -5066,6 +5090,86 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             return ""
         return "复核理由沿用了过期早间/睡前语境，已改按当前运行态放行"
 
+    @staticmethod
+    def _proactive_rewrite_blacklist_reason(text: str) -> str:
+        """Reject structured model leakage without blocking ordinary chat words."""
+        candidate = str(text or "")
+        if not candidate:
+            return ""
+        patterns = (
+            (r"```(?:json|python|javascript|text)?\s*", "改写残留代码块"),
+            (r"\{[^{}\n]{0,600}(?:[\"'](?:decision|text|reason|status|tool|delay_minutes)[\"']\s*:)", "改写残留结构化 JSON"),
+            (r"(?:作为(?:一个)?(?:AI|人工智能|语言模型)|我是(?:一个)?(?:AI|语言模型))", "改写暴露模型身份"),
+            (r"(?:系统提示|系统消息|提示词泄漏|模型输出|模型回复|工具调用|调用工具|主动消息复核|附加组件(?:发送|列表))", "改写残留内部流程"),
+            (r"[\"'](?:decision|text|reason|delay_minutes|planned_reason)[\"']\s*:", "改写残留 JSON 字段"),
+        )
+        for pattern, reason in patterns:
+            if re.search(pattern, candidate, re.IGNORECASE | re.DOTALL):
+                return reason
+        return ""
+
+    def _accept_proactive_rewrite(
+        self,
+        text: str,
+        *,
+        original_text: str = "",
+        user: dict[str, Any] | None = None,
+        reason: str = "",
+        action: str = "",
+        topic: str = "",
+        motive: str = "",
+        action_context: str = "",
+        image_path: str = "",
+    ) -> str | None:
+        """Run the single acceptance chain shared by every proactive rewrite."""
+        candidate = self._sanitize_action_boundaries(
+            self._sanitize_proactive_text(str(text or "")),
+            reason=reason,
+            action=action,
+            action_context=action_context,
+            has_real_image=bool(image_path)
+            or "真实图片文件：" in str(action_context or "")
+            or "图片路径：" in str(action_context or ""),
+        )
+        candidate = self._normalize_proactive_sentence_flow(candidate)
+        if not candidate:
+            return None
+        if re.fullmatch(
+            r"[嗯哦唔呃诶欸啊呀哎噢喔哈]+[。！？!?…~～]*",
+            re.sub(r"\s+", "", candidate),
+        ):
+            return None
+        current_user = user if isinstance(user, dict) else {}
+        recipient_name = _single_line(current_user.get("nickname"), 40)
+        candidate, _ = self._repair_proactive_recipient_address(
+            candidate,
+            current_user,
+            recipient_name,
+        )
+        if not candidate or self._wrong_proactive_recipient_address(candidate, current_user, recipient_name):
+            return None
+        meta_leak_checker = getattr(self, "_response_review_meta_leak_reason", None)
+        if callable(meta_leak_checker) and meta_leak_checker(candidate):
+            return None
+        if self._framework_agent_meta_summary_leak(candidate):
+            return None
+        original_length = len(str(original_text or "").strip())
+        if original_length and len(candidate) > max(original_length + 60, 240):
+            return None
+        if self._proactive_rewrite_blacklist_reason(candidate):
+            return None
+        if reason in {"bili_video_share", "news_share", "web_exploration_share"}:
+            if self._external_share_source_consistency_decision(
+                current_user,
+                candidate,
+                reason=reason,
+                topic=topic,
+                motive=motive,
+                action_context=action_context,
+            ):
+                return None
+        return candidate
+
     def _normalize_proactive_review_decision_policy(
         self,
         user: dict[str, Any],
@@ -5073,44 +5177,50 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         *,
         strength: str,
         source: str = "model",
+        reason: str = "",
+        action: str = "",
+        topic: str = "",
+        motive: str = "",
+        action_context: str = "",
+        image_path: str = "",
+        original_text: str = "",
     ) -> dict[str, Any]:
-        """Normalize the final proactive content gate to send, rewrite, or drop."""
+        """Normalize the final proactive content gate result."""
         if not isinstance(payload, dict):
             return {"decision": "send", "reason": "empty review result; local safety gate allowed the message"}
         decision = str(payload.get("decision") or "send").strip().lower()
         note = _single_line(payload.get("reason"), 120)
         reviewed_text = str(payload.get("text") or "").strip()
-        if decision == "defer":
-            decision = "drop"
-            note = _single_line(f"{note or 'candidate is not suitable now'}; final content gate drops instead of deferring", 120)
-        if decision not in {"send", "rewrite", "drop"}:
+        delay_minutes = max(5, min(240, _safe_int(payload.get("delay_minutes"), 60, 5, 240)))
+        if decision not in {"send", "rewrite", "defer", "drop"}:
             decision = "send"
         if decision == "rewrite" and not reviewed_text:
             decision = "drop"
             note = _single_line(f"{note or 'rewrite result is empty'}; candidate dropped", 120)
         if decision == "rewrite" and reviewed_text:
-            recipient_name = _single_line(user.get("nickname"), 40) if isinstance(user, dict) else ""
-            reviewed_text, repaired_address = self._repair_proactive_recipient_address(
+            accepted_text = self._accept_proactive_rewrite(
                 reviewed_text,
-                user,
-                recipient_name,
+                original_text=original_text,
+                user=user,
+                reason=reason,
+                action=action,
+                topic=topic,
+                motive=motive,
+                action_context=action_context,
+                image_path=image_path,
             )
-            remaining_wrong_address = self._wrong_proactive_recipient_address(
-                reviewed_text,
-                user,
-                recipient_name,
-            )
-            if remaining_wrong_address:
+            if accepted_text is None:
                 decision = "drop"
                 reviewed_text = ""
-                note = f"最终改写含其他用户专属称呼：{remaining_wrong_address}"
-            elif repaired_address:
-                note = _single_line(f"{note or 'final rewrite'}; corrected recipient address {repaired_address}", 120)
+                note = _single_line(f"{note or '改写未通过统一验收'}; 最终改写已拒绝", 120)
+            else:
+                reviewed_text = accepted_text
         return {
             "decision": decision,
             "text": reviewed_text if decision == "rewrite" else "",
             "reason": note or "proactive final content gate",
             "hard": bool(payload.get("hard")),
+            "delay_minutes": delay_minutes if decision == "defer" else 0,
         }
 
     async def _review_proactive_message_send_decision(
@@ -5145,6 +5255,28 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         review_context = _single_line(action_summary, 240)
         if image_path:
             review_context = _single_line(f"{review_context}\n真实图片文件：{image_path}", 360)
+
+        def normalize_review_result(payload: dict[str, Any], *, source: str) -> dict[str, Any]:
+            return self._normalize_proactive_review_decision_policy(
+                user,
+                payload,
+                strength=strength,
+                source=source,
+                reason=reason,
+                action=action,
+                topic=topic,
+                motive=motive,
+                action_context=review_context,
+                image_path=image_path,
+                original_text=text,
+            )
+
+        def local_model_fallback(fallback_reason: str) -> dict[str, Any]:
+            result = normalize_review_result(local, source="local")
+            result["review_fallback"] = True
+            result["review_fallback_reason"] = _single_line(fallback_reason, 180)
+            return result
+
         local = self._local_proactive_send_decision(
             user,
             text,
@@ -5169,7 +5301,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             local_mode_label = "主动发送前审核未启用"
             if local_decision in {"drop", "defer"}:
                 if local_hard_block:
-                    return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+                    return normalize_review_result(local, source="local")
                 return {
                     "decision": "send",
                     "text": "",
@@ -5178,12 +5310,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             if local_decision == "rewrite":
                 local_rewrite_text = str(local.get("text") or "").strip()
                 if local_rewrite_text:
-                    local_result = self._normalize_proactive_review_decision_policy(
-                        user,
-                        local,
-                        strength=strength,
-                        source="local",
-                    )
+                    local_result = normalize_review_result(local, source="local")
                     local_result["reason"] = _single_line(
                         f"{local_mode_label}，已采用本地确定性改写："
                         + (_single_line(local.get("reason"), 80) or "轻量清理"),
@@ -5210,16 +5337,11 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         if review_mode == "local_only":
             local_mode_label = "仅本地检查模式"
             if local_decision in {"drop", "defer"}:
-                return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+                return normalize_review_result(local, source="local")
             if local_decision == "rewrite":
                 local_rewrite_text = str(local.get("text") or "").strip()
                 if local_rewrite_text:
-                    local_result = self._normalize_proactive_review_decision_policy(
-                        user,
-                        local,
-                        strength=strength,
-                        source="local",
-                    )
+                    local_result = normalize_review_result(local, source="local")
                     local_result["reason"] = _single_line(
                         f"{local_mode_label}，已采用本地确定性改写："
                         + (_single_line(local.get("reason"), 80) or "轻量清理"),
@@ -5238,7 +5360,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 "reason": f"{local_mode_label}，本地检查允许原文发送",
             }
         if local_decision in {"drop", "defer"} and local_hard_block:
-            return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+            return normalize_review_result(local, source="local")
         if local.get("decision") == "rewrite" and str(local.get("reference_text") or "").strip():
             rewrite_scene = _single_line(
                 "自然地向用户分享自己刚看的这条内容；保留真实标题、来源和链接"
@@ -5256,31 +5378,36 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 allow_fallback=False,
             )
             if rewritten_reference:
-                rewritten_reference = self._sanitize_action_boundaries(
-                    self._sanitize_proactive_text(rewritten_reference),
+                accepted_reference = self._accept_proactive_rewrite(
+                    rewritten_reference,
+                    original_text=str(local.get("reference_text") or ""),
+                    user=user,
                     reason=reason,
                     action=action,
-                    action_context=review_context,
-                    has_real_image=bool(image_path) or "真实图片文件：" in review_context or "图片路径：" in review_context,
-                )
-                rewritten_reference = self._normalize_proactive_sentence_flow(rewritten_reference)
-                post_rewrite_check = self._external_share_source_consistency_decision(
-                    user,
-                    rewritten_reference,
-                    reason=reason,
                     topic=topic,
                     motive=motive,
                     action_context=review_context,
+                    image_path=image_path,
                 )
-                if post_rewrite_check:
+                if accepted_reference is None:
                     safe_reference = _single_line(local.get("reference_text"), 300)
-                    logger.info(
-                        "[PrivateCompanion] 主动外界分享人格润色后仍与来源不一致，已使用确定性来源文本: reason=%s before=%s after=%s",
-                        _single_line(post_rewrite_check.get("reason"), 120),
-                        _single_line(rewritten_reference, 140),
-                        _single_line(safe_reference, 140),
+                    accepted_reference = self._accept_proactive_rewrite(
+                        safe_reference,
+                        original_text=safe_reference,
+                        user=user,
+                        reason=reason,
+                        action=action,
+                        topic=topic,
+                        motive=motive,
+                        action_context=review_context,
+                        image_path=image_path,
                     )
-                    rewritten_reference = safe_reference
+                    if accepted_reference:
+                        logger.info(
+                            "[PrivateCompanion] 主动外界分享人格润色未通过统一验收，已使用确定性来源文本: reason=%s",
+                            reason,
+                        )
+                rewritten_reference = accepted_reference or ""
             if rewritten_reference:
                 local = dict(local)
                 local["text"] = rewritten_reference
@@ -5292,9 +5419,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     "hard": True,
                 }
         if local.get("decision") == "rewrite" and bool(local.get("hard")):
-            return local
+            return normalize_review_result(local, source="local")
         if local_decision == "drop":
-            return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+            return normalize_review_result(local, source="local")
         if review_mode == "severe_only" and local_decision == "send" and not local_hard_block:
             return {
                 "decision": "send",
@@ -5357,6 +5484,11 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             else ""
         )
         route_review_directive = route.review_directive()
+        persona_context = (
+            "(Creative-share compact review: use the proactive voice and excerpt rule below; do not restate the full persona.)"
+            if reason == "creative_share"
+            else self._truncate_proactive_context(persona, 2600)
+        ) if persona else "(No explicit persona was resolved. Preserve the candidate instead of inventing a new voice.)"
         prompt = f"""
 You are the final content gate immediately before one proactive private message is sent.
 Return JSON only. You must decide exactly one of send, rewrite, or drop.
@@ -5404,7 +5536,7 @@ route={route.key}({route.label}); review_profile={route.review_profile}; reason=
 {route_review_directive}
 
 [Full persona]
-{persona[:2600] if persona else "(No explicit persona was resolved. Preserve the candidate instead of inventing a new voice.)"}
+{persona_context}
 
 [Persona and intent constraints]
 {intent_hint or "(none)"}
@@ -5458,117 +5590,134 @@ Output:
                     "[PrivateCompanion] 主动最终内容复核模型暂不可用，已安全回退本地复核（同类日志 10 分钟内不重复）: %s",
                     self._format_send_exception(exc),
                 )
-            return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+            return local_model_fallback(self._format_send_exception(exc))
         payload = self._parse_json_object(raw)
         if not isinstance(payload, dict):
-            return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+            return local_model_fallback("复核模型未返回有效 JSON")
         decision = str(payload.get("decision") or "").strip().lower()
         if decision not in {"send", "rewrite", "drop"}:
-            return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
+            return local_model_fallback("复核模型返回了无效 decision")
         reviewed_text = str(payload.get("text") or "").strip()
         note = _single_line(payload.get("reason"), 120)
         original_decision = decision
         if decision == "rewrite":
             if not reviewed_text:
-                return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
-            reviewed_text = self._sanitize_action_boundaries(
-                self._sanitize_proactive_text(reviewed_text),
+                return local_model_fallback("复核模型要求改写但未返回正文")
+            accepted_text = self._accept_proactive_rewrite(
+                reviewed_text,
+                original_text=text,
+                user=user,
                 reason=reason,
                 action=action,
+                topic=topic,
+                motive=motive,
                 action_context=review_context,
-                has_real_image=bool(image_path) or "真实图片文件：" in review_context or "图片路径：" in review_context,
+                image_path=image_path,
             )
-            reviewed_text = self._normalize_proactive_sentence_flow(reviewed_text)
-            if re.fullmatch(
-                r"[嗯哦唔呃诶欸啊呀哎噢喔哈]+[。！？!?…~～]*",
-                re.sub(r"\s+", "", reviewed_text),
-            ):
-                logger.warning(
-                    "[PrivateCompanion] 主动发送前复核改写退化为单独语气词，已保留原候选: before=%s after=%s",
-                    _single_line(text, 120),
-                    _single_line(reviewed_text, 40),
-                )
-                return {
-                    "decision": "send",
-                    "text": "",
-                    "reason": "复核改写丢失原消息用途，保留完整候选",
-                }
-            reviewed_text, repaired_address = self._repair_proactive_recipient_address(
-                reviewed_text,
-                user,
-                _single_line(user.get("nickname"), 40),
-            )
-            if repaired_address:
-                logger.warning(
-                    "[PrivateCompanion] 主动发送前复核改写已纠正串用户称呼: user=%s wrong=%s",
-                    _single_line(user.get("user_id"), 40),
-                    repaired_address,
-                )
-            if not reviewed_text:
-                return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
-            meta_leak_checker = getattr(self, "_response_review_meta_leak_reason", None)
-            if callable(meta_leak_checker) and meta_leak_checker(reviewed_text):
-                return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
-            if self._framework_agent_meta_summary_leak(reviewed_text):
-                return {
-                    "decision": "drop",
-                    "text": "",
-                    "reason": "主动候选疑似工具循环/内部发送摘要泄漏",
-                }
-            if len(reviewed_text) > max(len(text) + 60, 240):
-                return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
-            if re.search(r"(提示词|系统|JSON|模型|工具调用|主动消息|无文字|附加组件)", reviewed_text, re.IGNORECASE):
-                return self._normalize_proactive_review_decision_policy(user, local, strength=strength, source="local")
-            if reason in {"bili_video_share", "news_share", "web_exploration_share"}:
-                rewritten_source_issue = self._external_share_source_consistency_decision(
-                    user,
-                    reviewed_text,
+            if accepted_text is None and reason in {"bili_video_share", "news_share", "web_exploration_share"}:
+                original_safe = self._accept_proactive_rewrite(
+                    text,
+                    original_text=text,
+                    user=user,
                     reason=reason,
+                    action=action,
                     topic=topic,
                     motive=motive,
                     action_context=review_context,
+                    image_path=image_path,
                 )
-                if rewritten_source_issue:
-                    original_source_issue = self._external_share_source_consistency_decision(
-                        user,
-                        text,
-                        reason=reason,
-                        topic=topic,
-                        motive=motive,
-                        action_context=review_context,
-                    )
-                    if original_source_issue is None:
-                        reviewed_text = text
-                        note = "终审改写破坏了真实来源，已恢复复核前原文"
-                    else:
-                        source_text = str(rewritten_source_issue.get("source_text") or "").strip()
-                        safe_reference = self._external_share_fallback_reference(source_text)
-                        if not safe_reference:
-                            return {
-                                "decision": "drop",
-                                "text": "",
-                                "reason": "终审改写后的来源不一致且无法恢复真实来源",
-                                "hard": True,
-                            }
-                        reviewed_text = safe_reference
-                        note = "终审改写破坏了真实来源，已恢复确定性来源文本"
+                safe_reference = original_safe or self._external_share_fallback_reference(
+                    _single_line(topic or action_summary or text, 300),
+                )
+                accepted_text = self._accept_proactive_rewrite(
+                    safe_reference,
+                    original_text=safe_reference,
+                    user=user,
+                    reason=reason,
+                    action=action,
+                    topic=topic,
+                    motive=motive,
+                    action_context=review_context,
+                    image_path=image_path,
+                ) if safe_reference else None
+                if accepted_text:
+                    note = "终审改写未通过统一验收，已恢复复核前或确定性来源文本"
+            if accepted_text is None:
+                original_safe = self._accept_proactive_rewrite(
+                    text,
+                    original_text=text,
+                    user=user,
+                    reason=reason,
+                    action=action,
+                    topic=topic,
+                    motive=motive,
+                    action_context=review_context,
+                    image_path=image_path,
+                )
+                if original_safe:
+                    decision = "send"
+                    reviewed_text = ""
+                    note = "终审改写未通过统一验收，已保留完整原候选"
+                else:
+                    local_result = normalize_review_result(local, source="local")
+                    local_result["review_model_ok"] = True
+                    return local_result
+            else:
+                reviewed_text = accepted_text
         normalized_payload = self._normalize_proactive_review_decision_policy(
             user,
             {
                 "decision": decision,
                 "text": reviewed_text,
                 "reason": note,
+                "delay_minutes": payload.get("delay_minutes", 0),
             },
             strength=strength,
             source="model",
+            reason=reason,
+            action=action,
+            topic=topic,
+            motive=motive,
+            action_context=review_context,
+            image_path=image_path,
+            original_text=text,
         )
         decision = str(normalized_payload.get("decision") or decision).strip().lower()
         reviewed_text = str(normalized_payload.get("text") or reviewed_text or "").strip()
         note = _single_line(normalized_payload.get("reason") or note, 120)
         if decision == "send" and str(local.get("decision") or "") == "rewrite" and str(local.get("text") or "").strip():
-            reviewed_text = str(local.get("text") or "").strip()
-            decision = "rewrite"
-            note = _single_line(note or local.get("reason") or "本地轻改写后放行", 120)
+            local_text = self._accept_proactive_rewrite(
+                str(local.get("text") or "").strip(),
+                original_text=text,
+                user=user,
+                reason=reason,
+                action=action,
+                topic=topic,
+                motive=motive,
+                action_context=review_context,
+                image_path=image_path,
+            )
+            if local_text:
+                reviewed_text = local_text
+                decision = "rewrite"
+                note = _single_line(note or local.get("reason") or "本地轻改写后放行", 120)
+            else:
+                reviewed_text = ""
+                decision = "send"
+                note = _single_line(note or "本地改写未通过统一验收，保留原候选", 120)
+        if str(local.get("decision") or "").strip().lower() == "defer" and not local_hard_block:
+            delay_minutes = max(5, min(240, _safe_int(local.get("delay_minutes"), 60, 5, 240)))
+            if decision in {"send", "rewrite"}:
+                return {
+                    "decision": "defer",
+                    "text": "",
+                    "delay_minutes": delay_minutes,
+                    "reason": _single_line(
+                        f"本地时机判断保留延后 {delay_minutes} 分钟：{local.get('reason') or '当前不宜立即发送'}",
+                        180,
+                    ),
+                    "review_model_ok": True,
+                }
         final_text = reviewed_text if decision == "rewrite" and reviewed_text else text
         link_platform_mismatch = self._proactive_link_platform_mismatch_reason(final_text)
         if decision in {"send", "rewrite"} and link_platform_mismatch:
@@ -5591,6 +5740,8 @@ Output:
             "decision": decision,
             "text": reviewed_text,
             "reason": note or "主动发送前价值复核",
+            "delay_minutes": max(0, _safe_int(normalized_payload.get("delay_minutes"), 0, 0, 240)),
+            "review_model_ok": True,
         }
 
     def _pop_framework_captured_send_payload(
@@ -6301,7 +6452,7 @@ Output:
 {intent_hint or "（无额外约束）"}
 
 【完整人格】
-{persona[:2600] if persona else "（没有解析到显式人格；尽量保留原文语气，不要另造一种通用陪伴人格）"}
+{self._truncate_proactive_context(persona, 2600) if persona else "（没有解析到显式人格；尽量保留原文语气，不要另造一种通用陪伴人格）"}
 
 【主动开口风格】
 {proactive_voice or "（无额外主动风格；保持原文已有的人格语气）"}
@@ -15956,6 +16107,36 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             parts.append(f"可分享碎片：{seed}")
         return "｜".join(part for part in parts if part)
 
+    @staticmethod
+    def _truncate_proactive_context(text: str, limit: int = 2600) -> str:
+        source = str(text or "").strip()
+        if len(source) <= limit:
+            return source
+        units = [item.strip() for item in re.split(r"(?<=[。！？!?])\s*|\n+", source) if item.strip()]
+        kept: list[str] = []
+        size = 0
+        for unit in units:
+            extra = len(unit) + (1 if kept else 0)
+            if size + extra > limit:
+                break
+            kept.append(unit)
+            size += extra
+        if kept:
+            return "\n".join(kept)
+        return source[:limit].rstrip() + "…"
+
+    @staticmethod
+    def _truncate_proactive_text(text: str, limit: int = 260) -> str:
+        source = str(text or "").strip()
+        if len(source) <= limit:
+            return source
+        cut = source[:limit]
+        boundaries = [cut.rfind(mark) for mark in "。！？!?…"]
+        boundary = max(boundaries, default=-1)
+        if boundary >= max(20, int(limit * 0.55)):
+            return cut[: boundary + 1].rstrip()
+        return cut.rstrip() + "…"
+
     def _sanitize_proactive_text(self, text: str) -> str:
         cleaned = str(text or "").strip()
         cleaned = re.sub(r"<img\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
@@ -15966,7 +16147,9 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         emotion_cleaner = getattr(self, "_strip_visible_tts_emotion_cues", None)
         if callable(emotion_cleaner):
             cleaned = emotion_cleaner(cleaned)
-        cleaned = self._strip_internal_identity_anchors(cleaned)
+        identity_cleaner = getattr(self, "_strip_internal_identity_anchors", None)
+        if callable(identity_cleaner):
+            cleaned = identity_cleaner(cleaned)
         cleaned = re.sub(r"^```(?:text)?\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned)
         cleaned = cleaned.strip().strip('"').strip("'")
@@ -15990,7 +16173,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             lines.append(line)
         if not lines:
             return ""
-        return "\n".join(lines[:3])[:260]
+        return self._truncate_proactive_text("\n".join(lines[:3]), 260)
 
     def _strip_parenthetical_stage_directions(self, text: str) -> str:
         cleaned = str(text or "").strip()
@@ -16058,10 +16241,10 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         normalized = [self._ensure_chat_sentence_punctuation(item) for item in merged]
         normalized = [item for item in normalized if item]
         if len(normalized) <= 3:
-            return "\n".join(normalized)[:260]
+            return self._truncate_proactive_text("\n".join(normalized), 260)
         head = normalized[:2]
-        tail = "".join(normalized[2:])
-        return "\n".join(head + [tail])[:260]
+        tail_sentences = normalized[2:4]
+        return self._truncate_proactive_text("\n".join(head + tail_sentences), 260)
 
     def _group_share_text_has_life_sidecar(self, text: str) -> bool:
         cleaned = _single_line(text, 500)

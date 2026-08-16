@@ -3291,7 +3291,24 @@ TTS 朗读文本：
             )
         return cleaned_chain
 
+    @staticmethod
+    def _without_reply_components(chain: list[Any]) -> list[Any]:
+        """Return a copy without quote components across AstrBot versions."""
+        return [
+            component
+            for component in list(chain or [])
+            if component.__class__.__name__.lower() != "reply"
+        ]
+
+    def _suppress_reply_components_for_voice_chain(self, chain: list[Any]) -> list[Any]:
+        """Voice replies must not retain a quote, including on transcript chunks."""
+        working_chain = list(chain or [])
+        if not any(isinstance(component, Record) for component in working_chain):
+            return working_chain
+        return self._without_reply_components(working_chain)
+
     def _split_tts_chain_for_ordered_send(self, chain: list[Any]) -> list[list[Any]]:
+        chain = self._suppress_reply_components_for_voice_chain(chain)
         has_record = False
         has_visible = False
         for comp in chain:

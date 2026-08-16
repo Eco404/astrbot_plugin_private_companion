@@ -555,6 +555,29 @@ class OfficialTtsSegmentingCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(should_defer)
         self.assertTrue(result.is_llm_result())
 
+    async def test_official_tts_preflight_removes_reply_quote(self) -> None:
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        plugin = object.__new__(PrivateCompanionPlugin)
+        plugin.enabled = True
+        plugin.context = _OfficialTtsHarness().context
+        result = _llm_result(Reply(id="quoted-message"), Plain("交给官方 TTS。"))
+
+        class Event:
+            unified_msg_origin = "default:GroupMessage:10001"
+
+            @staticmethod
+            def get_result() -> MessageEventResult:
+                return result
+
+        with patch(
+            "astrbot.core.star.session_llm_manager.SessionServiceManager.should_process_tts_request",
+            new=AsyncMock(return_value=True),
+        ):
+            await PrivateCompanionPlugin.attach_group_reply_quote(plugin, Event())
+
+        self.assertEqual(["Plain"], [type(component).__name__ for component in result.chain])
+
     async def test_session_tts_override_is_respected(self) -> None:
         harness = _OfficialTtsHarness()
         event = SimpleNamespace(unified_msg_origin="default:FriendMessage:10001")

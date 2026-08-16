@@ -5023,6 +5023,99 @@ class ProactiveEngineMixin:
             self.data["proactive_audit_log"] = raw
         return raw
 
+    def _proactive_review_audit_summary(
+        self,
+        *,
+        now: float | None = None,
+        window_days: int = 7,
+    ) -> dict[str, Any]:
+        """Aggregate recent review outcomes so tuning is evidence-based."""
+        check_now = _now_ts() if now is None else float(now)
+        cutoff = check_now - max(1, min(30, int(window_days or 7))) * 86400
+        decision_counts: dict[str, int] = {}
+        reason_counts: dict[str, int] = {}
+        outcome_counts = {"replied_24h": 0, "no_reply_24h": 0, "pending": 0}
+        total = 0
+        for item in self._proactive_audit_log():
+            if not isinstance(item, dict):
+                continue
+            updated_at = _safe_float(item.get("updated_ts"), _safe_float(item.get("created_ts"), 0))
+            if updated_at < cutoff:
+                continue
+            status = _single_line(item.get("status"), 32).lower() or "unknown"
+            if status in {"running", "unknown"}:
+                continue
+            reason = _single_line(item.get("reason") or item.get("note"), 48) or "未标注"
+            decision_counts[status] = decision_counts.get(status, 0) + 1
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            if status == "sent" and bool(item.get("expects_reply")):
+                outcome = _single_line(item.get("outcome"), 32).lower()
+                sent_at = _safe_float(item.get("sent_ts"), updated_at)
+                if outcome == "replied_24h":
+                    outcome_counts["replied_24h"] += 1
+                elif sent_at > 0 and check_now - sent_at >= 24 * 3600:
+                    outcome_counts["no_reply_24h"] += 1
+                else:
+                    outcome_counts["pending"] += 1
+            total += 1
+        settled_outcomes = outcome_counts["replied_24h"] + outcome_counts["no_reply_24h"]
+        runtime = self.data.get("proactive_review_runtime")
+        runtime = runtime if isinstance(runtime, dict) else {}
+        return {
+            "window_days": max(1, min(30, int(window_days or 7))),
+            "total": total,
+            "decision_counts": decision_counts,
+            "decision_percentages": {
+                key: round(value / total * 100, 1) for key, value in decision_counts.items()
+            } if total else {},
+            "top_reasons": [
+                {"reason": key, "count": value}
+                for key, value in sorted(reason_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:10]
+            ],
+            "reply_outcomes": outcome_counts,
+            "reply_rate_24h": (
+                round(outcome_counts["replied_24h"] / settled_outcomes * 100, 1)
+                if settled_outcomes else None
+            ),
+            "consecutive_fallback_releases": _safe_int(runtime.get("consecutive_fallback_releases"), 0, 0),
+            "last_fallback_release_at": _safe_float(runtime.get("last_fallback_release_at"), 0),
+            "last_fallback_reason": _single_line(runtime.get("last_fallback_reason"), 180),
+            "alert": _safe_int(runtime.get("consecutive_fallback_releases"), 0, 0) >= 10,
+        }
+
+    def _mark_proactive_audit_reply_outcome(
+        self,
+        user: dict[str, Any],
+        *,
+        received_at: float | None = None,
+        message_id: str = "",
+    ) -> bool:
+        """Associate the first timely inbound reply with its reply-seeking proactive send."""
+        if not isinstance(user, dict):
+            return False
+        audit_id = _single_line(user.get("last_proactive_reply_audit_id"), 40)
+        sent_at = _safe_float(user.get("last_proactive_reply_audit_sent_at"), 0)
+        check_at = _now_ts() if received_at is None else float(received_at)
+        if not audit_id or sent_at <= 0 or check_at < sent_at or check_at - sent_at > 24 * 3600:
+            return False
+        for item in reversed(self._proactive_audit_log()):
+            if not isinstance(item, dict) or _single_line(item.get("id"), 40) != audit_id:
+                continue
+            if _single_line(item.get("status"), 32).lower() != "sent" or not bool(item.get("expects_reply")):
+                return False
+            if _single_line(item.get("outcome"), 32):
+                return False
+            item["outcome"] = "replied_24h"
+            item["outcome_at"] = check_at
+            item["outcome_latency_seconds"] = max(0, int(check_at - sent_at))
+            if message_id:
+                item["outcome_message_id"] = _single_line(message_id, 160)
+            item["updated_ts"] = check_at
+            user["last_proactive_reply_audit_outcome"] = "replied_24h"
+            user["last_proactive_reply_audit_outcome_at"] = check_at
+            return True
+        return False
+
     def _proactive_visible_text_preview(self, text: str, *, limit: int = 180) -> str:
         meta_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
         if callable(meta_checker):
@@ -5212,6 +5305,8 @@ class ProactiveEngineMixin:
         original_text: str = "",
         final_text: str = "",
         diagnostic_detail: str = "",
+        sent_at: float | None = None,
+        expects_reply: bool | None = None,
     ) -> None:
         if not audit_id:
             return
@@ -5239,6 +5334,10 @@ class ProactiveEngineMixin:
                 item["action"] = _single_line(action, 60)
             if reason:
                 item["reason"] = _single_line(reason, 40)
+            if sent_at is not None:
+                item["sent_ts"] = max(0.0, float(sent_at))
+            if expects_reply is not None:
+                item["expects_reply"] = bool(expects_reply)
             if item.get("status") in {"cancelled", "dropped"} and item.get("status") != previous_status:
                 notifier = getattr(self, "_schedule_reply_interception_forward", None)
                 if callable(notifier):

@@ -608,6 +608,32 @@ class CommandHandlersMixin:
                 test_lines.append(f"{title}:{status}{('/' + detail) if detail else ''}")
             if test_lines:
                 lines.append("最近排障测试：" + " / ".join(test_lines))
+        review_summary_getter = getattr(self, "_proactive_review_audit_summary", None)
+        if callable(review_summary_getter):
+            try:
+                review_summary = review_summary_getter(window_days=7)
+            except Exception:
+                review_summary = {}
+            if isinstance(review_summary, dict) and review_summary.get("total", 0):
+                counts = review_summary.get("decision_counts") if isinstance(review_summary.get("decision_counts"), dict) else {}
+                count_text = "/".join(
+                    f"{_single_line(key, 16)}={_safe_int(value, 0)}"
+                    for key, value in sorted(counts.items())
+                )
+                lines.append(f"近7天主动复核：{count_text or '-'}")
+                outcomes = review_summary.get("reply_outcomes") if isinstance(review_summary.get("reply_outcomes"), dict) else {}
+                if outcomes:
+                    reply_rate = review_summary.get("reply_rate_24h")
+                    rate_text = f"{reply_rate}%" if isinstance(reply_rate, (int, float)) else "待积累"
+                    lines.append(
+                        "主动回应（需回应路线）："
+                        f"24h内回应={_safe_int(outcomes.get('replied_24h'), 0)}/"
+                        f"未回应={_safe_int(outcomes.get('no_reply_24h'), 0)}/"
+                        f"待观察={_safe_int(outcomes.get('pending'), 0)}，回应率={rate_text}"
+                    )
+                fallback_count = _safe_int(review_summary.get("consecutive_fallback_releases"), 0)
+                if fallback_count >= 10:
+                    lines.append(f"主动复核告警：模型已连续放行 {fallback_count} 条原文，请检查 RESPONSE_REVIEW_PROVIDER_ID")
         recent_photos = data.get("recent_photo_generations") if isinstance(data.get("recent_photo_generations"), list) else []
         photo_lines = []
         for item in recent_photos[:2]:

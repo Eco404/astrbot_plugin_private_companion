@@ -149,6 +149,26 @@ class _DegenerateReviewHarness(_ProactivePersonaHarness):
         return await super()._llm_call(prompt, **kwargs)
 
 
+class _LocalDeferReviewHarness(_ProactivePersonaHarness):
+    def _local_proactive_send_decision(self, *args, **kwargs):
+        return {
+            "decision": "defer",
+            "reason": "由头偏虚且打扰压力较高",
+            "delay_minutes": 75,
+        }
+
+
+class _DropReviewHarness(_ProactivePersonaHarness):
+    async def _llm_call(self, prompt, **kwargs):
+        self.captured_prompt = prompt
+        if kwargs.get("task") == "proactive_send_review":
+            return json.dumps(
+                {"decision": "drop", "text": "", "reason": "和当前对话冲突"},
+                ensure_ascii=False,
+            )
+        return await super()._llm_call(prompt, **kwargs)
+
+
 class ProactivePersonaConsistencyTests(unittest.IsolatedAsyncioTestCase):
     async def test_persona_cache_is_isolated_by_session(self):
         harness = _PersonaCacheHarness()
@@ -179,6 +199,7 @@ class ProactivePersonaConsistencyTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result["decision"], "send")
+        self.assertTrue(result["review_model_ok"])
         self.assertIn("完整人格::session-a::冷静、俏皮、称呼稳定", harness.captured_prompt)
         self.assertIn("主动风格：嗯…开头，俏皮但不黏人", harness.captured_prompt)
         self.assertIn("当前收件人：小林；普通朋友边界", harness.captured_prompt)
@@ -222,6 +243,49 @@ class ProactivePersonaConsistencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("send", result["decision"])
         self.assertEqual("", result["text"])
         self.assertIn("Never collapse", harness.captured_prompt)
+
+    async def test_model_send_preserves_local_timing_defer(self):
+        harness = _LocalDeferReviewHarness()
+
+        result = await harness._review_proactive_message_send_decision(
+            {"umo": "session-defer", "nickname": "小林", "user_id": "1"},
+            "刚刚想到一件小事，想顺手和你说一句。",
+            reason="check_in",
+            action="message",
+        )
+
+        self.assertEqual("defer", result["decision"])
+        self.assertEqual(75, result["delay_minutes"])
+        self.assertIn("本地时机判断", result["reason"])
+
+    async def test_model_failure_marks_local_release_for_runtime_alerting(self):
+        harness = _ProactivePersonaHarness()
+        harness._llm_call = AsyncMock(side_effect=RuntimeError("review provider unavailable"))
+
+        result = await harness._review_proactive_message_send_decision(
+            {"umo": "session-fallback", "nickname": "小林", "user_id": "1"},
+            "窗边那页书看得有点久啦。",
+            reason="quiet_care",
+            action="message",
+        )
+
+        self.assertEqual("send", result["decision"])
+        self.assertTrue(result["review_fallback"])
+        self.assertIn("provider unavailable", result["review_fallback_reason"])
+        self.assertNotIn("review_model_ok", result)
+
+    async def test_model_drop_marks_review_provider_as_recovered(self):
+        harness = _DropReviewHarness()
+
+        result = await harness._review_proactive_message_send_decision(
+            {"umo": "session-drop", "nickname": "小林", "user_id": "1"},
+            "现在突然换个完全无关的话题。",
+            reason="check_in",
+            action="message",
+        )
+
+        self.assertEqual("drop", result["decision"])
+        self.assertTrue(result["review_model_ok"])
 
     async def test_final_review_cannot_replace_verified_bilibili_link(self):
         harness = _SourceCorruptingReviewHarness()

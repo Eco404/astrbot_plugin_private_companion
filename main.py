@@ -9750,6 +9750,69 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 chunk for chunk in pending_chunks if isinstance(chunk, list)
             )
 
+        suppress_reply_reason = ""
+        if any(
+            isinstance(component, Record)
+            for chunk in delivery_chunks
+            for component in chunk
+        ):
+            suppress_reply_reason = "voice_component"
+        else:
+            official_tts_checker = getattr(
+                self,
+                "_should_defer_segmenting_to_astrbot_tts",
+                None,
+            )
+            if callable(official_tts_checker):
+                try:
+                    if await official_tts_checker(event, result, chain):
+                        suppress_reply_reason = "framework_tts"
+                except Exception as exc:
+                    logger.debug(
+                        "[PrivateCompanion] 语音引用抑制预判失败: session=%s error=%s",
+                        _single_line(getattr(event, "unified_msg_origin", ""), 120)
+                        or "unknown",
+                        _single_line(exc, 120),
+                    )
+        if suppress_reply_reason:
+            cleaned_chunks = [
+                self._without_reply_components(chunk) for chunk in delivery_chunks
+            ]
+            removed_count = sum(len(chunk) for chunk in delivery_chunks) - sum(
+                len(chunk) for chunk in cleaned_chunks
+            )
+            primary_chunk = cleaned_chunks[0]
+            pending_index = 1
+            for attr_name in (
+                "_private_companion_tts_reply_remainder",
+                "_private_companion_reaction_expression_segmented_remainder",
+            ):
+                pending = getattr(event, attr_name, None)
+                pending_chunks = (
+                    pending.get("chunks") if isinstance(pending, dict) else None
+                )
+                if not isinstance(pending_chunks, list):
+                    continue
+                replacement_count = len(
+                    [chunk for chunk in pending_chunks if isinstance(chunk, list)]
+                )
+                pending["chunks"] = cleaned_chunks[
+                    pending_index : pending_index + replacement_count
+                ]
+                pending_index += replacement_count
+            try:
+                result.chain = primary_chunk
+            except Exception:
+                event.set_result(self._build_result_from_chain(primary_chunk))
+            logger.info(
+                "[PrivateCompanion] 语音回复已自动屏蔽消息引用: session=%s reason=%s removed=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120)
+                or "unknown",
+                suppress_reply_reason,
+                removed_count,
+            )
+            return
+
         existing_replies = [
             component
             for chunk in delivery_chunks
@@ -14508,6 +14571,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
                 self._apply_user_rest_silence_from_message(user, safe_text or text, now=received_ts)
             if _safe_float(user.get("awaiting_reply_since"), 0) > 0:
+                audit_outcome_recorder = getattr(self, "_mark_proactive_audit_reply_outcome", None)
+                if callable(audit_outcome_recorder):
+                    audit_outcome_recorder(
+                        user,
+                        received_at=received_ts,
+                        message_id=self._event_message_id(event),
+                    )
                 user["reply_count"] = _safe_int(user.get("reply_count"), 0) + 1
                 self._note_action_reply_feedback(
                     user,

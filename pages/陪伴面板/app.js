@@ -1,6 +1,7 @@
 const HTTP_API = "/astrbot_plugin_private_companion/page";
 const BOOKSHELF_ACCESS_STORAGE_KEY = "pc_bookshelf_access_v1";
 const EXTENSION_MIGRATION_NOTICE_STORAGE_KEY = "pc_extension_migration_notice_6_2_2_dismissed";
+const EXTENSION_MIGRATION_NOTICE_VERSION = "6.2.2";
 const PAGE_ENDPOINT_PREFIX = "page";
 const PAGE_PLUGIN_NAME = "astrbot_plugin_private_companion";
 const PAGE_PERSONA_STORAGE_KEY = "pc_page_persona_v1";
@@ -6788,8 +6789,14 @@ function persistExtensionMigrationNoticePreference() {
   try {
     window.localStorage.setItem(EXTENSION_MIGRATION_NOTICE_STORAGE_KEY, "1");
   } catch (_error) {
-    // Embedded page environments may deny storage; the notice remains available for this session.
+    // Embedded page environments may deny storage; the plugin preference is authoritative.
   }
+  void fetchJson("/extension-migration-notice/update", {
+    method: "POST",
+    body: JSON.stringify({ version: EXTENSION_MIGRATION_NOTICE_VERSION, dismissed: true }),
+  }).catch((error) => {
+    console.warn("[PrivateCompanionPage] 迁移提示偏好持久化失败", error);
+  });
 }
 
 function bindExtensionMigrationNoticeDialog(dialog) {
@@ -6801,7 +6808,7 @@ function bindExtensionMigrationNoticeDialog(dialog) {
   });
 }
 
-function openExtensionMigrationNoticeIfNeeded() {
+async function openExtensionMigrationNoticeIfNeeded() {
   if (extensionMigrationNoticeChecked) return;
   extensionMigrationNoticeChecked = true;
   const dialog = $("#extensionMigrationNoticeDialog");
@@ -6811,9 +6818,28 @@ function openExtensionMigrationNoticeIfNeeded() {
   if (dialog.parentElement !== document.body) document.body.append(dialog);
   bindExtensionMigrationNoticeDialog(dialog);
   try {
-    if (window.localStorage.getItem(EXTENSION_MIGRATION_NOTICE_STORAGE_KEY) === "1") return;
+    if (window.localStorage.getItem(EXTENSION_MIGRATION_NOTICE_STORAGE_KEY) === "1") {
+      void fetchJson("/extension-migration-notice/update", {
+        method: "POST",
+        body: JSON.stringify({ version: EXTENSION_MIGRATION_NOTICE_VERSION, dismissed: true }),
+      }).catch(() => {});
+      return;
+    }
   } catch (_error) {
-    // Continue with an in-session notice when storage is unavailable.
+    // Fall through to the plugin-backed preference for embedded pages.
+  }
+  try {
+    const preference = await fetchJson("/extension-migration-notice");
+    if (preference?.dismissed) {
+      try {
+        window.localStorage.setItem(EXTENSION_MIGRATION_NOTICE_STORAGE_KEY, "1");
+      } catch (_error) {
+        // The server-side preference is authoritative when storage is unavailable.
+      }
+      return;
+    }
+  } catch (error) {
+    console.warn("[PrivateCompanionPage] 读取迁移提示偏好失败，按默认策略显示", error);
   }
   const remindChoice = dialog.querySelector('input[name="extension_migration_reminder"][value="remind"]');
   if (remindChoice) remindChoice.checked = true;
