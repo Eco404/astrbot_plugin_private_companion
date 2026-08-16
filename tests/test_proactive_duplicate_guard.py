@@ -156,9 +156,7 @@ def test_dedup_disabled_returns_no_reason():
         "recent_proactive_topics": [],
     }
 
-    reason = harness._recent_proactive_text_duplicate_reason(user, text=text, now=now)
-
-    assert reason == ""
+    assert harness._recent_proactive_text_duplicate_reason(user, text=text, now=now) == ""
 
 
 def test_dedup_last_message_window_config():
@@ -174,10 +172,7 @@ def test_dedup_last_message_window_config():
         "recent_proactive_topics": [],
     }
 
-    reason = harness._recent_proactive_text_duplicate_reason(user, text=text, now=now)
-
-    # 10 分钟前最后一条消息，超出 5 分钟配置窗口 → 不判重复
-    assert reason == ""
+    assert harness._recent_proactive_text_duplicate_reason(user, text=text, now=now) == ""
 
 
 def test_dedup_last_message_enabled_off():
@@ -193,20 +188,27 @@ def test_dedup_last_message_enabled_off():
         "recent_proactive_topics": [],
     }
 
-    reason = harness._recent_proactive_text_duplicate_reason(user, text=text, now=now)
-
-    # Layer-2 关闭后不再对比最后一条消息（默认窗口内本应判重）
-    assert reason == ""
+    assert harness._recent_proactive_text_duplicate_reason(user, text=text, now=now) == ""
 
 
-def test_dedup_min_shared_tokens_config():
+def test_dedup_min_shared_tokens_is_scoped_to_proactive_guard():
     harness = _DuplicateGuardHarness()
     harness.proactive_dedup_min_shared_tokens = 2
 
-    assert harness._topic_signature_similar("冲浪|休息", "冲浪|做饭") is False
-
-    harness.proactive_dedup_min_shared_tokens = 1
     assert harness._topic_signature_similar("冲浪|休息", "冲浪|做饭") is True
+    assert harness._topic_signature_similar(
+        "冲浪|休息", "冲浪|做饭", use_proactive_dedup_config=True
+    ) is False
+
+
+def test_dedup_overlap_floor_applies_even_with_six_shared_tokens():
+    harness = _DuplicateGuardHarness()
+    harness.proactive_dedup_min_overlap_ratio = 0.8
+    left = "a|b|c|d|e|f|g|h|i|j"
+    right = "a|b|c|d|e|f|k|l|m|n"
+
+    assert harness._topic_signature_similar(left, right) is True
+    assert harness._topic_signature_similar(left, right, use_proactive_dedup_config=True) is False
 
 
 def test_dedup_policies_exclude_semantic():
@@ -214,8 +216,6 @@ def test_dedup_policies_exclude_semantic():
     harness.proactive_dedup_policies = "content_fingerprint,life_event"
     policies = harness._proactive_dedup_enabled_policies()
 
-    assert "semantic" not in policies
-    # semantic 被移除 → 关系关怀不再参与去重
     assert harness._proactive_similarity_guard_enabled(
         {"planned_proactive_burst": False},
         is_troubleshooting=False,
@@ -224,7 +224,6 @@ def test_dedup_policies_exclude_semantic():
         duplicate_policy="semantic",
         enabled_policies=policies,
     ) is False
-    # content_fingerprint 仍在列表 → 内容去重保留
     assert harness._proactive_similarity_guard_enabled(
         {"planned_proactive_burst": False},
         is_troubleshooting=False,
@@ -233,3 +232,23 @@ def test_dedup_policies_exclude_semantic():
         duplicate_policy="content_fingerprint",
         enabled_policies=policies,
     ) is True
+
+
+def test_zero_sent_window_keeps_recent_history_available_without_age_limit():
+    harness = _DuplicateGuardHarness()
+    harness.proactive_dedup_sent_window_minutes = 0
+    now = 1_000_100.0
+    text = "揉了下眼睛，忽然想起刚刷到的有趣视频。"
+    user = {
+        "recent_proactive_topics": [
+            {
+                "ts": now - 2 * 24 * 3600,
+                "signature": harness._proactive_topic_signature(text),
+                "text": text,
+            }
+        ]
+    }
+
+    reason = harness._recent_proactive_text_duplicate_reason(user, text=text, now=now)
+
+    assert "已发送相似主动" in reason
