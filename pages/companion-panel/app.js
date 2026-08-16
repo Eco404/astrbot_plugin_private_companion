@@ -420,7 +420,7 @@ const setupGuideQuickProviderMeta = {
   CREATIVE_MODEL_PROVIDER_ID: {
     requirement: "可选测试",
     tone: "recommended",
-    intro: "日记、梦境和生图提示词等表达类任务会优先走它；独立创作扩展安装后，创作项目模型请在 astrbot_plugin_content_companion 配置。首次引导可先选择，不强制测试。",
+    intro: "日记、梦境和生图提示词等表达类任务会优先走它；安装创作扩展后，作品与 QQ 空间统一在陪伴面板的“创作”页管理。首次引导可先选择，不强制测试。",
     placeholder: "选择或输入创作 Provider ID",
   },
   PLUGIN_VISION_PROVIDER_ID: {
@@ -854,11 +854,6 @@ function contentCompanionInstalled() {
   return state.overview?.companion_plugins?.content?.installed === true;
 }
 
-function contentCompanionLinked() {
-  const status = state.overview?.companion_plugins?.content;
-  return status?.installed === true && status?.enabled === true && status?.available !== false;
-}
-
 function syncExternalCompanionVisibility() {
   const imageInstalled = imageCompanionInstalled();
   const anyImageInstalled = anyImageGeneratorInstalled();
@@ -871,36 +866,28 @@ function syncExternalCompanionVisibility() {
     state.featureDomainFilter = "all";
   }
 
-  if (!realityCompanionInstalled()) {
-    if (state.experimentalSubpage === "enable_experimental_bluetooth_wakeup") {
-      state.experimentalSubpage = "";
-    }
+  const realityInstalled = realityCompanionInstalled();
+  const realityTab = document.querySelector('.tab[data-tab="reality"]');
+  const realityPanel = document.getElementById("panel-reality");
+  if (realityTab) realityTab.hidden = !realityInstalled;
+  if (realityPanel) realityPanel.hidden = !realityInstalled;
+  if (!realityInstalled) {
     state.realityTouch = null;
     state.realityTouchError = "";
+    if (state.activeTab === "reality") {
+      document.querySelector('.tab[data-tab="dashboard"]')?.click();
+    }
   }
   if (!anyImageInstalled && state.troubleshootingCategory === "image_generation") {
     state.troubleshootingCategory = "all";
   }
 
-  // Once the standalone content extension is loaded, its own page owns the
-  // creative switches. Keep the host's legacy values available for migration,
-  // but do not make users configure the same feature in two places.
-  if (contentCompanionLinked() && state.featureDomainFilter === "content") {
-    state.featureDomainFilter = "all";
-  }
-
-  // 内容扩展可用时由它自己的“QQ 空间与书柜”页面承载；否则保留主插件兼容回退。
-  const qzoneTab = document.querySelector('.tab[data-tab="qzone"]');
-  const qzonePanel = document.getElementById("panel-qzone");
-  const bookshelfTab = document.querySelector('.tab[data-tab="bookshelf"]');
-  const bookshelfPanel = document.getElementById("panel-bookshelf");
-  const linked = contentCompanionLinked();
-  if (qzoneTab) qzoneTab.hidden = linked;
-  if (qzonePanel) qzonePanel.hidden = linked;
-  if (bookshelfTab) bookshelfTab.hidden = linked;
-  if (bookshelfPanel) bookshelfPanel.hidden = linked;
-  if (linked && ["qzone", "bookshelf"].includes(state.activeTab)) {
-    state.activeTab = "dashboard";
+  const creativeInstalled = contentCompanionInstalled();
+  const creativeTab = document.querySelector('.tab[data-tab="creative"]');
+  const creativePanel = document.getElementById("panel-creative");
+  if (creativeTab) creativeTab.hidden = !creativeInstalled;
+  if (creativePanel) creativePanel.hidden = !creativeInstalled;
+  if (!creativeInstalled && state.activeTab === "creative") {
     document.querySelector('.tab[data-tab="dashboard"]')?.click();
   }
 }
@@ -912,17 +899,17 @@ const pluginIntegrationAvailabilityRules = {
   enable_livingmemory_integration: () => Boolean(state.overview?.livingmemory?.compatible_available || state.overview?.livingmemory?.available || state.overview?.livingmemory?.memory_companion_active),
   enable_bilibili_integration: () => Boolean(state.overview?.bilibili?.available),
   enable_bilibili_boredom_watch: () => Boolean(state.overview?.bilibili?.available),
-  enable_qzone_integration: () => !contentCompanionLinked() && state.overview?.qzone?.platform_supported !== false,
-  enable_qzone_life_publish: () => !contentCompanionLinked() && state.overview?.qzone?.platform_supported !== false,
-  enable_qzone_generated_image_publish: () => !contentCompanionLinked() && imageCompanionInstalled() && state.overview?.qzone?.platform_supported !== false,
-  enable_qzone_comment_inbox: () => !contentCompanionLinked() && state.overview?.qzone?.platform_supported !== false,
-  enable_qzone_emotional_vent_publish: () => !contentCompanionLinked() && Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
-  enable_creative_writing: () => !contentCompanionLinked(),
-  enable_creative_cover_generation: () => !contentCompanionLinked(),
-  CREATIVE_MODEL_PROVIDER_ID: () => !contentCompanionLinked(),
-  CREATIVE_PROVIDER_ID: () => !contentCompanionLinked(),
-  CREATIVE_OUTLINE_PROVIDER_ID: () => !contentCompanionLinked(),
-  CREATIVE_REVIEW_PROVIDER_ID: () => !contentCompanionLinked(),
+  enable_qzone_integration: () => state.overview?.qzone?.platform_supported !== false,
+  enable_qzone_life_publish: () => state.overview?.qzone?.platform_supported !== false,
+  enable_qzone_generated_image_publish: () => imageCompanionInstalled() && state.overview?.qzone?.platform_supported !== false,
+  enable_qzone_comment_inbox: () => state.overview?.qzone?.platform_supported !== false,
+  enable_qzone_emotional_vent_publish: () => Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
+  enable_creative_writing: () => true,
+  enable_creative_cover_generation: () => true,
+  CREATIVE_MODEL_PROVIDER_ID: () => true,
+  CREATIVE_PROVIDER_ID: () => true,
+  CREATIVE_OUTLINE_PROVIDER_ID: () => true,
+  CREATIVE_REVIEW_PROVIDER_ID: () => true,
 };
 
 function unavailablePluginIntegrationOwner(key) {
@@ -6573,8 +6560,8 @@ async function loadRealityTouch(force = false) {
   if (state.realityTouch && !force) return state.realityTouch;
   state.realityTouchLoading = true;
   state.realityTouchError = "";
-  if (state.activeTab === "experimental" && state.experimentalSubpage === "enable_experimental_bluetooth_wakeup") {
-    renderExperimentalPage();
+  if (state.activeTab === "reality") {
+    renderRealityTouchPage();
   }
   try {
     const data = await fetchJson("/reality-touch");
@@ -6589,8 +6576,8 @@ async function loadRealityTouch(force = false) {
     throw error;
   } finally {
     state.realityTouchLoading = false;
-    if (state.activeTab === "experimental" && state.experimentalSubpage === "enable_experimental_bluetooth_wakeup") {
-      renderExperimentalPage();
+    if (state.activeTab === "reality") {
+      renderRealityTouchPage();
     }
   }
 }
@@ -6900,6 +6887,54 @@ function renderAll() {
   renderSetupGuideOverlay();
 }
 
+function renderCreativeCompanionStatus() {
+  const target = $("#creativeCompanionStatus");
+  if (!target) return;
+  const status = state.overview?.companion_plugins?.content || {};
+  if (!status.installed) {
+    target.textContent = "未安装创作扩展";
+    target.dataset.tone = "warn";
+  } else if (!status.enabled) {
+    target.textContent = "已安装 · 未启用";
+    target.dataset.tone = "warn";
+  } else if (status.available === false) {
+    target.textContent = "已安装 · 当前不可用";
+    target.dataset.tone = "error";
+  } else {
+    target.textContent = "创作扩展已联动";
+    target.dataset.tone = "ready";
+  }
+}
+
+function renderQzonePanel() {
+  if (window.PrivateCompanionQzonePanel?.render) {
+    window.PrivateCompanionQzonePanel.render({ fetchJson, postJson, showToast, escapeHtml, document });
+    return;
+  }
+  const meta = document.getElementById("qzoneFeedMeta");
+  const feed = document.getElementById("qzoneFeed");
+  const moduleError = state.lazyScriptErrors.qzonePanel || "";
+  const canRetryModule = Number(state.lazyScriptAttempts.qzonePanel || 0) < optionalModuleLoaders.qzonePanel.length;
+  if (meta) meta.textContent = moduleError ? "QQ 空间模块加载失败" : "正在加载 QQ 空间模块...";
+  if (feed) {
+    feed.innerHTML = moduleError
+      ? `<div class="empty small">${escapeHtml(moduleError)}<br />${canRetryModule ? `<button type="button" data-optional-module-retry="qzonePanel">重试加载</button>` : "请刷新当前页面。"}</div>`
+      : `<div class="empty small">正在按需加载 QQ 空间面板...</div>`;
+  }
+}
+
+function mergeCreativeWorkspace() {
+  const creative = document.getElementById("panel-creative");
+  const qzone = document.getElementById("panel-qzone");
+  if (!creative || !qzone || qzone.dataset.mergedIntoCreative === "1") return;
+  qzone.classList.remove("panel");
+  qzone.classList.add("creative-qzone-workspace");
+  qzone.dataset.mergedIntoCreative = "1";
+  creative.appendChild(qzone);
+}
+
+mergeCreativeWorkspace();
+
 function renderActiveTab(tabName = state.activeTab || "dashboard") {
   if (tabName === "private") {
     renderUsers();
@@ -6911,23 +6946,10 @@ function renderActiveTab(tabName = state.activeTab || "dashboard") {
     renderMemory();
   } else if (tabName === "proactive") {
     renderProactiveCandidates();
-  } else if (tabName === "bookshelf") {
+  } else if (tabName === "creative") {
     renderBookshelf();
-  } else if (tabName === "qzone") {
-    if (window.PrivateCompanionQzonePanel?.render) {
-      window.PrivateCompanionQzonePanel.render({ fetchJson, postJson, showToast, escapeHtml, document });
-    } else {
-      const meta = document.getElementById("qzoneFeedMeta");
-      const feed = document.getElementById("qzoneFeed");
-      const moduleError = state.lazyScriptErrors.qzonePanel || "";
-      const canRetryModule = Number(state.lazyScriptAttempts.qzonePanel || 0) < optionalModuleLoaders.qzonePanel.length;
-      if (meta) meta.textContent = moduleError ? "QQ 空间模块加载失败" : "正在加载 QQ 空间模块...";
-      if (feed) {
-        feed.innerHTML = moduleError
-          ? `<div class="empty small">${escapeHtml(moduleError)}<br />${canRetryModule ? `<button type="button" data-optional-module-retry="qzonePanel">重试加载</button>` : "请关闭后重新打开拓展页。"}</div>`
-          : `<div class="empty small">正在按需加载 QQ 空间面板...</div>`;
-      }
-    }
+    renderCreativeCompanionStatus();
+    renderQzonePanel();
   } else if (tabName === "image-cache") {
     renderImageCache();
   } else if (tabName === "troubleshooting") {
@@ -6944,6 +6966,8 @@ function renderActiveTab(tabName = state.activeTab || "dashboard") {
     renderProviders();
   } else if (tabName === "experimental") {
     renderExperimentalPage();
+  } else if (tabName === "reality") {
+    renderRealityTouchPage();
   }
   syncFeatureFooterAction();
 }
@@ -7076,7 +7100,7 @@ async function loadMemoNotes(force = false) {
   if (state.lazyLoaded.memoNotes && !force && state.memoNotes) return state.memoNotes;
   const result = await fetchJson("/memo/list");
   applyMemoPayload(result.memo_notes || {});
-  if (state.activeTab === "bookshelf") renderBookshelf();
+  if (state.activeTab === "creative") renderBookshelf();
   return state.memoNotes;
 }
 
@@ -7089,8 +7113,17 @@ async function ensureTabData(tabName, force = false) {
   }
   if (tabName === "tokens") {
     await loadTokenStats(force);
-  } else if (tabName === "bookshelf") {
-    await loadMemoNotes(force);
+  } else if (tabName === "creative") {
+    await Promise.all([
+      loadMemoNotes(force),
+      (async () => {
+        try {
+          await loadOptionalModule("qzonePanel");
+        } finally {
+          if (state.activeTab === "creative") renderActiveTab("creative");
+        }
+      })(),
+    ]);
   } else if (tabName === "models") {
     try {
       await Promise.all([
@@ -7109,12 +7142,9 @@ async function ensureTabData(tabName, force = false) {
   } else if (tabName === "image-cache") {
     renderImageCache();
     await Promise.all([loadImageCache(), loadOwnedReactionAssets()]);
-  } else if (tabName === "qzone") {
-    try {
-      await loadOptionalModule("qzonePanel");
-    } finally {
-      if (state.activeTab === "qzone") renderActiveTab("qzone");
-    }
+  } else if (tabName === "reality") {
+    renderRealityTouchPage();
+    await loadRealityTouch(force);
   } else if (tabName === "troubleshooting") {
     renderTroubleshooting();
     loadDiagnostics(force).catch(() => {});
@@ -8024,10 +8054,10 @@ const setupGuideAdvancedItems = {
       key: "enable_qzone_integration",
       title: "QQ 空间",
       ask: "是否让 Bot 读取/发布 QQ 空间相关内容？",
-      description: "仅 OneBot/aiocqhttp 可用于生活说说、自动配图、评论收件箱和情绪宣泄说说；QQ 官方机器人不支持。QQ 空间是本体兼容能力，不依赖独立创作扩展。",
+      description: "仅 OneBot/aiocqhttp 可用于生活说说、自动配图、评论收件箱和情绪宣泄说说；QQ 官方机器人不支持。安装创作扩展后，入口统一显示在陪伴面板的“创作”页。",
       caution: "这是 OneBot 外部账号动作，建议先只开总集成，不要马上开启自动发布。",
       dependencies: [
-        { label: "本体兼容", text: "QQ 空间动作由陪伴本体保留并按 OneBot/Cookie 能力检测；不需要为 QQ 空间安装创作扩展。" },
+        { label: "创作扩展", text: "QQ 空间动作由创作扩展承载，陪伴面板只提供统一入口和状态桥接。" },
         { label: "凭据", text: "需要 OneBot/NapCat 能获取 Cookie；获取不到时必须手动填写 QZONE_COOKIE。" },
       ],
       kind: "feature",
@@ -8069,7 +8099,7 @@ const setupGuideAdvancedItems = {
       title: "长线创作",
       ask: "是否让 Bot 在空档推进日记、梦境、故事或其他创作？",
       description: "安装 astrbot_plugin_content_companion 后，独立扩展负责项目生成、续写、审校、创作记忆和作品封面；本体只负责陪伴上下文和兼容回退。",
-      caution: "检测到独立创作扩展后，本体会隐藏旧版创作细项，请到扩展插件自己的配置页调整模型、预算和分享策略。",
+      caution: "创作执行和数据仍由创作扩展维护；陪伴面板只负责统一展示、操作入口和兼容迁移。",
       kind: "feature",
       settings: [
         { key: "creative_inspiration_probability", type: "number", label: "灵感触发概率（%）", placeholder: "15", min: 0, max: 100 },
@@ -8610,7 +8640,7 @@ function setupGuideModeHomeHtml() {
   const hasCreative = Boolean(features.enable_creative_writing);
   const hasNews = Boolean(features.enable_news_integration);
   const hasBili = Boolean(features.enable_bilibili_integration);
-  const hasQzone = !contentCompanionLinked() && Boolean(features.enable_qzone_integration);
+  const hasQzone = Boolean(features.enable_qzone_integration);
   const hasMemory = Boolean(features.enable_companion_memory);
 
   const firstGuideSteps = [
@@ -10741,7 +10771,7 @@ function renderDashboardPulse() {
       label: "最新内容",
       value: latestContent,
       note: latestContentNote,
-      jump: creativeTitle ? "bookshelf" : "dashboard",
+      jump: creativeTitle ? "creative" : "dashboard",
       scrollTarget: !creativeTitle && newsTitle
         ? "dashboardNewsCard"
         : (!creativeTitle && explorationTitle ? "dashboardWebExplorationCard" : ""),
@@ -10931,7 +10961,7 @@ function moduleShortcutNote(overview) {
     ["长期创作", Boolean(features.enable_creative_writing || settings.enable_creative_writing)],
     ["新闻阅读", Boolean(features.enable_news_integration || settings.enable_news_integration)],
     ["主动搜索", Boolean(features.enable_web_exploration || settings.enable_web_exploration)],
-    ["QQ 空间", !contentCompanionLinked() && Boolean((features.enable_qzone_integration || settings.enable_qzone_integration) && overview?.qzone?.platform_supported !== false)],
+    ["QQ 空间", Boolean((features.enable_qzone_integration || settings.enable_qzone_integration) && overview?.qzone?.platform_supported !== false)],
   ];
   if (overview?.private_reading?.available) {
     items.push(["夹层阅读", Boolean(features.enable_private_reading_integration || settings.enable_private_reading_integration)]);
@@ -11048,7 +11078,7 @@ function renderSetupProgress() {
   const hasMemory = Boolean(features.enable_companion_memory);
   const hasCreative = Boolean(features.enable_creative_writing);
   const hasNews = Boolean(features.enable_news_integration);
-  const hasQzone = !contentCompanionLinked() && Boolean(features.enable_qzone_integration);
+  const hasQzone = Boolean(features.enable_qzone_integration);
   const hasBili = Boolean(features.enable_bilibili_integration);
 
   const checklist = [
@@ -11123,7 +11153,7 @@ function renderSetupProgress() {
       hint: hasCreative
         ? "Bot 会自主推进写作项目"
         : "Bot 不会自主创作；书柜会保持空置",
-      tab: "bookshelf",
+      tab: "creative",
       action: hasCreative ? "看书柜" : "去配置",
       critical: false,
     },
@@ -11407,6 +11437,11 @@ function focusConfigControl(key, root = document) {
 
 async function navigateToDailyReviewConfig(key) {
   if (!key) return;
+  if (key === "enable_experimental_bluetooth_wakeup") {
+    state.experimentalSubpage = "";
+    switchTab("reality");
+    return;
+  }
   if (dailyReviewOwnConfigKeys.has(key)) {
     state.experimentalSubpage = "daily-review";
     if (state.activeTab !== "experimental") switchTab("experimental");
@@ -20361,7 +20396,7 @@ function clearBookshelfFallbackMotion() {
     window.clearTimeout(bookshelfFallbackTimer);
     bookshelfFallbackTimer = null;
   }
-  document.querySelectorAll("#panel-bookshelf .bookshelf-view.is-entering")
+  document.querySelectorAll("#panel-creative .bookshelf-view.is-entering")
     .forEach((view) => view.classList.remove("is-entering"));
 }
 
@@ -20372,7 +20407,7 @@ function cancelBookshelfTransition() {
   clearBookshelfFallbackMotion();
   delete document.documentElement.dataset.bookshelfTransition;
   delete document.documentElement.dataset.bookshelfDirection;
-  const panel = $("#panel-bookshelf");
+  const panel = $("#panel-creative");
   if (panel) delete panel.dataset.bookshelfDirection;
 }
 
@@ -20410,7 +20445,7 @@ function transitionBookshelfPage(nextPage, options = {}) {
   const direction = bookshelfPageOrder[nextPage] > bookshelfPageOrder[previousPage] ? "forward" : "backward";
   const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
   const root = document.documentElement;
-  const bookshelfPanel = $("#panel-bookshelf");
+  const bookshelfPanel = $("#panel-creative");
 
   if (activeTabTransition) {
     const tabTransition = activeTabTransition;
@@ -31706,7 +31741,6 @@ function bindReactionLibraryActions() {
 }
 
 const experimentalFeatureKeys = [
-  "enable_experimental_bluetooth_wakeup",
   "enable_daily_case_review_experiment",
   "enable_maslow_motivation_experiment",
   "enable_experimental_motivation_model",
@@ -31716,9 +31750,7 @@ const experimentalFeatureKeys = [
 ];
 
 function visibleExperimentalFeatureKeys() {
-  return experimentalFeatureKeys.filter((key) => (
-    key !== "enable_experimental_bluetooth_wakeup" || realityCompanionInstalled()
-  ));
+  return [...experimentalFeatureKeys];
 }
 
 const PERSONA_STYLE_SCENARIO_BATCH_SIZE = 3;
@@ -32310,7 +32342,125 @@ function renderExperimentalTheoryMatrix(key) {
   `;
 }
 
+function renderRealityTouchMobilePanel() {
+  const data = state.realityTouch;
+  if (!data) return realityTouchLoadingPanel("手机陪伴终端");
+  const configuration = data.configuration || {};
+  const mobile = configuration.mobile || {};
+  const serverHost = String(mobile.host || "0.0.0.0");
+  const clientHost = serverHost === "0.0.0.0" ? "电脑组网 IP" : serverHost;
+  const port = Number(mobile.bound_port || mobile.port || 6322);
+  const endpoint = `http://${clientHost}:${port}`;
+  return `
+    <article class="exp-detail-card reality-mobile-card">
+      <div class="reality-touch-section-head">
+        <div><span>移动连接</span><h3>手机陪伴终端</h3></div>
+        <span class="reality-audio-backend ${mobile.running ? "ready" : "limited"}">${mobile.running ? "网关运行中" : (mobile.enabled ? "等待重启绑定" : "未启用")}</span>
+      </div>
+      <div class="reality-mobile-summary">
+        <div><span>终端地址</span><b>${escapeHtml(endpoint)}</b></div>
+        <div><span>配对令牌</span><b>${mobile.pairing_token_configured ? "已配置" : "待生成"}</b></div>
+        <div><span>会话有效期</span><b>${Number(mobile.session_ttl_hours || 168)} 小时</b></div>
+        <div><span>前台位置有效期</span><b>${Number(mobile.location_ttl_seconds || 900)} 秒</b></div>
+      </div>
+      <form class="reality-mobile-config" data-reality-mobile-config>
+        <label class="reality-enable-field">
+          <input type="checkbox" name="mobile_enabled" ${mobile.enabled ? "checked" : ""}>
+          <span><b>启用手机陪伴终端网关</b><small>保存后由现实触及扩展重新绑定独立移动端端口。</small></span>
+        </label>
+        <label><span>监听 / 组网地址</span><input name="mobile_host" value="${escapeHtml(serverHost)}" placeholder="例如 100.66.1.4"></label>
+        <label><span>端口</span><input name="mobile_port" type="number" min="1" max="65535" value="${Number(mobile.port || 6322)}"></label>
+        <label><span>允许配对的用户 ID</span><input name="mobile_allowed_user_id" value="${escapeHtml(mobile.allowed_user_id || "")}" placeholder="主要用户 ID"></label>
+        <label><span>会话有效期（小时）</span><input name="mobile_session_ttl_hours" type="number" min="1" max="720" value="${Number(mobile.session_ttl_hours || 168)}"></label>
+        <label><span>位置上下文有效期（秒）</span><input name="mobile_location_ttl_seconds" type="number" min="60" max="86400" value="${Number(mobile.location_ttl_seconds || 900)}"></label>
+        <label class="reality-enable-field">
+          <input type="checkbox" name="mobile_screen_upload_enabled" ${mobile.screen_upload_enabled !== false ? "checked" : ""}>
+          <span><b>接收终端屏幕共享状态</b><small>只同步前台共享状态，实际画面仍由屏幕扩展处理。</small></span>
+        </label>
+        <label><span>新配对令牌（可选）</span><input name="mobile_pairing_token" type="password" autocomplete="new-password" placeholder="留空保留现有令牌"></label>
+        <button type="submit" class="primary">保存手机终端连接</button>
+      </form>
+      <div class="reality-mobile-guide">
+        <b>连接顺序</b>
+        <span>保存网关配置 → 在与 Bot 的私聊发送“现实触及 配对令牌” → 手机终端填写上方地址和令牌完成配对。</span>
+      </div>
+    </article>
+  `;
+}
+
+function renderRealityTouchPage() {
+  const root = $("#realityTouchRoot");
+  if (!root) return;
+  const data = state.realityTouch;
+  const status = state.overview?.companion_plugins?.reality || {};
+  const enabled = Boolean(data?.global_enabled ?? status.enabled);
+  const counts = data?.counts || {};
+  root.innerHTML = `
+    <div class="reality-touch-page ${enabled ? "on" : "off"}">
+      <header class="reality-page-head">
+        <div>
+          <span class="module-badge">陪伴扩展</span>
+          <h2>现实触及</h2>
+          <p>电脑设备、手机陪伴终端与现实提醒统一在这里连接；能力实现和授权数据仍由“我会来到你身边”维护。</p>
+        </div>
+        <div class="reality-page-actions">
+          <label class="feature-detail-toggle reality-global-toggle">
+            <input type="checkbox" data-reality-global-toggle ${enabled ? "checked" : ""}>
+            <span class="feature-toggle-visual"></span>
+            <b>${enabled ? "已开启" : "未开启"}</b>
+          </label>
+          <button type="button" data-reality-touch-refresh>${state.realityTouchLoading ? "正在刷新" : "刷新状态"}</button>
+        </div>
+      </header>
+      <div class="reality-page-status-grid">
+        <article><span>扩展状态</span><b>${status.enabled ? "已启用" : "已安装 · 未启用"}</b><small>${status.available === false ? "当前不可用" : "已连接陪伴面板"}</small></article>
+        <article><span>手机终端</span><b>${data?.configuration?.mobile?.running ? "已连接网关" : (data?.configuration?.mobile?.enabled ? "等待绑定" : "未启用")}</b><small>${Number(data?.configuration?.mobile?.active_sessions || 0)} 个活动会话</small></article>
+        <article><span>现实授权</span><b>${Number(counts.consented || 0)} 人</b><small>摄像头授权 ${Number(counts.camera_consented || 0)} 人</small></article>
+        <article><span>待执行提醒</span><b>${Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0)}</b><small>官方任务与计划场景</small></article>
+      </div>
+      ${renderRealityTouchMobilePanel()}
+      ${renderRealityTouchDevicePanel()}
+      <div class="exp-bottom-grid exp-priority-grid reality-touch-grid">
+        ${renderRealityTouchSettings()}
+        ${renderRealityTouchRuntime()}
+      </div>
+    </div>
+  `;
+  bindRealityTouchActions(root);
+  if (!state.realityTouch && !state.realityTouchLoading && realityCompanionInstalled()) {
+    loadRealityTouch().catch((error) => showToast(`读取现实触及状态失败：${error.message}`, "error"));
+  }
+}
+
+function realityGlobalConfigPayload(root, enabledOverride) {
+  const configuration = state.realityTouch?.configuration || {};
+  const mobile = configuration.mobile || {};
+  const form = root.querySelector("[data-reality-mobile-config]");
+  return {
+    action: "save_global_config",
+    enabled: enabledOverride == null ? Boolean(configuration.enabled ?? state.realityTouch?.global_enabled) : Boolean(enabledOverride),
+    vision_provider_id: configuration.vision_provider_id || "",
+    timezone: configuration.timezone || "Asia/Shanghai",
+    authorized_user_ids: Array.isArray(configuration.authorized_user_ids) ? configuration.authorized_user_ids : [],
+    audio_default_playback_volume: Number(configuration.audio_default_playback_volume ?? 35),
+    mobile: {
+      enabled: form ? Boolean(form.elements.mobile_enabled?.checked) : Boolean(mobile.enabled),
+      host: form?.elements.mobile_host?.value || mobile.host || "0.0.0.0",
+      port: Number(form?.elements.mobile_port?.value || mobile.port || 6322),
+      allowed_user_id: form?.elements.mobile_allowed_user_id?.value || mobile.allowed_user_id || "",
+      session_ttl_hours: Number(form?.elements.mobile_session_ttl_hours?.value || mobile.session_ttl_hours || 168),
+      location_ttl_seconds: Number(form?.elements.mobile_location_ttl_seconds?.value || mobile.location_ttl_seconds || 900),
+      screen_upload_enabled: form ? Boolean(form.elements.mobile_screen_upload_enabled?.checked) : mobile.screen_upload_enabled !== false,
+      pairing_token: form?.elements.mobile_pairing_token?.value || "",
+    },
+  };
+}
+
 function renderExperimentalPage() {
+  if (state.activeTab === "reality") {
+    renderRealityTouchPage();
+    return;
+  }
   const root = $("#experimentalRoot");
   if (!root) return;
   const subpage = state.experimentalSubpage || "";
@@ -35319,6 +35469,37 @@ function bindRealityTouchActions(root) {
       }
     });
   });
+  root.querySelector("[data-reality-global-toggle]")?.addEventListener("change", async (event) => {
+    const input = event.currentTarget;
+    const requested = Boolean(input.checked);
+    const result = await runAction(
+      () => postJson("/reality-touch/update", realityGlobalConfigPayload(root, requested)),
+      requested ? "现实触及已开启" : "现实触及已关闭",
+      input.closest(".reality-global-toggle"),
+      { reload: false },
+    );
+    if (result) {
+      state.realityTouch = result;
+      renderRealityTouchPage();
+    } else {
+      input.checked = !requested;
+    }
+  });
+  const mobileConfigForm = root.querySelector("[data-reality-mobile-config]");
+  mobileConfigForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = mobileConfigForm.querySelector('button[type="submit"]');
+    const result = await runAction(
+      () => postJson("/reality-touch/update", realityGlobalConfigPayload(root)),
+      "手机陪伴终端连接已保存",
+      button,
+      { reload: false },
+    );
+    if (result) {
+      state.realityTouch = result;
+      renderRealityTouchPage();
+    }
+  });
   root.querySelector("[data-reality-touch-device-save]")?.addEventListener("click", async (event) => {
     const select = root.querySelector("[data-reality-touch-device]");
     const result = await runAction(
@@ -35887,6 +36068,8 @@ function switchTab(tabName) {
   }
   const opensSocialLearning = tabName === "worldbook";
   const opensDailyReview = tabName === "daily-review";
+  if (["bookshelf", "qzone"].includes(tabName)) tabName = "creative";
+  if (tabName === "enable_experimental_bluetooth_wakeup") tabName = "reality";
   tabName = tabName === "modules" ? "config" : (opensSocialLearning ? "learning" : (opensDailyReview ? "experimental" : (tabName || "dashboard")));
   if (opensSocialLearning) state.learningSection = "social";
   if (opensDailyReview) state.experimentalSubpage = "daily-review";
@@ -36007,7 +36190,7 @@ document.addEventListener("click", (event) => {
   if (!retryButton) return;
   event.preventDefault();
   const moduleName = retryButton.dataset.optionalModuleRetry || "";
-  const tabName = moduleName === "providerTree" ? "models" : "qzone";
+  const tabName = moduleName === "providerTree" ? "models" : "creative";
   retryButton.disabled = true;
   retryButton.textContent = "正在重试...";
   loadOptionalModule(moduleName)

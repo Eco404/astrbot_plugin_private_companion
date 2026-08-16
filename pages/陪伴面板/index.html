@@ -257,13 +257,13 @@
         <button class="tab" data-tab="learning"><i>05</i><span>学习</span></button>
         <button class="tab" data-tab="memory"><i>06</i><span>观察</span></button>
         <button class="tab" data-tab="proactive"><i>07</i><span>主动</span></button>
-        <button class="tab" data-tab="bookshelf"><i>08</i><span>书柜</span></button>
-        <button class="tab" data-tab="qzone"><i>09</i><span>QQ空间</span></button>
-        <button class="tab" data-tab="tokens"><i>10</i><span>Token</span></button>
-        <button class="tab" data-tab="troubleshooting"><i>11</i><span>排障</span></button>
-        <button class="tab" data-tab="config"><i>12</i><span>配置</span></button>
-        <button class="tab" data-tab="models"><i>13</i><span>模型</span></button>
-        <button class="tab" data-tab="experimental"><i>14</i><span>实验</span></button>
+        <button class="tab" data-tab="creative" hidden><i>08</i><span>创作</span></button>
+        <button class="tab" data-tab="tokens"><i>09</i><span>Token</span></button>
+        <button class="tab" data-tab="troubleshooting"><i>10</i><span>排障</span></button>
+        <button class="tab" data-tab="config"><i>11</i><span>配置</span></button>
+        <button class="tab" data-tab="models"><i>12</i><span>模型</span></button>
+        <button class="tab" data-tab="experimental"><i>13</i><span>实验</span></button>
+        <button class="tab" data-tab="reality" hidden><i>14</i><span>现实触及</span></button>
       </nav>
 
       <section class="panel dashboard-overview is-active" id="panel-dashboard">
@@ -831,8 +831,8 @@ QQ空间 = 公开札记
             <header>
               <div>
                 <span class="eyebrow">6.2.2 UPDATE</span>
-                <h3 id="extensionMigrationNoticeTitle">部分功能已拆分为独立插件</h3>
-                <p>出于可维护性考量，陪伴插件将部分能力拆分为独立插件。有对应需求时安装即可，均已上架官方插件市场。</p>
+                <h3 id="extensionMigrationNoticeTitle">陪伴能力已改为按需扩展</h3>
+                <p>这些插件是“我会永远陪着你”的可选能力模块。安装后仍在本陪伴面板统一操作，不再需要分别进入各插件页面。</p>
               </div>
               <button type="button" class="icon-button" data-extension-migration-close aria-label="关闭">×</button>
             </header>
@@ -850,7 +850,7 @@ QQ空间 = 公开札记
                 <a href="https://github.com/menglimi/astrbot_plugin_content_companion" target="_blank" rel="noopener noreferrer">查看插件仓库 <span aria-hidden="true">↗</span></a>
               </li>
             </ul>
-            <p class="extension-migration-footnote">安装对应插件后，依旧建议在陪伴插件的拓展页进行操作。旧配置和用户数据不会被删除，更新后请重启 AstrBot。</p>
+            <p class="extension-migration-footnote">创作与现实触及入口仅在检测到对应扩展时显示。旧配置和用户数据不会被删除，更新后请重启 AstrBot。</p>
             <footer>
               <fieldset class="extension-migration-reminder-choice" aria-label="后续提示方式">
                 <legend>后续提示</legend>
@@ -1079,10 +1079,13 @@ QQ空间 = 公开札记
         </div>
       </section>
 
-      <section class="panel" id="panel-bookshelf">
+      <section class="panel" id="panel-creative" hidden>
         <div class="section-head">
-          <h2>书柜</h2>
-          <span class="muted">创作作品 · 私密日记 · 夹层阅读 — 管理可见性与内容</span>
+          <div>
+            <h2>创作</h2>
+            <span class="muted">作品、书柜与 QQ 空间统一由陪伴扩展提供</span>
+          </div>
+          <span id="creativeCompanionStatus" class="module-badge">正在检测扩展</span>
         </div>
         <div id="bookcaseHome" class="bookcase-home bookshelf-view" data-bookshelf-view="shelf">
           <div class="bookcase-hero">
@@ -1643,7 +1646,7 @@ QQ空间 = 公开札记
               <details class="config-card appearance-collapsible">
                 <summary class="appearance-summary">
                   <div>
-                    <h2>拓展页设置</h2>
+                    <h2>面板设置</h2>
                     <p>调整字体与配色主题。</p>
                   </div>
                 </summary>
@@ -1931,6 +1934,10 @@ QQ空间 = 公开札记
 
       <section class="panel" id="panel-experimental">
         <div id="experimentalRoot" class="experimental-root"></div>
+      </section>
+
+      <section class="panel" id="panel-reality" hidden>
+        <div id="realityTouchRoot" class="reality-touch-root"></div>
       </section>
     </section>
   </main>

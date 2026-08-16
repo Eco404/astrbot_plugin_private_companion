@@ -52,15 +52,16 @@ class ExternalAbilityControlsUiTests(unittest.TestCase):
             self.assertIn('value="never"', source)
             self.assertIn("后续提示", source)
 
-    def test_content_extension_owns_legacy_qzone_and_bookshelf_entrypoints(self) -> None:
+    def test_content_extension_is_exposed_through_unified_creative_workspace(self) -> None:
         for source in (self.script, self.localized_script):
-            self.assertIn("if (qzoneTab) qzoneTab.hidden = linked;", source)
-            self.assertIn("if (bookshelfTab) bookshelfTab.hidden = linked;", source)
-            self.assertIn(
-                "enable_qzone_integration: () => !contentCompanionLinked()",
-                source,
-            )
-            self.assertIn("if (linked && [\"qzone\", \"bookshelf\"]", source)
+            self.assertIn("if (creativeTab) creativeTab.hidden = !creativeInstalled;", source)
+            self.assertIn('qzone.classList.remove("panel")', source)
+            self.assertIn("creative.appendChild(qzone);", source)
+            self.assertNotIn("contentCompanionLinked()", source)
+        for source in (self.html, self.localized_html):
+            self.assertIn('data-tab="creative"', source)
+            self.assertNotIn('data-tab="bookshelf"', source)
+            self.assertNotIn('data-tab="qzone"', source)
 
 
 if __name__ == "__main__":
