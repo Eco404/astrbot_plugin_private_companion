@@ -1062,16 +1062,16 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
         "semantic,content_fingerprint,life_event",
     )
     self.proactive_dedup_sent_window_minutes = self._cfg_int(
-        c, "proactive_dedup_sent_window_minutes", 240, 0, 2880
+        c, "proactive_dedup_sent_window_minutes", 240, 0, 1440
     )
     self.proactive_dedup_last_message_window_minutes = self._cfg_int(
-        c, "proactive_dedup_last_message_window_minutes", 240, 0, 2880
+        c, "proactive_dedup_last_message_window_minutes", 240, 0, 1440
     )
     self.proactive_dedup_last_message_enabled = self._cfg_bool(
         c, "proactive_dedup_last_message_enabled", True
     )
     self.proactive_dedup_weather_window_minutes = self._cfg_int(
-        c, "proactive_dedup_weather_window_minutes", 1080, 0, 8640
+        c, "proactive_dedup_weather_window_minutes", 1080, 0, 2880
     )
     self.proactive_dedup_min_shared_tokens = self._cfg_int(
         c, "proactive_dedup_min_shared_tokens", 1, 1, 4
