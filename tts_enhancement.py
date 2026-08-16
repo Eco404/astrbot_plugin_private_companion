@@ -428,9 +428,9 @@ class TtsEnhancementMixin:
         if self.tts_generation_mode not in {"fast_tag", "postprocess"}:
             self.tts_generation_mode = "fast_tag"
         self.tts_legacy_generation_mode = raw_mode
-        self.tts_voice_language = self._cfg_str(config, "tts_voice_language", "ja", "ja").lower()
+        self.tts_voice_language = self._cfg_str(config, "tts_voice_language", "zh", "zh").lower()
         if self.tts_voice_language not in {"ja", "zh", "en"}:
-            self.tts_voice_language = "ja"
+            self.tts_voice_language = "zh"
         for language, attr in TTS_LANGUAGE_PROVIDER_ATTRS.items():
             setattr(self, attr, self._cfg_str(config, attr, ""))
         self.tts_delivery_mode = self._cfg_str(config, "tts_delivery_mode", "voice_and_text", "voice_and_text").lower()
@@ -730,8 +730,8 @@ class TtsEnhancementMixin:
     ) -> str:
         configured = str(getattr(self, "tts_fishaudio_model", "auto") or "auto").strip().lower()
         language = self._normalize_tts_voice_language_value(
-            voice_language or getattr(self, "tts_voice_language", "ja")
-        ) or "ja"
+            voice_language or getattr(self, "tts_voice_language", "zh")
+        ) or "zh"
         language_attr = TTS_LANGUAGE_PROVIDER_ATTRS.get(language, "")
         language_provider_id = _single_line(getattr(self, language_attr, ""), 160) if language_attr else ""
         active_provider_id = self._tts_synthesis_provider_id(tts_provider)
@@ -849,8 +849,8 @@ class TtsEnhancementMixin:
         if provider_kind.startswith("fishaudio"):
             return "[happy]", "[sad]"
         voice_lang = self._normalize_tts_voice_language_value(
-            voice_language or getattr(self, "tts_voice_language", "ja")
-        ) or "ja"
+            voice_language or getattr(self, "tts_voice_language", "zh")
+        ) or "zh"
         if voice_lang == "zh":
             return "[开心]", "[难过]"
         if voice_lang == "en":
@@ -900,7 +900,7 @@ class TtsEnhancementMixin:
         language = self._normalize_tts_voice_language_value(voice_language)
         if not language:
             language = self._tts_voice_language_for_event(event)
-        return {"ja": "日语", "zh": "中文", "en": "英语"}.get(language, "日语")
+        return {"ja": "日语", "zh": "中文", "en": "英语"}.get(language, "中文")
 
     def _normalize_tts_voice_language_value(self, value: Any) -> str:
         text = str(value or "").strip().lower()
@@ -944,8 +944,8 @@ class TtsEnhancementMixin:
         if turn_language:
             return turn_language
         return self._normalize_tts_voice_language_value(
-            getattr(self, "tts_voice_language", "ja")
-        ) or "ja"
+            getattr(self, "tts_voice_language", "zh")
+        ) or "zh"
 
     def _detect_turn_tts_voice_language(self, event: Any) -> tuple[str, str]:
         """Recognize an explicit reply-language request without changing saved settings."""
@@ -1030,7 +1030,7 @@ class TtsEnhancementMixin:
             return
         lang = self._normalize_tts_voice_language_value(settings.get("tts_voice_language"))
         if not lang:
-            lang = self._normalize_tts_voice_language_value(getattr(self, "tts_voice_language", "ja"))
+            lang = self._normalize_tts_voice_language_value(getattr(self, "tts_voice_language", "zh"))
         if lang:
             self.tts_voice_language = lang
 
@@ -1052,8 +1052,8 @@ class TtsEnhancementMixin:
             self.data["runtime_settings"] = settings
         if text.lower() in {"default", "config", "reset", "clear"} or text in {"默认", "配置", "配置页", "重置", "清除", "跟随配置"}:
             settings.pop("tts_voice_language", None)
-            configured = self._normalize_tts_voice_language_value(getattr(self, "config", {}).get("tts_voice_language", "ja") if getattr(self, "config", None) is not None else "ja")
-            self.tts_voice_language = configured or "ja"
+            configured = self._normalize_tts_voice_language_value(getattr(self, "config", {}).get("tts_voice_language", "zh") if getattr(self, "config", None) is not None else "zh")
+            self.tts_voice_language = configured or "zh"
             self._save_data_sync()
             return f"已恢复 TTS 语音语种为配置页设置：{self._tts_language_label()}。"
         lang = self._normalize_tts_voice_language_value(text)
@@ -5407,8 +5407,8 @@ Provider 规则：{emotion_rule}
 
     def _realtime_voice_config(self) -> dict[str, Any]:
         voice_language = self._normalize_tts_voice_language_value(
-            getattr(self, "tts_voice_language", "ja")
-        ) or "ja"
+            getattr(self, "tts_voice_language", "zh")
+        ) or "zh"
         return {
             "available": True,
             "voice_language": voice_language,

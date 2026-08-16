@@ -25733,7 +25733,7 @@ function featureRelatedSettings(key) {
       smart_message_debounce_learning_window_seconds: 8,
       smart_message_debounce_examples_limit: 8,
       tts_generation_mode: "fast_tag",
-      tts_voice_language: "ja",
+      tts_voice_language: "zh",
       tts_fishaudio_model: "auto",
       tts_fishaudio_emotion_mode: "balanced",
       tts_delivery_mode: "voice_and_text",
@@ -26201,7 +26201,7 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     llm: "postprocess",
   }[rawGenerationMode] || rawGenerationMode;
   const deliveryMode = String(valueSetting("tts_delivery_mode", "voice_and_text") || "voice_and_text");
-  const voiceLanguage = String(valueSetting("tts_voice_language", "ja") || "ja");
+  const voiceLanguage = String(valueSetting("tts_voice_language", "zh") || "zh");
   const globalOnly = new Set([
     "tts_constraint_mode",
     "tts_session_min_interval_seconds",
@@ -29934,7 +29934,7 @@ const ttsStrategyMeta = [
   { key: "enable_voice_action", label: "允许主动语音", type: "bool", default: false, group: "core", hint: "允许符合条件的主动消息使用当前语音合成链路。" },
   { key: "tts_synthesis_backend", label: "语音合成后端", type: "select", default: "astrbot_provider", group: "core", options: [["astrbot_provider", "AstrBot TTS Provider"], ["mimo_voice_clone", "MiMo Voice Clone"], ["auto", "自动回退"]], hint: "AstrBot 模式使用下方 Provider；自动模式在没有可用 Provider 时尝试 MiMo。" },
   { key: "tts_generation_mode", label: "生成路径", type: "select", default: "fast_tag", group: "core", options: [["fast_tag", "快速标签"], ["postprocess", "后处理判断与翻译"]], hint: "快速标签延迟更低；后处理更适合统一判断、翻译和改写。" },
-  { key: "tts_voice_language", label: "当前语音语种", type: "select", default: "ja", group: "core", options: [["zh", "中文"], ["ja", "日语"], ["en", "英语"]], hint: "也可以通过“陪伴 TTS语种”指令即时切换。" },
+  { key: "tts_voice_language", label: "当前语音语种", type: "select", default: "zh", group: "core", options: [["zh", "中文"], ["ja", "日语"], ["en", "英语"]], hint: "也可以通过“陪伴 TTS语种”指令即时切换。" },
   { key: "tts_delivery_mode", label: "发送形态", type: "select", default: "voice_and_text", group: "core", options: [["voice_only", "仅发送语音"], ["voice_and_text", "语音和文字都发送"]], hint: "合成失败时始终保留文字兜底。" },
   { key: "tts_message_scope", label: "消息生效范围", type: "select", default: "replies_only", group: "core", options: [["replies_only", "仅普通回复"], ["replies_and_proactive", "普通回复 + 所有主动消息"]], hint: "包含主动消息后，每条主动正文都会复用当前 TTS 策略；已有主动语音不会重复合成。" },
   { key: "tts_foreign_text_mode", label: "外语文字显示", type: "select", default: "translation", group: "content", options: [["original", "显示朗读原文"], ["translation", "显示中文译文"], ["bilingual", "原文和中文都显示"]], hint: "仅在日语或英语语音且保留文字时影响显示。" },
@@ -30043,7 +30043,7 @@ function ttsStrategyFieldMarkup(meta, values) {
 }
 
 function ttsProviderConfigDraftKey(providerId, language = state.selectedTtsLanguage) {
-  return `${String(language || "ja")}:${String(providerId || "")}`;
+  return `${String(language || "zh")}:${String(providerId || "")}`;
 }
 
 function ttsProviderDraft(provider, language = state.selectedTtsLanguage) {
@@ -30167,7 +30167,7 @@ function renderTtsModelConfig() {
   if (!summary || !editor) return;
   const values = ttsProviderValues();
   const settings = ttsStrategyValues();
-  const currentLanguage = String(settings.tts_voice_language || "ja");
+  const currentLanguage = String(settings.tts_voice_language || "zh");
   const activeLanguage = ttsLanguageProviderMeta.some((item) => item.language === state.selectedTtsLanguage)
     ? state.selectedTtsLanguage
     : currentLanguage;

@@ -408,8 +408,8 @@ class PageSettingNormalizerMixin:
             mode = aliases.get(mode, mode)
             return mode if mode in {"weak", "strong"} else "weak"
         if key == "tts_voice_language":
-            lang = str(value or "ja").strip().lower()
-            return lang if lang in {"ja", "zh", "en"} else "ja"
+            lang = str(value or "zh").strip().lower()
+            return lang if lang in {"ja", "zh", "en"} else "zh"
         if key in {"tts_provider_id_zh", "tts_provider_id_ja", "tts_provider_id_en"}:
             return str(value or "").strip()[:160]
         if key == "tts_fishaudio_model":

@@ -4062,7 +4062,7 @@
   "tts_voice_language": {
     "description": "Legacy flat config: TTS语音语种",
     "type": "string",
-    "default": "ja",
+    "default": "zh",
     "invisible": true
   },
   "tts_fishaudio_model": {
@@ -11296,7 +11296,7 @@
       "tts_voice_language": {
         "description": "TTS语音语种",
         "type": "string",
-        "default": "ja",
+        "default": "zh",
         "options": [
           "ja",
           "zh",

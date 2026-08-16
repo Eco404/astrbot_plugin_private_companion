@@ -1047,7 +1047,7 @@ class IntegrationStatusMixin:
                 "ja": "日语",
                 "zh": "中文",
                 "en": "英语",
-            }.get(str(getattr(self, "tts_voice_language", "ja") or "ja"), "日语")
+            }.get(str(getattr(self, "tts_voice_language", "zh") or "zh"), "中文")
             conversion_id = _single_line(getattr(self, "tts_conversion_provider_id", ""), 120)
             if conversion_id:
                 conversion_label = self._provider_model_label(conversion_id)

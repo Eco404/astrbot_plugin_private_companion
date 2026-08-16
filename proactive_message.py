@@ -8633,7 +8633,7 @@ Output:
             source = re.sub(r"</?t{2,}s\b[^>]*>", "", source, flags=re.IGNORECASE).strip()
         has_kana = bool(re.search(r"[\u3040-\u30ff]", source))
         has_cjk = bool(re.search(r"[\u4e00-\u9fff]", source))
-        if has_kana and has_cjk and getattr(self, "tts_voice_language", "ja") != "zh":
+        if has_kana and has_cjk and getattr(self, "tts_voice_language", "zh") != "zh":
             units = re.findall(r".*?[。！？!?…~～]+|.+$", source, flags=re.DOTALL)
             kept: list[str] = []
             dropped = False
