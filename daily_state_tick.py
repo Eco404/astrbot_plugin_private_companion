@@ -30,14 +30,20 @@ class DailyStateTickMixin:
         action: str,
         timeliness: str,
         duplicate_policy: str,
+        enabled_policies: frozenset[str] | None = None,
     ) -> bool:
         """Burst follow-ups intentionally use a second angle, not duplicate text."""
+        active_policies = (
+            {"semantic", "content_fingerprint", "life_event"}
+            if enabled_policies is None
+            else enabled_policies
+        )
         return bool(
             not is_troubleshooting
             and (action or "message") == "message"
             and not bool(user.get("planned_proactive_burst"))
             and timeliness == "routine"
-            and duplicate_policy in {"semantic", "content_fingerprint", "life_event"}
+            and duplicate_policy in active_policies
         )
 
     """Execute one user's proactive tick outside the daily-state capability module."""
@@ -1022,6 +1028,7 @@ class DailyStateTickMixin:
                     action=effective_action_for_send or planned_action_for_send or "message",
                     timeliness=timeliness,
                     duplicate_policy=duplicate_policy,
+                    enabled_policies=self._proactive_dedup_enabled_policies(),
                 ):
                     similar_note = self._recent_proactive_text_duplicate_reason(
                         current_for_similarity_guard,
