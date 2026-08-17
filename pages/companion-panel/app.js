@@ -157,6 +157,8 @@ const state = {
   ttsProviderCreateId: "",
   ttsProviderTestResults: {},
   imageApiStatus: null,
+  imageExtensionStatus: null,
+  imageExtensionError: "",
   imageApiEndpointTestResults: {},
   proactiveCandidateFilter: "all",
   imageCacheItems: [],
@@ -207,6 +209,7 @@ const state = {
     providers: false,
     ttsProviderConfigs: false,
     imageApiStatus: false,
+    imageExtensionStatus: false,
     roleplayPersonas: false,
     tokenStats: false,
     configBackups: false,
@@ -858,6 +861,13 @@ function contentCompanionInstalled() {
 function syncExternalCompanionVisibility() {
   const imageInstalled = imageCompanionInstalled();
   const anyImageInstalled = anyImageGeneratorInstalled();
+  const imageRuntimeTab = document.querySelector('.tab[data-tab="image"]');
+  const imageRuntimePanel = document.getElementById("panel-image");
+  if (imageRuntimeTab) imageRuntimeTab.hidden = !imageInstalled;
+  if (imageRuntimePanel) imageRuntimePanel.hidden = !imageInstalled;
+  if (!imageInstalled && state.activeTab === "image") {
+    document.querySelector('.tab[data-tab="dashboard"]')?.click();
+  }
   const imageTab = document.getElementById("modelsImageTab");
   const imagePane = document.getElementById("modelsImagePane");
   if (imageTab) imageTab.hidden = !imageInstalled;
@@ -6932,6 +6942,64 @@ function renderCreativeCompanionStatus() {
   }
 }
 
+function renderImageRuntimeStatus() {
+  const value = state.imageExtensionStatus || {};
+  const badge = document.getElementById("imageRuntimeBadge");
+  const notice = document.getElementById("imageRuntimeNotice");
+  const available = value.available === true;
+  const enabled = value.enabled === true;
+  if (badge) {
+    badge.textContent = available ? "运行中" : enabled ? "等待主插件" : "已停用";
+    badge.dataset.tone = available ? "ready" : enabled ? "warn" : "error";
+  }
+  if (notice) {
+    notice.textContent = state.imageExtensionError
+      ? `状态读取失败：${state.imageExtensionError}`
+      : !value.installed
+        ? "未检测到“我会画给你看”扩展。"
+        : available
+          ? "生图扩展已由陪伴主插件接管，所有页面入口集中在当前面板。"
+          : value.reason === "private_companion_required"
+            ? "生图扩展尚未连接陪伴主插件。"
+            : "生图扩展当前不可用，请检查插件启用状态。";
+  }
+  const latest = value.last_generation && typeof value.last_generation === "object"
+    ? value.last_generation
+    : {};
+  const setText = (id, text) => {
+    const target = document.getElementById(id);
+    if (target) target.textContent = String(text ?? "-");
+  };
+  setText("imageRuntimeEnabled", !value.installed ? "未安装" : enabled ? "已启用" : "已停用");
+  setText("imageRuntimeMode", value.state === "managed" ? "陪伴面板接管" : "不可用");
+  setText("imageRuntimeCount", Number(value.generation_count || 0));
+  setText("imageRuntimeWorkflow", latest.workflow_kind || "暂无记录");
+  setText("imageRuntimeBackend", latest.backend || "-");
+  setText("imageRuntimeResult", latest.success === true ? "成功" : latest.success === false ? "失败" : "-");
+  setText("imageRuntimeNote", latest.note || "-");
+
+  const engine = document.getElementById("imageRuntimeEngine");
+  if (!engine) return;
+  const diagnostics = value.unified_engine && typeof value.unified_engine === "object"
+    ? value.unified_engine
+    : {};
+  const labelMap = {
+    mode: "模式",
+    backend: "当前后端",
+    selected_backend: "当前后端",
+    configured: "配置状态",
+    valid: "路由校验",
+    migration_required: "需要迁移",
+    reason: "说明",
+  };
+  const entries = Object.entries(diagnostics)
+    .filter(([, item]) => ["string", "number", "boolean"].includes(typeof item))
+    .slice(0, 8);
+  engine.innerHTML = entries.length
+    ? entries.map(([key, item]) => `<div><dt>${escapeHtml(labelMap[key] || key)}</dt><dd>${escapeHtml(String(item))}</dd></div>`).join("")
+    : '<div><dt>诊断</dt><dd>暂无统一引擎摘要</dd></div>';
+}
+
 function renderQzonePanel() {
   if (window.PrivateCompanionQzonePanel?.render) {
     window.PrivateCompanionQzonePanel.render({ fetchJson, postJson, showToast, escapeHtml, document });
@@ -6976,6 +7044,8 @@ function renderActiveTab(tabName = state.activeTab || "dashboard") {
     renderBookshelf();
     renderCreativeCompanionStatus();
     renderQzonePanel();
+  } else if (tabName === "image") {
+    renderImageRuntimeStatus();
   } else if (tabName === "image-cache") {
     renderImageCache();
   } else if (tabName === "troubleshooting") {
@@ -7091,6 +7161,28 @@ async function loadImageApiStatus(force = false) {
   return state.imageApiStatus;
 }
 
+async function loadImageExtensionStatus(force = false) {
+  if (!imageCompanionInstalled()) {
+    state.imageExtensionStatus = null;
+    state.imageExtensionError = "";
+    state.lazyLoaded.imageExtensionStatus = false;
+    return null;
+  }
+  if (state.lazyLoaded.imageExtensionStatus && !force) return state.imageExtensionStatus;
+  state.imageExtensionError = "";
+  try {
+    state.imageExtensionStatus = await fetchJson("/extensions/image/status");
+    state.lazyLoaded.imageExtensionStatus = true;
+  } catch (error) {
+    state.imageExtensionStatus = null;
+    state.imageExtensionError = error?.message || "未知错误";
+    throw error;
+  } finally {
+    if (state.activeTab === "image") renderImageRuntimeStatus();
+  }
+  return state.imageExtensionStatus;
+}
+
 async function loadRoleplayPersonas(force = false) {
   if (state.lazyLoaded.roleplayPersonas && !force) return state.roleplayPersonas;
   const storedPersona = storedPagePersonaId();
@@ -7150,6 +7242,9 @@ async function ensureTabData(tabName, force = false) {
         }
       })(),
     ]);
+  } else if (tabName === "image") {
+    renderImageRuntimeStatus();
+    await loadImageExtensionStatus(force);
   } else if (tabName === "models") {
     try {
       await Promise.all([
@@ -36207,6 +36302,23 @@ document.addEventListener("click", (event) => {
   if (!button) return;
   event.preventDefault();
   openModelConfigSection(button.dataset.modelConfigJump);
+});
+
+document.getElementById("imageRuntimeRefreshBtn")?.addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    await loadImageExtensionStatus(true);
+    showToast("生图运行状态已刷新");
+  } catch (error) {
+    showToast(`刷新生图运行状态失败：${error.message}`, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById("imageRuntimeConfigBtn")?.addEventListener("click", () => {
+  openModelConfigSection("image");
 });
 
 document.addEventListener("click", (event) => {

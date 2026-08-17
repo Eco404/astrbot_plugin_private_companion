@@ -3817,7 +3817,11 @@ class ProactiveMixin(UserRestGateMixin):
             user["mobile_location_watch_pending_key"] = pending_key
             user["mobile_location_watch_pending_count"] = pending_count
             already_triggered = _single_line(user.get("mobile_location_watch_triggered_key"), 80) == transition_key
-            if pending_count >= 2 and not already_triggered and bool(scene.get("recent_arrival")):
+            # The Android client already requires consecutive stable fixes before
+            # reporting a confirmed place. One new semantic transition is therefore
+            # enough to wake planning; waiting for a duplicate upload can lose the
+            # event when foreground sharing is closed shortly after arrival.
+            if pending_count >= 1 and not already_triggered and bool(scene.get("recent_transition")):
                 user["mobile_location_priority_key"] = transition_key
                 user["mobile_location_priority_until"] = check_now + 180
                 user["mobile_location_watch_triggered_key"] = transition_key

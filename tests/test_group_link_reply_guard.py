@@ -103,12 +103,19 @@ class _WakeEvent:
 
 
 class _RepeatEvent:
-    is_wake = False
-    is_at_or_wake_command = False
     private_companion_group_quoted_link_payload = False
 
+    def __init__(self, *, sender_id: str = "10001", wake: bool = False) -> None:
+        self.sender_id = sender_id
+        self.is_wake = wake
+        self.is_at_or_wake_command = wake
+        self.stopped = False
+
     def get_sender_id(self) -> str:
-        return "10001"
+        return self.sender_id
+
+    def stop_event(self) -> None:
+        self.stopped = True
 
 
 class GroupLinkReplyGuardTests(unittest.IsolatedAsyncioTestCase):
@@ -306,12 +313,11 @@ class GroupLinkReplyGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_repeat_still_works_when_general_interjection_is_disabled(self) -> None:
         harness = _RepeatHarness()
         group = {}
-        event = _RepeatEvent()
 
         with patch("astrbot_plugin_private_companion.group_observation.random.random", return_value=0.5):
             for _ in range(3):
                 await harness._maybe_group_interject(
-                    event,
+                    _RepeatEvent(),
                     group,
                     "复读测试",
                     allow_interjection=False,
@@ -320,6 +326,71 @@ class GroupLinkReplyGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.replies, [("复读测试", "")])
         self.assertEqual(group["repeat_follow_state"]["count"], 3)
         self.assertTrue(group["repeat_follow_state"]["acted"])
+
+    async def test_repeat_uses_structured_scene_when_adapter_marks_group_message_as_wake(self) -> None:
+        harness = _RepeatHarness()
+        group = {}
+        events: list[_RepeatEvent] = []
+
+        with patch("astrbot_plugin_private_companion.group_observation.random.random", return_value=0.5):
+            for _ in range(3):
+                event = _RepeatEvent(wake=True)
+                events.append(event)
+                await harness._maybe_group_interject(
+                    event,
+                    group,
+                    "复读测试",
+                    allow_interjection=False,
+                    repeat_scene={"talking_to": "group", "trigger": "group_message"},
+                )
+
+        self.assertEqual(harness.replies, [("复读测试", "")])
+        self.assertEqual(group["repeat_follow_state"]["count"], 3)
+        self.assertTrue(events[-1].stopped)
+
+    async def test_repeat_message_is_counted_only_once_across_early_and_late_paths(self) -> None:
+        harness = _RepeatHarness()
+        group = {}
+
+        with patch("astrbot_plugin_private_companion.group_observation.random.random", return_value=0.5):
+            for _ in range(3):
+                event = _RepeatEvent()
+                await harness._maybe_group_interject(
+                    event,
+                    group,
+                    "复读测试",
+                    allow_interjection=False,
+                    repeat_scene={"talking_to": "group"},
+                )
+                await harness._maybe_group_interject(
+                    event,
+                    group,
+                    "复读测试",
+                    allow_interjection=False,
+                    repeat_scene={"talking_to": "group"},
+                )
+
+        self.assertEqual(harness.replies, [("复读测试", "")])
+        self.assertEqual(group["repeat_follow_state"]["count"], 3)
+
+    async def test_repeat_interrupt_path_is_delivered(self) -> None:
+        harness = _RepeatHarness()
+        harness.group_repeat_follow_probability = 0.0
+        harness.group_repeat_interrupt_probability = 1.0
+        group = {}
+
+        with patch("astrbot_plugin_private_companion.group_observation.random.random", return_value=0.5):
+            for _ in range(3):
+                await harness._maybe_group_interject(
+                    _RepeatEvent(),
+                    group,
+                    "复读测试",
+                    allow_interjection=False,
+                    repeat_scene={"talking_to": "group"},
+                )
+
+        self.assertEqual(harness.replies, [("禁止复读", "")])
+        self.assertEqual(group["last_bot_interjection"]["reason"], "群聊复读打断")
 
 
 if __name__ == "__main__":

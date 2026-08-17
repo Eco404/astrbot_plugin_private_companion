@@ -258,12 +258,13 @@
         <button class="tab" data-tab="memory"><i>06</i><span>观察</span></button>
         <button class="tab" data-tab="proactive"><i>07</i><span>主动</span></button>
         <button class="tab" data-tab="creative" hidden><i>08</i><span>创作</span></button>
-        <button class="tab" data-tab="tokens"><i>09</i><span>Token</span></button>
-        <button class="tab" data-tab="troubleshooting"><i>10</i><span>排障</span></button>
-        <button class="tab" data-tab="config"><i>11</i><span>配置</span></button>
-        <button class="tab" data-tab="models"><i>12</i><span>模型</span></button>
-        <button class="tab" data-tab="experimental"><i>13</i><span>实验</span></button>
-        <button class="tab" data-tab="reality" hidden><i>14</i><span>现实触及</span></button>
+        <button class="tab" data-tab="image" hidden><i>09</i><span>生图</span></button>
+        <button class="tab" data-tab="tokens"><i>10</i><span>Token</span></button>
+        <button class="tab" data-tab="troubleshooting"><i>11</i><span>排障</span></button>
+        <button class="tab" data-tab="config"><i>12</i><span>配置</span></button>
+        <button class="tab" data-tab="models"><i>13</i><span>模型</span></button>
+        <button class="tab" data-tab="experimental"><i>14</i><span>实验</span></button>
+        <button class="tab" data-tab="reality" hidden><i>15</i><span>现实触及</span></button>
       </nav>
 
       <section class="panel dashboard-overview is-active" id="panel-dashboard">
@@ -1788,6 +1789,41 @@ QQ空间 = 公开札记
             </div>
             <div class="feature-switch-board" id="featureFlags"></div>
           </article>
+        </div>
+      </section>
+
+      <section class="panel image-runtime-panel" id="panel-image" hidden>
+        <div class="section-head image-runtime-head">
+          <div>
+            <h2>生图运行</h2>
+            <span class="muted">运行状态、生成记录与统一引擎诊断</span>
+          </div>
+          <div class="actions compact">
+            <span id="imageRuntimeBadge" class="module-badge">正在读取</span>
+            <button id="imageRuntimeRefreshBtn" type="button" title="刷新生图运行状态">刷新</button>
+            <button id="imageRuntimeConfigBtn" type="button">生图配置</button>
+          </div>
+        </div>
+        <div id="imageRuntimeNotice" class="image-runtime-notice muted">正在读取生图扩展状态...</div>
+        <div class="image-runtime-metrics" aria-label="生图运行摘要">
+          <article><span>扩展状态</span><b id="imageRuntimeEnabled">-</b><small>由陪伴主插件统一接管</small></article>
+          <article><span>运行模式</span><b id="imageRuntimeMode">-</b><small>页面与能力所有权</small></article>
+          <article><span>本次启动生成</span><b id="imageRuntimeCount">0</b><small>成功与失败请求总数</small></article>
+        </div>
+        <div class="image-runtime-details">
+          <section>
+            <div class="section-head compact"><h3>最近一次生成</h3></div>
+            <dl class="image-runtime-list">
+              <div><dt>工作流</dt><dd id="imageRuntimeWorkflow">暂无记录</dd></div>
+              <div><dt>后端</dt><dd id="imageRuntimeBackend">-</dd></div>
+              <div><dt>结果</dt><dd id="imageRuntimeResult">-</dd></div>
+              <div><dt>说明</dt><dd id="imageRuntimeNote">-</dd></div>
+            </dl>
+          </section>
+          <section>
+            <div class="section-head compact"><h3>统一引擎</h3></div>
+            <dl id="imageRuntimeEngine" class="image-runtime-list"></dl>
+          </section>
         </div>
       </section>
 

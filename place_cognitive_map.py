@@ -18,6 +18,7 @@ _MAP_STORE_KEY = "place_cognitive_maps"
 _MAP_VERSION = 1
 _MAX_PLACES_PER_USER = 24
 _MAX_ROUTES_PER_USER = 32
+_PLACE_TRANSITION_MAX_SECONDS = 8 * 60 * 60
 _PLACE_KINDS = frozenset({"home", "work", "custom"})
 _PLACE_KIND_LABELS = {"home": "家", "work": "工作地点", "custom": "自定义地点"}
 
@@ -87,6 +88,9 @@ class PlaceCognitiveMapMixin:
                 "places": {},
                 "routes": {},
                 "current_place_key": "",
+                "last_departed_place_key": "",
+                "last_departed_at_ts": 0.0,
+                "last_transition": {},
                 "updated_at": "",
             }
             root[store_key] = state
@@ -208,17 +212,11 @@ class PlaceCognitiveMapMixin:
             "name": _single_line(current.get("name"), 48),
             "kind": _single_line(current.get("kind"), 24),
         } if current else {}
-        if include_transition and current_place:
-            arrivals = [
-                item
-                for item in routes.values()
-                if isinstance(item, dict) and _single_line(item.get("to_key"), 96) == current_key
-            ]
-            if arrivals:
-                latest_arrival = max(arrivals, key=lambda item: float(item.get("last_seen_ts") or 0))
-                current_place["transition_at"] = _single_line(latest_arrival.get("last_seen_at"), 40)
-                current_place["previous_place_name"] = _single_line(latest_arrival.get("from_name"), 48)
-        return {
+        transition = state.get("last_transition") if isinstance(state.get("last_transition"), dict) else {}
+        if include_transition and current_place and _single_line(transition.get("kind"), 24) == "arrival":
+            current_place["transition_at"] = _single_line(transition.get("at"), 40)
+            current_place["previous_place_name"] = _single_line(transition.get("from_name"), 48)
+        result = {
             "available": bool(known),
             "current_place": current_place,
             "known_places": [PlaceCognitiveMapMixin._place_cognitive_map_known_place(item) for item in known],
@@ -232,6 +230,16 @@ class PlaceCognitiveMapMixin:
                 if _single_line(item.get("from_name"), 48) and _single_line(item.get("to_name"), 48)
             ],
         }
+        if include_transition and transition:
+            result["last_transition"] = {
+                "kind": _single_line(transition.get("kind"), 24),
+                "from_name": _single_line(transition.get("from_name"), 48),
+                "from_kind": _single_line(transition.get("from_kind"), 24),
+                "to_name": _single_line(transition.get("to_name"), 48),
+                "to_kind": _single_line(transition.get("to_kind"), 24),
+                "at": _single_line(transition.get("at"), 40),
+            }
+        return result
 
     @staticmethod
     def _place_cognitive_map_known_place(item: Any) -> dict[str, Any]:
@@ -308,6 +316,16 @@ class PlaceCognitiveMapMixin:
             if previous:
                 previous["last_left_at"] = self._place_cognitive_map_iso(timestamp)
                 state["current_place_key"] = ""
+                state["last_departed_place_key"] = previous_key
+                state["last_departed_at_ts"] = timestamp
+                state["last_transition"] = {
+                    "kind": "departure",
+                    "from_name": _single_line(previous.get("name"), 48),
+                    "from_kind": _single_line(previous.get("kind"), 24),
+                    "to_name": "",
+                    "to_kind": "",
+                    "at": self._place_cognitive_map_iso(timestamp),
+                }
                 state["updated_at"] = self._place_cognitive_map_iso(timestamp)
                 changed = True
                 events.append(self._place_cognitive_map_event(
@@ -332,28 +350,57 @@ class PlaceCognitiveMapMixin:
                 stored["last_seen_at"] = self._place_cognitive_map_iso(timestamp)
                 changed = True
 
+            route_from_key = previous_key
+            route_from = previous
+            if not route_from:
+                departed_key = _single_line(state.get("last_departed_place_key"), 96)
+                departed_at = _safe_float(state.get("last_departed_at_ts"), 0)
+                departed = places.get(departed_key) if isinstance(places.get(departed_key), dict) else {}
+                if departed and 0 <= timestamp - departed_at <= _PLACE_TRANSITION_MAX_SECONDS:
+                    route_from_key = departed_key
+                    route_from = departed
+
             if previous_key != key:
                 if previous:
                     previous["last_left_at"] = self._place_cognitive_map_iso(timestamp)
                     events.append(self._place_cognitive_map_event(
                         event="departure", subject_ref=subject_ref, place=previous, timestamp=timestamp,
                     ))
-                    route_key = f"{previous_key}>{key}"
+                if route_from and route_from_key != key:
+                    route_key = f"{route_from_key}>{key}"
                     route = state["routes"].get(route_key)
                     if not isinstance(route, dict):
-                        route = {"from_key": previous_key, "to_key": key, "from_name": previous.get("name", ""), "to_name": stored["name"], "count": 0}
+                        route = {"from_key": route_from_key, "to_key": key, "from_name": route_from.get("name", ""), "to_name": stored["name"], "count": 0}
                         state["routes"][route_key] = route
-                    route["from_name"] = _single_line(previous.get("name"), 48)
+                    route["from_name"] = _single_line(route_from.get("name"), 48)
                     route["to_name"] = stored["name"]
                     route["count"] = max(0, int(route.get("count") or 0)) + 1
                     route["last_seen_ts"] = timestamp
                     route["last_seen_at"] = self._place_cognitive_map_iso(timestamp)
                 state["current_place_key"] = key
+                state["last_departed_place_key"] = ""
+                state["last_departed_at_ts"] = 0.0
+                state["last_transition"] = {
+                    "kind": "arrival",
+                    "from_name": (
+                        _single_line(route_from.get("name"), 48)
+                        if route_from_key != key
+                        else "外出"
+                    ),
+                    "from_kind": (
+                        _single_line(route_from.get("kind"), 24)
+                        if route_from_key != key
+                        else "outside"
+                    ),
+                    "to_name": stored["name"],
+                    "to_kind": _single_line(stored.get("kind"), 24),
+                    "at": self._place_cognitive_map_iso(timestamp),
+                }
                 state["updated_at"] = self._place_cognitive_map_iso(timestamp)
                 changed = True
                 events.append(self._place_cognitive_map_event(
                     event="arrival", subject_ref=subject_ref, place=stored, timestamp=timestamp,
-                    previous_place=previous or None,
+                    previous_place=route_from if route_from_key != key else None,
                 ))
 
         if len(places) > _MAX_PLACES_PER_USER:

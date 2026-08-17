@@ -9136,77 +9136,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return "unexpected_time_anchor"
         return ""
 
-    def _segmented_previous_text_needs_closure(self, text: str) -> bool:
-        text = _single_line(text, 220).strip()
-        if not text:
-            return False
-        if text[-1:] in "。！？!?~～":
-            return False
-        if text.endswith(("，", ",", "、", "：", ":", "；", ";", "——", "…", "...")):
-            return True
-        incomplete_suffixes = (
-            "因为",
-            "所以",
-            "但是",
-            "不过",
-            "只是",
-            "而且",
-            "然后",
-            "如果",
-            "虽然",
-            "尽管",
-            "除非",
-            "只要",
-            "等到",
-            "直到",
-            "为了",
-            "关于",
-            "至于",
-            "比如",
-            "像是",
-            "之前",
-            "之后",
-            "以前",
-            "以后",
-            "的时候",
-            "那时候",
-            "这时候",
-            "一边",
-            "一面",
-        )
-        if text.endswith(incomplete_suffixes):
-            return True
-        return bool(re.search(r"(因为|所以|但是|不过|如果|虽然|尽管|除非|只要|等到|直到|为了|关于|至于|比如|像是)\s*$", text))
-
-    def _segmented_should_finish_after_new_activity(self, previous_text: str, next_text: str) -> bool:
-        prev = _single_line(previous_text, 220).strip()
-        nxt = _single_line(next_text, 220).strip()
-        if not prev or not nxt:
-            return False
-        if self._segmented_previous_text_needs_closure(prev):
-            return True
-        if prev[-1:] in "。！？!?~～":
-            return False
-        continuation_prefixes = (
-            "其实",
-            "就是",
-            "也就是",
-            "然后",
-            "而且",
-            "所以",
-            "但是",
-            "不过",
-            "只是",
-            "还",
-            "也",
-            "就",
-            "才",
-            "再",
-        )
-        if nxt.startswith(continuation_prefixes) and re.search(r"(之前|之后|以前|以后|时候|因为|不过|但是|如果|虽然|为了)$", prev):
-            return True
-        return False
-
     def _sanitize_segmented_plain_text(self, event: AstrMessageEvent, text: Any) -> str:
         protected_tts_tokens = getattr(event, "_private_companion_tts_block_tokens", None)
         preserve_private_tts_tokens = (
@@ -9339,7 +9268,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             240,
         )
         scope = self._event_scope_key(event)
-        started_at = _safe_float(started_at, 0.0, 0.0) or self._event_inbound_activity_ts(event)
         async with self._segmented_remainder_lock(scope):
             for chunk in chunks:
                 if not chunk:
@@ -9375,42 +9303,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     delay = await self._calc_segmented_proactive_interval(wait_for, event=event)
                     if delay > 0:
                         await asyncio.sleep(delay)
-                    new_activity = self._scope_has_new_inbound_activity(scope, started_at, ignore_self=True)
-                    if new_activity and source == "reaction_expression":
-                        # A reaction expression is one already-started reply:
-                        # keep its text bubbles together before the image hook
-                        # runs, even if an adapter reports a mid-delivery event.
-                        logger.debug(
-                            "[PrivateCompanion] 表情正文补发期间检测到新活动，继续发送剩余组件: scope=%s sent=%s/%s",
-                            scope or "unknown",
-                            max(0, sent_index - 1),
-                            total,
-                        )
-                        new_activity = False
-                    if new_activity and self._segmented_should_finish_after_new_activity(prev, preview):
-                        logger.info(
-                            "[PrivateCompanion] 会话已有新消息，但上一段未收口，允许补发一段分段收尾: source=%s scope=%s prev=%s next=%s",
-                            source or "unknown",
-                            scope or "unknown",
-                            _single_line(prev, 120),
-                            _single_line(preview, 120),
-                        )
-                        started_at = time.time()
-                    elif new_activity:
-                        if case_id:
-                            self._update_daily_review_case(
-                                case_id,
-                                outcome="incomplete",
-                                signals={"stop_reason": "new_inbound", "segments_expected": total + 1, "segments_sent": sent_index},
-                            )
-                        logger.info(
-                            "[PrivateCompanion] 会话已有新消息，停止发送分段剩余组件: source=%s scope=%s sent=%s/%s",
-                            source or "unknown",
-                            scope or "unknown",
-                            max(0, sent_index - 1),
-                            total,
-                        )
-                        return
                     recalled_message_id = await self._should_cancel_reply_for_missing_or_recalled_trigger(event)
                     if recalled_message_id:
                         if case_id:
@@ -9592,8 +9484,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         prev = previous_segment
         total = len([item for item in segments if str(item or "").strip()])
         sent_index = 0
-        scope = self._event_scope_key(event)
-        started_at = _safe_float(started_at, 0.0, 0.0) or self._event_inbound_activity_ts(event)
         for segment in segments:
             segment = str(segment or "").strip()
             if not segment:
@@ -9629,25 +9519,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 delay = await self._calc_segmented_proactive_interval(wait_for, event=event)
                 if delay > 0:
                     await asyncio.sleep(delay)
-                new_activity = self._scope_has_new_inbound_activity(scope, started_at, ignore_self=True)
-                if new_activity and self._segmented_should_finish_after_new_activity(prev, segment):
-                    logger.info(
-                        "[PrivateCompanion] 会话已有新消息，但上一段未收口，允许补发一段分段收尾: source=%s scope=%s prev=%s next=%s",
-                        source or "unknown",
-                        scope or "unknown",
-                        _single_line(prev, 120),
-                        _single_line(segment, 120),
-                    )
-                    started_at = time.time()
-                elif new_activity:
-                    logger.info(
-                        "[PrivateCompanion] 会话已有新消息，停止发送分段剩余片段: source=%s scope=%s sent=%s/%s",
-                        source or "unknown",
-                        scope or "unknown",
-                        max(0, sent_index - 1),
-                        total,
-                    )
-                    return
                 recalled_message_id = await self._should_cancel_reply_for_missing_or_recalled_trigger(event)
                 if recalled_message_id:
                     logger.info(
@@ -17371,7 +17242,18 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             sender_name=sender_name,
             text=text,
         )
+        repeat_group_snapshot: dict[str, Any] = {}
+        repeat_scene: dict[str, Any] = {}
         async with self._data_lock:
+            repeat_group = self._get_group(group_id)
+            repeat_group_snapshot = deepcopy(repeat_group)
+            repeat_scene = self._infer_group_scene(
+                event,
+                repeat_group,
+                sender_id=sender_id,
+                sender_name=sender_name,
+                text=text,
+            )
             projection_getter = getattr(self, "_req039_group_observation_projection", None)
             observed_user = (
                 projection_getter(event, sender_id=sender_id, sender_name=sender_name)
@@ -17385,6 +17267,28 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 source="group_observation",
             )
             self._schedule_data_save()
+        if not self._proactive_only_blocks_passive_event(event, "group_repeat_early"):
+            original_repeat_state = deepcopy(repeat_group_snapshot.get("repeat_follow_state", {}))
+            original_interject_at = _safe_float(repeat_group_snapshot.get("last_interject_at"), 0)
+            await self._maybe_group_interject(
+                event,
+                repeat_group_snapshot,
+                text,
+                allow_interjection=False,
+                repeat_scene=repeat_scene,
+            )
+            repeat_state_changed = repeat_group_snapshot.get("repeat_follow_state") != original_repeat_state
+            repeat_acted = _safe_float(repeat_group_snapshot.get("last_interject_at"), 0) > original_interject_at
+            if repeat_state_changed or repeat_acted:
+                async with self._data_lock:
+                    current = self._get_group(group_id)
+                    current["repeat_follow_state"] = repeat_group_snapshot.get("repeat_follow_state", {})
+                    if repeat_acted:
+                        current["last_interject_at"] = repeat_group_snapshot.get("last_interject_at", 0)
+                        current["interject_day"] = repeat_group_snapshot.get("interject_day", "")
+                        current["interject_today"] = repeat_group_snapshot.get("interject_today", 0)
+                        current["last_bot_interjection"] = repeat_group_snapshot.get("last_bot_interjection", {})
+                    self._save_data_sync()
         self._start_group_image_understanding(
             event,
             group_id=group_id,

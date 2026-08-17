@@ -32490,6 +32490,65 @@ pre {
 #creativeCompanionStatus[data-tone="warn"] { color: #8a5a13; border-color: #d9bd82; }
 #creativeCompanionStatus[data-tone="error"] { color: #9a3737; border-color: #dda7a7; }
 
+#imageRuntimeBadge[data-tone="ready"] { color: #176b52; border-color: #9bcdbd; }
+#imageRuntimeBadge[data-tone="warn"] { color: #8a5a13; border-color: #d9bd82; }
+#imageRuntimeBadge[data-tone="error"] { color: #9a3737; border-color: #dda7a7; }
+
+.image-runtime-head { align-items: flex-start; }
+.image-runtime-notice {
+  margin: 4px 0 16px;
+  padding: 11px 14px;
+  border-left: 3px solid #4e8a73;
+  background: rgba(78, 138, 115, 0.08);
+}
+.image-runtime-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.image-runtime-metrics article {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line, rgba(31, 42, 51, 0.16));
+  border-radius: 6px;
+  background: var(--surface, rgba(255, 255, 255, 0.72));
+}
+.image-runtime-metrics span,
+.image-runtime-metrics small {
+  display: block;
+  color: var(--muted, #667078);
+  font-size: 12px;
+}
+.image-runtime-metrics b {
+  display: block;
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}
+.image-runtime-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+.image-runtime-details > section {
+  min-width: 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--line, rgba(31, 42, 51, 0.16));
+}
+.image-runtime-list {
+  display: block;
+  margin: 0;
+}
+.image-runtime-list > div {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.35fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line, rgba(31, 42, 51, 0.1));
+}
+.image-runtime-list dt { color: var(--muted, #667078); }
+.image-runtime-list dd { margin: 0; overflow-wrap: anywhere; }
+
 .creative-qzone-workspace {
   margin-top: 28px;
   padding-top: 28px;
@@ -32582,6 +32641,9 @@ pre {
 }
 
 @media (max-width: 640px) {
+  .image-runtime-head { flex-direction: column; }
+  .image-runtime-metrics,
+  .image-runtime-details { grid-template-columns: minmax(0, 1fr); }
   .reality-page-head { flex-direction: column; }
   .reality-page-actions { width: 100%; justify-content: space-between; }
   .reality-page-status-grid,

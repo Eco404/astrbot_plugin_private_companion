@@ -4822,7 +4822,6 @@ class PrivateImageMixin:
             scope = _single_line(getattr(event, "unified_msg_origin", ""), 160) or "unknown"
         lock_getter = getattr(self, "_segmented_remainder_lock", None)
         lock = lock_getter(scope) if callable(lock_getter) else asyncio.Lock()
-        started_at = _safe_float(started_at, _now_ts(), 0.0) or _now_ts()
         async with lock:
             for chain in chains:
                 if not chain:
@@ -4833,19 +4832,6 @@ class PrivateImageMixin:
                     delay = await self._calc_segmented_proactive_interval(wait_for, event=event)
                     if delay > 0:
                         await asyncio.sleep(delay)
-                    activity_checker = getattr(self, "_scope_has_new_inbound_activity", None)
-                    if callable(activity_checker):
-                        try:
-                            if activity_checker(scope, started_at, ignore_self=True):
-                                logger.info(
-                                    "[PrivateCompanion] 会话已有新消息，停止发送私聊单图剩余片段: scope=%s sent=%s/%s",
-                                    scope,
-                                    max(0, sent_index - 1),
-                                    total,
-                                )
-                                return sent_texts
-                        except Exception:
-                            pass
                     await self._send_private_image_reply_chain(event, chain)
                     sent_text = self._private_image_chain_text(chain)
                     if sent_text:

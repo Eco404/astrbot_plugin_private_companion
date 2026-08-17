@@ -6179,7 +6179,7 @@ class ProactiveEngineMixin:
         *,
         now: float | None = None,
     ) -> dict[str, Any] | None:
-        """Offer one gentle arrival anchor when consented location confirms a transition."""
+        """Offer one gentle anchor when consented location confirms a place transition."""
         scene_getter = getattr(self, "_mobile_user_proactive_scene", None)
         if not callable(scene_getter):
             return None
@@ -6193,16 +6193,29 @@ class ProactiveEngineMixin:
                 return None
         except Exception:
             return None
-        if not isinstance(scene, dict) or not scene.get("recent_arrival"):
+        if not isinstance(scene, dict) or not scene.get("recent_transition"):
             return None
         transition_key = _single_line(scene.get("transition_key"), 80)
         place_name = _single_line(scene.get("place_name"), 40)
         place_kind = _single_line(scene.get("place_kind"), 24)
+        transition_kind = _single_line(scene.get("transition_kind"), 24)
         if not transition_key or not place_name:
             return None
         if _single_line(user.get("last_mobile_location_arrival_key"), 80) == transition_key:
             return None
-        if place_kind == "home":
+        if transition_kind == "departure" and place_kind == "home":
+            topic = "刚离开家后的路上"
+            motive = "刚出门，想顺手跟你说一声"
+            scene_hint = "用户刚离开已标记的家"
+        elif transition_kind == "departure" and place_kind == "work":
+            topic = "刚离开公司后的这一段"
+            motive = "刚离开公司，想顺手问问接下来怎么走"
+            scene_hint = "用户刚离开已标记的工作地点"
+        elif transition_kind == "departure":
+            topic = f"刚离开{place_name}后的这一段"
+            motive = f"刚离开{place_name}，想顺手跟你说一声"
+            scene_hint = f"用户刚离开已标记地点{place_name}"
+        elif place_kind == "home":
             topic = "刚到家后的这一小段"
             motive = "刚到家，想顺手跟你说一声"
             scene_hint = "用户刚进入已标记的家"
@@ -6219,7 +6232,7 @@ class ProactiveEngineMixin:
         is_priority_arrival = priority_key and priority_key == transition_key and priority_until > check_now
         delay_seconds = random.uniform(5, 20) if is_priority_arrival else random.uniform(45, 240)
         return {
-            "event_id": f"mobile-place-arrival:{place_kind}:{transition_key}",
+            "event_id": f"mobile-place-{transition_kind or 'arrival'}:{place_kind}:{transition_key}",
             "reason": "check_in",
             "action": "message",
             "topic": topic,

@@ -87,11 +87,21 @@ class ProactiveLocationHarness(ProactiveMixin, ProactiveEngineMixin, PlaceCognit
 class ProactiveTransitionHarness(ProactiveLocationHarness):
     def __init__(self) -> None:
         super().__init__()
-        self.current_place = ("公司", "work")
+        self.current_place: tuple[str, str] | None = ("公司", "work")
         self.data["users"] = {"owner-route": {"user_id": "owner-route", "enabled": True}}
         self.kick_count = 0
 
     def _reality_mobile_context(self, _user_id: str):
+        if self.current_place is None:
+            return {
+                "available": True,
+                "location": {
+                    "available": True,
+                    "latitude": 31.24,
+                    "longitude": 121.48,
+                    "place": {"matched": False, "name": "公司", "kind": "work"},
+                },
+            }
         name, kind = self.current_place
         return {
             "available": True,
@@ -244,8 +254,28 @@ def test_mobile_location_watch_wakes_once_for_a_new_transition() -> None:
     assert harness.kick_count == 0
 
     harness.current_place = ("公司", "work")
-    assert asyncio.run(harness._mobile_location_watch_once(now=baseline_now + 60)) is False
-    assert asyncio.run(harness._mobile_location_watch_once(now=baseline_now + 75)) is True
+    assert asyncio.run(harness._mobile_location_watch_once(now=baseline_now + 60)) is True
     assert harness.kick_count == 1
-    assert asyncio.run(harness._mobile_location_watch_once(now=baseline_now + 90)) is False
+    assert asyncio.run(harness._mobile_location_watch_once(now=baseline_now + 75)) is False
     assert harness.kick_count == 1
+
+
+def test_departure_from_home_becomes_a_prompt_and_proactive_anchor() -> None:
+    harness = ProactiveTransitionHarness()
+    harness.current_place = ("家", "home")
+    user = harness.data["users"]["owner-route"]
+    harness._observe_mobile_place_context(
+        user["user_id"], harness._reality_mobile_context(user["user_id"])["location"], observed_at=time.time(),
+    )
+    harness.current_place = None
+
+    scene = harness._mobile_user_proactive_scene(user)
+    event = harness._pick_mobile_location_arrival_event(user)
+    prompt = harness._format_mobile_user_location_context_for_proactive(user)
+
+    assert scene["recent_departure"] is True
+    assert scene["transition_kind"] == "departure"
+    assert event is not None
+    assert event["topic"] == "刚离开家后的路上"
+    assert "用户刚离开已标记的家" == event["scene"]
+    assert "刚离开已标记地点“家”" in prompt

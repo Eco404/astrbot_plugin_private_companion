@@ -30,7 +30,7 @@ class ImageModelConfigUiTests(unittest.TestCase):
         self.assertIn("function imageCompanionInstalled()", self.script)
         self.assertIn("function realityCompanionInstalled()", self.script)
         self.assertIn("function syncExternalCompanionVisibility()", self.script)
-        self.assertIn("enable_photo_text_action: () => imageCompanionInstalled()", self.script)
+        self.assertIn("enable_photo_text_action: () => anyImageGeneratorInstalled()", self.script)
         self.assertIn(
             "enable_experimental_bluetooth_wakeup: () => realityCompanionInstalled()",
             self.script,

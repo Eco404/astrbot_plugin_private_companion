@@ -3772,9 +3772,8 @@ class GroupObservationMixin:
         text: str,
         *,
         allow_interjection: bool = True,
+        repeat_scene: dict[str, Any] | None = None,
     ) -> None:
-        if bool(getattr(event, "is_wake", False)) or bool(getattr(event, "is_at_or_wake_command", False)):
-            return
         if bool(getattr(event, "private_companion_group_quoted_link_payload", False)):
             return
         _, has_link_payload = _group_link_message_context(text)
@@ -3784,7 +3783,33 @@ class GroupObservationMixin:
             sender_id = str(event.get_sender_id())
         except Exception:
             sender_id = ""
-        repeat_action = self._update_group_repeat_follow_state(group, text, sender_id=sender_id)
+        raw_wakeup = bool(getattr(event, "is_wake", False)) or bool(
+            getattr(event, "is_at_or_wake_command", False)
+        )
+        scene = repeat_scene if isinstance(repeat_scene, dict) else getattr(
+            event,
+            "private_companion_group_scene",
+            None,
+        )
+        has_structured_scene = isinstance(scene, dict) and bool(scene)
+        talking_to = _single_line(scene.get("talking_to"), 80) if has_structured_scene else ""
+        repeat_is_directed = (
+            talking_to not in {"", "group"}
+            if has_structured_scene
+            else raw_wakeup
+        )
+        repeat_action: dict[str, str] = {}
+        repeat_processed = bool(
+            getattr(event, "_private_companion_group_repeat_processed", False)
+        )
+        if not repeat_processed:
+            setattr(event, "_private_companion_group_repeat_processed", True)
+            if not repeat_is_directed:
+                repeat_action = self._update_group_repeat_follow_state(
+                    group,
+                    text,
+                    sender_id=sender_id,
+                )
         if repeat_action:
             repeat_reply = _single_line(repeat_action.get("text"), 80)
             image_path = str(repeat_action.get("image_path") or "")
@@ -3799,6 +3824,13 @@ class GroupObservationMixin:
                 "has_image": bool(image_path),
                 "topic_signature": self._group_topic_signature(text),
             }
+            if raw_wakeup and has_structured_scene and talking_to in {"", "group"}:
+                try:
+                    event.stop_event()
+                except Exception:
+                    pass
+            return
+        if raw_wakeup:
             return
         if not allow_interjection:
             return

@@ -3569,18 +3569,11 @@ TTS 朗读文本：
             scope = _single_line(getattr(event, "unified_msg_origin", ""), 160) or "unknown"
         lock_getter = getattr(self, "_segmented_remainder_lock", None)
         lock = lock_getter(scope) if callable(lock_getter) else asyncio.Lock()
-        started_at = float(started_at or time.time())
         previous_text = ""
-        transcript_activity_logged = False
         async with lock:
             for chunk in expanded_chunks:
                 if not chunk:
                     continue
-                is_tts_transcript = any(
-                    bool(getattr(comp, "_private_companion_tts_visible_text", False))
-                    for comp in chunk
-                )
-                stop_after_send = False
                 delay = 0.45
                 if previous_text and len(expanded_chunks) > 1:
                     calc_interval = getattr(self, "_calc_segmented_proactive_interval", None)
@@ -3594,68 +3587,6 @@ TTS 朗读文本：
                         except Exception:
                             delay = 0.45
                 await asyncio.sleep(delay)
-                activity_checker = getattr(self, "_scope_has_new_inbound_activity", None)
-                if callable(activity_checker):
-                    try:
-                        if activity_checker(scope, started_at, ignore_self=True):
-                            if is_tts_transcript:
-                                if not transcript_activity_logged:
-                                    transcript_activity_logged = True
-                                    logger.info(
-                                        "[PrivateCompanion] 会话已有新消息，TTS 对应文本仍继续完整补齐: session=%s",
-                                        scope,
-                                    )
-                            elif scope.startswith("group:"):
-                                if not previous_text:
-                                    stop_after_send = True
-                                    logger.info(
-                                        "[PrivateCompanion] 群聊已有新消息，但仍补发当前首段文本: session=%s",
-                                        scope,
-                                    )
-                                else:
-                                    if case_id and callable(case_updater):
-                                        case_updater(
-                                            case_id,
-                                            outcome="incomplete",
-                                            signals={
-                                                "interrupted_by_new_message": True,
-                                                "segments_expected": total_chunks,
-                                                "segments_sent": sent_chunks,
-                                                "visible_text_complete": False,
-                                            },
-                                        )
-                                    logger.info(
-                                        "[PrivateCompanion] 群聊已有新消息，停止发送 TTS 后续分块: session=%s sent_preview=%s",
-                                        scope,
-                                        _single_line(previous_text, 120) or "0",
-                                    )
-                                    return
-                            elif not previous_text:
-                                stop_after_send = True
-                                logger.info(
-                                    "[PrivateCompanion] 会话已有新消息，但仍补发 TTS 语音对应首段文本: session=%s",
-                                    scope,
-                                )
-                            else:
-                                if case_id and callable(case_updater):
-                                    case_updater(
-                                        case_id,
-                                        outcome="incomplete",
-                                        signals={
-                                            "interrupted_by_new_message": True,
-                                            "segments_expected": total_chunks,
-                                            "segments_sent": sent_chunks,
-                                            "visible_text_complete": False,
-                                        },
-                                    )
-                                logger.info(
-                                    "[PrivateCompanion] 会话已有新消息，停止发送 TTS 后续分块: session=%s sent_preview=%s",
-                                    scope,
-                                    _single_line(previous_text, 120) or "0",
-                                )
-                                return
-                    except Exception:
-                        pass
                 proactive_umo = _single_line(
                     getattr(event, "_private_companion_proactive_delivery_umo", ""),
                     180,
@@ -3739,46 +3670,6 @@ TTS 朗读文本：
                     for comp in chunk
                     if isinstance(comp, Plain)
                 ).strip() or previous_text
-                if stop_after_send:
-                    if case_id and callable(case_updater):
-                        case_updater(
-                            case_id,
-                            outcome="incomplete",
-                            signals={
-                                "interrupted_by_new_message": True,
-                                "segments_expected": total_chunks,
-                                "segments_sent": sent_chunks,
-                                "visible_text_complete": False,
-                            },
-                        )
-                    logger.info(
-                        "[PrivateCompanion] 当前首段文本已补发，停止发送普通回复剩余分块: session=%s sent_preview=%s",
-                        scope,
-                        _single_line(previous_text, 120) or "0",
-                    )
-                    return
-
-    def _deferred_reaction_tts_has_new_activity(
-        self,
-        event: Any,
-        started_at: float,
-    ) -> bool:
-        scope_getter = getattr(self, "_event_scope_key", None)
-        scope = ""
-        if callable(scope_getter):
-            try:
-                scope = _single_line(scope_getter(event), 160)
-            except Exception:
-                scope = ""
-        if not scope:
-            scope = _single_line(getattr(event, "unified_msg_origin", ""), 160)
-        checker = getattr(self, "_scope_has_new_inbound_activity", None)
-        if not scope or not callable(checker):
-            return False
-        try:
-            return bool(checker(scope, started_at, ignore_self=True))
-        except Exception:
-            return False
 
     async def _send_deferred_reaction_tts(
         self,
@@ -3790,19 +3681,7 @@ TTS 朗读文本：
             pending.get("fallback_plain"),
             max_chars=1600,
         )
-        try:
-            started_at = float(pending.get("started_at") or time.time())
-        except (TypeError, ValueError):
-            started_at = time.time()
-        if not normalized or self._deferred_reaction_tts_has_new_activity(
-            event,
-            started_at,
-        ):
-            logger.info(
-                "[PrivateCompanion] 表情表达后台 TTS 已因新入站消息取消: session=%s stage=before_synthesis",
-                _single_line(getattr(event, "unified_msg_origin", ""), 120)
-                or "unknown",
-            )
+        if not normalized:
             return
 
         setattr(event, "_private_companion_deferred_reaction_tts_active", True)
@@ -3847,14 +3726,6 @@ TTS 朗读文本：
                 or "unknown",
             )
             return
-        if self._deferred_reaction_tts_has_new_activity(event, started_at):
-            logger.info(
-                "[PrivateCompanion] 表情表达后台 TTS 生成期间出现新入站消息,已丢弃过期语音: session=%s",
-                _single_line(getattr(event, "unified_msg_origin", ""), 120)
-                or "unknown",
-            )
-            return
-
         proactive_umo = _single_line(
             getattr(event, "_private_companion_proactive_delivery_umo", ""),
             180,

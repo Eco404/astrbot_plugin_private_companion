@@ -284,7 +284,7 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
             hasattr(event, "_private_companion_deferred_reaction_tts")
         )
 
-    async def test_reaction_background_tts_drops_voice_when_new_message_arrives(
+    async def test_reaction_background_tts_is_not_cancelled_by_new_message(
         self,
     ):
         harness = _TtsHarness()
@@ -292,12 +292,7 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         harness._maybe_convert_plain_reply_to_tts = AsyncMock(
             return_value=[Record(file="voice.wav"), Plain("不应补发正文。")]
         )
-        activity = iter((False, True))
-        harness._event_scope_key = lambda _event: "group:10001"
-        harness._scope_has_new_inbound_activity = (
-            lambda *_args, **_kwargs: next(activity)
-        )
-
+        harness._scope_has_new_inbound_activity = lambda *_args, **_kwargs: True
         class Event:
             unified_msg_origin = "default:GroupMessage:10001"
 
@@ -322,7 +317,9 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         )
 
         harness._maybe_convert_plain_reply_to_tts.assert_awaited_once()
-        self.assertEqual([], event.sent)
+        self.assertEqual(1, len(event.sent))
+        self.assertEqual(1, len(event.sent[0].chain))
+        self.assertIsInstance(event.sent[0].chain[0], Record)
 
     def test_changed_visible_text_does_not_reuse_stale_source_segments(self):
         harness = _TtsHarness()
@@ -1504,7 +1501,7 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
             [chunk[0].text for chunk in sent],
         )
 
-    async def test_group_activity_still_stops_unmarked_reply_remainder(self):
+    async def test_unmarked_reply_remainder_is_sent_in_full(self):
         harness = _TtsHarness()
         harness._event_scope_key = lambda _event: "group:10001"
         harness._scope_has_new_inbound_activity = lambda *_args, **_kwargs: True
@@ -1530,7 +1527,10 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
                 started_at=1.0,
             )
 
-        self.assertEqual(["普通第一段。"], [chunk[0].text for chunk in sent])
+        self.assertEqual(
+            ["普通第一段。", "普通第二段。"],
+            [chunk[0].text for chunk in sent],
+        )
 
     def test_segmented_tts_visible_text_keeps_transcript_marker(self):
         harness = _TtsHarness()

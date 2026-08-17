@@ -68,6 +68,36 @@ def test_leaving_and_arriving_elsewhere_creates_a_semantic_route_and_memory_even
     assert "从家前往" in harness.events[-1]["title"]
 
 
+def test_unmatched_travel_keeps_the_departure_origin_for_the_next_arrival() -> None:
+    harness = _MapHarness()
+
+    harness._observe_mobile_place_context("u1", _location("公司", "work"), observed_at=100)
+    departure = harness._observe_mobile_place_context(
+        "u1", _location("途中", matched=False), observed_at=160, include_transition=True,
+    )
+    arrival = harness._observe_mobile_place_context(
+        "u1", _location("家", "home"), observed_at=260, include_transition=True,
+    )
+
+    assert departure["last_transition"]["kind"] == "departure"
+    assert departure["last_transition"]["from_name"] == "公司"
+    assert arrival["recent_routes"] == [{"from_name": "公司", "to_name": "家", "count": 1}]
+    assert arrival["last_transition"] == {
+        "kind": "arrival",
+        "from_name": "公司",
+        "from_kind": "work",
+        "to_name": "家",
+        "to_kind": "home",
+        "at": "1970-01-01T00:04:20+00:00",
+    }
+    assert [item["kind"] for item in harness.events] == [
+        "confirmed_place_arrival",
+        "confirmed_place_departure",
+        "confirmed_place_arrival",
+    ]
+    assert "从公司前往" in harness.events[-1]["title"]
+
+
 def test_unmatched_place_does_not_create_any_durable_place_knowledge() -> None:
     harness = _MapHarness()
 

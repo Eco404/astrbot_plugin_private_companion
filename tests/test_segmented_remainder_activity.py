@@ -72,7 +72,7 @@ class SegmentedRemainderActivityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("group:10001", harness._recent_inbound_activity_by_scope)
 
     @staticmethod
-    def _build_remainder_harness(*, activity: bool):
+    def _build_remainder_harness(*, activity: bool = True):
         plugin = object.__new__(PrivateCompanionPlugin)
         plugin.enable_framework_error_leak_guard = False
         plugin.enable_tts_enhancement = False
@@ -82,7 +82,6 @@ class SegmentedRemainderActivityTests(unittest.IsolatedAsyncioTestCase):
         plugin._segmented_remainder_context_drift_reason = lambda *_args, **_kwargs: ""
         plugin._calc_segmented_proactive_interval = AsyncMock(return_value=0.0)
         plugin._scope_has_new_inbound_activity = lambda *_args, **_kwargs: activity
-        plugin._segmented_should_finish_after_new_activity = lambda *_args, **_kwargs: False
         plugin._should_cancel_reply_for_missing_or_recalled_trigger = AsyncMock(return_value="")
         plugin._sanitize_segmented_plain_text = lambda _event, text: str(text or "")
         plugin._strip_plaintext_tool_call_envelopes = lambda text: (str(text or ""), [])
@@ -94,7 +93,7 @@ class SegmentedRemainderActivityTests(unittest.IsolatedAsyncioTestCase):
         return plugin
 
     async def test_reaction_expression_remainder_is_sent_in_full(self) -> None:
-        plugin = self._build_remainder_harness(activity=True)
+        plugin = self._build_remainder_harness()
         event = _RemainderEvent()
         chunks = [[Plain("第二段。")], [Plain("第三段。")], [Plain("第四段。")]]
 
@@ -112,8 +111,8 @@ class SegmentedRemainderActivityTests(unittest.IsolatedAsyncioTestCase):
             [result.chain[0].text for result in event.sent],
         )
 
-    async def test_regular_remainder_still_stops_after_new_activity(self) -> None:
-        plugin = self._build_remainder_harness(activity=True)
+    async def test_regular_remainder_is_not_stopped_by_new_activity(self) -> None:
+        plugin = self._build_remainder_harness()
         event = _RemainderEvent()
 
         await PrivateCompanionPlugin._send_segmented_llm_chain_remainder(
@@ -125,10 +124,13 @@ class SegmentedRemainderActivityTests(unittest.IsolatedAsyncioTestCase):
             started_at=1.0,
         )
 
-        self.assertEqual([], event.sent)
+        self.assertEqual(
+            ["第二段。", "第三段。"],
+            [result.chain[0].text for result in event.sent],
+        )
 
     async def test_proactive_remainder_uses_live_platform_sender_after_event_finishes(self) -> None:
-        plugin = self._build_remainder_harness(activity=False)
+        plugin = self._build_remainder_harness()
         plugin._send_chain_components = AsyncMock(return_value=True)
         event = _RemainderEvent()
         event._private_companion_external_proactive_source = "proactive_chat"
@@ -150,7 +152,7 @@ class SegmentedRemainderActivityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first_call.kwargs["apply_decorating_hooks"])
 
     async def test_synthetic_proactive_remainder_uses_delivery_umo_platform_sender(self) -> None:
-        plugin = self._build_remainder_harness(activity=False)
+        plugin = self._build_remainder_harness()
         plugin._send_chain_components = AsyncMock(return_value=True)
         event = _RemainderEvent()
         event._private_companion_proactive_delivery_umo = "default:GroupMessage:10001"
@@ -172,7 +174,7 @@ class SegmentedRemainderActivityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first_call.kwargs["apply_decorating_hooks"])
 
     async def test_synthetic_proactive_remainder_does_not_fallback_to_fake_event(self) -> None:
-        plugin = self._build_remainder_harness(activity=False)
+        plugin = self._build_remainder_harness()
         plugin._send_chain_components = AsyncMock(return_value=False)
         event = _RemainderEvent()
         event._private_companion_proactive_delivery_umo = "default:GroupMessage:10001"

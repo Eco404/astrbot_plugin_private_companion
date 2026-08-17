@@ -915,35 +915,52 @@ class SceneContextMixin:
             return {}
         place = location.get("place") if isinstance(location.get("place"), dict) else {}
         place_name = _single_line(place.get("name"), 40)
-        if not bool(place.get("matched")) or not place_name:
-            scene: dict[str, Any] = {"available": True, "matched": False}
-            if include_map:
-                scene["known_places"] = self._known_places_from_map(
-                    self._mobile_cognitive_map(user_id, location)
-                )
-            return scene
-
         cognitive_map = self._mobile_cognitive_map(user_id, location, include_transition=True)
-        current_place = cognitive_map.get("current_place") if isinstance(cognitive_map.get("current_place"), dict) else {}
-        updated_at = _single_line(current_place.get("transition_at"), 40)
-        previous_place_name = _single_line(current_place.get("previous_place_name"), 48)
-        arrival_age_minutes: float | None = None
-        if updated_at:
+        transition = cognitive_map.get("last_transition") if isinstance(cognitive_map.get("last_transition"), dict) else {}
+        transition_kind = _single_line(transition.get("kind"), 24)
+        transition_at = _single_line(transition.get("at"), 40)
+        transition_age_minutes: float | None = None
+        if transition_at:
             try:
-                transition_ts = datetime.fromisoformat(updated_at.replace("Z", "+00:00")).timestamp()
+                transition_ts = datetime.fromisoformat(transition_at.replace("Z", "+00:00")).timestamp()
                 check_now = _now_ts() if now is None else float(now)
                 if transition_ts > 0 and check_now >= transition_ts:
-                    arrival_age_minutes = max(0.0, (check_now - transition_ts) / 60.0)
+                    transition_age_minutes = max(0.0, (check_now - transition_ts) / 60.0)
             except (TypeError, ValueError, OverflowError):
-                arrival_age_minutes = None
+                transition_age_minutes = None
+        recent_transition = transition_age_minutes is not None and transition_age_minutes <= 90.0
+        if not bool(place.get("matched")) or not place_name:
+            scene: dict[str, Any] = {"available": True, "matched": False}
+            if transition_kind == "departure" and recent_transition:
+                from_name = _single_line(transition.get("from_name"), 48)
+                from_kind = _single_line(transition.get("from_kind"), 24)
+                scene.update({
+                    "place_name": from_name,
+                    "place_kind": from_kind,
+                    "transition_kind": "departure",
+                    "transition_key": f"departure:{from_name}@{transition_at}" if from_name else "",
+                    "recent_transition": bool(from_name),
+                    "recent_departure": bool(from_name),
+                    "transition_age_minutes": transition_age_minutes,
+                })
+            if include_map:
+                scene["known_places"] = self._known_places_from_map(cognitive_map)
+            return scene
+
+        previous_place_name = _single_line(transition.get("from_name"), 48)
+        is_recent_arrival = transition_kind == "arrival" and bool(previous_place_name) and recent_transition
         scene = {
             "available": True,
             "matched": True,
             "place_name": place_name,
             "place_kind": _single_line(place.get("kind"), 24),
-            "transition_key": f"{previous_place_name}>{place_name}@{updated_at}" if previous_place_name and updated_at else "",
-            "recent_arrival": bool(previous_place_name) and arrival_age_minutes is not None and arrival_age_minutes <= 90.0,
-            "arrival_age_minutes": arrival_age_minutes,
+            "transition_kind": transition_kind,
+            "transition_key": f"arrival:{previous_place_name}>{place_name}@{transition_at}" if is_recent_arrival else "",
+            "recent_transition": is_recent_arrival,
+            "recent_arrival": is_recent_arrival,
+            "recent_departure": False,
+            "arrival_age_minutes": transition_age_minutes if is_recent_arrival else None,
+            "transition_age_minutes": transition_age_minutes if is_recent_arrival else None,
         }
         if include_map:
             scene["known_places"] = self._known_places_from_map(cognitive_map)
@@ -991,6 +1008,10 @@ class SceneContextMixin:
                 facts.append("这是最近一次进入该地点后的短时间窗口，可把它理解为刚到达后的生活节点")
         else:
             facts.append("用户已授权手机位置感知，但当前未命中已标记地点（只作为模糊场景背景）")
+            if bool(scene.get("recent_departure")):
+                place_name = _single_line(scene.get("place_name"), 40)
+                if place_name:
+                    facts.append(f"用户刚离开已标记地点“{place_name}”，可把它理解为出发后的生活节点")
 
         # A few user-created place names can help distinguish home/work context, but
         # routes and coordinates are intentionally excluded from proactive prompts.

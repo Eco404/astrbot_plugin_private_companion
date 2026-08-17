@@ -165,15 +165,27 @@ class GroupObservationIngressTests(unittest.IsolatedAsyncioTestCase):
         plugin._message_debounce_command_text = Mock(return_value=False)
         plugin._sender_display_name = Mock(return_value="用户")
         plugin._capture_group_observation_event = AsyncMock(return_value=True)
+        group: dict = {}
+        plugin._get_group = Mock(return_value=group)
+        plugin._infer_group_scene = Mock(
+            return_value={"talking_to": "group", "trigger": "group_message"}
+        )
+        plugin._proactive_only_blocks_passive_event = Mock(return_value=False)
+        plugin._maybe_group_interject = AsyncMock()
         plugin.data = {"users": {}}
         plugin._data_lock = asyncio.Lock()
         plugin._canonical_private_user_id = Mock(return_value="user-1")
         plugin._req036_attach_unified_profile_context = Mock(return_value={"state": "profile_exact"})
         plugin._schedule_data_save = Mock()
+        plugin._start_group_image_understanding = Mock()
 
         await plugin.capture_group_observation_early(event)
 
         plugin._capture_group_observation_event.assert_awaited_once()
+        plugin._maybe_group_interject.assert_awaited_once()
+        repeat_call = plugin._maybe_group_interject.await_args
+        self.assertFalse(repeat_call.kwargs["allow_interjection"])
+        self.assertEqual("group", repeat_call.kwargs["repeat_scene"]["talking_to"])
         plugin._req036_attach_unified_profile_context.assert_called_once()
         self.assertFalse(event._stopped)
 

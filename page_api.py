@@ -728,6 +728,7 @@ class PrivateCompanionPageApi(
             ("/reality-touch", self.get_reality_touch, ["GET"], "Private Companion Page reality touch status"),
             ("/reality-touch/update", self.update_reality_touch, ["POST"], "Private Companion Page update reality touch alarm"),
             ("/settings/swap_image_api", self.swap_image_api_settings, ["POST"], "Private Companion Page swap image API settings"),
+            ("/extensions/image/status", self.get_image_extension_status, ["GET"], "Private Companion Page image extension status"),
             ("/image_api/status", self.get_image_api_status, ["GET"], "Private Companion Page image API status"),
             ("/image_api/test", self.test_image_api_endpoint, ["POST"], "Private Companion Page test one image API endpoint"),
             ("/config/export", self.export_migration_config, ["GET"], "Private Companion Page export migration config"),
@@ -1302,7 +1303,8 @@ class PrivateCompanionPageApi(
             "image": {
                 "installed": image_api is not None,
                 "enabled": bool(image_status.get("enabled")),
-                "available": image_api is not None,
+                "available": bool(image_api is not None and image_status.get("available", True)),
+                "reason": self._single_line(image_status.get("reason"), 120),
             },
             "nai": {
                 "installed": nai_api is not None,
@@ -6558,6 +6560,62 @@ class PrivateCompanionPageApi(
             "ratio": self._single_line(endpoint.get("ratio"), 20),
             "timeout_seconds": self._int(endpoint.get("timeout_seconds"), 180, 20, 600),
         }
+
+    async def get_image_extension_status(self) -> dict[str, Any]:
+        """Expose the split image runtime through the companion-owned page."""
+        getter = getattr(self.plugin, "_image_companion_api", None)
+        try:
+            api = getter() if callable(getter) else None
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanionPage] 生图扩展发现失败: %s",
+                self._single_line(exc, 160),
+                exc_info=True,
+            )
+            api = None
+        if api is None:
+            return self._ok(
+                {
+                    "installed": False,
+                    "enabled": False,
+                    "available": False,
+                    "reason": "image_companion_unavailable",
+                    "state": "unavailable",
+                    "generation_count": 0,
+                    "last_generation": {},
+                    "unified_engine": {},
+                    "metrics": {},
+                }
+            )
+        status_getter = getattr(api, "status", None)
+        if not callable(status_getter):
+            return self._ok(
+                {
+                    "installed": True,
+                    "enabled": False,
+                    "available": False,
+                    "reason": "status_api_unavailable",
+                    "state": "unavailable",
+                    "generation_count": 0,
+                    "last_generation": {},
+                    "unified_engine": {},
+                    "metrics": {},
+                }
+            )
+        try:
+            value = status_getter()
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanionPage] 获取生图扩展状态失败: %s",
+                self._single_line(exc, 160),
+                exc_info=True,
+            )
+            return self._exception_error("获取生图扩展状态失败")
+        status = dict(value) if isinstance(value, dict) else {}
+        status.setdefault("installed", True)
+        status.setdefault("available", bool(status.get("enabled")))
+        status.setdefault("state", "managed")
+        return self._ok(status)
 
     async def get_image_api_status(self) -> dict[str, Any]:
         try:
