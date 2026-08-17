@@ -930,40 +930,116 @@ class PrivateCompanionPageApi(
             logger.warning("[PrivateCompanionPage] 保存拓展迁移提示偏好失败: %s", self._single_line(exc, 160))
             return self._exception_error("保存迁移提示偏好失败")
 
+    def _overview_section_value(
+        self,
+        section: str,
+        builder: Any,
+        *,
+        fallback: Any = None,
+        degraded_sections: list[str] | None = None,
+    ) -> Any:
+        """Keep one optional dashboard section from taking down the overview."""
+        try:
+            return builder()
+        except Exception as exc:
+            section_name = self._single_line(section, 80) or "unknown"
+            if isinstance(degraded_sections, list) and section_name not in degraded_sections:
+                degraded_sections.append(section_name)
+            logger.warning(
+                "[PrivateCompanionPage] 总览区块读取失败: section=%s error=%s",
+                section_name,
+                self._single_line(exc, 200),
+                exc_info=True,
+            )
+            return deepcopy(fallback)
+
     @_multi_persona_page_context
     async def get_overview(self) -> dict[str, Any]:
         start = time.perf_counter()
+        degraded_sections: list[str] = []
         try:
             async with self.plugin._data_lock:
                 refresher = getattr(self.plugin, "_refresh_sleep_runtime_state", None)
                 if callable(refresher):
-                    refresher()
+                    self._overview_section_value(
+                        "sleep_runtime",
+                        refresher,
+                        degraded_sections=degraded_sections,
+                    )
                 schedule_content_changed = False
                 plan_sanitizer = getattr(self.plugin, "_sanitize_daily_plan_inplace", None)
                 plan = self.plugin.data.get("daily_plan")
-                if callable(plan_sanitizer) and isinstance(plan, dict) and plan_sanitizer(plan):
+                plan_sanitized = self._overview_section_value(
+                    "daily_plan_sanitizer",
+                    lambda: plan_sanitizer(plan),
+                    fallback=False,
+                    degraded_sections=degraded_sections,
+                ) if callable(plan_sanitizer) and isinstance(plan, dict) else False
+                if plan_sanitized:
                     schedule_content_changed = True
                 if isinstance(plan, dict) and isinstance(plan.get("items"), list) and not isinstance(plan.get("quality"), dict):
-                    plan["quality"] = evaluate_daily_plan_quality(self.plugin, plan.get("items"))
-                    schedule_content_changed = True
+                    quality = self._overview_section_value(
+                        "daily_plan_quality",
+                        lambda: evaluate_daily_plan_quality(self.plugin, plan.get("items")),
+                        fallback=None,
+                        degraded_sections=degraded_sections,
+                    )
+                    if isinstance(quality, dict):
+                        plan["quality"] = quality
+                        schedule_content_changed = True
                 detail_sanitizer = getattr(self.plugin, "_sanitize_detail_enhanced_segments_inplace", None)
                 enhanced = self.plugin.data.get("detail_enhanced_segments")
-                if callable(detail_sanitizer) and isinstance(enhanced, dict) and detail_sanitizer(enhanced):
+                detail_sanitized = self._overview_section_value(
+                    "detail_segments_sanitizer",
+                    lambda: detail_sanitizer(enhanced),
+                    fallback=False,
+                    degraded_sections=degraded_sections,
+                ) if callable(detail_sanitizer) and isinstance(enhanced, dict) else False
+                if detail_sanitized:
                     schedule_content_changed = True
                 story_sanitizer = getattr(self.plugin, "_sanitize_story_plan_social_facts_inplace", None)
                 story = self.plugin.data.get("daily_story_plan")
-                if callable(story_sanitizer) and isinstance(story, dict) and story_sanitizer(story):
+                story_sanitized = self._overview_section_value(
+                    "story_plan_sanitizer",
+                    lambda: story_sanitizer(story),
+                    fallback=False,
+                    degraded_sections=degraded_sections,
+                ) if callable(story_sanitizer) and isinstance(story, dict) else False
+                if story_sanitized:
                     schedule_content_changed = True
                 expression_profile_getter = getattr(self.plugin, "_expression_voice_profile", None)
                 if callable(expression_profile_getter):
-                    expression_profile_getter()
+                    self._overview_section_value(
+                        "expression_voice_profile",
+                        expression_profile_getter,
+                        degraded_sections=degraded_sections,
+                    )
                 if schedule_content_changed:
-                    self.plugin._save_data_sync()
-                data = self._overview_data_snapshot_locked(self.plugin.data)
-                reaction_expression = self._reaction_expression_runtime_summary(self.plugin.data)
-                token_stats = self._token_overview_payload(
-                    self.plugin.data.get("token_usage", {}),
-                    self.plugin.data.get("balance_awareness", {}),
+                    self._overview_section_value(
+                        "data_save",
+                        self.plugin._save_data_sync,
+                        degraded_sections=degraded_sections,
+                    )
+                data = self._overview_section_value(
+                    "data_snapshot",
+                    lambda: self._overview_data_snapshot_locked(self.plugin.data),
+                    fallback={"users": {}, "groups": {}},
+                    degraded_sections=degraded_sections,
+                )
+                reaction_expression = self._overview_section_value(
+                    "reaction_expression",
+                    lambda: self._reaction_expression_runtime_summary(self.plugin.data),
+                    fallback={},
+                    degraded_sections=degraded_sections,
+                )
+                token_stats = self._overview_section_value(
+                    "token_stats",
+                    lambda: self._token_overview_payload(
+                        self.plugin.data.get("token_usage", {}),
+                        self.plugin.data.get("balance_awareness", {}),
+                    ),
+                    fallback={},
+                    degraded_sections=degraded_sections,
                 )
             users = data.get("users") if isinstance(data.get("users"), dict) else {}
             groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
@@ -987,8 +1063,18 @@ class PrivateCompanionPageApi(
             }
             enabled_groups = sum(1 for item in visible_groups.values() if isinstance(item, dict) and item.get("enabled", True))
             group_access_mode = str(getattr(self.plugin, "group_access_mode", "whitelist") or "whitelist")
-            group_whitelist = list(self.plugin._configured_group_ids())
-            group_blacklist = list(self.plugin._configured_group_blacklist_ids())
+            group_whitelist = self._overview_section_value(
+                "group_whitelist",
+                lambda: list(self.plugin._configured_group_ids()),
+                fallback=[],
+                degraded_sections=degraded_sections,
+            )
+            group_blacklist = self._overview_section_value(
+                "group_blacklist",
+                lambda: list(self.plugin._configured_group_blacklist_ids()),
+                fallback=[],
+                degraded_sections=degraded_sections,
+            )
             effective_group_count = sum(
                 1
                 for group_id, item in visible_groups.items()
@@ -999,6 +1085,26 @@ class PrivateCompanionPageApi(
             group_access_warning = ""
             if bool(getattr(self.plugin, "enable_group_companion", False)) and group_access_mode == "whitelist" and not group_whitelist:
                 group_access_warning = "群聊观察已开启，但白名单为空，当前不会接收任何群聊观察。"
+
+            def section(name: str, builder: Any, fallback: Any = None) -> Any:
+                return self._overview_section_value(
+                    name,
+                    builder,
+                    fallback=fallback,
+                    degraded_sections=degraded_sections,
+                )
+
+            try:
+                bookshelf = await self._bookshelf_summary(data, unlocked=False)
+            except Exception as exc:
+                degraded_sections.append("bookshelf")
+                logger.warning(
+                    "[PrivateCompanionPage] 总览区块读取失败: section=bookshelf error=%s",
+                    self._single_line(exc, 200),
+                    exc_info=True,
+                )
+                bookshelf = {"available": False, "degraded": True, "reason": "summary_unavailable"}
+
             payload = {
                 "plugin": {
                     "enabled": bool(getattr(self.plugin, "enabled", False)),
@@ -1015,15 +1121,27 @@ class PrivateCompanionPageApi(
                     ),
                     "data_version": data.get("version"),
                 },
-                "companion_plugins": self._companion_plugins_summary(),
+                "companion_plugins": section("companion_plugins", self._companion_plugins_summary, {}),
                 "private": {
                     "user_count": len(users),
                     "enabled_user_count": enabled_users,
                     "proactive_enabled_user_count": proactive_enabled_users,
                     "require_opt_in": bool(getattr(self.plugin, "require_private_opt_in", True)),
-                    "admin_ids": list(self.plugin._configured_admin_ids()) if hasattr(self.plugin, "_configured_admin_ids") else [],
-                    "target_user_ids": list(self.plugin._configured_target_ids()) if hasattr(self.plugin, "_configured_target_ids") else [],
-                    "relationship_owner_ids": list(self.plugin._relationship_owner_user_ids()) if hasattr(self.plugin, "_relationship_owner_user_ids") else [],
+                    "admin_ids": section(
+                        "admin_ids",
+                        lambda: list(self.plugin._configured_admin_ids()),
+                        [],
+                    ) if hasattr(self.plugin, "_configured_admin_ids") else [],
+                    "target_user_ids": section(
+                        "target_user_ids",
+                        lambda: list(self.plugin._configured_target_ids()),
+                        [],
+                    ) if hasattr(self.plugin, "_configured_target_ids") else [],
+                    "relationship_owner_ids": section(
+                        "relationship_owner_ids",
+                        lambda: list(self.plugin._relationship_owner_user_ids()),
+                        [],
+                    ) if hasattr(self.plugin, "_relationship_owner_user_ids") else [],
                     "max_daily_messages": getattr(self.plugin, "max_daily_messages", 0),
                     "idle_minutes": getattr(self.plugin, "idle_minutes", 0),
                     "min_interval_minutes": getattr(self.plugin, "min_interval_minutes", 0),
@@ -1041,45 +1159,55 @@ class PrivateCompanionPageApi(
                     "interjection_enabled": bool(getattr(self.plugin, "enable_group_interjection", False)),
                     "repeat_follow_enabled": bool(getattr(self.plugin, "enable_group_repeat_follow", False)),
                 },
-                "platform_adaptation": self.plugin._platform_adaptation_overview()
-                if hasattr(self.plugin, "_platform_adaptation_overview")
-                else {},
-                "features": self._feature_flags(),
+                "platform_adaptation": section(
+                    "platform_adaptation",
+                    self.plugin._platform_adaptation_overview,
+                    {},
+                ) if hasattr(self.plugin, "_platform_adaptation_overview") else {},
+                "features": section("features", self._feature_flags, {}),
                 "reaction_expression": reaction_expression,
-                "proactive_intensity": self._proactive_intensity_summary(),
-                "proactive_only": self._proactive_only_mode_snapshot(),
-                "proactive_chat": self._proactive_chat_summary(data),
-                "body_monitor_integration": self._body_monitor_integration_summary(),
-                "expression_scope": self._expression_learning_scope_summary(data),
-                "providers": self._provider_settings(),
-                "settings": self._runtime_settings(),
-                "deepseek_peak_routing": self._deepseek_peak_routing_summary(),
-                "cache": self._cache_summary(data),
-                "livingmemory": self._livingmemory_summary(),
-                "screen_companion": self._screen_companion_summary(data),
-                "knowledge": self.plugin._roleplay_knowledge_summary(),
-                "worldbook": self._worldbook_summary(data),
-                "proactive_candidates": self._proactive_candidate_summary(data),
-                "proactive_tasks": self._proactive_task_summary(data),
-                "message_debounce": self._message_debounce_summary(data),
-                "bilibili": self._bilibili_summary(data),
-                "news": self._news_summary(data),
-                "web_exploration": self._web_exploration_summary(data),
-                "qzone": self._qzone_summary(data),
-                "private_reading": self._jm_cosmos_summary(data),
-                "creative": self._creative_summary(data),
-                "bookshelf": await self._bookshelf_summary(data, unlocked=False),
-                "skill_growth": self._skill_growth_summary(data),
-                "personal_goals": self._personal_goal_summary(data),
-                "food_menu": self._food_menu_summary(data),
-                "external_abilities": self._external_ability_summary(data),
-                "life_observation": self._life_observation_summary(data),
-                "daily_state": self._daily_state_summary(data.get("daily_state")),
-                "daily_timeline": self._daily_timeline_summary(data),
-                "daily_outfit": self._daily_outfit_summary(data),
+                "proactive_intensity": section("proactive_intensity", self._proactive_intensity_summary, {}),
+                "proactive_only": section("proactive_only", self._proactive_only_mode_snapshot, {}),
+                "proactive_chat": section("proactive_chat", lambda: self._proactive_chat_summary(data), {}),
+                "body_monitor_integration": section("body_monitor_integration", self._body_monitor_integration_summary, {}),
+                "expression_scope": section("expression_scope", lambda: self._expression_learning_scope_summary(data), {}),
+                "providers": section("providers", self._provider_settings, {}),
+                "settings": section("settings", self._runtime_settings, {}),
+                "deepseek_peak_routing": section("deepseek_peak_routing", self._deepseek_peak_routing_summary, {}),
+                "cache": section("cache", lambda: self._cache_summary(data), {}),
+                "livingmemory": section("livingmemory", self._livingmemory_summary, {}),
+                "screen_companion": section("screen_companion", lambda: self._screen_companion_summary(data), {}),
+                "knowledge": section("knowledge", self.plugin._roleplay_knowledge_summary, {}),
+                "worldbook": section("worldbook", lambda: self._worldbook_summary(data), {}),
+                "proactive_candidates": section("proactive_candidates", lambda: self._proactive_candidate_summary(data), {}),
+                "proactive_tasks": section("proactive_tasks", lambda: self._proactive_task_summary(data), {}),
+                "message_debounce": section("message_debounce", lambda: self._message_debounce_summary(data), {}),
+                "bilibili": section("bilibili", lambda: self._bilibili_summary(data), {}),
+                "news": section("news", lambda: self._news_summary(data), {}),
+                "web_exploration": section("web_exploration", lambda: self._web_exploration_summary(data), {}),
+                "qzone": section("qzone", lambda: self._qzone_summary(data), {}),
+                "private_reading": section("private_reading", lambda: self._jm_cosmos_summary(data), {}),
+                "creative": section("creative", lambda: self._creative_summary(data), {}),
+                "bookshelf": bookshelf,
+                "skill_growth": section("skill_growth", lambda: self._skill_growth_summary(data), {}),
+                "personal_goals": section("personal_goals", lambda: self._personal_goal_summary(data), {}),
+                "food_menu": section("food_menu", lambda: self._food_menu_summary(data), {}),
+                "external_abilities": section("external_abilities", lambda: self._external_ability_summary(data), {}),
+                "life_observation": section("life_observation", lambda: self._life_observation_summary(data), {}),
+                "daily_state": section("daily_state", lambda: self._daily_state_summary(data.get("daily_state")), {}),
+                "daily_timeline": section("daily_timeline", lambda: self._daily_timeline_summary(data), {}),
+                "daily_outfit": section("daily_outfit", lambda: self._daily_outfit_summary(data), {}),
                 "token_stats": token_stats,
-                "multi_persona": getattr(self.plugin, "_multi_persona_status", lambda: {"enabled": False})(),
-                "req041": self._req041_runtime_summary(),
+                "multi_persona": section(
+                    "multi_persona",
+                    getattr(self.plugin, "_multi_persona_status", lambda: {"enabled": False}),
+                    {"enabled": False},
+                ),
+                "req041": section("req041", self._req041_runtime_summary, {}),
+                "overview_health": {
+                    "degraded": bool(degraded_sections),
+                    "sections": degraded_sections,
+                },
             }
             if not payload.get("multi_persona", {}).get("enabled"):
                 payload.pop("multi_persona", None)
@@ -1136,6 +1264,18 @@ class PrivateCompanionPageApi(
         if not isinstance(reality_status, dict):
             reality_status = {}
 
+        content_status_getter = getattr(self.plugin, "_content_companion_status", None)
+        try:
+            content_status = content_status_getter() if callable(content_status_getter) else {}
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanionPage] 创作扩展状态读取失败: %s",
+                self._single_line(exc, 160),
+            )
+            content_status = {}
+        if not isinstance(content_status, dict):
+            content_status = {}
+
         return {
             # These two capabilities are part of the companion core. Keep them
             # visible in the same status payload so the panel and diagnostics
@@ -1150,14 +1290,15 @@ class PrivateCompanionPageApi(
                 "enabled": bool(getattr(self.plugin, "enable_emotion_simulation", True)),
                 "available": callable(getattr(self.plugin, "_record_interaction_emotion_event", None)),
             },
-            "content": dict(
-                getattr(self.plugin, "_content_companion_status", lambda: {
-                    "installed": False,
-                    "enabled": False,
-                    "available": False,
-                    "reason": "content_companion_unavailable",
-                })()
-            ),
+            "content": {
+                "installed": bool(content_status.get("installed")),
+                "enabled": bool(content_status.get("enabled")),
+                "available": bool(content_status.get("available")),
+                "reason": self._single_line(
+                    content_status.get("reason") or "content_companion_unavailable",
+                    120,
+                ),
+            },
             "image": {
                 "installed": image_api is not None,
                 "enabled": bool(image_status.get("enabled")),
