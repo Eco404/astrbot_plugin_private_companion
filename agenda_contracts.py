@@ -17,12 +17,14 @@ from zoneinfo import ZoneInfo
 
 try:  # package import
     from .bot_personal_contract import (
+        BOT_PERSONAL_CANONICAL_SCHEMA_VERSION,
         SCHEDULE_WINDOWS as _CONTRACT_WINDOWS,
         WINDOW_SLUGS as _CONTRACT_WINDOW_SLUGS,
         window_for_minutes as _contract_window_for_minutes,
     )
 except ImportError:  # direct test/import from the plugin directory
     from bot_personal_contract import (
+        BOT_PERSONAL_CANONICAL_SCHEMA_VERSION,
         SCHEDULE_WINDOWS as _CONTRACT_WINDOWS,
         WINDOW_SLUGS as _CONTRACT_WINDOW_SLUGS,
         window_for_minutes as _contract_window_for_minutes,
@@ -34,7 +36,7 @@ AGENDA_VERSION = 1
 # canonical fields below are additive so old readers can continue to consume
 # the payload.  Keep a separate semantic version for capability checks rather
 # than changing the old storage marker underneath them.
-CANONICAL_SCHEMA_VERSION = 2
+CANONICAL_SCHEMA_VERSION = BOT_PERSONAL_CANONICAL_SCHEMA_VERSION
 AGENDA_CONTRACT_VERSION = CANONICAL_SCHEMA_VERSION
 AGENDA_SCHEMA_VERSION = CANONICAL_SCHEMA_VERSION
 SCHEDULE_WINDOWS = tuple(_CONTRACT_WINDOWS)

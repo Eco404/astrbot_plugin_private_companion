@@ -23,7 +23,7 @@ import hashlib
 import json
 
 CONTRACT_NAME = "bot_personal_archive"
-CONTRACT_REVISION = 2
+CONTRACT_REVISION = 3
 
 # ---------------------------------------------------------------------------
 # 一、日程分级（原「四段」→ 陪伴分支五段）
@@ -136,13 +136,16 @@ BOT_PERSONAL_MAX_PAYLOAD_BYTES = 16 * 1024
 BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION = "1.0"
 # 信封字段 window 的**值域**变了（四段→五段）→ 能力版本必升，且必须在能力探测里
 # 回传 windows，让调用方启动时就能发现两侧值域不一致，而不是等到归档 invalid_window。
-BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION = "1.2"
+BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION = "1.3"
 
 # Canonical C3 agenda capability surface.  These values are deliberately
 # duplicated in the memory-side contract so startup negotiation can reject a
 # stale reader before it promotes archived payloads to facts.
-BOT_PERSONAL_CANONICAL_SCHEMA_VERSION = 2
+BOT_PERSONAL_CANONICAL_SCHEMA_VERSION = 3
+BOT_PERSONAL_LEGACY_CANONICAL_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2)
 BOT_PERSONAL_CANONICAL_FIELDS: tuple[str, ...] = (
+    "owner_bot_id",
+    "persona_id",
     "source_kind",
     "status",
     "temporal_phase",
@@ -251,6 +254,7 @@ def capability_descriptor(*, available: bool = True, read_only: bool = False) ->
         "contract_fingerprint": CONTRACT_FINGERPRINT,
         "capability_schema_version": BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION,
         "canonical_schema_version": BOT_PERSONAL_CANONICAL_SCHEMA_VERSION,
+        "legacy_canonical_schema_versions": list(BOT_PERSONAL_LEGACY_CANONICAL_SCHEMA_VERSIONS),
         "canonical_fields": list(BOT_PERSONAL_CANONICAL_FIELDS),
         "canonical_source_kinds": list(BOT_PERSONAL_CANONICAL_SOURCE_KINDS),
         "canonical_statuses": list(BOT_PERSONAL_CANONICAL_STATUSES),
@@ -280,6 +284,7 @@ def _fingerprint_source() -> str:
         "payload_schema_version": BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION,
         "capability_schema_version": BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION,
         "canonical_schema_version": BOT_PERSONAL_CANONICAL_SCHEMA_VERSION,
+        "legacy_canonical_schema_versions": list(BOT_PERSONAL_LEGACY_CANONICAL_SCHEMA_VERSIONS),
         "canonical_fields": list(BOT_PERSONAL_CANONICAL_FIELDS),
         "canonical_source_kinds": list(BOT_PERSONAL_CANONICAL_SOURCE_KINDS),
         "canonical_statuses": list(BOT_PERSONAL_CANONICAL_STATUSES),
@@ -298,7 +303,7 @@ def compute_contract_fingerprint() -> str:
 
 
 # 由 compute_contract_fingerprint() 生成。改了上面任何常量都要重跑本文件更新它。
-CONTRACT_FINGERPRINT = "0ffe3a1ab69b659c"
+CONTRACT_FINGERPRINT = "ecf1d69406a8445d"
 
 
 def contract_self_check() -> list[str]:

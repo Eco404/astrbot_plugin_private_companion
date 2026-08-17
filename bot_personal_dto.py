@@ -11,6 +11,8 @@ import re
 from typing import Any
 
 from .bot_personal_contract import (
+    BOT_PERSONAL_CANONICAL_SCHEMA_VERSION,
+    BOT_PERSONAL_LEGACY_CANONICAL_SCHEMA_VERSIONS,
     BOT_PERSONAL_MEMORY_DOMAIN,
     BOT_PERSONAL_MEMORY_TYPES,
     BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION,
@@ -212,10 +214,12 @@ class BotPersonalArchiveDTO:
     runtime_origin_refs: list[str] | None = None
     expires_at: str = ""
     decision_trace: list[dict[str, Any]] | None = None
-    canonical_schema_version: int = 2
+    owner_bot_id: str = ""
+    persona_id: str = ""
+    canonical_schema_version: int = BOT_PERSONAL_CANONICAL_SCHEMA_VERSION
 
     def envelope(self) -> dict[str, Any]:
-        return {
+        result = {
             "record_id": self.record_id,
             "memory_domain": self.memory_domain,
             "memory_type": self.memory_type,
@@ -256,6 +260,10 @@ class BotPersonalArchiveDTO:
             "decision_trace": deepcopy(self.decision_trace or []),
             "canonical_schema_version": self.canonical_schema_version,
         }
+        if self.canonical_schema_version >= BOT_PERSONAL_CANONICAL_SCHEMA_VERSION:
+            result["owner_bot_id"] = self.owner_bot_id
+            result["persona_id"] = self.persona_id
+        return result
 
 
 def build_bot_personal_dto(
@@ -268,12 +276,37 @@ def build_bot_personal_dto(
     occurred_at: str,
     now: datetime | None = None,
     version: int = 1,
+    owner_bot_id: str = "",
+    persona_id: str = "",
+    canonical_schema_version: int | None = None,
 ) -> BotPersonalArchiveDTO:
     del kind, namespace
     if memory_type not in BOT_PERSONAL_MEMORY_TYPES:
         raise ValueError(f"invalid_memory_type:{memory_type}")
     validate_bot_personal_payload(payload)
     validate_bot_personal_key(idempotency_key)
+    # Keep direct/legacy callers on canonical v2 until they explicitly
+    # provide the v3 producer namespace.  The adapter passes v3 after bridge
+    # capability negotiation.
+    requested_canonical_schema = int(
+        canonical_schema_version
+        if canonical_schema_version is not None
+        else max(BOT_PERSONAL_LEGACY_CANONICAL_SCHEMA_VERSIONS)
+    )
+    supported_canonical_schemas = {
+        *BOT_PERSONAL_LEGACY_CANONICAL_SCHEMA_VERSIONS,
+        BOT_PERSONAL_CANONICAL_SCHEMA_VERSION,
+    }
+    if requested_canonical_schema not in supported_canonical_schemas:
+        raise ValueError("unsupported_canonical_schema")
+    owner_bot_id = _text(owner_bot_id, 120)
+    persona_id = _text(persona_id, 96)
+    if requested_canonical_schema >= BOT_PERSONAL_CANONICAL_SCHEMA_VERSION:
+        if not owner_bot_id or not persona_id:
+            raise ValueError("invalid_namespace")
+    else:
+        owner_bot_id = ""
+        persona_id = "legacy"
     current = now or datetime.now().astimezone()
     safe = _safe_value(payload) or {}
     subject_actor = _text(safe.get("subject_actor_id"), 120) or BOT_PERSONAL_SUBJECT
@@ -429,9 +462,12 @@ def build_bot_personal_dto(
     created_at = _text(safe.get("created_at"), 80) or current.isoformat(timespec="seconds")
     updated_at = _text(safe.get("updated_at"), 80) or created_at
     canonical_key = _text(idempotency_key, 240)
-    record_digest = hashlib.sha256(
-        f"{BOT_PERSONAL_MEMORY_DOMAIN}|{memory_type}|{canonical_key}".encode("utf-8")
-    ).hexdigest()[:24]
+    identity = (
+        f"{BOT_PERSONAL_MEMORY_DOMAIN}|{owner_bot_id}|{persona_id}|{memory_type}|{canonical_key}"
+        if requested_canonical_schema >= BOT_PERSONAL_CANONICAL_SCHEMA_VERSION
+        else f"{BOT_PERSONAL_MEMORY_DOMAIN}|{memory_type}|{canonical_key}"
+    )
+    record_digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
     record_id = f"botmem_{record_digest}"
     archive_status = (
         "planned"
@@ -503,6 +539,9 @@ def build_bot_personal_dto(
         runtime_origin_refs=deepcopy(safe.get("runtime_origin_refs")) if isinstance(safe.get("runtime_origin_refs"), list) else [],
         expires_at=_text(safe.get("expires_at"), 96),
         decision_trace=deepcopy(safe.get("decision_trace")) if isinstance(safe.get("decision_trace"), list) else [],
+        owner_bot_id=owner_bot_id,
+        persona_id=persona_id,
+        canonical_schema_version=requested_canonical_schema,
     )
 
 

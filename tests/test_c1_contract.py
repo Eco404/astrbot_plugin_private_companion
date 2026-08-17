@@ -10,6 +10,7 @@ PEIBAN_ROOT = COMPANION_ROOT.parents[1]
 CONTRACT_PATH = COMPANION_ROOT / "bot_personal_contract.py"
 _MEMORY_CONTRACT_CANDIDATES = (
     PEIBAN_ROOT / "astrbot_plugin_memory_companion-main" / "core" / "bot_personal_contract.py",
+    COMPANION_ROOT.parent / "astrbot_plugin_remember_you" / "core" / "bot_personal_contract.py",
     COMPANION_ROOT.parent / "我会牢牢记住你" / "core" / "bot_personal_contract.py",
 )
 MEMORY_CONTRACT_PATH = next((path for path in _MEMORY_CONTRACT_CANDIDATES if path.is_file()), _MEMORY_CONTRACT_CANDIDATES[0])
@@ -43,9 +44,9 @@ def test_contract_bytes_match_authority_and_other_side():
 
 def test_frozen_contract_values_and_self_check():
     for module in (contract, memory_contract):
-        assert module.CONTRACT_FINGERPRINT == "0ffe3a1ab69b659c"
-        assert module.CONTRACT_REVISION == 2
-        assert module.BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION == "1.2"
+        assert module.CONTRACT_FINGERPRINT == "ecf1d69406a8445d"
+        assert module.CONTRACT_REVISION == 3
+        assert module.BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION == "1.3"
         assert module.BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION == "1.0"
         assert module.BOT_PERSONAL_MEMORY_DOMAIN == "bot_self_schedule"
         assert len(module.BOT_PERSONAL_MEMORY_TYPES) == 12
@@ -90,10 +91,11 @@ def test_descriptor_fields_and_cross_side_descriptor_equality():
     companion = contract.capability_descriptor()
     memory = memory_contract.capability_descriptor()
     assert companion == memory
-    assert companion["contract_fingerprint"] == "0ffe3a1ab69b659c"
-    assert companion["contract_revision"] == 2
-    assert companion["capability_schema_version"] == "1.2"
-    assert companion["canonical_schema_version"] == 2
+    assert companion["contract_fingerprint"] == "ecf1d69406a8445d"
+    assert companion["contract_revision"] == 3
+    assert companion["capability_schema_version"] == "1.3"
+    assert companion["canonical_schema_version"] == 3
+    assert companion["legacy_canonical_schema_versions"] == [1, 2]
     assert companion["payload_schema_version"] == "1.0"
     assert companion["memory_domain"] == "bot_self_schedule"
     assert companion["windows"] == list(contract.WINDOW_SLUGS)

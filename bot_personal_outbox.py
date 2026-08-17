@@ -16,6 +16,7 @@ import json
 import logging
 from typing import Any, Awaitable, Callable, Mapping
 
+from .bot_personal_contract import BOT_PERSONAL_CANONICAL_SCHEMA_VERSION
 from .bot_personal_dto import BotPersonalArchiveDTO, build_bot_personal_dto
 
 
@@ -153,13 +154,41 @@ class BotPersonalOutbox:
             logger.warning("Bot Personal outbox save task failed: %s", error, exc_info=error)
 
     @staticmethod
-    def _key(memory_type: str, idempotency_key: str) -> str:
-        return f"{str(memory_type or '').strip()}::{str(idempotency_key or '').strip()}"
+    def _key(
+        memory_type: str,
+        idempotency_key: str,
+        *,
+        owner_bot_id: str = "",
+        persona_id: str = "",
+    ) -> str:
+        base = f"{str(memory_type or '').strip()}::{str(idempotency_key or '').strip()}"
+        owner = str(owner_bot_id or "").strip()
+        persona = str(persona_id or "").strip()
+        return f"{owner}::{persona}::{base}" if owner or persona else base
 
-    def _find(self, entries: list[dict[str, Any]], memory_type: str, key: str) -> dict[str, Any] | None:
-        composite = self._key(memory_type, key)
+    def _find(
+        self,
+        entries: list[dict[str, Any]],
+        memory_type: str,
+        key: str,
+        *,
+        owner_bot_id: str = "",
+        persona_id: str = "",
+    ) -> dict[str, Any] | None:
+        composite = self._key(
+            memory_type,
+            key,
+            owner_bot_id=owner_bot_id,
+            persona_id=persona_id,
+        )
         for entry in entries:
-            if self._key(entry.get("memory_type"), entry.get("idempotency_key")) == composite:
+            envelope = entry.get("envelope") if isinstance(entry.get("envelope"), dict) else {}
+            if self._key(
+                entry.get("memory_type"),
+                entry.get("idempotency_key"),
+                owner_bot_id=envelope.get("owner_bot_id", ""),
+                persona_id=envelope.get("persona_id", ""),
+            ) == composite:
                 return entry
         return None
 
@@ -213,9 +242,31 @@ class BotPersonalOutbox:
             envelope["source_refs"] = list(dict.fromkeys(str(item).strip()[:240] for item in source_refs if str(item).strip()))
         envelope_fingerprint = _fingerprint(envelope)
         current = float(self.clock() if now is None else now)
+        owner_bot_id = (
+            dto.owner_bot_id
+            if dto.canonical_schema_version >= BOT_PERSONAL_CANONICAL_SCHEMA_VERSION
+            else ""
+        )
+        persona_id = (
+            dto.persona_id
+            if dto.canonical_schema_version >= BOT_PERSONAL_CANONICAL_SCHEMA_VERSION
+            else ""
+        )
+        scoped_key = self._key(
+            dto.memory_type,
+            dto.idempotency_key,
+            owner_bot_id=owner_bot_id,
+            persona_id=persona_id,
+        )
         async with self._lock:
             entries = self.entries
-            existing = self._find(entries, dto.memory_type, dto.idempotency_key)
+            existing = self._find(
+                entries,
+                dto.memory_type,
+                dto.idempotency_key,
+                owner_bot_id=owner_bot_id,
+                persona_id=persona_id,
+            )
             if existing is not None:
                 old_version = int(existing.get("version") or 0)
                 old_fingerprint = str(existing.get("payload_fingerprint") or "")
@@ -264,7 +315,7 @@ class BotPersonalOutbox:
                 entry = existing
             else:
                 entry = {
-                    "outbox_id": f"outbox_{hashlib.sha1(self._key(dto.memory_type, dto.idempotency_key).encode()).hexdigest()[:20]}",
+                    "outbox_id": f"outbox_{hashlib.sha1(scoped_key.encode()).hexdigest()[:20]}",
                     "memory_type": dto.memory_type,
                     "idempotency_key": dto.idempotency_key,
                     "record_id": dto.record_id,
@@ -327,7 +378,13 @@ class BotPersonalOutbox:
             except Exception as exc:
                 response = {"ok": False, "state": "retry", "error_code": type(exc).__name__}
             async with self._lock:
-                current_entry = self._find(self.entries, entry.get("memory_type", ""), entry.get("idempotency_key", ""))
+                current_entry = self._find(
+                    self.entries,
+                    entry.get("memory_type", ""),
+                    entry.get("idempotency_key", ""),
+                    owner_bot_id=envelope.get("owner_bot_id", ""),
+                    persona_id=envelope.get("persona_id", ""),
+                )
                 if current_entry is None:
                     continue
                 current_entry["updated_at"] = _now_iso()

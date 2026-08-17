@@ -10,7 +10,11 @@ from types import SimpleNamespace
 
 
 COMPANION_ROOT = Path(__file__).resolve().parents[1]
-MEMORY_ROOT = COMPANION_ROOT.parents[1] / "astrbot_plugin_memory_companion-main"
+_MEMORY_ROOT_CANDIDATES = (
+    COMPANION_ROOT.parents[1] / "astrbot_plugin_memory_companion-main",
+    COMPANION_ROOT.parent / "astrbot_plugin_remember_you",
+)
+MEMORY_ROOT = next((path for path in _MEMORY_ROOT_CANDIDATES if path.is_dir()), _MEMORY_ROOT_CANDIDATES[0])
 
 
 def _load_companion_package():
@@ -47,6 +51,8 @@ def test_chat_outbox_delivers_structured_archive_to_memory_bridge_without_domain
         service.store.initialize()
         service._schedule_memory_embedding = lambda *args, **kwargs: None
         producer = type("PrivateCompanionProducer", (), {})()
+        producer._memory_companion_bridge_bot_id = lambda: "bot-1"
+        producer._memory_companion_archive_persona_id = lambda: "persona-main"
         service.context = SimpleNamespace(get_all_stars=lambda: [SimpleNamespace(
             star_cls=producer, star_cls_type=type(producer), activated=True,
             root_dir_name="astrbot_plugin_private_companion", name="陪伴插件",
@@ -67,6 +73,9 @@ def test_chat_outbox_delivers_structured_archive_to_memory_bridge_without_domain
                 payload=payload,
                 idempotency_key="daily_plan:2026-07-30",
                 occurred_at="2026-07-30T19:00:00+08:00",
+                owner_bot_id="bot-1",
+                persona_id="persona-main",
+                canonical_schema_version=3,
                 sender=lambda envelope: bridge.record_bot_personal_archive(
                     envelope, producer_capability=capability,
                 ),
@@ -76,11 +85,18 @@ def test_chat_outbox_delivers_structured_archive_to_memory_bridge_without_domain
                 payload=payload,
                 idempotency_key="daily_plan:2026-07-30",
                 occurred_at="2026-07-30T19:00:00+08:00",
+                owner_bot_id="bot-1",
+                persona_id="persona-main",
+                canonical_schema_version=3,
                 sender=lambda envelope: bridge.record_bot_personal_archive(
                     envelope, producer_capability=capability,
                 ),
             )
-            profile = await service.read_bot_personal_profile(limit=10)
+            profile = await service.read_bot_personal_profile(
+                limit=10,
+                owner_bot_id="bot-1",
+                persona_id="persona-main",
+            )
             return first, duplicate, profile
 
         try:

@@ -119,6 +119,72 @@ def test_capability_probe_allows_backward_compatible_superset():
     assert status["contract_compatibility"] == "superset"
 
 
+def test_capability_probe_allows_known_memory_v2_contract():
+    class _LegacyV2Bridge(_ProbeBridge):
+        def probe_bot_personal_memory_capabilities(self):
+            result = super().probe_bot_personal_memory_capabilities()
+            result.update(
+                {
+                    "contract_fingerprint": "0ffe3a1ab69b659c",
+                    "contract_revision": 2,
+                    "capability_schema_version": "1.2",
+                    "canonical_schema_version": 2,
+                    "payload_schema_version": "1.0",
+                }
+            )
+            return result
+
+    plugin = _Plugin(True, False, _LegacyV2Bridge())
+    assert plugin._memory_companion_bridge() is not None
+    status = plugin._bridge_last_status
+    assert status["state"] == "ready_compatible"
+    assert status["contract_compatibility"] == "legacy_v2"
+    assert status["negotiated_canonical_schema_version"] == 2
+
+
+def test_bot_personal_outbox_uses_negotiated_schema_and_namespace():
+    capability = object()
+
+    class _CaptureBridge(_ProbeBridge):
+        def __init__(self):
+            self.envelope = None
+
+        @staticmethod
+        def register_emotion_producer(_producer):
+            return capability
+
+        async def record_bot_personal_archive(self, envelope, *, producer_capability=None):
+            assert producer_capability is capability
+            self.envelope = envelope
+            return {
+                "ok": True,
+                "state": "sent",
+                "record_id": envelope["record_id"],
+                "version": envelope["version"],
+            }
+
+    bridge = _CaptureBridge()
+    plugin = _Plugin(True, False, bridge)
+    plugin.data = {}
+    plugin.bot_self_id = "bot-1"
+    plugin.plugin_specific_persona_id = "persona-main"
+    plugin._schedule_data_save = lambda **_kwargs: None
+
+    result = asyncio.run(
+        plugin._memory_companion_record_bot_personal(
+            memory_type="bot_daily_diary",
+            payload={"date": "2026-08-17", "summary": "v3 bridge"},
+            idempotency_key="diary:2026-08-17",
+            occurred_at="2026-08-17T21:00:00+08:00",
+        )
+    )
+
+    assert result["ok"] is True
+    assert bridge.envelope["canonical_schema_version"] == 3
+    assert bridge.envelope["owner_bot_id"] == "bot-1"
+    assert bridge.envelope["persona_id"] == "persona-main"
+
+
 def test_bot_personal_sender_passes_registered_producer_capability():
     capability = object()
 

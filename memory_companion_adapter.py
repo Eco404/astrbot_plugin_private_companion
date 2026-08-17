@@ -15,6 +15,7 @@ from astrbot.api import logger
 
 from .bot_personal_contract import (
     BOT_PERSONAL_CAPABILITY_SCHEMA_VERSION,
+    BOT_PERSONAL_CANONICAL_SCHEMA_VERSION,
     BOT_PERSONAL_MEMORY_DOMAIN,
     BOT_PERSONAL_MEMORY_TYPES,
     BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION,
@@ -30,6 +31,18 @@ from .relationship_ledger import normalize_relationship_mode
 from .relationship_policy import relationship_projection_for_bridge
 from .namespace_capability import negotiate_namespace_capability
 from .identity_namespace import validate_namespace_context
+
+
+# The v2 contract was published by the previous Memory Companion release.
+# Keep this tuple narrow: only this known, fully-compatible legacy descriptor
+# may negotiate down; arbitrary mismatches remain degraded.
+_LEGACY_V2_CONTRACT = {
+    "contract_fingerprint": "0ffe3a1ab69b659c",
+    "contract_revision": 2,
+    "capability_schema_version": "1.2",
+    "canonical_schema_version": 2,
+    "payload_schema_version": "1.0",
+}
 
 
 def _memory_companion_safe_float(value: Any, default: float, minimum: float = 0.0) -> float:
@@ -593,6 +606,29 @@ class MemoryCompanionAdapterMixin:
                 "version": int(version or 1),
                 "error_code": "outbox_unavailable",
             }
+        # Probe before constructing the envelope so a v3 bridge gets the
+        # namespace-aware format while a known v2 bridge receives a legacy
+        # envelope it can still validate.  Local-only operation remains
+        # available when no bridge is installed.
+        try:
+            self._memory_companion_bridge()
+        except Exception:
+            pass
+        negotiated_schema = int(
+            getattr(self, "_bridge_last_status", {}).get(
+                "negotiated_canonical_schema_version", 2
+            ) or 2
+        )
+        if negotiated_schema >= BOT_PERSONAL_CANONICAL_SCHEMA_VERSION:
+            owner_bot_id = self._memory_companion_bridge_bot_id()
+            persona_id = self._memory_companion_archive_persona_id()
+            if not owner_bot_id or not persona_id:
+                negotiated_schema = 2
+                owner_bot_id = ""
+                persona_id = ""
+        else:
+            owner_bot_id = ""
+            persona_id = ""
         try:
             result = await outbox.enqueue(
                 memory_type=memory_type,
@@ -601,6 +637,9 @@ class MemoryCompanionAdapterMixin:
                 occurred_at=occurred_at or self._memory_companion_now_iso(),
                 version=max(1, int(version or 1)),
                 source_refs=source_refs,
+                owner_bot_id=owner_bot_id,
+                persona_id=persona_id,
+                canonical_schema_version=negotiated_schema,
                 sender=self._memory_companion_bot_personal_sender(),
             )
             self._bridge_last_status = {
@@ -742,6 +781,8 @@ class MemoryCompanionAdapterMixin:
             mismatches.append("capability_schema_version")
         if result.get("payload_schema_version") != BOT_PERSONAL_PAYLOAD_SCHEMA_VERSION:
             mismatches.append("payload_schema_version")
+        if result.get("canonical_schema_version") != BOT_PERSONAL_CANONICAL_SCHEMA_VERSION:
+            mismatches.append("canonical_schema_version")
         if observed_domain != BOT_PERSONAL_MEMORY_DOMAIN:
             mismatches.append("memory_domain")
         if observed_windows != expected_windows:
@@ -751,6 +792,27 @@ class MemoryCompanionAdapterMixin:
         if result.get("available") is not True:
             mismatches.append("available")
         if mismatches:
+            legacy_v2 = (
+                result.get("available") is True
+                and all(result.get(key) == value for key, value in _LEGACY_V2_CONTRACT.items())
+                and observed_domain == BOT_PERSONAL_MEMORY_DOMAIN
+                and observed_windows == expected_windows
+                and observed_memory_types == expected_memory_types
+            )
+            if legacy_v2:
+                status = dict(result)
+                status.update(
+                    {
+                        "state": "ready_compatible",
+                        "degraded": False,
+                        "available": True,
+                        "contract_compatibility": "legacy_v2",
+                        "negotiated_canonical_schema_version": 2,
+                        "negotiated_mismatches": tuple(mismatches),
+                    }
+                )
+                self._bridge_last_status = status
+                return status
             compatible_superset = (
                 set(mismatches).issubset({"contract_fingerprint", "windows", "memory_types"})
                 and result.get("contract_revision") == CONTRACT_REVISION
@@ -774,6 +836,7 @@ class MemoryCompanionAdapterMixin:
                         "degraded": False,
                         "available": True,
                         "contract_compatibility": "superset",
+                        "negotiated_canonical_schema_version": BOT_PERSONAL_CANONICAL_SCHEMA_VERSION,
                         "negotiated_mismatches": tuple(mismatches),
                     }
                 )
@@ -788,6 +851,7 @@ class MemoryCompanionAdapterMixin:
         status.setdefault("state", "ready")
         status.setdefault("degraded", False)
         status.setdefault("available", True)
+        status.setdefault("negotiated_canonical_schema_version", BOT_PERSONAL_CANONICAL_SCHEMA_VERSION)
         self._bridge_last_status = status
         return status
 
@@ -1065,6 +1129,16 @@ class MemoryCompanionAdapterMixin:
         result.setdefault("available", True)
         result.setdefault("state", "ready")
         result.setdefault("degraded", False)
+        # coordination_status is a separate runtime health surface and may
+        # omit the contract negotiation fields.  Preserve the negotiated
+        # format so the next outbox write does not silently fall back to v2.
+        for key in (
+            "contract_compatibility",
+            "negotiated_canonical_schema_version",
+            "negotiated_mismatches",
+        ):
+            if key in self._bridge_last_status and key not in result:
+                result[key] = self._bridge_last_status[key]
         self._bridge_last_status = result
         return result
 
@@ -1297,6 +1371,23 @@ class MemoryCompanionAdapterMixin:
             if value:
                 known_ids.add(value)
         return next(iter(known_ids)) if len(known_ids) == 1 else ""
+
+    def _memory_companion_archive_persona_id(self) -> str:
+        """Return the stable persona namespace used by Memory Companion v3."""
+        getter = getattr(self, "_effective_plugin_persona_id", None)
+        if callable(getter):
+            try:
+                value = _single_line(getter(), 96)
+            except Exception:
+                value = ""
+            if value:
+                return value
+        for attr in ("plugin_specific_persona_id", "multi_persona_primary_id"):
+            value = _single_line(getattr(self, attr, ""), 96)
+            if value:
+                return value
+        # Single-persona installs still need a non-empty namespace for v3.
+        return "default"
 
     def _memory_companion_p5_gate_kwargs(self, *, event: Any | None = None, sink: str) -> dict[str, Any]:
         """Mint a fresh opaque handle for one Bridge call when P5 is enabled."""

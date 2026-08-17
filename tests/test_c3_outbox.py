@@ -14,6 +14,7 @@ if PACKAGE not in sys.modules:
     sys.modules[PACKAGE] = package
 
 from c3_outbox_companion.bot_personal_outbox import BotPersonalOutbox
+from c3_outbox_companion.bot_personal_dto import build_bot_personal_dto
 
 
 def run(coro):
@@ -114,3 +115,47 @@ def test_newer_version_replaces_pending_and_same_version_conflict_is_rejected():
     assert newer["state"] == "pending"
     assert stale["state"] == "stale_version"
     assert data["bot_personal_outbox"][0]["version"] == 2
+
+
+def test_canonical_v3_envelope_is_namespace_bound_but_v2_stays_legacy():
+    common = {
+        "memory_type": "bot_daily_diary",
+        "payload": {"date": "2026-07-30", "summary": "命名空间测试"},
+        "idempotency_key": "diary:namespace-test",
+        "occurred_at": "2026-07-30T19:00:00+08:00",
+    }
+    first = build_bot_personal_dto(
+        **common, owner_bot_id="bot-a", persona_id="persona-a", canonical_schema_version=3
+    )
+    second = build_bot_personal_dto(
+        **common, owner_bot_id="bot-b", persona_id="persona-b", canonical_schema_version=3
+    )
+    legacy = build_bot_personal_dto(**common)
+
+    assert first.record_id != second.record_id
+    assert first.envelope()["owner_bot_id"] == "bot-a"
+    assert first.envelope()["persona_id"] == "persona-a"
+    assert "owner_bot_id" not in legacy.envelope()
+    assert legacy.canonical_schema_version == 2
+    assert legacy.record_id == build_bot_personal_dto(**common).record_id
+
+
+def test_outbox_deduplication_is_isolated_per_v3_persona():
+    data = {}
+    outbox = BotPersonalOutbox(data, clock=lambda: 100.0)
+    common = {
+        "memory_type": "bot_daily_diary",
+        "payload": {"date": "2026-07-30", "summary": "同一日期，不同人格"},
+        "idempotency_key": "diary:2026-07-30",
+        "occurred_at": "2026-07-30T19:00:00+08:00",
+        "owner_bot_id": "bot-a",
+        "canonical_schema_version": 3,
+    }
+
+    first = run(outbox.enqueue(**common, persona_id="persona-a"))
+    second = run(outbox.enqueue(**common, persona_id="persona-b"))
+
+    assert first["state"] == "pending"
+    assert second["state"] == "pending"
+    assert len(data["bot_personal_outbox"]) == 2
+    assert data["bot_personal_outbox"][0]["record_id"] != data["bot_personal_outbox"][1]["record_id"]

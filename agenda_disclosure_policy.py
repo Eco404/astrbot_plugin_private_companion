@@ -18,6 +18,7 @@ except ImportError:
     from schedule_authority import ScheduleAuthorityAdapter, validate_structured_schedule_ref
 
 try:  # package import
+    from .bot_personal_contract import BOT_PERSONAL_CANONICAL_SCHEMA_VERSION
     from .agenda_contracts import (
         ACTOR_TYPES,
         AGENDA_STATUSES,
@@ -44,6 +45,7 @@ try:  # package import
         timezone_or_default,
     )
 except ImportError:  # direct test/import from the plugin directory
+    from bot_personal_contract import BOT_PERSONAL_CANONICAL_SCHEMA_VERSION
     from agenda_contracts import (
         ACTOR_TYPES,
         AGENDA_STATUSES,
@@ -529,9 +531,11 @@ class AgendaDisclosurePolicy:
         candidate["participant_roles"] = deepcopy(candidate.get("participant_roles") if isinstance(candidate.get("participant_roles"), list) else candidate.get("participants") or [])
         candidate["decision_trace"] = deepcopy(candidate.get("decision_trace") if isinstance(candidate.get("decision_trace"), list) else [])
         try:
-            candidate["canonical_schema_version"] = max(1, int(candidate.get("canonical_schema_version") or 2))
+            candidate["canonical_schema_version"] = max(
+                1, int(candidate.get("canonical_schema_version") or BOT_PERSONAL_CANONICAL_SCHEMA_VERSION)
+            )
         except (TypeError, ValueError):
-            candidate["canonical_schema_version"] = 2
+            candidate["canonical_schema_version"] = BOT_PERSONAL_CANONICAL_SCHEMA_VERSION
         return candidate
 
     def _actor_reasons(self, candidate: Mapping[str, Any]) -> list[str]:
