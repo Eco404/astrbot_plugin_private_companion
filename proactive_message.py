@@ -10979,6 +10979,27 @@ Output:
             "使用 Positive prompt: ... Negative prompt: ... 结构，不要写解释性段落。"
         )
 
+    def _photo_tool_prompt_format_instruction(self) -> str:
+        """Compact format hint for the request-local tool description."""
+        mode = self._photo_generation_prompt_format_mode()
+        if mode == "nai":
+            return (
+                "NAI 4/4.5：使用精简的英文 danbooru 标签并以逗号分隔；"
+                "用 {tag} 加权、[tag] 降权、1.5::tags:: 数值加权，负权重移除不需要的概念；"
+                "已知角色写作 人物名(作品名)，可使用情绪标签；"
+                "多角色分别写作 {人物[tags]人物}，互动使用 source#/target#/mutual#。"
+                "直接输出可投喂后端的提示词，不加 Positive/Negative 标题或解释。"
+            )
+        if mode == "natural_language":
+            return (
+                "使用自然语言描述：用连贯具体的英文句子描述主体、外观、动作、场景、光线、镜头、构图与风格；"
+                "不要标签堆、权重语法或 Positive/Negative 标题；需要避免的内容在末句用 Avoid ... 表达。"
+            )
+        return (
+            "使用英文短词组，按主体、外观、服装、场景、光线、镜头、构图、风格排列并以逗号分隔；"
+            "使用 Positive prompt: ... Negative prompt: ... 结构，不写解释。"
+        )
+
     @staticmethod
     def _photo_generation_negative_clause_content(clause: str) -> tuple[bool, str]:
         text = re.sub(r"\s+", " ", str(clause or "")).strip(" ,.;；。，")

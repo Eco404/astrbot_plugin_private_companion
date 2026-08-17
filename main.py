@@ -21,7 +21,7 @@ import time
 import unicodedata
 import uuid
 import zoneinfo
-from copy import deepcopy
+from copy import copy, deepcopy
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
@@ -199,6 +199,7 @@ from .relationship_policy import normalize_relationship_stage_policy
 
 
 _ACTIVE_PERSONA_ID = contextvars.ContextVar("private_companion_active_persona_id", default="")
+_PHOTO_TOOL_PROMPT_FORMAT_MARKER = "<!-- private_companion_prompt_format_req_v1 -->"
 _PERSONA_PROFILE_FORBIDDEN_FILENAME_CHARS = frozenset('<>:"/\\|?*%')
 _WINDOWS_RESERVED_FILENAME_STEMS = frozenset(
     {
@@ -15298,6 +15299,91 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 replaced,
                 dropped,
                 _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
+
+    def _annotate_photo_tool_prompt_format_for_request(self, req: ProviderRequest) -> bool:
+        """Attach the selected prompt syntax to this request's photo tool schema."""
+        tool_set = getattr(req, "func_tool", None) if req is not None else None
+        get_tool = getattr(tool_set, "get_tool", None) if tool_set is not None else None
+        if not callable(get_tool):
+            return False
+        try:
+            tool = get_tool("pc_generate_photo")
+        except Exception:
+            return False
+        if tool is None or not bool(getattr(tool, "active", True)):
+            return False
+
+        instruction = re.sub(
+            r"\s+",
+            " ",
+            str(self._photo_tool_prompt_format_instruction() or ""),
+        ).strip()
+        if not instruction:
+            return False
+        marker = _PHOTO_TOOL_PROMPT_FORMAT_MARKER
+        description = re.sub(
+            rf"\n*\s*{re.escape(marker)}.*?{re.escape(marker)}\s*",
+            "",
+            str(getattr(tool, "description", "") or ""),
+            flags=re.DOTALL,
+        ).strip()
+        annotated = (
+            f"{description}\n\n{marker}\n"
+            f"【提示词表达方式】prompt 参数必须按下述格式书写：{instruction}\n"
+            f"{marker}"
+        ).strip()
+
+        tools = getattr(tool_set, "tools", None)
+        if isinstance(tools, list):
+            try:
+                for index, existing in enumerate(tools):
+                    if existing is tool:
+                        request_tool = copy(tool)
+                        request_tool.description = annotated
+                        request_tools = list(tools)
+                        request_tools[index] = request_tool
+                        request_tool_set = copy(tool_set)
+                        request_tool_set.tools = request_tools
+                        req.func_tool = request_tool_set
+                        return True
+            except Exception as exc:
+                logger.debug(
+                    "[PrivateCompanion] pc_generate_photo 请求工具描述标注失败: %s",
+                    _single_line(exc, 120),
+                )
+                return False
+
+        # Older request-local wrappers may expose get_tool() without a tools list.
+        if getattr(tool, "handler", None) is None:
+            try:
+                tool.description = annotated
+                return True
+            except Exception as exc:
+                logger.debug(
+                    "[PrivateCompanion] pc_generate_photo 兼容工具描述标注失败: %s",
+                    _single_line(exc, 120),
+                )
+        return False
+
+    @filter.on_llm_request(priority=-251000)
+    @_multi_persona_event_context
+    async def annotate_photo_tool_prompt_format(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        *args,
+        **kwargs,
+    ):
+        """Expose prompt-format guidance whenever the photo tool is available."""
+        if self is None or req is None or not bool(getattr(self, "enabled", False)):
+            return
+        try:
+            self._annotate_photo_tool_prompt_format_for_request(req)
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] pc_generate_photo 工具提示词格式标注失败: %s",
+                _single_line(exc, 120),
             )
 
     @filter.on_llm_request()

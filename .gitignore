@@ -9,6 +9,7 @@ __pycache__/
 *.patch
 *.tmp
 *.bak
+/.zcode/
 
 # AstrBot host runtime data must never be packaged with this plugin.
 /data/
