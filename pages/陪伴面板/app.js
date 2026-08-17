@@ -32473,16 +32473,16 @@ function renderRealityTouchMobilePanel() {
   const port = Number(mobile.bound_port || mobile.port || 6322);
   const endpoint = `http://${clientHost}:${port}`;
   return `
-    <article class="exp-detail-card reality-mobile-card">
+    <article id="reality-connect" class="exp-detail-card reality-mobile-card reality-workspace-card">
       <div class="reality-touch-section-head">
         <div><span>移动连接</span><h3>手机陪伴终端</h3></div>
         <span class="reality-audio-backend ${mobile.running ? "ready" : "limited"}">${mobile.running ? "网关运行中" : (mobile.enabled ? "等待重启绑定" : "未启用")}</span>
       </div>
       <div class="reality-mobile-summary">
         <div><span>终端地址</span><b>${escapeHtml(endpoint)}</b></div>
+        <div><span>网关版本</span><b>v${escapeHtml(mobile.gateway_version || "0.2.7")}</b></div>
+        <div><span>终端兼容 API</span><b>v${escapeHtml(mobile.api_version || "1.0")}</b></div>
         <div><span>配对令牌</span><b>${mobile.pairing_token_configured ? "已配置" : "待生成"}</b></div>
-        <div><span>会话有效期</span><b>${Number(mobile.session_ttl_hours || 168)} 小时</b></div>
-        <div><span>前台位置有效期</span><b>${Number(mobile.location_ttl_seconds || 900)} 秒</b></div>
       </div>
       <form class="reality-mobile-config" data-reality-mobile-config>
         <label class="reality-enable-field">
@@ -32494,6 +32494,10 @@ function renderRealityTouchMobilePanel() {
         <label><span>允许配对的用户 ID</span><input name="mobile_allowed_user_id" value="${escapeHtml(mobile.allowed_user_id || "")}" placeholder="主要用户 ID"></label>
         <label><span>会话有效期（小时）</span><input name="mobile_session_ttl_hours" type="number" min="1" max="720" value="${Number(mobile.session_ttl_hours || 168)}"></label>
         <label><span>位置上下文有效期（秒）</span><input name="mobile_location_ttl_seconds" type="number" min="60" max="86400" value="${Number(mobile.location_ttl_seconds || 900)}"></label>
+        <label class="reality-enable-field reality-mobile-proxy-field">
+          <input type="checkbox" name="mobile_proxy_rooms" ${mobile.proxy_rooms !== false ? "checked" : ""}>
+          <span><b>统一代理一起 / 游戏 / 协同房间</b><small>手机只访问移动网关，由网关转发页面、接口、媒体和 WebSocket；推荐保持开启。</small></span>
+        </label>
         <label class="reality-enable-field">
           <input type="checkbox" name="mobile_screen_upload_enabled" ${mobile.screen_upload_enabled !== false ? "checked" : ""}>
           <span><b>接收终端屏幕共享状态</b><small>只同步前台共享状态，实际画面仍由屏幕扩展处理。</small></span>
@@ -32501,9 +32505,29 @@ function renderRealityTouchMobilePanel() {
         <label><span>新配对令牌（可选）</span><input name="mobile_pairing_token" type="password" autocomplete="new-password" placeholder="留空保留现有令牌"></label>
         <button type="submit" class="primary">保存手机终端连接</button>
       </form>
-      <div class="reality-mobile-guide">
-        <b>连接顺序</b>
-        <span>保存网关配置 → 在与 Bot 的私聊发送“现实触及 配对令牌” → 手机终端填写上方地址和令牌完成配对。</span>
+      <div class="reality-mobile-methods">
+        <section>
+          <b>版本与协议</b>
+          <p>当前网关 v${escapeHtml(mobile.gateway_version || "0.2.7")}，手机陪伴终端兼容 API v${escapeHtml(mobile.api_version || "1.0")}。网关升级后建议重新打开连接。</p>
+        </section>
+        <section>
+          <b>怎么连接</b>
+          <ul>
+            <li><strong>同一局域网 / Tailscale、ZeroTier 等组网：</strong>手机填写 <code>http://电脑组网 IP:${port}</code>，不要填写 127.0.0.1、localhost 或 0.0.0.0。</li>
+            <li><strong>跨网络或公网：</strong>给移动网关配置 HTTPS 反向代理或安全隧道，再把 HTTPS 地址填入终端；浏览器房间不要使用公网纯 HTTP。</li>
+            <li><strong>仅本机测试：</strong>只在电脑本机访问 <code>http://127.0.0.1:${port}</code>，手机无法访问这个地址。</li>
+          </ul>
+          <p class="reality-mobile-guide-line">保存配置后，在与 Bot 的私聊发送“现实触及 配对令牌”，再用令牌完成配对。</p>
+        </section>
+        <section class="reality-mobile-troubleshooting">
+          <b>一起功能一直连接中</b>
+          <ul>
+            <li>确认上方“统一代理一起 / 游戏 / 协同房间”已开启。</li>
+            <li>确认手机打开的是移动网关端口 <code>:${port}</code>，不是 Together 直连端口（常见为 <code>:6321</code>）。</li>
+            <li>确认“一起”房间服务已启用、正在运行，并已配置实时共处对话模型。</li>
+            <li>修改端口或代理模式后保存并重启现实触及（或重启 AstrBot），再重新打开房间链接。</li>
+          </ul>
+        </section>
       </div>
     </article>
   `;
@@ -32519,10 +32543,10 @@ function renderRealityTouchPage() {
   root.innerHTML = `
     <div class="reality-touch-page ${enabled ? "on" : "off"}">
       <header class="reality-page-head">
-        <div>
+        <div class="reality-page-head-copy">
           <span class="module-badge">陪伴扩展</span>
           <h2>现实触及</h2>
-          <p>电脑设备、手机陪伴终端与现实提醒统一在这里连接；能力实现和授权数据仍由“我会来到你身边”维护。</p>
+          <p>集中管理手机终端、电脑设备、用户授权与现实提醒。能力实现和授权数据仍由“我会来到你身边”维护。</p>
         </div>
         <div class="reality-page-actions">
           <label class="feature-detail-toggle reality-global-toggle">
@@ -32534,16 +32558,27 @@ function renderRealityTouchPage() {
         </div>
       </header>
       <div class="reality-page-status-grid">
-        <article><span>扩展状态</span><b>${status.enabled ? "已启用" : "已安装 · 未启用"}</b><small>${status.available === false ? "当前不可用" : "已连接陪伴面板"}</small></article>
-        <article><span>手机终端</span><b>${data?.configuration?.mobile?.running ? "已连接网关" : (data?.configuration?.mobile?.enabled ? "等待绑定" : "未启用")}</b><small>${Number(data?.configuration?.mobile?.active_sessions || 0)} 个活动会话</small></article>
-        <article><span>现实授权</span><b>${Number(counts.consented || 0)} 人</b><small>摄像头授权 ${Number(counts.camera_consented || 0)} 人</small></article>
-        <article><span>待执行提醒</span><b>${Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0)}</b><small>官方任务与计划场景</small></article>
+        <article class="${status.enabled ? "is-positive" : "is-muted"}"><span>扩展状态</span><b>${status.enabled ? "已启用" : "已安装 · 未启用"}</b><small>${status.available === false ? "当前不可用" : "已连接陪伴面板"}</small></article>
+        <article class="${data?.configuration?.mobile?.running ? "is-positive" : "is-muted"}"><span>手机终端</span><b>${data?.configuration?.mobile?.running ? "已连接网关" : (data?.configuration?.mobile?.enabled ? "等待绑定" : "未启用")}</b><small>${Number(data?.configuration?.mobile?.active_sessions || 0)} 个活动会话</small></article>
+        <article class="is-info"><span>现实授权</span><b>${Number(counts.consented || 0)} 人</b><small>摄像头授权 ${Number(counts.camera_consented || 0)} 人</small></article>
+        <article class="${Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0) ? "is-warm" : "is-muted"}"><span>待执行提醒</span><b>${Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0)}</b><small>官方任务与计划场景</small></article>
       </div>
-      ${renderRealityTouchMobilePanel()}
-      ${renderRealityTouchDevicePanel()}
-      <div class="exp-bottom-grid exp-priority-grid reality-touch-grid">
-        ${renderRealityTouchSettings()}
-        ${renderRealityTouchRuntime()}
+      <nav class="reality-section-nav" aria-label="现实触及页面分区">
+        <a href="#reality-connect"><span>01</span>手机连接</a>
+        <a href="#reality-audio"><span>02</span>音频输出</a>
+        <a href="#reality-camera"><span>03</span>摄像头</a>
+        <a href="#reality-automation"><span>04</span>用户与提醒</a>
+        <a href="#reality-runtime"><span>05</span>运行状态</a>
+      </nav>
+      <div class="reality-console-layout">
+        <main class="reality-console-main">
+          ${renderRealityTouchMobilePanel()}
+          ${renderRealityTouchDevicePanel()}
+          ${renderRealityTouchSettings()}
+        </main>
+        <aside class="reality-console-aside" aria-label="现实触及运行摘要">
+          ${renderRealityTouchRuntime()}
+        </aside>
       </div>
     </div>
   `;
@@ -32571,6 +32606,7 @@ function realityGlobalConfigPayload(root, enabledOverride) {
       allowed_user_id: form?.elements.mobile_allowed_user_id?.value || mobile.allowed_user_id || "",
       session_ttl_hours: Number(form?.elements.mobile_session_ttl_hours?.value || mobile.session_ttl_hours || 168),
       location_ttl_seconds: Number(form?.elements.mobile_location_ttl_seconds?.value || mobile.location_ttl_seconds || 900),
+      proxy_rooms: form ? Boolean(form.elements.mobile_proxy_rooms?.checked) : mobile.proxy_rooms !== false,
       screen_upload_enabled: form ? Boolean(form.elements.mobile_screen_upload_enabled?.checked) : mobile.screen_upload_enabled !== false,
       pairing_token: form?.elements.mobile_pairing_token?.value || "",
     },
@@ -34649,9 +34685,9 @@ function renderRealityTouchDevicePanel() {
     : null;
   const canTestCamera = Boolean(data.global_enabled && camera.global_enabled && cameraState.eligible && cameraState.consented && cameraState.enabled && cameraBackend.available);
   return `
-    <article class="exp-detail-card reality-device-card">
+    <article id="reality-audio" class="exp-detail-card reality-device-card reality-workspace-card">
       <div class="reality-touch-section-head">
-        <div><span>能力出口</span><h3>电脑音频输出设备</h3></div>
+        <div><span>能力出口</span><h3>音频输出</h3></div>
         <span class="reality-audio-backend ${audio.backend_available ? "ready" : "limited"}">${audio.backend_available ? "设备直连可用" : "仅系统默认"}</span>
       </div>
       <p class="reality-device-intro">选择现实触及实际播放到的电脑输出端点。蓝牙音响需要先由 Windows 完成连接；插件不负责配对。</p>
@@ -34674,9 +34710,9 @@ function renderRealityTouchDevicePanel() {
         <span>${escapeHtml(audio.error || (audio.backend_available ? "指定设备离线或播放失败时，会自动回退到系统默认输出并记录诊断。" : "安装音频路由依赖并重载插件后，可选择具体耳机、扬声器或蓝牙音响。"))}</span>
       </div>
     </article>
-    <article class="exp-detail-card reality-device-card">
+    <article id="reality-camera" class="exp-detail-card reality-device-card reality-workspace-card">
       <div class="reality-touch-section-head">
-        <div><span>环境感知</span><h3>摄像头单帧读取</h3></div>
+        <div><span>环境感知</span><h3>摄像头</h3></div>
         <span class="reality-audio-backend ${cameraBackend.available ? "ready" : "limited"}">${cameraBackend.available ? "单帧后端可用" : "后端不可用"}</span>
       </div>
       <p class="reality-device-intro">页面不会自动扫描。点击“扫描摄像头”只读取设备名称和 OpenCV 索引，不采集画面；真正可用性由授权后的单帧测试确认。</p>
@@ -34721,7 +34757,7 @@ function renderRealityTouchSettings() {
   const user = selectedRealityTouchUser();
   if (!user) {
     return `
-      <article id="experimentalSettings" class="exp-detail-card reality-touch-card">
+      <article id="reality-automation" class="exp-detail-card reality-touch-card reality-workspace-card">
         <div class="reality-touch-section-head">
           <div><span>用户与场景</span><h3>主动语音扩展</h3></div>
           <button type="button" class="soft" data-reality-touch-refresh>刷新</button>
@@ -34756,7 +34792,7 @@ function renderRealityTouchSettings() {
   const formDisabled = confirmed ? "" : "disabled";
   const testDisabled = data.global_enabled && confirmed && alarm.time ? "" : "disabled";
   return `
-    <article id="experimentalSettings" class="exp-detail-card reality-touch-card">
+    <article id="reality-automation" class="exp-detail-card reality-touch-card reality-workspace-card">
       <div class="reality-touch-section-head">
         <div><span>用户与场景</span><h3>主动语音扩展</h3></div>
         <button type="button" class="soft" data-reality-touch-refresh>刷新状态</button>
@@ -34942,7 +34978,7 @@ function renderRealityTouchRuntime() {
     ? "每天"
     : (Array.isArray(alarm.days) ? `周${alarm.days.map((day) => dayLabels[Number(day)]).filter(Boolean).join("、")}` : "-");
   return `
-    <article id="experimentalRuntime" class="exp-detail-card reality-touch-card">
+    <article id="reality-runtime" class="exp-detail-card reality-touch-card reality-runtime-card">
       <div class="reality-touch-section-head">
         <div><span>实时摘要</span><h3>运行状态</h3></div>
         <span class="reality-global-state ${data.global_enabled ? "on" : "off"}">${data.global_enabled ? "总开关已开启" : "总开关已关闭"}</span>
