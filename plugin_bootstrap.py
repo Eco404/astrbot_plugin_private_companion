@@ -1946,7 +1946,9 @@ def initialize_plugin_runtime(self: Any) -> None:
     self._persona_data_save_dirty: set[str] = set()
     self._maintenance_failure_cooldowns: dict[str, dict[str, Any]] = {}
     self._framework_captured_send_cache: dict[str, list[Any]] = {}
+    self._framework_captured_send_cache_at: dict[str, float] = {}
     self._framework_deferred_photo_cache: dict[str, dict[str, Any]] = {}
+    self._framework_deferred_photo_cache_at: dict[str, float] = {}
     self._segmented_reply_remainder_locks: dict[str, asyncio.Lock] = {}
     self._last_input_status_at: dict[str, float] = {}
     self._passive_input_status_tasks: dict[str, asyncio.Task] = {}

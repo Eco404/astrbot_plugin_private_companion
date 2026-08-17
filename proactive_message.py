@@ -3841,11 +3841,14 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         user: dict[str, Any] | None = None,
         max_steps: int = 20,
     ) -> str:
+        self._cleanup_framework_delivery_caches()
         cache_key = str(umo or "")
         self._framework_captured_send_cache.pop(cache_key, None)
+        getattr(self, "_framework_captured_send_cache_at", {}).pop(cache_key, None)
         deferred_photo_cache = getattr(self, "_framework_deferred_photo_cache", None)
         if isinstance(deferred_photo_cache, dict):
             deferred_photo_cache.pop(cache_key, None)
+        getattr(self, "_framework_deferred_photo_cache_at", {}).pop(cache_key, None)
         framework_context = self._proactive_framework_context()
         if framework_context is None:
             context_value = getattr(self, "context", None)
@@ -3946,6 +3949,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         await _run_with_retries()
         if captured_tool_sends:
             self._framework_captured_send_cache[cache_key] = list(captured_tool_sends)
+            captured_at = getattr(self, "_framework_captured_send_cache_at", None)
+            if isinstance(captured_at, dict):
+                captured_at[cache_key] = time.time()
         if bool(getattr(event, "_private_companion_photo_tool_deferred", False)):
             deferred_path = _path_text(
                 getattr(event, "_private_companion_photo_tool_deferred_path", ""),
@@ -3967,7 +3973,11 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         40,
                     ),
                 }
+                deferred_at = getattr(self, "_framework_deferred_photo_cache_at", None)
+                if isinstance(deferred_at, dict):
+                    deferred_at[cache_key] = time.time()
                 self._framework_captured_send_cache.pop(cache_key, None)
+                getattr(self, "_framework_captured_send_cache_at", {}).pop(cache_key, None)
                 logger.info(
                     "[PrivateCompanion] 主动主链已接收 pc_generate_photo 成图，等待统一发送: label=%s session=%s",
                     label,
@@ -5748,7 +5758,10 @@ Output:
         self,
         umo: str,
     ) -> tuple[str, str, list[Any]]:
-        captured = self._framework_captured_send_cache.pop(str(umo or ""), [])
+        cache_key = str(umo or "")
+        self._cleanup_framework_delivery_caches()
+        captured = self._framework_captured_send_cache.pop(cache_key, [])
+        getattr(self, "_framework_captured_send_cache_at", {}).pop(cache_key, None)
         if not captured:
             return "", "", []
         text_parts: list[str] = []
@@ -5778,11 +5791,58 @@ Output:
         return "\n".join(part for part in text_parts if part).strip(), image_path, extra_components
 
     def _pop_framework_deferred_photo_payload(self, umo: str) -> dict[str, Any]:
+        self._cleanup_framework_delivery_caches()
+        cache_key = str(umo or "")
         cache = getattr(self, "_framework_deferred_photo_cache", None)
         if not isinstance(cache, dict):
             return {}
-        payload = cache.pop(str(umo or ""), None)
+        payload = cache.pop(cache_key, None)
+        getattr(self, "_framework_deferred_photo_cache_at", {}).pop(cache_key, None)
         return dict(payload) if isinstance(payload, dict) else {}
+
+    def _cleanup_framework_delivery_caches(self, *, force: bool = False) -> None:
+        """Drop abandoned framework delivery payloads and their component references."""
+        now = time.time()
+        try:
+            ttl = max(30.0, float(getattr(self, "framework_delivery_cache_ttl_seconds", 300) or 300))
+        except (TypeError, ValueError):
+            ttl = 300.0
+
+        def stamp(key: str, stamps: dict[str, Any]) -> float:
+            try:
+                return float(stamps.get(key, now) or now)
+            except (TypeError, ValueError):
+                return now
+
+        for cache_name, stamp_name in (
+            ("_framework_captured_send_cache", "_framework_captured_send_cache_at"),
+            ("_framework_deferred_photo_cache", "_framework_deferred_photo_cache_at"),
+        ):
+            cache = getattr(self, cache_name, None)
+            if not isinstance(cache, dict):
+                continue
+            stamps = getattr(self, stamp_name, None)
+            if not isinstance(stamps, dict):
+                stamps = {}
+                setattr(self, stamp_name, stamps)
+            if force:
+                cache.clear()
+                stamps.clear()
+                continue
+            for key in list(stamps):
+                if key not in cache:
+                    stamps.pop(key, None)
+            stale = [key for key in cache if now - stamp(key, stamps) > ttl]
+            for key in stale:
+                cache.pop(key, None)
+                stamps.pop(key, None)
+            # A small defensive cap protects against callers that bypass the normal writer.
+            max_items = 128
+            if len(cache) > max_items:
+                ordered = sorted(cache, key=lambda key: stamp(key, stamps))
+                for key in ordered[: len(cache) - max_items]:
+                    cache.pop(key, None)
+                    stamps.pop(key, None)
 
     def _captured_framework_message_component(self, item: dict[str, Any]) -> Any | None:
         item_type = str(item.get("type") or "").strip().lower()

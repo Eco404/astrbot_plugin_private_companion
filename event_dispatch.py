@@ -1883,6 +1883,48 @@ class EventDispatchMixin:
                 cache.pop(key, None)
         self._cleanup_recall_message_image_cache()
 
+    def _lightweight_recall_message_payload(self, value: Any, *, max_chars: int = 12000) -> Any:
+        """Create a bounded, detached payload for the recall cache.
+
+        Platform events may contain nested media metadata or encoded image data.  The
+        recall flow only needs message structure and small identifiers, so retaining
+        the original object here can keep a surprisingly large event graph alive.
+        """
+        budget = [max(1024, int(max_chars))]
+        preferred_keys = {
+            "type", "data", "text", "content", "message", "raw_message", "messages",
+            "id", "message_id", "msg_id", "file", "file_id", "url", "path", "name",
+            "user_id", "qq", "sender", "nickname", "card", "node", "seq", "time",
+        }
+
+        def copy_value(item: Any, depth: int = 0) -> Any:
+            if budget[0] <= 0 or depth > 5:
+                return "[已省略]"
+            if item is None or isinstance(item, (bool, int, float)):
+                return item
+            if isinstance(item, str):
+                value_text = item
+                if len(value_text) > budget[0]:
+                    value_text = value_text[: max(0, budget[0] - 16)] + "...[已截断]"
+                budget[0] -= len(value_text)
+                return value_text
+            if isinstance(item, Mapping):
+                result: dict[str, Any] = {}
+                for key, nested in item.items():
+                    key_text = str(key)
+                    if key_text not in preferred_keys and depth >= 2:
+                        continue
+                    if budget[0] <= 0:
+                        break
+                    result[key_text] = copy_value(nested, depth + 1)
+                return result
+            if isinstance(item, (list, tuple)):
+                # Message chains are normally short; cap pathological platform payloads.
+                return [copy_value(nested, depth + 1) for nested in list(item)[:32]]
+            return copy_value(_single_line(item, 2000), depth + 1)
+
+        return copy_value(value)
+
     def _cleanup_recall_message_image_cache(self, *, force: bool = False) -> bool:
         root = Path(getattr(self, "data_dir", "") or "") / "recall_message_images"
         try:
@@ -1967,6 +2009,9 @@ class EventDispatchMixin:
         return False
 
     async def _cache_message_for_recall(self, event: AstrMessageEvent) -> None:
+        delivery_cleanup = getattr(self, "_cleanup_framework_delivery_caches", None)
+        if callable(delivery_cleanup):
+            delivery_cleanup()
         if not getattr(self, "enable_recall_enhancement", True):
             return
         if not getattr(self, "enable_recall_message_cache", True):
@@ -2048,6 +2093,7 @@ class EventDispatchMixin:
             self._recall_message_cache = cache
         self._cleanup_recall_message_cache()
         message_id = message_ids[0]
+        raw_payload = raw.get("message") if raw.get("message") is not None else raw.get("raw_message")
         snapshot = {
             "message_id": message_id,
             "message_id_aliases": message_ids,
@@ -2056,7 +2102,7 @@ class EventDispatchMixin:
             "sender_id": snapshot_sender_id,
             "sender_name": snapshot_sender_name,
             "text": text,
-            "raw_message": raw.get("message") if raw.get("message") is not None else raw.get("raw_message"),
+            "raw_message": self._lightweight_recall_message_payload(raw_payload),
             "reply_message_ids": reply_message_ids,
             "images": image_sources,
             "image_items": image_items,

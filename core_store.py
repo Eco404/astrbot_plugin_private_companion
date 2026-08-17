@@ -1114,11 +1114,16 @@ class CoreStoreMixin:
                     await asyncio.sleep(max(0.0, float(delay)))
                     live_data = self._persona_data_for_save(persona_id)
                     snapshot = deepcopy(live_data)
-                    snapshot_changed = await asyncio.to_thread(
-                        self._write_persona_data_snapshot_sync,
-                        persona_id,
-                        snapshot,
-                    )
+                    try:
+                        snapshot_changed = await asyncio.to_thread(
+                            self._write_persona_data_snapshot_sync,
+                            persona_id,
+                            snapshot,
+                        )
+                    finally:
+                        # Do not keep a full store copy alive while waiting for the
+                        # next coalesced write; this matters for large persona stores.
+                        snapshot = None
                     if snapshot_changed:
                         live_changed = self._sanitize_store_control_tags_inplace(live_data)
                         if live_changed:
@@ -1183,7 +1188,12 @@ class CoreStoreMixin:
                     self._data_save_dirty = False
                     await asyncio.sleep(max(0.0, float(delay)))
                     snapshot = deepcopy(self.data)
-                    snapshot_changed = await asyncio.to_thread(self._write_data_snapshot_sync, snapshot)
+                    try:
+                        snapshot_changed = await asyncio.to_thread(self._write_data_snapshot_sync, snapshot)
+                    finally:
+                        # A dirty burst can schedule another iteration immediately.
+                        # Release the previous full copy before that iteration starts.
+                        snapshot = None
                     if snapshot_changed:
                         live_changed = self._sanitize_store_control_tags_inplace(self.data)
                         if live_changed:

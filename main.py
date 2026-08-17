@@ -6519,6 +6519,9 @@ class PrivateCompanionPlugin(
     async def terminate(self):
         global _private_companion_plugin
         self._stop_event.set()
+        cleanup_delivery_caches = getattr(self, "_cleanup_framework_delivery_caches", None)
+        if callable(cleanup_delivery_caches):
+            cleanup_delivery_caches(force=True)
         await self._cancel_lifecycle_background_tasks()
         invalidate_bridge = getattr(self, "_memory_companion_invalidate_bridge_cache", None)
         if callable(invalidate_bridge):
