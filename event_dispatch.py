@@ -2278,14 +2278,10 @@ class EventDispatchMixin:
             attempts.insert(0, int(message_id))
         except (TypeError, ValueError):
             pass
-        missing_error = False
         for value in attempts:
             try:
                 raw = await call_action("get_msg", message_id=value)
             except Exception as exc:
-                error_text = str(exc or "").lower()
-                if any(marker in error_text for marker in ("not found", "message not", "消息不存在", "找不到", "不存在", "已撤回", "recalled")):
-                    missing_error = True
                 logger.debug(
                     "[PrivateCompanion] 触发消息存在性检查失败: message_id=%s error=%s",
                     message_id,
@@ -2294,7 +2290,10 @@ class EventDispatchMixin:
                 continue
             if raw:
                 return True
-        return False if missing_error else None
+        # Adapters differ in whether get_msg can read an inbound private message.
+        # An unavailable lookup is not proof of a recall; explicit recall notices
+        # are recorded in _recalled_message_ids and handled before this fallback.
+        return None
 
     async def _should_cancel_reply_for_missing_or_recalled_trigger(self, event: AstrMessageEvent, *extra_message_ids: str) -> str:
         recalled_message_id = self._should_cancel_reply_for_recalled_trigger(event, *extra_message_ids)
