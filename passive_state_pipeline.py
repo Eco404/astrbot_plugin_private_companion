@@ -127,6 +127,26 @@ async def inject_humanized_state(
     )
     if busy_delay_reason == "superseded_by_newer_private_message":
         return
+    pending_marker = getattr(self, "_message_debounce_mark_llm_pending", None)
+    if callable(pending_marker):
+        # Only mark requests that belong to this companion's inbound path.
+        # Other plugins can share the same AstrBot session and must not cause
+        # their responses to be discarded when a user sends a follow-up.
+        mark_pending = bool(is_private_chat and private_user_active)
+        if not is_private_chat:
+            group_id_for_pending = self._extract_group_id_from_event(event)
+            group_scene = getattr(event, "private_companion_group_scene", None)
+            high_intensity = getattr(event, "private_companion_group_high_intensity", None)
+            mark_pending = bool(
+                isinstance(group_scene, dict)
+                and str(group_scene.get("talking_to") or "") == "bot"
+                and not (isinstance(high_intensity, dict) and high_intensity.get("merge_active"))
+                and group_id_for_pending
+                and self._feature_enabled_or_temp_unlocked("enable_group_companion")
+                and self._group_enabled_for_event(group_id_for_pending)
+            )
+        if mark_pending:
+            pending_marker(event)
     self._trim_passive_request_context_if_needed(event, req, is_private_chat=is_private_chat)
     await self._enrich_request_context_image_placeholders(event, req)
     if not is_private_chat:

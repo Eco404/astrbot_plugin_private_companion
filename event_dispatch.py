@@ -105,6 +105,13 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+
+_ON_WAITING_LLM_REQUEST = getattr(filter, "on_waiting_llm_request", None)
+if not callable(_ON_WAITING_LLM_REQUEST):
+    def _ON_WAITING_LLM_REQUEST(*args: Any, **kwargs: Any):
+        def decorate(function: Any) -> Any:
+            return function
+        return decorate
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -3237,6 +3244,224 @@ class EventDispatchMixin:
         if cleaned.startswith(("/", "／", "!", "！", "#")) and re.search(r"[\w\u4e00-\u9fff]", cleaned[1:]):
             return True
         return False
+
+    def _message_debounce_pending_store(self) -> dict[str, dict[str, Any]]:
+        store = getattr(self, "_message_debounce_pending_llm", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._message_debounce_pending_llm = store
+        now = _now_ts()
+        for key, item in list(store.items()):
+            if not isinstance(item, dict) or now - _safe_float(item.get("updated_ts"), 0.0, 0.0) > 300:
+                store.pop(key, None)
+        return store
+
+    def _message_debounce_pending_key(self, event: AstrMessageEvent) -> str:
+        if not bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True))):
+            return ""
+        if self._message_debounce_command_text(event, str(getattr(event, "message_str", "") or "")):
+            return ""
+        inbound_checker = getattr(self, "_event_is_inbound_chat_message", None)
+        if callable(inbound_checker):
+            try:
+                if not inbound_checker(event):
+                    return ""
+            except Exception:
+                return ""
+        try:
+            if bool(getattr(event, "is_private_chat", lambda: False)()):
+                try:
+                    sender_id = _single_line(event.get_sender_id(), 160)
+                except Exception:
+                    sender_id = ""
+                resolver = getattr(self, "_private_user_id_for_event", None)
+                if sender_id and callable(resolver):
+                    try:
+                        sender_id = _single_line(resolver(event, sender_id), 160) or sender_id
+                    except Exception:
+                        pass
+                return self._semantic_buffer_key(f"private:{sender_id}", sender_id) if sender_id else ""
+        except Exception:
+            return ""
+        group_id = self._extract_group_id_from_event(event)
+        if not group_id:
+            return ""
+        try:
+            sender_id = _single_line(event.get_sender_id(), 160)
+        except Exception:
+            sender_id = ""
+        return self._semantic_buffer_key(f"group:{group_id}", sender_id) if sender_id else ""
+
+    def _message_debounce_event_id(self, event: AstrMessageEvent) -> str:
+        return self._event_message_id(event) or f"object:{id(event)}"
+
+    def _message_debounce_pending_prompt_text(self, event: AstrMessageEvent) -> str:
+        """Capture the text already consumed into the current LLM request.
+
+        The semantic buffer is normally consumed before the provider call.  A
+        later follow-up therefore cannot reconstruct the old prompt from the
+        event alone; keep a bounded snapshot so an expired response can be
+        retried together with the follow-up.
+        """
+        key = self._message_debounce_pending_key(event)
+        buffers = getattr(self, "_semantic_message_buffers", None)
+        texts: list[str] = []
+        if key and isinstance(buffers, dict):
+            buffer = buffers.get(key)
+            if isinstance(buffer, dict):
+                messages = buffer.get("messages") if isinstance(buffer.get("messages"), list) else []
+                for item in messages[-8:]:
+                    if isinstance(item, dict):
+                        text = _single_line(item.get("text"), 260)
+                        if text and text not in texts:
+                            texts.append(text)
+        current = _single_line(getattr(event, "message_str", ""), 260)
+        if current and current not in texts:
+            texts.append(current)
+        return "\n".join(texts[-8:])
+
+    def _message_debounce_absorb_pending_message(self, event: AstrMessageEvent, text: str) -> bool:
+        """将 LLM 处理中到达的补话放回同一缓冲区，避免并发生成第二个回复。"""
+        key = self._message_debounce_pending_key(event)
+        if not key:
+            return False
+        store = self._message_debounce_pending_store()
+        pending = store.get(key)
+        if not isinstance(pending, dict):
+            return False
+        message_id = self._message_debounce_event_id(event)
+        if message_id and message_id == _single_line(pending.get("event_id"), 120):
+            return False
+        cleaned = _single_line(text, 260)
+        if not cleaned:
+            return False
+        wait = self._message_debounce_seconds("group" if key.startswith("group:") else "text")
+        if wait <= 0:
+            return False
+        buffers = getattr(self, "_semantic_message_buffers", None)
+        if not isinstance(buffers, dict):
+            buffers = {}
+            self._semantic_message_buffers = buffers
+        buffer = buffers.get(key)
+        now = _now_ts()
+        if not isinstance(buffer, dict):
+            buffer = {
+                "first_ts": now,
+                "updated_ts": now,
+                "wait_seconds": wait,
+                "kind": "group_text" if key.startswith("group:") else "text",
+                "messages": [],
+            }
+            buffers[key] = buffer
+        messages = buffer.setdefault("messages", [])
+        if not isinstance(messages, list):
+            messages = []
+            buffer["messages"] = messages
+        previous_prompt = str(pending.get("prompt_text") or "")[:1800]
+        if previous_prompt and not messages:
+            for line in previous_prompt.splitlines()[-8:]:
+                line = _single_line(line, 260)
+                if line and line not in {
+                    _single_line(item.get("text"), 260)
+                    for item in messages
+                    if isinstance(item, dict)
+                }:
+                    messages.append({"ts": now, "text": line, "sender_name": ""})
+        if cleaned not in {
+            _single_line(item.get("text"), 260)
+            for item in messages
+            if isinstance(item, dict)
+        }:
+            messages.append({"ts": now, "text": cleaned, "sender_name": ""})
+        buffer["updated_ts"] = now
+        # 当前事件已经在等待 LLM，不要再等待一个滑动窗口；等旧锁释放后
+        # 立即用合并内容发起下一轮请求。
+        buffer["deadline_ts"] = now
+        stale_ids = pending.setdefault("stale_event_ids", [])
+        active_id = _single_line(pending.get("event_id"), 120)
+        if active_id and active_id not in stale_ids:
+            stale_ids.append(active_id)
+        pending["updated_ts"] = now
+        try:
+            setattr(event, "private_companion_debounce_pending_merged", True)
+        except Exception:
+            pass
+        logger.info(
+            "[PrivateCompanion] LLM 处理中收到补话，旧回复标记过期并合并等待: key=%s count=%s text=%s",
+            key,
+            len(messages),
+            _single_line(cleaned, 80),
+        )
+        return True
+
+    def _message_debounce_mark_llm_pending(self, event: AstrMessageEvent) -> None:
+        key = self._message_debounce_pending_key(event)
+        if not key:
+            return
+        message_id = self._message_debounce_event_id(event)
+        store = self._message_debounce_pending_store()
+        current = store.get(key)
+        if not isinstance(current, dict):
+            current = {"stale_event_ids": []}
+            store[key] = current
+        current["event_id"] = message_id
+        current["updated_ts"] = _now_ts()
+        current["prompt_text"] = self._message_debounce_pending_prompt_text(event)
+
+    @_ON_WAITING_LLM_REQUEST(priority=100000)
+    async def guard_pending_message_debounce(self, event: AstrMessageEvent, *args: Any, **kwargs: Any) -> None:
+        """在会话锁前收口补话，避免旧回复与新消息并发出站。"""
+        if bool(getattr(event, "private_companion_debounce_pending_merged", False)):
+            return
+        try:
+            if not bool(event.is_private_chat()):
+                scene = getattr(event, "private_companion_group_scene", None)
+                high_intensity = getattr(event, "private_companion_group_high_intensity", None)
+                if (
+                    not isinstance(scene, dict)
+                    or str(scene.get("talking_to") or "") != "bot"
+                    or (isinstance(high_intensity, dict) and high_intensity.get("merge_active"))
+                ):
+                    return
+        except Exception:
+            return
+        text = _single_line(getattr(event, "message_str", ""), 260)
+        if text:
+            self._message_debounce_absorb_pending_message(event, text)
+
+    @filter.on_llm_response(priority=100000)
+    async def settle_pending_message_debounce(self, event: AstrMessageEvent, resp: LLMResponse, *args: Any, **kwargs: Any) -> None:
+        key = self._message_debounce_pending_key(event)
+        if not key:
+            return
+        store = self._message_debounce_pending_store()
+        pending = store.get(key)
+        if not isinstance(pending, dict):
+            return
+        message_id = self._message_debounce_event_id(event)
+        stale_ids = pending.get("stale_event_ids") if isinstance(pending.get("stale_event_ids"), list) else []
+        if message_id and message_id in stale_ids:
+            stale_ids.remove(message_id)
+            try:
+                resp.completion_text = ""
+            except Exception:
+                pass
+            try:
+                # Some AstrBot versions expose a parallel result chain; clear
+                # it as well so an expired response cannot leak a second path.
+                resp.result_chain = None
+            except Exception:
+                pass
+            pending["updated_ts"] = _now_ts()
+            logger.info(
+                "[PrivateCompanion] 已丢弃消息收口中过期 LLM 回复: key=%s event=%s",
+                key,
+                message_id,
+            )
+            return
+        active_id = _single_line(pending.get("event_id"), 120)
+        if not active_id or active_id == message_id:
+            store.pop(key, None)
 
     def _smart_message_debounce_store(self) -> dict[str, Any]:
         store = self.data.setdefault("smart_message_debounce", {})

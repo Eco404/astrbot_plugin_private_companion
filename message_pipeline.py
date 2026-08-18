@@ -631,6 +631,10 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             event.stop_event()
             return
         elif is_target_user and not forward_only_prompt and not reference_media_with_text:
+            pending_debounce_merge = False
+            pending_absorber = getattr(self, "_message_debounce_absorb_pending_message", None)
+            if callable(pending_absorber):
+                pending_debounce_merge = bool(pending_absorber(event, text))
             key = self._semantic_buffer_key(f"private:{user_id}", user_id)
             buffers = getattr(self, "_semantic_message_buffers", None)
             existing_buffer = buffers.get(key) if isinstance(buffers, dict) else None
@@ -663,7 +667,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     len(messages),
                     _single_line(cleaned_text, 80),
                 )
-            else:
+            elif not pending_debounce_merge:
                 try:
                     async with self._temporarily_release_data_lock():
                         smart_wait = await self._smart_message_debounce_wait_seconds_for_event(
@@ -1726,22 +1730,32 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                 return
         group_smart_wait = 0.0
         group_buffer_key = self._semantic_buffer_key(f"group:{group_id}", sender_id)
+        pending_debounce_merge = False
+        pending_absorber = getattr(self, "_message_debounce_absorb_pending_message", None)
+        if (
+            talking_to_bot
+            and not high_intensity_merge_active
+            and not group_reference_media_with_text
+            and callable(pending_absorber)
+        ):
+            pending_debounce_merge = bool(pending_absorber(event, text))
         if talking_to_bot and not high_intensity_merge_active and not group_reference_media_with_text:
-            self._maybe_record_smart_message_debounce_followup(
-                scope=f"group:{group_id}",
-                sender_id=sender_id,
-                text=text,
-                now=_now_ts(),
-            )
-            async with self._temporarily_release_data_lock():
-                group_smart_wait = await self._smart_message_debounce_wait_seconds_for_event(
-                    event,
-                    key=group_buffer_key,
-                    text=text,
+            if not pending_debounce_merge:
+                self._maybe_record_smart_message_debounce_followup(
+                    scope=f"group:{group_id}",
                     sender_id=sender_id,
-                    sender_name=sender_name,
-                    private_chat=False,
+                    text=text,
+                    now=_now_ts(),
                 )
+                async with self._temporarily_release_data_lock():
+                    group_smart_wait = await self._smart_message_debounce_wait_seconds_for_event(
+                        event,
+                        key=group_buffer_key,
+                        text=text,
+                        sender_id=sender_id,
+                        sender_name=sender_name,
+                        private_chat=False,
+                    )
         group_smart_result = getattr(event, "private_companion_smart_message_debounce_result", None)
         group_smart_decision = str(group_smart_result.get("decision") or "") if isinstance(group_smart_result, dict) else ""
         group_smart_handled = group_smart_decision in {"complete", "incomplete"}
