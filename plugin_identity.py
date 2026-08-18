@@ -6,21 +6,20 @@ from typing import Any
 
 PLUGIN_ID = "astrbot_plugin_private_companion"
 PLUGIN_DISPLAY_NAME = "我会永远陪着你"
-PLUGIN_VERSION = "6.3.0"
+PLUGIN_VERSION = "6.3.1"
 PLUGIN_DATA_DIRECTORY_KEY = PLUGIN_ID
 
 _IDENTITY_SEPARATORS = re.compile(r"[.:/\\]+")
 
 
 def _identity_text(value: Any, *, limit: int = 240) -> str:
-    # If the object belongs to the `torch` namespace, skip it directly to prevent triggering a C++ dynamic class instantiation assertion.
-    val_type = type(value)
-    if getattr(val_type, "__module__", "").startswith("torch") or "_ClassNamespace" in str(val_type):
+    if value is None:
         return ""
     try:
-        return " ".join(str(value or "").split())[:limit]
+        return " ".join(str(value).split())[:limit]
     except Exception:
         return ""
+
 
 def _identity_segments(value: Any) -> tuple[str, ...]:
     text = _identity_text(value)

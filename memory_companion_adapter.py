@@ -439,13 +439,15 @@ class MemoryCompanionAdapterMixin:
 
     @classmethod
     def _memory_companion_identity_matches(cls, value: Any) -> bool:
-        # If the object belongs to the `torch` namespace, skip it directly to prevent triggering a C++ dynamic class instantiation assertion.
-        val_type = type(value)
-        if getattr(val_type, "__module__", "").startswith("torch") or "_ClassNamespace" in str(val_type):
+        if value is None:
             return False
         try:
-            text = str(value or "").strip().lower()
+            text = str(value).strip().lower()
         except Exception:
+            # AstrBot may expose optional-model proxies (for example torch
+            # namespaces) as metadata values. Their string conversion can
+            # import a missing dependency; an invalid identity is simply not
+            # a MemoryCompanion module.
             return False
         if not text:
             return False
@@ -479,15 +481,22 @@ class MemoryCompanionAdapterMixin:
     def _memory_companion_star_matches(cls, metadata: Any | None) -> bool:
         if metadata is None:
             return False
-        values = (
-            getattr(metadata, "name", ""),
-            getattr(metadata, "display_name", ""),
-            getattr(metadata, "root_dir_name", ""),
-            getattr(metadata, "module_path", ""),
-        )
+        try:
+            values = (
+                getattr(metadata, "name", ""),
+                getattr(metadata, "display_name", ""),
+                getattr(metadata, "root_dir_name", ""),
+                getattr(metadata, "module_path", ""),
+            )
+        except Exception:
+            return False
         if any(cls._memory_companion_identity_matches(value) for value in values):
             return True
-        return cls._memory_companion_module_matches(getattr(metadata, "module", None))
+        try:
+            module = getattr(metadata, "module", None)
+        except Exception:
+            module = None
+        return cls._memory_companion_module_matches(module)
 
     def _memory_companion_bridge_from_star(self, metadata: Any | None) -> Any | None:
         if metadata is None or not bool(getattr(metadata, "activated", True)):

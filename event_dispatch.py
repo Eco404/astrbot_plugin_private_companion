@@ -866,17 +866,15 @@ class EventDispatchMixin:
                     return False
 
         def identity_text(*values: Any) -> str:
-            # If the object belongs to the `torch` namespace, skip it directly to prevent triggering a C++ dynamic class instantiation assertion.
             for value in values:
-                val_type = type(value)
-                if getattr(val_type, "__module__", "").startswith("torch") or "_ClassNamespace" in str(val_type):
+                if value is None:
                     continue
                 try:
-                    text = str(value or "").strip()
-                    if text:
-                        return text
+                    text = str(value).strip()
                 except Exception:
                     continue
+                if text:
+                    return text
             return ""
 
         sender_payload = raw.get("sender") if isinstance(raw.get("sender"), Mapping) else {}

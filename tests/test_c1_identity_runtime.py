@@ -43,6 +43,18 @@ def test_identity_snapshot_freezes_public_name_and_data_key():
     assert snapshot["match_rule"] == "exact_id_or_module_segment"
 
 
+def test_identity_helpers_ignore_unstringifiable_optional_proxy():
+    class _ExplodingIdentity:
+        def __str__(self):
+            raise ModuleNotFoundError("No module named 'torch'", name="torch")
+
+    value = _ExplodingIdentity()
+    assert identity._identity_text(value) == ""
+    assert identity._identity_segments(value) == ()
+    assert not identity.is_exact_plugin_id(value)
+    assert not identity.is_module_path_for_package(value, PLUGIN_ID)
+
+
 def test_runtime_probe_is_non_blocking_and_structured():
     status = runtime.probe_runtime_capabilities(context=SimpleNamespace(), event=None, plugin_name=PLUGIN_ID, plugin_version="5.10.6")
     payload = status.to_dict()

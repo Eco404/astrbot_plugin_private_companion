@@ -1238,6 +1238,21 @@ class Req036CompanionTests(unittest.TestCase):
             with self.subTest(raw_message=raw_message):
                 self.assertEqual(expected, ingress._event_is_inbound_chat_message(_PrivateEvent(raw_message=raw_message)))
 
+    def test_event_classification_skips_unstringifiable_identity_values(self) -> None:
+        class _ExplodingIdentity:
+            def __str__(self):
+                raise ModuleNotFoundError("No module named 'torch'", name="torch")
+
+        ingress = _EventIngressHost()
+        event = _PrivateEvent(
+            raw_message={
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": _ExplodingIdentity(),
+            }
+        )
+        assert ingress._event_is_inbound_chat_message(event) is True
+
     def test_outbound_message_markers_are_not_inbound_even_when_sender_is_recipient(self) -> None:
         ingress = _EventIngressHost()
         payloads = (

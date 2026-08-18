@@ -47,15 +47,20 @@ def _lifecycle_active(api: Any) -> bool:
     return True
 
 
-def _identity_segments(value: Any) -> set[str]:
-    # If the object belongs to the `torch` namespace, skip it directly to prevent triggering a C++ dynamic class instantiation assertion.
-    val_type = type(value)
-    if getattr(val_type, "__module__", "").startswith("torch") or "_ClassNamespace" in str(val_type):
-        return set()
+def _safe_identity_text(value: Any) -> str:
+    """Convert an optional plugin identity to text without trusting third-party objects."""
+    if value is None:
+        return ""
     try:
-        text = str(value or "").strip().casefold().replace("\\", "/")
+        return str(value)
     except Exception:
-        return set()
+        # Some extension namespaces (notably torch custom-class proxies) can
+        # raise from __str__. A malformed identity must not break discovery.
+        return ""
+
+
+def _identity_segments(value: Any) -> set[str]:
+    text = _safe_identity_text(value).strip().casefold().replace("\\", "/")
     if not text:
         return set()
     for separator in ("/", ":"):
@@ -64,7 +69,7 @@ def _identity_segments(value: Any) -> set[str]:
 
 
 def _metadata_matches_star(metadata: Any, star_name: str) -> bool:
-    expected = str(star_name or "").strip().casefold().replace("-", "_")
+    expected = _safe_identity_text(star_name).strip().casefold().replace("-", "_")
     if not expected:
         return False
     values = (
@@ -107,7 +112,8 @@ def _module_candidates(
         module_identity = getattr(module, "PLUGIN_NAME", "")
         if (
             any(name.endswith(suffix) for suffix in suffixes)
-            or str(star_name or "").casefold().replace("-", "_") in _identity_segments(module_identity)
+            or _safe_identity_text(star_name).casefold().replace("-", "_")
+            in _identity_segments(module_identity)
             or callable(getattr(module, getter_name, None))
         ):
             candidates.append(module)
