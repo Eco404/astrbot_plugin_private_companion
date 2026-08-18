@@ -7,6 +7,7 @@ import uuid
 import asyncio
 import re
 import time
+import types
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -450,7 +451,11 @@ class MemoryCompanionAdapterMixin:
 
     @classmethod
     def _memory_companion_module_matches(cls, module: Any | None) -> bool:
-        if module is None:
+        # AstrBot's plugin registry can expose proxy objects from optional
+        # libraries (notably ``torch.classes``) as a module field. Those
+        # proxies resolve arbitrary attributes as dynamic classes, so reading
+        # ``__file__`` from them raises instead of returning a missing value.
+        if module is None or not isinstance(module, types.ModuleType):
             return False
         module_vars = getattr(module, "__dict__", {})
         if isinstance(module_vars, dict) and cls._memory_companion_identity_matches(module_vars.get("PLUGIN_NAME")):

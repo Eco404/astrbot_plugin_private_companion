@@ -4881,6 +4881,40 @@ class PrivateCompanionPlugin(
             return {"ok": False, "state": "invalid", "code": "scoped_group_erase_context_invalid"}
         synchronizer = getattr(self, "req041_scoped_projection_sync", None)
         if synchronizer is None:
+            # Startup migration runs in the background. A panel action can arrive
+            # before it binds the scoped eraser, so wait for that task once instead
+            # of reporting an unavailable capability during the normal race window.
+            startup_tasks = getattr(self, "_startup_background_tasks", {})
+            migration_task = (
+                startup_tasks.get("req041_automatic_migration")
+                if isinstance(startup_tasks, dict) else None
+            )
+            if isinstance(migration_task, asyncio.Task) and not migration_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(migration_task), timeout=20.0)
+                except asyncio.TimeoutError:
+                    return {
+                        "ok": False, "state": "degraded",
+                        "code": "scoped_group_erase_initializing",
+                    }
+                except Exception:
+                    pass
+            synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+            status = getattr(self, "req041_migration_status", None)
+            if synchronizer is None and isinstance(status, dict) and status.get("state") == "uninitialized":
+                initializer = getattr(self, "_req041_initialize_automatic_migration", None)
+                if callable(initializer):
+                    try:
+                        await asyncio.wait_for(initializer(), timeout=20.0)
+                    except asyncio.TimeoutError:
+                        return {
+                            "ok": False, "state": "degraded",
+                            "code": "scoped_group_erase_initializing",
+                        }
+                    except Exception:
+                        pass
+                    synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None:
             status = getattr(self, "req041_migration_status", None)
             if isinstance(status, dict) and (status.get("required") or status.get("scoped_required")):
                 return {"ok": False, "state": "degraded", "code": "scoped_group_erase_unavailable"}

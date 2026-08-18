@@ -38,6 +38,7 @@ def _load_methods(*names: str) -> dict[str, Any]:
 
     namespace = {
         "Any": Any,
+        "asyncio": asyncio,
         "NamespaceContext": NamespaceContext,
         "deepcopy": deepcopy,
         "scoped_group_ref": scoped_group_ref,
@@ -212,6 +213,26 @@ class GroupResetSagaTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual("not_required", result["state"])
         self.assertIn("group-a", host.data["groups"])
+
+    def test_group_reset_waits_for_scoped_startup_binding(self) -> None:
+        async def run() -> tuple[dict[str, Any], _Host]:
+            host = _Host()
+            host.req041_scoped_projection_sync = None
+            host.req041_migration_status = {"required": True, "state": "initializing"}
+
+            async def finish_startup() -> None:
+                await asyncio.sleep(0)
+                host.req041_scoped_projection_sync = _Remote()
+
+            task = asyncio.create_task(finish_startup())
+            host._startup_background_tasks = {"req041_automatic_migration": task}
+            return await host.reset_group_scoped_data("group-a"), host
+
+        result, host = asyncio.run(run())
+        self.assertTrue(result["ok"])
+        self.assertEqual("completed", result["state"])
+        self.assertNotIn("group-a", host.data["groups"])
+        self.assertEqual(1, len(host.req041_scoped_projection_sync.calls))
 
 
 class _PageApi:

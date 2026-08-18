@@ -227,6 +227,14 @@ def test_prefixed_or_livingmemory_modules_do_not_drive_bridge(monkeypatch):
     assert MemoryCompanionAdapterMixin._memory_companion_bridge_uncached(plugin) is None
 
 
+def test_non_module_registry_proxy_is_ignored_without_dynamic_attribute_lookup():
+    class _TorchClassProxy:
+        def __getattr__(self, name):
+            raise RuntimeError(f"Tried to instantiate class 'PLUGIN_NAME.{name}'")
+
+    assert MemoryCompanionAdapterMixin._memory_companion_module_matches(_TorchClassProxy()) is False
+
+
 def test_bridge_discovery_uses_astrbot_registered_plugin_instance():
     bridge = _ProbeBridge()
     module = types.ModuleType("data.plugins.custom_memory_folder.main")
