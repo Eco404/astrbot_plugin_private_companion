@@ -7588,6 +7588,126 @@
         "condition": {
           "enable_news_integration": true
         }
+      },
+      "external_event_idle_minutes": {
+        "description": "外部消息分享空闲下限（分钟）",
+        "type": "int",
+        "hint": "新闻、B 站视频和主动搜索三类外部消息分享前，用户至少空闲多久才允许主动开口。默认 90 分钟是原先写死的下限，任何低于它的 idle_minutes 都会被顶到该值；调低即可在更短的静默后允许分享。",
+        "slider": {
+          "min": 5,
+          "max": 1440,
+          "step": 5
+        },
+        "default": 90
+      },
+      "external_event_idle_strong_minutes": {
+        "description": "强自我关联时空闲下限（分钟）",
+        "type": "int",
+        "hint": "当外部消息与 Bot 自我关联很强（relevance/desire 高、生活机会或用户偏好命中）时，允许在更短空闲后开口。默认 20 分钟是原先写死的下限。",
+        "slider": {
+          "min": 1,
+          "max": 1440,
+          "step": 5
+        },
+        "default": 20,
+        "condition": {
+          "enable_external_event_self_link": true
+        }
+      },
+      "news_share_cooldown_hours": {
+        "description": "新闻分享冷却（小时）",
+        "type": "int",
+        "hint": "同一用户两次新闻主动分享的最小间隔。默认 8 小时是原先写死的值；设为 0 可关闭这道单独限制（仍受上方主动外链统一冷却约束）。",
+        "slider": {
+          "min": 0,
+          "max": 168,
+          "step": 1
+        },
+        "default": 8
+      },
+      "bilibili_share_cooldown_hours": {
+        "description": "B 站视频分享冷却（小时）",
+        "type": "int",
+        "hint": "同一用户两次 B 站视频主动分享的最小间隔。默认 10 小时是原先写死的值；设为 0 可关闭这道单独限制（仍受主动外链统一冷却约束）。",
+        "slider": {
+          "min": 0,
+          "max": 168,
+          "step": 1
+        },
+        "default": 10
+      },
+      "web_exploration_share_cooldown_hours": {
+        "description": "主动搜索分享冷却（小时）",
+        "type": "int",
+        "hint": "同一用户两次主动搜索结果的分享最小间隔。默认 10 小时是原先写死的值；设为 0 可关闭这道单独限制（仍受主动外链统一冷却约束）。",
+        "slider": {
+          "min": 0,
+          "max": 168,
+          "step": 1
+        },
+        "default": 10
+      },
+      "external_event_self_link_override_min_relevance": {
+        "description": "意愿放宽·最低相关度",
+        "type": "int",
+        "hint": "当意愿判断给出 should_share=false 时，若相关度不低于该值且意愿放宽·最低分享欲达标，仍把本条外部消息判定为可分享（放宽 override）。0 表示不启用该放宽。默认关闭，保持原判。",
+        "slider": {
+          "min": 0,
+          "max": 10,
+          "step": 1
+        },
+        "default": 0,
+        "condition": {
+          "enable_external_event_self_link": true
+        }
+      },
+      "external_event_self_link_override_min_desire": {
+        "description": "意愿放宽·最低分享欲",
+        "type": "int",
+        "hint": "当意愿判断给出 should_share=false 时，若分享欲不低于该值且意愿放宽·最低相关度达标，仍把本条外部消息判定为可分享（放宽 override）。0 表示不启用该放宽。",
+        "slider": {
+          "min": 0,
+          "max": 10,
+          "step": 1
+        },
+        "default": 0,
+        "condition": {
+          "enable_external_event_self_link": true
+        }
+      },
+      "external_event_self_link_override_probability": {
+        "description": "意愿放宽·分享概率保底",
+        "type": "float",
+        "hint": "当 override 把 should_share 翻为可分享时，这条消息的分享概率至少为该值，避免放宽后仍被概率随机砍掉。",
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
+        "default": 0.6,
+        "condition": {
+          "enable_external_event_self_link": true
+        }
+      },
+      "external_event_share_min_total": {
+        "description": "外部消息统一评分下限",
+        "type": "int",
+        "hint": "外部消息通过意愿判断后，统一评分（相关度/分享欲/用户匹配/质量/新鲜度综合）需要达到的下限才允许进入主动候选。默认 18 是原先写死的值；调低可让更多消息通过。",
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 1
+        },
+        "default": 18,
+        "condition": {
+          "enable_external_event_self_link": true
+        }
+      },
+      "external_share_require_source_link": {
+        "description": "外部共享强制带来源链接",
+        "type": "bool",
+        "hint": "开启时，新闻/B 站视频/主动搜索三类外部共享的正文必须包含真实来源链接，否则退回兜底文本。关闭后不再硬要求链接，只要正文提到来源（标题/来源名/关键词）即可放行——适合想要更自然的话题式分享、不强求贴链接的场合。平台错配检查（正文声称的平台与链接不符）始终生效。",
+        "default": true
       }
     }
   },

@@ -1405,6 +1405,7 @@ def _initialize_review_and_group_config(self: Any, c: Any) -> None:
         "enable_proactive_message_review",
         legacy_response_review_enabled,
     )
+    self.external_share_require_source_link = self._cfg_bool(c, "external_share_require_source_link", True)
     self.proactive_review_history_limit = self._cfg_int(
         c,
         "proactive_review_history_limit",
@@ -1782,6 +1783,15 @@ def _initialize_group_and_provider_config(self: Any, c: Any) -> None:
     self.external_event_self_link_cooldown_hours = self._cfg_int(c, "external_event_self_link_cooldown_hours", 12, 1, 168)
     self.external_link_share_cooldown_hours = self._cfg_int(c, "external_link_share_cooldown_hours", 72, 0, 168)
     self.news_max_items_per_source = self._cfg_int(c, "news_max_items_per_source", 5, 1, 20)
+    self.external_event_idle_minutes = self._cfg_int(c, "external_event_idle_minutes", 90, 5, 1440)
+    self.external_event_idle_strong_minutes = self._cfg_int(c, "external_event_idle_strong_minutes", 20, 1, 1440)
+    self.news_share_cooldown_hours = self._cfg_int(c, "news_share_cooldown_hours", 8, 0, 168)
+    self.bilibili_share_cooldown_hours = self._cfg_int(c, "bilibili_share_cooldown_hours", 10, 0, 168)
+    self.web_exploration_share_cooldown_hours = self._cfg_int(c, "web_exploration_share_cooldown_hours", 10, 0, 168)
+    self.external_event_self_link_override_min_relevance = self._cfg_int(c, "external_event_self_link_override_min_relevance", 0, 0, 10)
+    self.external_event_self_link_override_min_desire = self._cfg_int(c, "external_event_self_link_override_min_desire", 0, 0, 10)
+    self.external_event_self_link_override_probability = self._cfg_unit_interval(c, "external_event_self_link_override_probability", 0.6, 0.0)
+    self.external_event_share_min_total = self._cfg_int(c, "external_event_share_min_total", 18, 0, 100)
     self.news_hot_sources = self._cfg_str(c, "news_hot_sources", self._cfg_str(c, "hot_trend_sources", "weibo,hackernews"))
     self.news_hot_max_items = self._cfg_int(c, "news_hot_max_items", self._cfg_int(c, "hot_trend_max_items", 12, 3, 30), 3, 30)
     self.enable_ai_daily_watch = self._cfg_bool(c, "enable_ai_daily_watch", True)

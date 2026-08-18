@@ -841,7 +841,8 @@ class NewsExplorationMixin:
         noisy = self._external_event_recently_seen(payload, source_type=source_type, now=now)
         duplicate_penalty = 4 if noisy else 0
         interrupt_penalty = 0
-        if now - _safe_float(user.get("last_seen"), 0) < max(self.idle_minutes, 90) * 60:
+        external_idle_min = _safe_int(getattr(self, "external_event_idle_minutes", 90), 90, 5, 1440)
+        if now - _safe_float(user.get("last_seen"), 0) < max(self.idle_minutes, external_idle_min) * 60:
             interrupt_penalty += 3
         if now - _safe_float(user.get("last_sent"), 0) < max(self.min_interval_minutes, 120) * 60:
             interrupt_penalty += 2
@@ -855,7 +856,7 @@ class NewsExplorationMixin:
             "freshness": freshness,
             "duplicate_penalty": duplicate_penalty,
             "interrupt_penalty": interrupt_penalty,
-            "should_share": bool((wish or {}).get("should_share")) and total >= 18 and not noisy,
+            "should_share": bool((wish or {}).get("should_share")) and total >= _safe_int(getattr(self, "external_event_share_min_total", 18), 18, 0, 100) and not noisy,
             "duplicate": noisy,
         }
 
@@ -1409,9 +1410,9 @@ class NewsExplorationMixin:
         for user_id, user in users.items():
             if not isinstance(user, dict) or not self._is_target_private_user(str(user_id), user) or not user.get("enabled", True) or not user.get("umo"):
                 continue
-            if now - _safe_float(user.get("last_seen"), 0) < max(self.idle_minutes, 90) * 60:
+            if now - _safe_float(user.get("last_seen"), 0) < max(self.idle_minutes, _safe_int(getattr(self, "external_event_idle_minutes", 90), 90, 5, 1440)) * 60:
                 continue
-            if now - _safe_float(user.get("last_bilibili_share_at"), 0) < 10 * 3600:
+            if now - _safe_float(user.get("last_bilibili_share_at"), 0) < _safe_int(getattr(self, "bilibili_share_cooldown_hours", 10), 10, 0, 168) * 3600:
                 continue
             if self._external_link_share_cooldown_remaining(user, now=now) > 0:
                 continue
@@ -3039,6 +3040,26 @@ class NewsExplorationMixin:
             "created_ts": _now_ts(),
             "source_type": source_type,
         }
+        # User-configured relaxation: when the judgement model says
+        # should_share=false but relevance/desire clear a configured floor,
+        # promote the item to shareable instead of dropping it silently.
+        # boost_reason marks strong self-link so downstream probability/idle
+        # boosts apply. Life-opportunity wishes still win below.
+        override_min_rel = _safe_int(getattr(self, "external_event_self_link_override_min_relevance", 0), 0, 0, 10)
+        override_min_des = _safe_int(getattr(self, "external_event_self_link_override_min_desire", 0), 0, 0, 10)
+        if (
+            not result["should_share"]
+            and override_min_rel > 0
+            and override_min_des > 0
+            and relevance >= override_min_rel
+            and desire >= override_min_des
+        ):
+            result["should_share"] = True
+            result["share_probability"] = max(
+                result["share_probability"],
+                _safe_float(getattr(self, "external_event_self_link_override_probability", 0.6), 0.6),
+            )
+            result["boost_reason"] = "override_by_user_threshold"
         if life_wish:
             if not result["should_share"] or result["share_probability"] < life_wish["share_probability"]:
                 result = {
@@ -3196,9 +3217,9 @@ class NewsExplorationMixin:
                         or _safe_int(user_preference.get("score"), 0) >= 10
                     )
                 )
-                idle_required = max(self.idle_minutes, 90) * 60
+                idle_required = max(self.idle_minutes, _safe_int(getattr(self, "external_event_idle_minutes", 90), 90, 5, 1440)) * 60
                 if strong_self_link:
-                    idle_required = min(idle_required, max(20, self.idle_minutes) * 60)
+                    idle_required = min(idle_required, max(_safe_int(getattr(self, "external_event_idle_strong_minutes", 20), 20, 1, 1440), self.idle_minutes) * 60)
                 idle_elapsed = now - _safe_float(user.get("last_seen"), 0)
                 if idle_elapsed < idle_required:
                     _note_news_share(user_id, "skipped", "用户近期仍活跃，暂不主动打扰", idle_elapsed_seconds=round(idle_elapsed, 1), idle_required_seconds=round(idle_required, 1))
@@ -3206,7 +3227,7 @@ class NewsExplorationMixin:
                 if str(user.get("last_news_share_key") or "") == user_selected_key:
                     _note_news_share(user_id, "skipped", "这条新闻已经给该用户排过主动")
                     continue
-                if now - _safe_float(user.get("last_news_share_at"), 0) < 8 * 3600:
+                if now - _safe_float(user.get("last_news_share_at"), 0) < _safe_int(getattr(self, "news_share_cooldown_hours", 8), 8, 0, 168) * 3600:
                     _note_news_share(user_id, "skipped", "新闻分享 8 小时冷却中")
                     continue
                 shared_link_cooldown = self._external_link_share_cooldown_remaining(user, now=now)
@@ -4534,9 +4555,9 @@ class NewsExplorationMixin:
         if digest.get("possible_share") and target_users:
             random.shuffle(target_users)
             for user_id, user in target_users[:3]:
-                if now - _safe_float(user.get("last_seen"), 0) < max(self.idle_minutes, 90) * 60:
+                if now - _safe_float(user.get("last_seen"), 0) < max(self.idle_minutes, _safe_int(getattr(self, "external_event_idle_minutes", 90), 90, 5, 1440)) * 60:
                     continue
-                if now - _safe_float(user.get("last_web_exploration_share_at"), 0) < 10 * 3600:
+                if now - _safe_float(user.get("last_web_exploration_share_at"), 0) < _safe_int(getattr(self, "web_exploration_share_cooldown_hours", 10), 10, 0, 168) * 3600:
                     continue
                 if self._external_link_share_cooldown_remaining(user, now=now) > 0:
                     continue

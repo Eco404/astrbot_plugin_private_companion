@@ -4555,7 +4555,8 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 "reason": f"来源平台错配：应为{expected_label}而不是{claimed_platform}",
                 "hard": True,
             }
-        if source_link and source_link not in cleaned:
+        require_source_link = bool(getattr(self, "external_share_require_source_link", True))
+        if require_source_link and source_link and source_link not in cleaned:
             reference = self._external_share_fallback_reference(source_text)
             if reference:
                 return {
@@ -4623,23 +4624,23 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 payload = user.get(key)
                 if not isinstance(payload, dict):
                     continue
-                for field in (
-                    "title",
-                    "headline",
-                    "topic",
-                    "summary",
-                    "impression",
-                    "comment",
-                    "review",
-                    "source",
-                    "selected_source",
-                    "source_title",
-                    "selected_link",
-                    "source_url",
-                    "link",
-                    "url",
-                    "bvid",
-                ):
+                prefixed_fields = {
+                    "topic": "话题",
+                    "headline": "标题",
+                    "title": "标题",
+                    "source": "来源",
+                    "selected_source": "来源",
+                    "source_title": "参考来源",
+                    "selected_link": "链接",
+                    "source_url": "链接",
+                    "link": "链接",
+                    "url": "链接",
+                }
+                for field, prefix in prefixed_fields.items():
+                    value = payload.get(field)
+                    if value:
+                        add(f"{prefix}：{value}", 180)
+                for field in ("summary", "impression", "comment", "review", "bvid"):
                     add(payload.get(field), 180)
         if not parts:
             add(motive, 140)
@@ -16284,6 +16285,17 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         cleaned = str(text or "").strip()
         if not cleaned:
             return ""
+        # Protect URLs from sentence-flow tokenization: a URL is one atomic
+        # unit and must never be split on ASCII dots or receive an appended
+        # sentence punctuation. Swap each URL out for a NUL placeholder and
+        # restore it right before returning.
+        url_placeholders: list[str] = []
+
+        def _protect_url(match: re.Match[str]) -> str:
+            url_placeholders.append(match.group(0))
+            return f"\x00URL{len(url_placeholders) - 1}\x00"
+
+        cleaned = re.sub(r"https?://[^\s，。！？!?；;、]+", _protect_url, cleaned)
         cleaned = self._strip_unsupported_proactive_agreement(cleaned)
         cleaned = self._trim_abrupt_closing_topic_shift(cleaned)
         cleaned = _normalize_outbound_punctuation_flow(cleaned)
@@ -16322,10 +16334,14 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         normalized = [self._ensure_chat_sentence_punctuation(item) for item in merged]
         normalized = [item for item in normalized if item]
         if len(normalized) <= 3:
-            return self._truncate_proactive_text("\n".join(normalized), 260)
-        head = normalized[:2]
-        tail_sentences = normalized[2:4]
-        return self._truncate_proactive_text("\n".join(head + tail_sentences), 260)
+            result = self._truncate_proactive_text("\n".join(normalized), 260)
+        else:
+            head = normalized[:2]
+            tail_sentences = normalized[2:4]
+            result = self._truncate_proactive_text("\n".join(head + tail_sentences), 260)
+        for idx, url in enumerate(url_placeholders):
+            result = result.replace(f"\x00URL{idx}\x00", url)
+        return result
 
     def _group_share_text_has_life_sidecar(self, text: str) -> bool:
         cleaned = _single_line(text, 500)
