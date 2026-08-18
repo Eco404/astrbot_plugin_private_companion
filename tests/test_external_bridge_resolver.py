@@ -6,6 +6,9 @@ import types
 from types import SimpleNamespace
 
 from astrbot_plugin_private_companion.external_bridge_resolver import (
+    _identity_segments,
+    _metadata_matches_star,
+    _module_candidates,
     invalidate_external_bridge_cache,
     resolve_external_bridge,
 )
@@ -198,3 +201,51 @@ def test_registered_star_identity_can_expose_extension_api_without_fixed_module_
         getter_name="get_custom_api",
         star_name="astrbot_plugin_custom_bridge",
     ) is api
+
+
+def test_identity_scan_ignores_objects_that_raise_during_string_conversion() -> None:
+    class ExplodingString:
+        def __str__(self) -> str:
+            raise RuntimeError("torch namespace lookup failed")
+
+    assert _identity_segments(ExplodingString()) == set()
+
+
+def test_metadata_matching_ignores_unstringifiable_plugin_name() -> None:
+    class ExplodingString:
+        def __str__(self) -> str:
+            raise RuntimeError("torch namespace lookup failed")
+
+    metadata = SimpleNamespace(
+        name="",
+        root_dir_name="",
+        module_path="",
+        module=SimpleNamespace(__name__="", PLUGIN_NAME=ExplodingString()),
+        star_cls=None,
+    )
+    assert not _metadata_matches_star(metadata, "some_plugin")
+
+
+def test_module_scan_ignores_unstringifiable_plugin_name() -> None:
+    module_name = "astrbot_plugin_torch_namespace_probe.main"
+    module = types.ModuleType(module_name)
+
+    class ExplodingString:
+        def __str__(self) -> str:
+            raise RuntimeError("torch namespace lookup failed")
+
+    module.PLUGIN_NAME = ExplodingString()
+    previous = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        candidates = _module_candidates(
+            ("astrbot_plugin_missing_bridge.main",),
+            getter_name="get_missing_api",
+            star_name="astrbot_plugin_missing_bridge",
+        )
+        assert module not in candidates
+    finally:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous

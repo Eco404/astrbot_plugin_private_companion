@@ -332,6 +332,22 @@ class ProactiveGateDecouplingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("已达每日上限", reason)
         self.assertEqual([], harness.defer_calls)
 
+    def test_insomnia_reserved_slot_can_cross_normal_daily_cap_once(self) -> None:
+        harness = _ShouldSendHarness()
+        harness._can_send_insomnia_night_message = lambda _user, **_kwargs: True
+        user = _due_user(
+            harness.now,
+            sent_today=8,
+            planned_proactive_reason="insomnia_night",
+            planned_proactive_source="night_care",
+        )
+
+        with patch("astrbot_plugin_private_companion.proactive_engine._now_ts", return_value=harness.now):
+            allowed, reason = harness._should_send(user)
+
+        self.assertTrue(allowed)
+        self.assertEqual("ok", reason)
+
     def test_daypart_cap_defers_without_blocking_current_impulse(self) -> None:
         harness = _ShouldSendHarness()
         harness.daypart_cap = True

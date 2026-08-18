@@ -851,7 +851,12 @@ class ProactiveEngineMixin:
                 source=source,
                 now=now,
             )
+        midnight_ritual = bool(prepared.get("_midnight_ritual")) and reason in {
+            "birthday_celebration",
+            "special_day_greeting",
+        }
         time_exempt = source in {"timer", "troubleshooting", "simulation"}
+        quiet_hours_exempt = reason == "insomnia_night" or midnight_ritual
         if (
             reason == "morning_greeting"
             and source in {"daily_greeting", "story", "daily_story", "state"}
@@ -891,7 +896,7 @@ class ProactiveEngineMixin:
 
         quiet_end_getter = getattr(self, "_quiet_hours_end_timestamp", None)
         quiet_end = 0.0
-        if not time_exempt and callable(quiet_end_getter):
+        if not time_exempt and not quiet_hours_exempt and callable(quiet_end_getter):
             try:
                 quiet_end = _safe_float(quiet_end_getter(max(window_start_at, preferred_ts)), 0.0)
             except Exception:
@@ -972,10 +977,10 @@ class ProactiveEngineMixin:
             salience += 0.12
         elif source == "random":
             warmth += 0.06
-        if impulse_reason in {"morning_greeting", "noon_greeting", "evening_greeting"}:
+        if impulse_reason in {"morning_greeting", "noon_greeting", "evening_greeting", "special_day_greeting"}:
             warmth += 0.1
             urgency += 0.08
-        if impulse_reason in {"quiet_care", "important_date_share"}:
+        if impulse_reason in {"quiet_care", "important_date_share", "insomnia_night"}:
             warmth += 0.16
         if role == "friend":
             warmth = max(0.18, warmth - 0.08)
@@ -1073,6 +1078,8 @@ class ProactiveEngineMixin:
             "followup": 88,
             "mobile_location": 84,
             "birthday_celebration": 86,
+            "special_day_ritual": 89,
+            "night_care": 87,
             "daily_greeting": 72,
             "meal_care": 78,
             "balance": 82,
@@ -1085,7 +1092,14 @@ class ProactiveEngineMixin:
             "random": 20,
         }
         priority = priorities.get(source, 48)
-        if reason in {"birthday_celebration", "birthday_eve_hint", "birthday_makeup", "important_date_share"}:
+        if reason in {
+            "birthday_celebration",
+            "birthday_eve_hint",
+            "birthday_makeup",
+            "important_date_share",
+            "special_day_greeting",
+            "insomnia_night",
+        }:
             priority = max(priority, 86)
         elif reason == "morning_greeting":
             priority = max(priority, 82)
@@ -1566,6 +1580,17 @@ class ProactiveEngineMixin:
                 score -= 0.12
                 note("次要用户关系下动机太像索取回应")
         else:
+            if normalized_reason == "special_day_greeting":
+                ritual_markers = ("节日", "仪式", "纪念", "浪漫", "庆祝", "情人", "七夕")
+                if any(marker in str(self._get_default_persona_prompt() or "") for marker in ritual_markers):
+                    score += 0.07
+                    note("人格对节日/纪念性表达有承载空间")
+                else:
+                    score -= 0.04
+                    note("人格不偏节日仪式，表达应收成平常口吻")
+            elif normalized_reason == "insomnia_night" and not (profile.get("clingy") or profile.get("voicey")):
+                score -= 0.03
+                note("人格主动温度偏低，失眠关怀只留很短一句")
             if intimate and (profile.get("clingy") or profile.get("voicey")):
                 score += 0.07
                 note("亲近型人格可承载这个主动")
@@ -2654,6 +2679,7 @@ class ProactiveEngineMixin:
             "birthday_makeup",
             "birthday_afterglow",
             "important_date_share",
+            "special_day_greeting",
             "bili_video_share",
             "news_share",
             "web_exploration_share",
@@ -2688,9 +2714,17 @@ class ProactiveEngineMixin:
             "body_monitor",
         }:
             return "urgent"
-        if normalized_reason in {"environment_change", "memo_note_reminder"} or normalized_source in {
+        if normalized_reason in {
+            "environment_change",
+            "memo_note_reminder",
+            "birthday_celebration",
+            "special_day_greeting",
+            "insomnia_night",
+        } or normalized_source in {
             "environment_change",
             "memo_note",
+            "special_day_ritual",
+            "night_care",
         }:
             return "timely"
         return "routine"
@@ -4015,11 +4049,32 @@ class ProactiveEngineMixin:
             if busy_block_kind == "external_realtime":
                 return False, "正在实时共处，普通主动消息已顺延"
             return False, "Bot 当前日程忙碌，主动消息已顺延"
+        # Refresh time-sensitive rituals before the quiet-hours and quota gates
+        # so their narrow midnight window is not hidden behind an older plan.
+        if not is_troubleshooting and not due_timer_active and self._promote_earlier_daily_greeting_event(user, now=now):
+            planned_reason = self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40)
+            planned_source = self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40) or planned_source
+            next_at = _safe_float(user.get("next_proactive_at"), 0)
+            impulse_value = self._planned_impulse_value(user, now=now)
+            window_phase, window_detail = self._planned_impulse_window_phase(user, now=now)
         post_goodnight_active = self._post_goodnight_group_activity_is_fresh(user, now=now)
+        planned_reason = self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40)
+        ritual_context = (
+            user.get("planned_birthday_event_context")
+            if planned_reason == "birthday_celebration"
+            else user.get("planned_special_day_context")
+        )
+        if not isinstance(ritual_context, dict):
+            ritual_context = {}
+        midnight_ritual_active = planned_reason in {"birthday_celebration", "special_day_greeting"} and (
+            _single_line(ritual_context.get("delivery_timing"), 24) == "midnight"
+        )
+        insomnia_slot_available = planned_reason == "insomnia_night" and self._can_send_insomnia_night_message(user, now=now)
         if (
             not is_troubleshooting
             and self._is_quiet_time()
-            and not self._can_send_insomnia_night_message(user)
+            and not insomnia_slot_available
+            and not midnight_ritual_active
             and not post_goodnight_active
         ):
             return False, "免打扰时段"
@@ -4196,6 +4251,7 @@ class ProactiveEngineMixin:
             not is_troubleshooting
             and not self._proactive_daily_limit_is_unlimited(daily_limit)
             and _safe_int(user.get("sent_today"), 0) >= daily_limit
+            and not insomnia_slot_available
         ):
             if not due_timer_active:
                 self._schedule_next_proactive(user, now=now, delay_hours=(8, 16))
@@ -7359,10 +7415,42 @@ class ProactiveEngineMixin:
             return None
         event = user.get("birthday_event") if isinstance(user.get("birthday_event"), dict) else {}
         minute = current.hour * 60 + current.minute
-        year = current.year if stage == "birthday" else (current.year + 1 if stage == "eve" else current.year - 1)
+        # The observance year is the year of the actual birthday date.  Using
+        # current.year +/- 1 here made almost every non-New-Year birthday carry
+        # the wrong receipt year and could cause duplicate greetings.
+        year = (
+            (current + timedelta(days=1)).year
+            if stage == "eve"
+            else (current - timedelta(days=1)).year
+            if stage == "after"
+            else current.year
+        )
 
         if stage == "eve":
             recent_activity = self._latest_private_user_activity_ts(user)
+            if (
+                minute >= 21 * 60 + 30
+                and _safe_int(event.get("celebrated_year"), 0) != year
+                and _safe_int(user.get("ignored_streak"), 0, 0) <= 0
+            ):
+                tomorrow = current.date() + timedelta(days=1)
+                target = datetime.combine(tomorrow, datetime.min.time(), tzinfo=current.tzinfo)
+                target += timedelta(minutes=random.randint(1, 7))
+                return {
+                    "window": "00:00-00:15",
+                    "date": tomorrow.isoformat(),
+                    "reason": "birthday_celebration",
+                    "action": "message",
+                    "why": "生日刚开始，想在零点后轻轻送上第一句祝福",
+                    "topic": "零点后的生日小惊喜",
+                    "motive": "对方的生日刚刚开始，想第一时间留一句祝福",
+                    "_scheduled_ts": target.timestamp(),
+                    "_proactive_source": "birthday_celebration",
+                    "_midnight_ritual": True,
+                    "_birthday_stage": "birthday",
+                    "context_key": "planned_birthday_event_context",
+                    "context": {"observance_year": year, "delivery_timing": "midnight"},
+                }
             if _safe_int(event.get("eve_year"), 0) == year or _safe_int(user.get("ignored_streak"), 0) > 0:
                 return None
             if recent_activity <= 0 or now - recent_activity > 7 * 24 * 3600 or not (17 * 60 + 30 <= minute < 21 * 60 + 30):
@@ -7386,24 +7474,44 @@ class ProactiveEngineMixin:
                 return None
             if _safe_int(user.get("ignored_streak"), 0, 0) > 0 and minute < 18 * 60:
                 return None
-            if minute < 9 * 60 + 30:
+            midnight = minute < 15
+            if midnight:
+                midnight_end = current.replace(hour=0, minute=15, second=0, microsecond=0).timestamp()
+                remaining = int(midnight_end - now)
+                if remaining > 10:
+                    scheduled = now + random.randint(5, min(150, remaining - 5))
+                    window = "00:00-00:15"
+                else:
+                    midnight = False
+            if not midnight and minute < 9 * 60 + 30:
                 scheduled = current.replace(hour=10, minute=random.randint(5, 45), second=0, microsecond=0).timestamp()
-            elif minute < 18 * 60 + 30:
+                window = "09:30-21:55"
+            elif not midnight and minute < 18 * 60 + 30:
                 scheduled = now + random.randint(12, 75) * 60
-            else:
-                scheduled = now + random.randint(8, 35) * 60
-            action = "photo_text" if self._photo_text_available(user) and random.random() < 0.58 else "message"
+                window = "09:30-21:55"
+            elif not midnight:
+                daytime_end = current.replace(hour=21, minute=55, second=0, microsecond=0).timestamp()
+                remaining = max(20, int(daytime_end - now) - 5)
+                scheduled = now + random.randint(min(8 * 60, remaining), min(35 * 60, remaining))
+                window = "09:30-21:55"
+            action = (
+                "photo_text"
+                if not midnight and self._photo_text_available(user) and random.random() < 0.58
+                else "message"
+            )
             return {
-                "window": self._window_from_delay_minutes(max(5, int((scheduled - now) / 60)), width_minutes=75),
+                "window": window,
                 "reason": "birthday_celebration",
                 "action": action,
                 "why": "今天是用户明确允许记住的生日，想认真递上一份不造成压力的小惊喜",
                 "topic": "今天只属于你的生日小惊喜",
                 "motive": "今天是对方生日，想留一份小惊喜",
                 "_scheduled_ts": scheduled,
+                "_proactive_source": "birthday_celebration",
+                "_midnight_ritual": midnight,
                 "_birthday_stage": "birthday",
                 "context_key": "planned_birthday_event_context",
-                "context": {"observance_year": year},
+                "context": {"observance_year": year, "delivery_timing": "midnight" if midnight else "daytime"},
             }
 
         celebrated_at = _safe_float(event.get("celebrated_at"), 0)
@@ -7440,6 +7548,154 @@ class ProactiveEngineMixin:
             "_birthday_stage": "afterglow",
             "context_key": "planned_birthday_event_context",
             "context": {"observance_year": year},
+        }
+
+    def _insomnia_night_key(self, now: float | None = None) -> str:
+        current = self._environment_fromtimestamp(_now_ts() if now is None else now)
+        # 23:00-05:59 is one night, even though it crosses midnight.
+        return (current - timedelta(hours=6)).date().isoformat()
+
+    def _pick_insomnia_night_event(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        check_now = _now_ts() if now is None else now
+        if not self._can_send_insomnia_night_message(user, now=check_now):
+            return None
+        night_key = self._insomnia_night_key(check_now)
+        planned_context = user.get("insomnia_night_context") if isinstance(user.get("insomnia_night_context"), dict) else {}
+        if (
+            self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40) == "insomnia_night"
+            and _single_line(planned_context.get("night_key"), 20) == night_key
+            and _safe_float(user.get("next_proactive_at"), 0) > 0
+        ):
+            return None
+        current = self._environment_fromtimestamp(check_now)
+        end = (
+            current.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            if current.hour >= 23
+            else current.replace(hour=6, minute=0, second=0, microsecond=0)
+        )
+        remaining_seconds = int(end.timestamp() - check_now)
+        if remaining_seconds <= 30:
+            return None
+        max_delay = max(20, min(22 * 60, remaining_seconds - 10))
+        min_delay = min(4 * 60, max_delay)
+        scheduled = check_now + random.randint(min_delay, max_delay)
+        return {
+            "window": "23:00-24:00" if current.hour >= 23 else "00:00-06:00",
+            "reason": "insomnia_night",
+            "action": "message",
+            "why": "Bot 还醒着，夜里只想给用户留一句不要求回应的话",
+            "topic": "夜里还醒着",
+            "motive": "夜里一直没睡着，想短短和对方说一句",
+            "_scheduled_ts": scheduled,
+            "_proactive_source": "night_care",
+            "context_key": "insomnia_night_context",
+            "context": {"night_key": night_key},
+        }
+
+    def _special_day_observance(self, current: datetime) -> dict[str, Any] | None:
+        month_day = current.strftime("%m-%d")
+        if month_day == "02-14":
+            return {"key": "valentines_day", "title": "情人节", "year": current.year}
+        if Converter and Solar:
+            try:
+                lunar = Converter.Solar2Lunar(Solar(current.year, current.month, current.day))
+                if int(lunar.month) == 7 and int(lunar.day) == 7 and not bool(getattr(lunar, "isleap", False)):
+                    return {"key": "qixi", "title": "七夕", "year": current.year}
+            except Exception:
+                pass
+        entries = self.data.get("important_dates", [])
+        if not isinstance(entries, list):
+            return None
+        for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("enabled", True):
+                continue
+            base = self._parse_date_value(entry.get("date"))
+            if base is None or (base.month, base.day) != (current.month, current.day):
+                continue
+            if not entry.get("repeat_yearly", True) and base.year != current.year:
+                continue
+            joined = _single_line(
+                f"{entry.get('title', '')} {entry.get('type', '')} {entry.get('note', '')}",
+                180,
+            )
+            if "生日" in joined or not any(token in joined for token in ("纪念日", "周年", "相识", "恋爱", "情人")):
+                continue
+            key = _single_line(entry.get("id"), 60) or hashlib.sha1(joined.encode("utf-8", errors="ignore")).hexdigest()[:12]
+            return {"key": f"custom:{key}", "title": _single_line(entry.get("title"), 40) or "这个特别的日子", "year": current.year}
+        return None
+
+    def _pick_special_day_greeting_event(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        if self._private_user_role(user) != "owner" or bool(user.get("special_day_greeting_opt_out")):
+            return None
+        check_now = _now_ts() if now is None else now
+        current = self._environment_fromtimestamp(check_now)
+        # A user's birthday owns the midnight ritual when it overlaps a
+        # calendar holiday; avoid sending two competing greetings in one slot.
+        if self._birthday_profile_matches_on_date(user, current) or self._birthday_profile_matches_on_date(
+            user, current + timedelta(days=1)
+        ):
+            return None
+        observance = self._special_day_observance(current)
+        tomorrow = current + timedelta(days=1)
+        tomorrow_observance = self._special_day_observance(tomorrow)
+        current_minute = current.hour * 60 + current.minute
+        if observance is None and not (tomorrow_observance and current_minute >= 21 * 60 + 30):
+            return None
+        target = observance or tomorrow_observance
+        assert target is not None
+        receipt_key = f"{target['key']}:{target['year']}"
+        receipts = user.get("special_day_greeting_receipts")
+        if isinstance(receipts, dict) and receipt_key in receipts:
+            return None
+        if observance:
+            if current.hour == 0 and current.minute < 15:
+                midnight_end = current.replace(hour=0, minute=15, second=0, microsecond=0).timestamp()
+                remaining = int(midnight_end - check_now)
+                if remaining > 10:
+                    scheduled = check_now + random.randint(5, min(120, remaining - 5))
+                    midnight = True
+                else:
+                    scheduled = current.replace(hour=8, minute=30, second=0, microsecond=0).timestamp() + random.randint(0, 35) * 60
+                    midnight = False
+            elif current.hour < 21:
+                scheduled = check_now + random.randint(8, 28) * 60
+                midnight = False
+            else:
+                return None
+            date_text = current.date().isoformat()
+        else:
+            scheduled = datetime.combine(tomorrow.date(), datetime.min.time(), tzinfo=current.tzinfo).timestamp() + random.randint(1, 7) * 60
+            midnight = True
+            date_text = tomorrow.date().isoformat()
+        return {
+            "window": "00:00-00:15" if midnight else "08:30-21:30",
+            "date": date_text,
+            "reason": "special_day_greeting",
+            "action": "message",
+            "why": f"{target['title']}刚开始，想第一时间送一句有关系感的问候",
+            "topic": f"{target['title']}的问候",
+            "motive": f"今天是{target['title']}，想在特别的时间点先和对方说一句",
+            "_scheduled_ts": scheduled,
+            "_midnight_ritual": midnight,
+            "_proactive_source": "special_day_ritual",
+            "context_key": "planned_special_day_context",
+            "context": {
+                "observance_key": target["key"],
+                "observance_title": target["title"],
+                "observance_year": target["year"],
+                "receipt_key": receipt_key,
+                "delivery_timing": "midnight" if midnight else "daytime_fallback",
+            },
         }
 
     def _birthday_curiosity_has_known_birthday(self, user: dict[str, Any]) -> bool:
@@ -9013,6 +9269,11 @@ class ProactiveEngineMixin:
         if reason == "birthday_curiosity":
             return "好奇对方的生日"
 
+        if reason == "special_day_greeting":
+            context = user.get("planned_special_day_context") if isinstance(user.get("planned_special_day_context"), dict) else {}
+            title = _single_line(context.get("observance_title"), 32) or "这个特别的日子"
+            return f"今天是{title}，想在这个时间点先和对方说一句"
+
         if reason == "insomnia_night":
             motives = [
                 "夜里一直没睡着",
@@ -9381,9 +9642,10 @@ class ProactiveEngineMixin:
             "activity_share": [(10 * 60, 18 * 60 + 30)],
             "diary_share": [(19 * 60, 23 * 60)],
             "important_date_share": [(8 * 60 + 30, 22 * 60)],
+            "special_day_greeting": [(0, 15), (8 * 60 + 30, 21 * 60 + 30)],
             "birthday_curiosity": [(10 * 60, 12 * 60), (15 * 60, 20 * 60 + 30)],
             "birthday_eve_hint": [(17 * 60 + 30, 21 * 60 + 30)],
-            "birthday_celebration": [(9 * 60 + 30, 21 * 60 + 55)],
+            "birthday_celebration": [(0, 15), (9 * 60 + 30, 21 * 60 + 55)],
             "birthday_makeup": [(9 * 60 + 30, 13 * 60 + 55)],
             "birthday_afterglow": [(10 * 60, 21 * 60 + 25)],
             "background_schedule": [(9 * 60, 22 * 60)],
@@ -9393,6 +9655,8 @@ class ProactiveEngineMixin:
             "meal_care": [(7 * 60 + 50, 20 * 60 + 35)],
             "meal_care_followup": [(8 * 60 + 5, 22 * 60)],
         }.get(reason, [(9 * 60, 22 * 60)])
+        if reason in {"special_day_greeting", "birthday_celebration", "insomnia_night"}:
+            return windows
         return self._apply_chronotype_shift_to_windows(windows, user)
 
     def _apply_chronotype_shift_to_windows(
@@ -9510,25 +9774,36 @@ class ProactiveEngineMixin:
         )
         return target.timestamp() + random.randint(0, 59 * 60)
 
-    def _can_send_insomnia_night_message(self, user: dict[str, Any]) -> bool:
-        if not self.allow_insomnia_night_message:
+    def _can_send_insomnia_night_message(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> bool:
+        if not bool(getattr(self, "allow_insomnia_night_message", True)):
             return False
         if not self._has_active_insomnia_state():
             return False
-        hour = self._environment_now().hour
+        if self._private_user_role(user) != "owner":
+            return False
+        check_now = _now_ts() if now is None else now
+        current = self._environment_fromtimestamp(check_now)
+        hour = current.hour
         if not (0 <= hour <= 5 or hour >= 23):
             return False
         daily_limit = self._effective_user_daily_limit(user)
-        if (
-            not self._proactive_daily_limit_is_unlimited(daily_limit)
-            and _safe_int(user.get("sent_today"), 0) >= max(1, daily_limit)
-        ):
+        if daily_limit <= 0:
+            return False
+        night_key = self._insomnia_night_key(check_now)
+        if _single_line(user.get("insomnia_night_sent_key"), 20) == night_key:
             return False
         if _safe_float(user.get("last_sent"), 0) > 0:
-            elapsed = _now_ts() - _safe_float(user.get("last_sent"), 0)
-            if elapsed < max(6 * 3600, self._effective_user_min_interval_minutes(user) * 60):
+            elapsed = check_now - _safe_float(user.get("last_sent"), 0)
+            # A dedicated night care slot can be closer than ordinary chatter,
+            # but it still cannot stack immediately after another message.
+            if elapsed < max(45 * 60, min(120 * 60, self._effective_user_min_interval_minutes(user) * 60)):
                 return False
-        return random.random() < 0.35
+        return True
 
     def _has_active_insomnia_state(self) -> bool:
         state = self.data.get("daily_state", {})

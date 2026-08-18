@@ -305,7 +305,9 @@ class ContinuationRoute(ProactiveRoute):
 class RitualRoute(ProactiveRoute):
     key = "ritual"
     label = "日常仪式"
-    source_names = frozenset({"daily_greeting", "meal_care", "birthday_celebration", "birthday_curiosity"})
+    source_names = frozenset(
+        {"daily_greeting", "meal_care", "birthday_celebration", "birthday_curiosity", "special_day_ritual"}
+    )
     reason_names = frozenset(
         {
             "morning_greeting",
@@ -318,6 +320,7 @@ class RitualRoute(ProactiveRoute):
             "birthday_makeup",
             "birthday_curiosity",
             "important_date_share",
+            "special_day_greeting",
         }
     )
     active_window_seconds = 70 * 60.0

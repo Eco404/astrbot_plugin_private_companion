@@ -3066,6 +3066,8 @@ class ProactiveMixin(UserRestGateMixin):
             ("pending_followup", self._pick_pending_followup_event(user, now)),
             ("open_loop", self._pick_open_loop_followup_event(user, now)),
             ("birthday_celebration", self._pick_birthday_celebration_event(user, now)),
+            ("special_day_ritual", self._pick_special_day_greeting_event(user, now=now)),
+            ("night_care", self._pick_insomnia_night_event(user, now=now)),
             ("meal_care", self._pick_meal_care_event(user, now=now)),
             ("daily_greeting", self._pick_daily_greeting_event(user, now)),
             ("mobile_location", self._pick_mobile_location_arrival_event(user, now=now)),
@@ -3411,8 +3413,6 @@ class ProactiveMixin(UserRestGateMixin):
         *,
         now: float | None = None,
     ) -> bool:
-        if not self.enable_daily_greetings and not bool(getattr(self, "enable_meal_care_proactive", True)):
-            return False
         if str(user.get("planned_proactive_source") or "") == "timer":
             return False
         current_next = _safe_float(user.get("next_proactive_at"), 0)
@@ -3424,14 +3424,28 @@ class ProactiveMixin(UserRestGateMixin):
             events.append(self._pick_daily_greeting_event(user, now))
         if bool(getattr(self, "enable_meal_care_proactive", True)):
             events.append(self._pick_meal_care_event(user, now=now))
+        events.extend(
+            (
+                self._pick_birthday_celebration_event(user, now),
+                self._pick_special_day_greeting_event(user, now=now),
+                self._pick_insomnia_night_event(user, now=now),
+            )
+        )
         valid_events = [item for item in events if isinstance(item, dict)]
         if not valid_events:
             return False
         event = min(valid_events, key=lambda item: self._timestamp_from_story_event(item, str(item.get("reason") or "check_in")))
         reason = str(event.get("reason") or "")
-        if not (self._is_sticky_greeting_reason(reason) or bool(event.get("_daily_meal_care"))):
+        priority_reasons = {"birthday_celebration", "special_day_greeting", "insomnia_night"}
+        if not (
+            self._is_sticky_greeting_reason(reason)
+            or bool(event.get("_daily_meal_care"))
+            or reason in priority_reasons
+        ):
             return False
-        source = "daily_greeting" if event.get("_daily_greeting") else "meal_care"
+        source = _single_line(event.get("_proactive_source"), 40)
+        if not source:
+            source = "daily_greeting" if event.get("_daily_greeting") else "meal_care"
         prepared, _invalid_reason = self._prepare_proactive_candidate_window(
             event,
             reason=reason,

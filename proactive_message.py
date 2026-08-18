@@ -3312,7 +3312,15 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         elif reason == "birthday_afterglow":
             lines.append("这是用户在生日祝福后已经回应过才会出现的余温收尾：只轻轻接住一个开心瞬间，不重复说生日快乐、不追问安排，也不延长成连续庆祝。")
         elif reason == "birthday_celebration":
-            lines.append("今天是用户明确允许记住的生日，是一年一次的轻量仪式。先送出真诚、具体、低压力的祝福；不要提系统、记录、年龄、出生年份或精确日期，不承诺永远陪伴，也不要求回复或追问庆祝安排。若带图，正文只自然递出，不描述制作过程。")
+            lines.append("今天是用户明确允许记住的生日，是一年一次的轻量仪式。表达必须服从当前人格：可以热闹、安静、含蓄或只留一句，不要强行煽情。先送出真诚、具体、低压力的祝福；不要提系统、记录、年龄、出生年份或精确日期，不承诺永远陪伴，也不要求回复或追问庆祝安排。若带图，正文只自然递出，不描述制作过程。")
+        elif reason == "special_day_greeting":
+            special_context = user.get("planned_special_day_context") if isinstance(user.get("planned_special_day_context"), dict) else {}
+            title = _single_line(special_context.get("observance_title"), 32) or "这个特别的日子"
+            timing = _single_line(special_context.get("delivery_timing"), 24)
+            if timing == "midnight":
+                lines.append(f"这是{title}零点后的第一句问候：先看人格是否喜欢仪式感；若不偏节日表达，就用平常口吻轻轻带过，不要硬写浪漫。只围绕一个具体情绪或祝愿自然说一句；不要写成节日科普、营销文案、固定祝福模板，也不要要求用户回复或追问安排。")
+            else:
+                lines.append(f"这是错过零点后的{title}白天补上：自然承认今天这个特别日子即可，不解释系统延迟，不使用僵硬的节日贺词，不把普通寒暄扩成盘问。")
         elif reason == "birthday_curiosity":
             lines.append("这是一次低频的资料好奇：只自然地问生日的月日，可顺带问公历还是农历；明确说不想回答也完全没关系。不要索要出生年份、年龄、证件信息，也不要假装已经准备了生日惊喜。")
         elif reason == "web_exploration_share":
@@ -16726,7 +16734,10 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         reason = planned_reason if planned_reason and self._is_reason_allowed_now(planned_reason, user) else random.choice(reasons)
 
         if reason == "insomnia_night":
-            return reason, "夜间清醒时的一句短开场；不报时、不追问、不拉长。"
+            return reason, "夜间清醒时的一句短开场；根据人格决定是安静自述、轻轻靠近还是不打扰地留一句，不报时、不追问、不拉长。"
+
+        if reason == "special_day_greeting":
+            return reason, "特别日子的低压力关系问候；只留一个真诚而具体的祝愿，不堆砌节日话术。"
 
         if reason == "quiet_care":
             return reason, "低能量或状态余波下的轻量问候；只给一个具体切口，不写成关心清单。"

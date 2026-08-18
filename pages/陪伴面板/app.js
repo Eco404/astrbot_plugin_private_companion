@@ -246,6 +246,15 @@ const hiddenCompatibilityConfigKeys = new Set([
   "weather_alert_api_key",
 ]);
 
+// Keep legacy QQ Zone image settings editable even when the optional image
+// extension is not installed. Runtime generation already falls back to text;
+// hiding the switch would leave older users unable to disable stale settings.
+const legacyConfigGraceKeys = new Set([
+  "enable_qzone_generated_image_publish",
+  "qzone_generated_image_probability",
+  "qzone_publish_image_style_prompt",
+]);
+
 const featureSwitchNotes = {
   enable_skill_growth_simulation: "自定义技能不在这里填写，请到学习页的“技能成长”区域新增、隐藏、冻结成长或合并别名。",
   enable_food_menu_recommendation: "候选菜单在本功能详情页管理；观察页不再展示这块内容。",
@@ -938,7 +947,7 @@ function unavailablePluginIntegrationOwner(key) {
 
 function visibleConfigKey(key) {
   if (hiddenCompatibilityConfigKeys.has(key)) return false;
-  if (unavailablePluginIntegrationOwner(key)) return false;
+  if (unavailablePluginIntegrationOwner(key) && !legacyConfigGraceKeys.has(key)) return false;
   return isPrivateReadingAvailable() || !privateReadingConfigKeys.has(key);
 }
 
@@ -26854,7 +26863,12 @@ function featureDependencyLines(key) {
   if (["enable_bilibili_boredom_watch"].includes(key)) dependencies.push(["依赖", "B 站能力可用"]);
   if (["enable_web_exploration", "enable_web_exploration_boredom_search"].includes(key)) dependencies.push(["依赖", "AstrBot 网页搜索"]);
   if (["enable_qzone_life_publish", "enable_qzone_comment_inbox"].includes(key)) dependencies.push(["依赖", "QQ 空间动态层"]);
-  if (key === "enable_qzone_generated_image_publish") dependencies.push(["依赖", "QQ 空间动态层 + 主动拍照/生图"]);
+  if (key === "enable_qzone_generated_image_publish") {
+    dependencies.push(["依赖", "QQ 空间动态层 + 主动拍照/生图"]);
+    if (!anyImageGeneratorInstalled()) {
+      dependencies.push(["当前状态", "未检测到生图扩展；仍可修改此配置，运行时会自动跳过配图并发布纯文字"]);
+    }
+  }
   if (key === "enable_qzone_emotional_vent_publish") dependencies.push(["依赖", "情绪模拟 + QQ 空间动态层"]);
   if (key === "enable_photo_text_action") dependencies.push(["依赖", "ComfyUI、SDGen 或在线图片 API"]);
   if (key === "enable_tts_enhancement") dependencies.push(["依赖", "当前会话 TTS provider"]);

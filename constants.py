@@ -291,6 +291,7 @@ _REASON_TEXT = {
     "diary_share": "跟{name}说说今天的小事",
     "state_share": "说说当前状态",
     "important_date_share": "提醒{name}重要的日子",
+    "special_day_greeting": "在特别的日子里第一时间问候{name}",
     "memo_note_reminder": "提醒{name}一张到期便签",
     "birthday_curiosity": "好奇地问问{name}的生日",
     "birthday_celebration": "给{name}送上一份生日小惊喜",

@@ -137,6 +137,28 @@ class _Event:
 
 
 class QzoneLifePublishPlanTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_image_setting_without_generator_falls_back_to_text(self) -> None:
+        class LegacyImageHarness(QzoneMixin):
+            enable_qzone_integration = True
+            enable_qzone_generated_image_publish = True
+            qzone_generated_image_probability = 1.0
+
+            def __init__(self) -> None:
+                self.data = {"qzone_integration": {}}
+
+        harness = LegacyImageHarness()
+        images = await harness._maybe_generate_qzone_publish_image(
+            post_text="今天有点累，但还是想记录一下。",
+            reason="life_publish",
+            state=harness.data["qzone_integration"],
+            force=True,
+        )
+        self.assertEqual(images, [])
+        self.assertEqual(
+            harness.data["qzone_integration"].get("last_life_publish_generated_image_status"),
+            "skipped:no_generator",
+        )
+
     def test_nested_failure_code_wins_over_empty_normalized_code(self) -> None:
         self.assertEqual(_PlanHarness._qzone_response_code({"code": None, "_raw_code": -3000}), -3000)
         self.assertEqual(_PlanHarness._qzone_response_code({"code": "", "ret": -1}), -1)

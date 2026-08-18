@@ -47,6 +47,25 @@ class ImageModelConfigUiTests(unittest.TestCase):
         self.assertIn("if (!realityCompanionInstalled())", self.script)
         self.assertIn("if (!imageCompanionInstalled())", self.script)
 
+    def test_legacy_qzone_image_settings_remain_editable_without_image_extension(self) -> None:
+        self.assertIn("const legacyConfigGraceKeys = new Set([", self.script)
+        for key in (
+            "enable_qzone_generated_image_publish",
+            "qzone_generated_image_probability",
+            "qzone_publish_image_style_prompt",
+        ):
+            self.assertIn(f'"{key}"', self.script)
+        self.assertIn(
+            "if (unavailablePluginIntegrationOwner(key) && !legacyConfigGraceKeys.has(key)) return false;",
+            self.script,
+        )
+        self.assertIn(
+            "未检测到生图扩展；仍可修改此配置，运行时会自动跳过配图并发布纯文字",
+            self.script,
+        )
+        companion_script = (ROOT / "pages" / "companion-panel" / "app.js").read_text(encoding="utf-8")
+        self.assertEqual(self.script, companion_script)
+
     def test_provider_category_switch_uses_one_delegated_click(self) -> None:
         toolbar_binding = self.provider_tree.split("function bindProviderToolbar", 1)[1]
         self.assertIn('document.querySelector(".provider-mode-switch")', toolbar_binding)

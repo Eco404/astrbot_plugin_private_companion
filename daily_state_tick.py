@@ -1795,6 +1795,30 @@ class DailyStateTickMixin:
                     birthday_event["afterglow_year"] = birthday_year
                     birthday_event["afterglow_at"] = current["last_sent"]
                 current["birthday_event"] = birthday_event
+            if reason == "special_day_greeting":
+                special_context = (
+                    current.get("planned_special_day_context")
+                    if isinstance(current.get("planned_special_day_context"), dict)
+                    else {}
+                )
+                receipt_key = _single_line(special_context.get("receipt_key"), 80)
+                if receipt_key:
+                    receipts = current.get("special_day_greeting_receipts")
+                    if not isinstance(receipts, dict):
+                        receipts = {}
+                        current["special_day_greeting_receipts"] = receipts
+                    receipts[receipt_key] = current["last_sent"]
+                    # Keep migrations and long-lived profiles bounded.
+                    if len(receipts) > 24:
+                        for old_key, _old_at in sorted(receipts.items(), key=lambda item: _safe_float(item[1], 0))[:-24]:
+                            receipts.pop(old_key, None)
+                current["planned_special_day_context"] = {}
+            if reason == "insomnia_night":
+                context = current.get("insomnia_night_context") if isinstance(current.get("insomnia_night_context"), dict) else {}
+                current["insomnia_night_sent_key"] = _single_line(
+                    context.get("night_key"),
+                ) or self._insomnia_night_key(current["last_sent"])
+                current["insomnia_night_context"] = {}
             current["last_proactive_action"] = effective_action_for_send or planned_action_for_send or "message"
             current["last_proactive_behavior_summary"] = action_summary
             current["last_proactive_motive"] = planned_motive_for_send
