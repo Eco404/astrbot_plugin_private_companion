@@ -907,7 +907,7 @@ class DailyStateMixin(DailyStateTickMixin):
             for meal_entry in meal_entries:
                 await self._memory_companion_record_self_meal(meal_entry)
             if meal_entries:
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"self_meal_log"})
             await self._apply_detail_presence_status(segment, detail)
         return last_detail
 
@@ -3361,13 +3361,13 @@ class DailyStateMixin(DailyStateTickMixin):
                     return state
                 async with self._data_lock:
                     before = json.dumps(self.data.get("daily_state", {}), ensure_ascii=False, sort_keys=True, default=str)
-                    self._cleanup_expired_conditions()
+                    deleted_sections = self._cleanup_expired_conditions()
                     self._ensure_time_based_hunger_condition()
                     state = self._compose_state_from_conditions(weather)
                     after = json.dumps(state, ensure_ascii=False, sort_keys=True, default=str)
-                    if before != after:
+                    if before != after or deleted_sections:
                         self.data["daily_state"] = state
-                        self._save_data_sync()
+                        self._save_data_sync(deleted_sections=deleted_sections)
                     return state
             cached_weather = self.data.get("daily_weather", {})
             weather = cached_weather if isinstance(cached_weather, dict) and cached_weather.get("date") == today else {
@@ -3398,11 +3398,11 @@ class DailyStateMixin(DailyStateTickMixin):
 
             needs_generation = force or self.data.get("state_generated_day") != today
             if not needs_generation:
-                self._cleanup_expired_conditions()
+                deleted_sections = self._cleanup_expired_conditions()
                 self._ensure_time_based_hunger_condition()
                 state = self._compose_state_from_conditions(weather)
                 self.data["daily_state"] = state
-                self._save_data_sync()
+                self._save_data_sync(deleted_sections=deleted_sections)
                 return state
 
         generation_day = _today_key()
@@ -3413,10 +3413,11 @@ class DailyStateMixin(DailyStateTickMixin):
         )
 
         async with self._data_lock:
+            deleted_sections: set[str] = set()
             if not force and self.data.get("state_generated_day") == generation_day:
-                self._cleanup_expired_conditions()
+                deleted_sections = self._cleanup_expired_conditions()
             else:
-                self._cleanup_expired_conditions()
+                deleted_sections = self._cleanup_expired_conditions()
                 if force:
                     self.data["state_conditions"] = []
                 dream_pick = deferred_updates.get("dream_pick")
@@ -3442,7 +3443,7 @@ class DailyStateMixin(DailyStateTickMixin):
             self._ensure_time_based_hunger_condition()
             state = self._compose_state_from_conditions(weather)
             self.data["daily_state"] = state
-            self._save_data_sync()
+            self._save_data_sync(deleted_sections=deleted_sections)
             return state
 
     async def _generate_state_conditions(
@@ -4783,11 +4784,17 @@ class DailyStateMixin(DailyStateTickMixin):
             state["last_observation"] = self._environment_weather_observation(current)
             state["initialized"] = True
             if not initialized:
-                self._schedule_data_save(delay=0.5)
+                self._schedule_data_save(
+                    sections={"environment_change_awareness", "daily_weather"},
+                    delay=0.5,
+                )
                 return
             change = self._detect_environment_weather_change(previous, current)
             if not change:
-                self._schedule_data_save(delay=0.5)
+                self._schedule_data_save(
+                    sections={"environment_change_awareness", "daily_weather"},
+                    delay=0.5,
+                )
                 return
             fingerprint = _single_line(change.get("fingerprint"), 160)
             cooldown_minutes = max(
@@ -4810,7 +4817,10 @@ class DailyStateMixin(DailyStateTickMixin):
             # 形同虚设（实测 30-40 分钟就 offer 一条）。score>=90 的极端变化保留逃生口。
             too_soon = now - last_prompted_at < cooldown_minutes * 60 and _safe_int(change.get("score"), 0) < 90
             if recently_repeated or too_soon:
-                self._schedule_data_save(delay=0.5)
+                self._schedule_data_save(
+                    sections={"environment_change_awareness", "daily_weather"},
+                    delay=0.5,
+                )
                 return
             offered = 0
             async with self._data_lock:
@@ -9081,12 +9091,13 @@ class DailyStateMixin(DailyStateTickMixin):
         )
         return kept
 
-    def _cleanup_expired_conditions(self):
+    def _cleanup_expired_conditions(self) -> set[str]:
         now = _now_ts()
+        had_body_cycle_state = "body_cycle_state" in self.data
         conditions = self.data.setdefault("state_conditions", [])
         if not isinstance(conditions, list):
             self.data["state_conditions"] = []
-            return
+            return set()
         profile = self._persona_state_profile()
         if not profile.get("allow_cycle", False):
             before_count = len(conditions)
@@ -9129,6 +9140,9 @@ class DailyStateMixin(DailyStateTickMixin):
         active = self._reconcile_advanced_cycle_condition(active, now)
         active = self._prune_active_hunger_conditions(active, now)
         self.data["state_conditions"] = active
+        return {
+            "body_cycle_state"
+        } if had_body_cycle_state and "body_cycle_state" not in self.data else set()
 
     def _prune_active_hunger_conditions(self, conditions: list[dict[str, Any]], now: float) -> list[dict[str, Any]]:
         hunger_items = [

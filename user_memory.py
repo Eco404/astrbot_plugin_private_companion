@@ -3859,6 +3859,7 @@ class UserMemoryMixin:
         feedback_field = "positive_feedback" if signal == "positive" else "negative_feedback"
         updated = 0
         demoted = 0
+        updated_sections: set[str] = set()
         processed: set[tuple[str, str, str]] = set()
         for pending_rule in pending.get("rules", []) if isinstance(pending.get("rules"), list) else []:
             if not isinstance(pending_rule, dict):
@@ -3909,6 +3910,7 @@ class UserMemoryMixin:
                     source_rule["last_feedback"] = signal
                     source_rule["last_feedback_ts"] = now
                     updated += 1
+                    updated_sections.add(collection_key)
                     if (
                         signal == "negative"
                         and _safe_int(source_rule.get("negative_feedback"), 0, 0) >= 2
@@ -3962,7 +3964,12 @@ class UserMemoryMixin:
                 )
         if updated:
             self._refresh_expression_voice_profile()
-        return {"signal": signal, "updated_rules": updated, "demoted_rules": demoted}
+        return {
+            "signal": signal,
+            "updated_rules": updated,
+            "demoted_rules": demoted,
+            "updated_sections": sorted(updated_sections),
+        }
 
     def _format_companion_memory_for_prompt(self, user: dict[str, Any], *, style_only: bool = False) -> str:
         memory = user.get("companion_memory")
@@ -6521,7 +6528,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
             state["confession_until"] = ts + 30 * 60
             state["last_reason"] = _single_line(intent.get("boundary_feedback_reason") or "表达喜欢或想念", 120)
             state["last_event_id"] = explicit_id
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"users"})
             boundary_logger = getattr(self, "_log_relationship_boundary_event", None)
             if callable(boundary_logger):
                 boundary_logger(
@@ -6575,7 +6582,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
                 stage_refresher = getattr(self, "_refresh_relationship_violation_stage", None)
                 if callable(stage_refresher):
                     stage_refresher(state, now=ts)
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"users"})
                 boundary_logger = getattr(self, "_log_relationship_boundary_event", None)
                 if callable(boundary_logger):
                     boundary_logger(
@@ -6707,7 +6714,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         side_effects = getattr(self, "_record_relationship_boundary_side_effects", None)
         if callable(side_effects) and (applied_penalty or clawed_back):
             side_effects(user, intent, state, now=ts)
-        self._schedule_data_save()
+        self._schedule_data_save(sections={"users", "boundary_feedback_reports"})
         boundary_logger = getattr(self, "_log_relationship_boundary_event", None)
         if callable(boundary_logger):
             boundary_logger(
@@ -7144,7 +7151,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         candidate["excerpt"] = _single_line(candidate.get("excerpt"), max_chars)
         candidate["status"] = "delivered"
         candidate["delivered_at"] = _now_ts()
-        self._schedule_data_save()
+        self._schedule_data_save(sections={"boundary_feedback_reports"})
         text = self._format_relationship_boundary_owner_report(candidate)
         return {
             "success": True,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import Collection
 from contextlib import asynccontextmanager
 import contextvars
 import functools
@@ -1957,7 +1958,7 @@ class PrivateCompanionPlugin(
             actor_id=actor_id,
         )
         if result.get("ok") and result.get("changed") and schedule_save:
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"unified_person"})
         return result
 
     def _persona_profile_path(self, persona_id: str) -> Path:
@@ -2175,17 +2176,28 @@ class PrivateCompanionPlugin(
                         sync_targets()
                 try:
                     if multi_enabled:
-                        self._save_persona_profile_sync(pid, self.data)
-                        dirty = getattr(self, "_persona_data_save_dirty", None)
-                        if isinstance(dirty, set):
-                            dirty.discard(pid)
+                        self._write_persona_data_snapshot_sync(
+                            pid,
+                            deepcopy(self.data),
+                        )
+                        clear_dirty = getattr(self, "_clear_scheduled_data_save_dirty", None)
+                        if callable(clear_dirty):
+                            clear_dirty(persona_id=pid)
+                        else:
+                            dirty = getattr(self, "_persona_data_save_dirty", None)
+                            if isinstance(dirty, set):
+                                dirty.discard(pid)
                     else:
                         self._write_data_snapshot_sync(deepcopy(self.data))
-                        self._data_save_dirty = False
+                        clear_dirty = getattr(self, "_clear_scheduled_data_save_dirty", None)
+                        if callable(clear_dirty):
+                            clear_dirty()
+                        else:
+                            self._data_save_dirty = False
                 except Exception:
                     self.data = previous
                     if multi_enabled:
-                        self._save_persona_profile_sync(pid, previous)
+                        self._write_persona_data_snapshot_sync(pid, previous)
                     else:
                         self._write_data_snapshot_sync(previous)
                     raise
@@ -4044,7 +4056,7 @@ class PrivateCompanionPlugin(
         if result.get("ok") and result.get("changed"):
             saver = getattr(self, "_schedule_data_save", None)
             if callable(saver):
-                saver()
+                saver(sections={"unified_person"})
         return result
 
     def resolve_unified_person_for_event(self, event: Any | None = None) -> dict[str, Any]:
@@ -5006,9 +5018,13 @@ class PrivateCompanionPlugin(
             }
         async with self._data_lock:
             self._req041_group_reset_sagas_locked().pop(clean_operation, None)
+            deleted_sections: set[str] = set()
             if not self.data.get("_req041_group_reset_sagas"):
                 self.data.pop("_req041_group_reset_sagas", None)
-            self._req041_persist_archive_saga_locked()
+                deleted_sections.add("_req041_group_reset_sagas")
+            self._req041_persist_archive_saga_locked(
+                deleted_sections=deleted_sections,
+            )
         return {
             "ok": True, "state": "completed", "code": "group_reset_completed",
             "operation_id": clean_operation, "config_saved": True,
@@ -5082,13 +5098,17 @@ class PrivateCompanionPlugin(
             "error_codes": sorted(set(errors))[:16],
         }
 
-    def _req041_persist_archive_saga_locked(self) -> None:
+    def _req041_persist_archive_saga_locked(
+        self,
+        *,
+        deleted_sections: Collection[str] = (),
+    ) -> None:
         """Durably persist a destructive saga before any cross-store write."""
         active_persona = str(self._active_persona_scope() or "")
         if bool(getattr(self, "enable_multi_persona_mode", False)) and active_persona:
             self._write_persona_data_snapshot_sync(active_persona, deepcopy(self.data))
             return
-        self._save_data_now_sync()
+        self._save_data_now_sync(deleted_sections=deleted_sections)
 
     async def archive_unified_person(
         self,
@@ -5684,7 +5704,7 @@ class PrivateCompanionPlugin(
             )
             candidate["legacy_result_code"] = str(result.get("code") or "")
             if result.get("changed"):
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"users"})
 
     @filter.after_message_sent(priority=-105000)
     @_multi_persona_event_context
@@ -6264,7 +6284,10 @@ class PrivateCompanionPlugin(
             if changed:
                 needs_startup_save = True
         if needs_startup_save:
-            self._schedule_data_save(delay=0.5)
+            # Startup maintenance can reconcile several legacy sections; retain
+            # the explicit full-save compatibility path until its mutation set
+            # is proven stable across all migration and recovery branches.
+            self._schedule_data_save(sections=None, delay=0.5)
         self._create_startup_background_task(
             "req041_automatic_migration",
             self._req041_initialize_automatic_migration,
@@ -6635,11 +6658,19 @@ class PrivateCompanionPlugin(
         try:
             await asyncio.wait_for(self._flush_scheduled_data_save(), timeout=3.0)
         except asyncio.TimeoutError:
-            logger.warning("[PrivateCompanion] 等待后台合并保存超时，将改用最终快照保存")
+            logger.warning(
+                "[PrivateCompanion] Scheduled persistence did not drain before "
+                "shutdown; final persistence will continue in the background"
+            )
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            logger.debug("[PrivateCompanion] 等待后台合并保存时收到异常: %s", _single_line(exc, 160))
+            logger.debug(
+                "[PrivateCompanion] Waiting for scheduled persistence during "
+                "shutdown failed: %s",
+                _single_line(exc, 160),
+            )
+        self._termination_flush_already_attempted = True
         close_image_download_session = getattr(self, "_close_external_image_download_session", None)
         if callable(close_image_download_session):
             try:
@@ -6648,29 +6679,102 @@ class PrivateCompanionPlugin(
                 logger.warning("[PrivateCompanion] 终止时关闭在线图片下载会话超时")
             except Exception as exc:
                 logger.debug("[PrivateCompanion] 终止时关闭在线图片下载会话失败: %s", _single_line(exc, 160))
+        final_save_task = asyncio.create_task(self._save_data_on_terminate())
+        self._termination_save_task = final_save_task
+
+        def observe_final_save(task: asyncio.Task) -> None:
+            if getattr(self, "_termination_save_task", None) is task:
+                self._termination_save_task = None
+            if task.cancelled():
+                return
+            try:
+                error = task.exception()
+            except (asyncio.CancelledError, asyncio.InvalidStateError):
+                return
+            if error is not None:
+                logger.warning(
+                    "[PrivateCompanion] Final shutdown persistence failed: %s",
+                    _single_line(error, 160),
+                )
+
+        final_save_task.add_done_callback(observe_final_save)
         try:
-            await asyncio.wait_for(self._save_data_on_terminate(), timeout=3.0)
+            await asyncio.wait_for(asyncio.shield(final_save_task), timeout=3.0)
         except asyncio.TimeoutError:
-            logger.warning("[PrivateCompanion] 终止时保存数据超时,已跳过最终保存以避免卡死卸载")
+            logger.warning(
+                "[PrivateCompanion] Final shutdown persistence timed out; the "
+                "shielded task will continue in the background"
+            )
         if _private_companion_plugin is self:
             _private_companion_plugin = None
 
     async def _save_data_on_terminate(self) -> None:
-        await self._flush_scheduled_data_save()
-        async with self._data_lock:
-            snapshot = deepcopy(getattr(self, "_data_default", self.data))
-            persona_snapshots = {
-                str(persona_id): deepcopy(profile)
-                for persona_id, profile in (getattr(self, "_persona_data_profiles", {}) or {}).items()
-                if isinstance(profile, dict)
-            }
-        await asyncio.to_thread(self._write_data_snapshot_sync, snapshot)
+        if not bool(getattr(self, "_termination_flush_already_attempted", False)):
+            await self._flush_scheduled_data_save()
+
+        manager = getattr(self, "store_manager", None)
+        manager_backend = str(getattr(manager, "backend_name", "") or "").lower()
+        sqlite_incremental = bool(
+            manager_backend == "sqlite"
+            and callable(getattr(manager, "save_sections", None))
+        )
+        if sqlite_incremental:
+            await self._flush_default_data_save_on_terminate()
+        else:
+            task = getattr(self, "_data_save_task", None)
+            if (
+                isinstance(task, asyncio.Task)
+                and not task.done()
+                and task is not asyncio.current_task()
+            ):
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "[PrivateCompanion] Waiting for the default JSON writer "
+                        "during shutdown failed: %s",
+                        _single_line(exc, 160),
+                    )
+            async with self._data_lock:
+                snapshot = deepcopy(getattr(self, "_data_default", self.data))
+            await asyncio.to_thread(self._write_data_snapshot_sync, snapshot)
+
         if bool(getattr(self, "enable_multi_persona_mode", False)):
-            for persona_id, profile in persona_snapshots.items():
+            profiles = getattr(self, "_persona_data_profiles", {}) or {}
+            persona_ids = (
+                [
+                    str(persona_id)
+                    for persona_id, profile in profiles.items()
+                    if isinstance(profile, dict)
+                ]
+                if isinstance(profiles, dict)
+                else []
+            )
+            for persona_id in persona_ids:
+                task = getattr(self, "_persona_data_save_tasks", {}).get(persona_id)
+                if isinstance(task, asyncio.Task) and not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as exc:
+                        logger.debug(
+                            "[PrivateCompanion] Waiting for a persona writer during "
+                            "shutdown failed: persona=%s error=%s",
+                            persona_id,
+                            _single_line(exc, 160),
+                        )
+                async with self._data_lock:
+                    profile = getattr(self, "_persona_data_profiles", {}).get(persona_id)
+                    if not isinstance(profile, dict):
+                        continue
+                    snapshot = deepcopy(profile)
                 await asyncio.to_thread(
                     self._write_persona_data_snapshot_sync,
                     persona_id,
-                    profile,
+                    snapshot,
                 )
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=11000)
@@ -13875,7 +13979,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         max_items = max(1, _safe_int(getattr(self, "rest_backlog_max_messages", 4), 4, 1))
         user["rest_reply_backlog"] = backlog[-max_items:]
         user["rest_reply_backlog_updated_at"] = now
-        self._schedule_data_save()
+        self._schedule_data_save(sections={"users"})
         logger.info(
             "[PrivateCompanion] 已记录休息中未回复私聊: user=%s count=%s reason=%s text=%s",
             user_id,
@@ -13895,7 +13999,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if not items:
             user["rest_reply_backlog"] = []
             user["rest_reply_backlog_updated_at"] = 0
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"users"})
             return ""
         lines: list[str] = []
         for idx, item in enumerate(items, 1):
@@ -13911,7 +14015,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             lines.append(f"{idx}. {when}｜{text}")
         user["rest_reply_backlog"] = []
         user["rest_reply_backlog_updated_at"] = 0
-        self._schedule_data_save()
+        self._schedule_data_save(sections={"users"})
         if not lines:
             return ""
         return "休息时有几条私聊没来得及回，醒来后补看到：\n" + "\n".join(lines)
@@ -14173,7 +14277,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             _single_line(inbound, 120),
         )
         try:
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"passive_no_reply_records"})
         except Exception:
             pass
         self._schedule_reply_interception_forward(
@@ -14393,7 +14497,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if not self._proactive_only_unlock_store():
             return
         self.data["proactive_only_temp_unlocks"] = []
-        self._schedule_data_save()
+        self._schedule_data_save(sections={"proactive_only_temp_unlocks"})
 
     def _format_proactive_only_temp_unlocks(self) -> str:
         unlocks = self._proactive_only_unlock_store()
@@ -14463,7 +14567,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 logger.info("[PrivateCompanion] 主动专用模式忽略 poke 回流事件: user=%s", user_id)
                 return
             if self._is_duplicate_inbound_message(event, scope=f"private:{user_id}", sender_id=user_id, text=text):
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"inbound_debounce_stats"})
                 return
             self._note_private_user_umo(user_id, user, event.unified_msg_origin)
             self._note_private_display_name_observation(user, user_id, sender_display_name, now=received_ts)
@@ -14520,9 +14624,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             user["ignored_streak"] = 0
             user["friend_unanswered_silenced_since"] = 0
             user["friend_unanswered_silence_note"] = ""
+            meal_care_result: dict[str, Any] = {}
             if self._private_user_role(user, user_id) == "owner" and text:
-                self._handle_meal_care_inbound(user, text, now=received_ts)
-            self._schedule_data_save()
+                meal_care_result = self._handle_meal_care_inbound(user, text, now=received_ts)
+            save_sections = {"users"}
+            if meal_care_result.get("foods"):
+                save_sections.add("food_menu")
+            self._schedule_data_save(sections=save_sections)
         logger.info(
             "[PrivateCompanion] 主动消息专用模式已跳过私聊被动增强: user=%s text=%s",
             user_id,
@@ -16384,7 +16492,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     user=private_user if isinstance(private_user, dict) else None,
                     source="private_command",
                 )
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"users", "unified_person"})
         self._qzone_note_event_bot(event)
         raw_text = str(event.message_str or "")
         normalized_text = raw_text.replace("\u3000", " ").replace("／", "/").strip()
@@ -17121,7 +17229,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             migrator = getattr(self, "_req036_migrate_configured_target_capability", None)
             migrated = bool(migrator(user_id, private_user)) if callable(migrator) else False
             if migrated:
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"users"})
         if auto_profile_created:
             logger.info(
                 "[PrivateCompanion] 已建立最小用户档案: user=%s platform=%s",
@@ -17287,7 +17395,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 event=event,
             )
             if captured:
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"groups"})
         activity_recorder = getattr(self, "_record_c3_inbound_activity", None)
         if callable(activity_recorder):
             activity_recorder(
@@ -17411,7 +17519,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 group_id=group_id,
                 source="group_observation",
             )
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"unified_person"})
         if not self._proactive_only_blocks_passive_event(event, "group_repeat_early"):
             original_repeat_state = deepcopy(repeat_group_snapshot.get("repeat_follow_state", {}))
             original_interject_at = _safe_float(repeat_group_snapshot.get("last_interject_at"), 0)
@@ -17536,7 +17644,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     group_id=group_id,
                     source="group_portrait_query",
                 )
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"users", "unified_person"})
         event.stop_event()
         await self._reply(event, await self._req036_read_group_self_portrait(event))
 

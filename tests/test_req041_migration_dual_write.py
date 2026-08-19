@@ -343,7 +343,7 @@ class MigrationDualWriteTests(unittest.TestCase):
             def _unified_persona_domain():
                 return ""
 
-            def _schedule_data_save(self):
+            def _schedule_data_save(self, *_args, **_kwargs):
                 self.saved = True
 
         host = Host()
@@ -383,7 +383,7 @@ class MigrationDualWriteTests(unittest.TestCase):
             def _unified_persona_domain():
                 return ""
 
-            def _schedule_data_save(self):
+            def _schedule_data_save(self, *_args, **_kwargs):
                 self.saved = True
 
         host = Host()

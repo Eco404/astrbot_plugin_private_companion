@@ -84,7 +84,7 @@ class _Harness(InteractionUtilsMixin, TtsEnhancementMixin):
         return {"state": "profile_exact"}
 
     @staticmethod
-    def _schedule_data_save() -> None:
+    def _schedule_data_save(*_args, **_kwargs) -> None:
         return None
 
     @staticmethod

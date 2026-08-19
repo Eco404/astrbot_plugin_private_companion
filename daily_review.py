@@ -299,7 +299,7 @@ class DailyReviewMixin:
         audit[:] = [entry for entry in audit if isinstance(entry, dict) and _safe_float(entry.get("ts"), 0.0) >= cutoff][-160:]
         scheduler = getattr(self, "_schedule_data_save", None)
         if callable(scheduler):
-            scheduler()
+            scheduler(sections={"daily_review_case_audit"})
         return str(item["id"])
 
     def _update_daily_review_case(self, case_id: str, **changes: Any) -> None:
@@ -327,7 +327,7 @@ class DailyReviewMixin:
             item["updated_ts"] = time.time()
             scheduler = getattr(self, "_schedule_data_save", None)
             if callable(scheduler):
-                scheduler()
+                scheduler(sections={"daily_review_case_audit"})
             return
 
     def _record_daily_review_outbound_case(self, event: Any, chain: list[Any]) -> str:

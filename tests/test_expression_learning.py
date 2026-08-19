@@ -677,11 +677,65 @@ class ExpressionLearningTests(unittest.TestCase):
             )
             result = self.harness._apply_expression_rule_feedback(recipient, complaint, channel="private")
             self.assertEqual("negative", result["signal"])
+            self.assertEqual(["users"], result["updated_sections"])
 
         profile = source["expression_profile"]
         self.assertEqual([], profile["learned_rules"])
         self.assertEqual("needs_review", profile["pending_rules"][0]["review_status"])
         self.assertEqual(2, profile["pending_rules"][0]["negative_feedback"])
+
+    def test_feedback_reports_group_source_section(self):
+        now = time.time()
+        group = {
+            "group_id": "group-1",
+            "expression_profile": {
+                "learned_rules": [
+                    {
+                        "id": "group-rule",
+                        "kind": "style",
+                        "situation": "casual acknowledgement",
+                        "pattern": "sure, ____",
+                        "instruction": "acknowledge before continuing",
+                        "evidence_count": 2,
+                        "last_seen_ts": now,
+                    }
+                ]
+            },
+        }
+        recipient = {
+            "user_id": "friend-1",
+            "relationship_role": "friend",
+            "expression_profile": {
+                "pending_semantic_feedback": {
+                    "ts": now,
+                    "channel": "private",
+                    "rules": [
+                        {
+                            "source_refs": [
+                                {
+                                    "source_kind": "group",
+                                    "source_id": "group-1",
+                                    "rule_id": "group-rule",
+                                }
+                            ]
+                        }
+                    ],
+                }
+            },
+        }
+        self.harness.data = {
+            "users": {"friend-1": recipient},
+            "groups": {"group-1": group},
+        }
+
+        result = self.harness._apply_expression_rule_feedback(
+            recipient,
+            "别这么说",
+            channel="private",
+        )
+
+        self.assertEqual("negative", result["signal"])
+        self.assertEqual(["groups"], result["updated_sections"])
 
     def test_page_summary_exposes_companion_applicability_and_feedback(self):
         user = {

@@ -133,7 +133,7 @@ class CommandHandlersMixin:
             data["weather_alert_awareness"] = {}
             saver = getattr(self, "_save_data_sync", None)
             if callable(saver):
-                saver()
+                saver(sections=None, deleted_sections={"daily_weather"})
 
         data_lock = getattr(self, "_data_lock", None)
         if isinstance(data_lock, asyncio.Lock):
@@ -2235,7 +2235,7 @@ class CommandHandlersMixin:
         }
         self._companion_manual_recent_context_store()
         try:
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"manual_diagnosis_recent_context"})
         except Exception:
             try:
                 self._save_data_sync()

@@ -236,7 +236,7 @@ class _Host:
     def _active_persona_scope() -> str:
         return ""
 
-    def _save_data_now_sync(self) -> None:
+    def _save_data_now_sync(self, **_kwargs: Any) -> None:
         self.persisted += 1
 
 

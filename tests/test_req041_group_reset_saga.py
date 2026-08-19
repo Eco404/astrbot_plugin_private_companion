@@ -157,7 +157,7 @@ class _Host:
     def _normalize_group_identity_id(value: Any) -> str:
         return str(value or "").strip()
 
-    def _save_data_now_sync(self) -> None:
+    def _save_data_now_sync(self, **_kwargs: Any) -> None:
         self.persisted += 1
 
     async def _save_config_if_possible(self) -> bool:

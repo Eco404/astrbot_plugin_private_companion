@@ -610,7 +610,7 @@ class BalanceAwarenessMixin:
                 )
                 schedule_save = getattr(self, "_schedule_data_save", None)
                 if callable(schedule_save):
-                    schedule_save(delay=0.5)
+                    schedule_save(sections={"balance_awareness"}, delay=0.5)
                 if auto_unsupported:
                     logger.warning(
                         "[PrivateCompanion] 当前 Provider 不支持余额查询,已延长探测间隔: "
@@ -673,7 +673,10 @@ class BalanceAwarenessMixin:
                 state["last_recovered_at"] = now
             schedule_save = getattr(self, "_schedule_data_save", None)
             if callable(schedule_save):
-                schedule_save(delay=0.5)
+                sections = {"balance_awareness"}
+                if offered > 0:
+                    sections.add("users")
+                schedule_save(sections=sections, delay=0.5)
             if offered:
                 logger.info(
                     "[PrivateCompanion] 余额偏低事件已进入主动候选链: tier=%s targets=%s",

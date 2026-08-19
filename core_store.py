@@ -16,12 +16,14 @@ import os
 import random
 import re
 import shutil
+import sqlite3
 import sys
 import threading
 import time
 import unicodedata
 import uuid
 import zoneinfo
+from collections.abc import Collection
 from copy import deepcopy
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -278,6 +280,48 @@ _PLATFORM_DISPLAY_NAMES = {
 class CoreStoreMixin:
     """配置、数据存储、用户/群组基础访问"""
 
+    @staticmethod
+    def _backup_store_switch_target(backend: str, path: Path) -> Path | None:
+        if not path.exists():
+            return None
+        suffix = f".before-switch-{datetime.now().strftime('%Y%m%dT%H%M%S%f')}-{uuid.uuid4().hex[:12]}.bak"
+        backup_path = path.with_name(path.name + suffix)
+        if backend == "sqlite":
+            source = sqlite3.connect(str(path), timeout=15.0)
+            destination = sqlite3.connect(str(backup_path), timeout=15.0)
+            try:
+                source.backup(destination)
+                destination.commit()
+            finally:
+                destination.close()
+                source.close()
+        else:
+            shutil.copy2(path, backup_path)
+        return backup_path
+
+    @staticmethod
+    def _restore_store_switch_target(
+        backend: str,
+        path: Path,
+        backup_path: Path | None,
+    ) -> None:
+        for sidecar in (Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+            sidecar.unlink(missing_ok=True)
+        if backup_path is None:
+            path.unlink(missing_ok=True)
+            return
+        if backend == "sqlite":
+            source = sqlite3.connect(str(backup_path), timeout=15.0)
+            destination = sqlite3.connect(str(path), timeout=15.0)
+            try:
+                source.backup(destination)
+                destination.commit()
+            finally:
+                destination.close()
+                source.close()
+        else:
+            shutil.copy2(backup_path, path)
+
     def _rebuild_store_manager(self, *, reload_data: bool = False) -> None:
         backend = str(getattr(self, "storage_backend", "json") or "json").strip().lower() or "json"
         if backend not in {"json", "sqlite"}:
@@ -305,17 +349,104 @@ class CoreStoreMixin:
                     invalid_reason,
                     default_sqlite_path,
                 )
+        previous_effective_path = str(
+            getattr(self, "storage_sqlite_effective_path", "") or ""
+        )
+        previous_manager = getattr(self, "store_manager", None)
+        previous_data = deepcopy(getattr(self, "data", {})) if reload_data else None
+        previous_manager_backend = str(
+            getattr(previous_manager, "backend_name", "") or ""
+        ).lower()
+        previous_manager_sqlite_path = str(
+            getattr(previous_manager, "sqlite_path", "") or ""
+        )
+        previous_configured_backend = str(
+            getattr(
+                self,
+                "_storage_backend_applied",
+                previous_manager_backend or "json",
+            )
+        )
+        if hasattr(self, "_storage_sqlite_path_applied"):
+            previous_configured_sqlite_path = str(
+                getattr(self, "_storage_sqlite_path_applied", "") or ""
+            )
+        else:
+            previous_configured_sqlite_path = (
+                ""
+                if previous_manager_sqlite_path
+                and Path(previous_manager_sqlite_path).resolve()
+                == Path(default_sqlite_path).resolve()
+                else previous_manager_sqlite_path
+            )
+        same_store = bool(
+            reload_data
+            and previous_manager is not None
+            and previous_manager_backend == backend
+            and (
+                backend != "sqlite"
+                or Path(previous_manager_sqlite_path).resolve()
+                == Path(sqlite_path).resolve()
+            )
+        )
+        target_path = Path(sqlite_path if backend == "sqlite" else self.data_file)
+        target_backup: Path | None = None
+        target_write_started = False
+        try:
+            next_manager = StoreManager(
+                backend_name=backend,
+                data_file=self.data_file,
+                sqlite_path=sqlite_path,
+                ensure_defaults=self._ensure_store_defaults,
+                new_store=self._new_store,
+            )
+            if reload_data and not same_store and isinstance(previous_data, dict):
+                # A backend change must carry the current authority forward before
+                # reading the target, otherwise switching away from SQLite falls
+                # back to an obsolete JSON mirror.
+                target_backup = self._backup_store_switch_target(backend, target_path)
+                target_write_started = True
+                with self._data_save_io_lock():
+                    with next_manager._store_lock:
+                        next_manager.backend.save_store(deepcopy(previous_data))
+                    self._advance_data_save_write_generation()
+                loaded = next_manager.backend.load_store()
+                if not isinstance(loaded, dict):
+                    raise RuntimeError("Storage switch target returned a non-object store")
+            elif reload_data:
+                loaded = next_manager.load_initial_store()
+            else:
+                loaded = None
+        except Exception:
+            if target_write_started:
+                try:
+                    self._restore_store_switch_target(
+                        backend,
+                        target_path,
+                        target_backup,
+                    )
+                except Exception as restore_exc:
+                    logger.error(
+                        "[PrivateCompanion] Failed to restore storage switch target: %s",
+                        _single_line(restore_exc, 200),
+                    )
+            if reload_data and previous_manager is not None:
+                self.storage_backend = previous_configured_backend
+                self.storage_sqlite_path = previous_configured_sqlite_path
+                self.storage_sqlite_effective_path = previous_effective_path
+                self.store_manager = previous_manager
+                if isinstance(previous_data, dict):
+                    self.data = previous_data
+            raise
+
         self.storage_backend = backend
         self.storage_sqlite_effective_path = sqlite_path
-        self.store_manager = StoreManager(
-            backend_name=backend,
-            data_file=self.data_file,
-            sqlite_path=sqlite_path,
-            ensure_defaults=self._ensure_store_defaults,
-            new_store=self._new_store,
-        )
-        if reload_data:
-            self.data = self.store_manager.load_initial_store()
+        self._storage_backend_applied = backend
+        self._storage_sqlite_path_applied = configured_sqlite_path
+        self.store_manager = next_manager
+        if reload_data and isinstance(loaded, dict):
+            self.data = loaded
+            self._refresh_data_save_revision_from_manager()
 
     async def _save_config_if_possible(self) -> bool:
         for method_name in ("save_config", "save", "save_conf"):
@@ -930,11 +1061,99 @@ class CoreStoreMixin:
             logger.warning("[PrivateCompanion] 已根据本地书页和删除记录校准夹层书库: changed=%s", recovered)
         return recovered
 
+    def _persist_startup_maintenance_sync(
+        self,
+        manager: Any,
+        before: dict[str, Any],
+        data: dict[str, Any],
+        persisted_tombstones: dict[str, int] | None = None,
+    ) -> None:
+        tombstones = {
+            str(section): int(revision)
+            for section, revision in (persisted_tombstones or {}).items()
+        }
+        for section in tombstones:
+            data.pop(section, None)
+        changed_sections = {
+            str(section)
+            for section, value in data.items()
+            if section not in before or before[section] != value
+        }
+        deleted_sections = {str(section) for section in before if section not in data}
+        bookshelf_sections = {
+            "bookshelf_items",
+            "bookshelf_secret",
+            "bookshelf_store_revision",
+            "jm_cosmos_integration",
+        }
+        bookshelf_tombstones = bookshelf_sections & set(tombstones)
+        if bookshelf_sections & (changed_sections | deleted_sections):
+            changed_sections.difference_update(bookshelf_tombstones)
+            deleted_sections.update(bookshelf_tombstones)
+        if not changed_sections and not deleted_sections:
+            return
+
+        incremental = bool(
+            str(getattr(manager, "backend_name", "") or "").lower() == "sqlite"
+            and callable(getattr(manager, "save_sections", None))
+            and callable(getattr(manager, "next_revision", None))
+        )
+        if not incremental:
+            manager.save_store(data)
+            self._refresh_data_save_revision_from_manager()
+            return
+
+        self._expand_bookshelf_save_sections(
+            data,
+            changed_sections,
+            deleted_sections,
+            tombstones,
+        )
+        revision = manager.next_revision()
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise RuntimeError("SQLite startup maintenance returned an invalid revision")
+        confirmed = manager.save_sections(
+            {
+                section: (revision, deepcopy(data[section]))
+                for section in changed_sections
+            },
+            {section: revision for section in deleted_sections},
+        )
+        expected = changed_sections | deleted_sections
+        unconfirmed = sorted(
+            section
+            for section in expected
+            if int(confirmed.get(section, -1)) < revision
+        )
+        if unconfirmed:
+            raise RuntimeError(
+                "SQLite startup maintenance did not confirm sections: "
+                + ", ".join(unconfirmed)
+            )
+        self._refresh_data_save_revision_from_manager()
+
     def _load_data_sync(self) -> dict[str, Any]:
         manager = getattr(self, "store_manager", None)
         if manager is not None:
             try:
                 data = manager.load_initial_store()
+                manager_backend = str(
+                    getattr(manager, "backend_name", "") or ""
+                ).lower()
+                persisted_bookshelf_tombstones: dict[str, int] = {}
+                deleted_revisions = getattr(manager, "deleted_section_revisions", None)
+                if manager_backend == "sqlite" and callable(deleted_revisions):
+                    persisted_bookshelf_tombstones = dict(
+                        deleted_revisions(
+                            {
+                                "bookshelf_items",
+                                "bookshelf_secret",
+                                "bookshelf_store_revision",
+                                "jm_cosmos_integration",
+                            }
+                        )
+                    )
+                before_maintenance = deepcopy(data)
                 changed = self._sanitize_store_control_tags_inplace(data)
                 repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(data)
                 compacted = self._compact_store_history_inplace(data)
@@ -945,13 +1164,12 @@ class CoreStoreMixin:
                     logger.warning("[PrivateCompanion] 启动读取数据时压缩主动候选重复计数: items=%s", repeat_changed)
                 if compacted:
                     logger.info("[PrivateCompanion] 启动读取数据时压缩历史存储: %s", compacted)
-                if bookshelf_recovered:
-                    manager.save_store(data)
-                    if getattr(self, "storage_backend", "json") == "sqlite":
-                        try:
-                            manager.export_current_to_json(data)
-                        except Exception as exc:
-                            logger.debug("[PrivateCompanion] 夹层恢复后的 JSON 镜像写出失败: %s", _single_line(exc, 160))
+                self._persist_startup_maintenance_sync(
+                    manager,
+                    before_maintenance,
+                    data,
+                    persisted_bookshelf_tombstones,
+                )
                 return data
             except Exception as exc:
                 logger.error(
@@ -985,7 +1203,12 @@ class CoreStoreMixin:
             )
             raise
 
-    def _save_data_sync(self):
+    def _save_data_sync(
+        self,
+        *,
+        sections: Collection[str] | None = None,
+        deleted_sections: Collection[str] = (),
+    ):
         scoped_scheduler = getattr(self, "_req041_schedule_scoped_sync", None)
         if callable(scoped_scheduler):
             scoped_scheduler()
@@ -997,33 +1220,70 @@ class CoreStoreMixin:
                 snapshot = deepcopy(self.data)
                 self._write_persona_data_snapshot_sync(active_persona, snapshot)
                 return
-            self._schedule_data_save(delay=0.35)
+            self._schedule_data_save(
+                sections=sections,
+                deleted_sections=deleted_sections,
+                delay=0.35,
+            )
             return
-        compacted = self._compact_store_history_inplace(self.data)
-        if compacted:
-            logger.info("[PrivateCompanion] 保存前压缩历史存储: %s", compacted)
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            self._save_data_now_sync()
+            self._save_data_now_sync(deleted_sections=deleted_sections)
             return
-        self._schedule_data_save(delay=0.35)
+        self._schedule_data_save(
+            sections=sections,
+            deleted_sections=deleted_sections,
+            delay=0.35,
+        )
 
-    def _save_data_now_sync(self) -> None:
+    def _save_data_now_sync(
+        self,
+        *,
+        deleted_sections: Collection[str] = (),
+    ) -> None:
         changed = self._sanitize_store_control_tags_inplace(self.data)
         repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(self.data)
+        compacted = self._compact_store_history_inplace(self.data)
         if changed:
             self._log_store_control_cleanup("immediate_save", changed)
         if repeat_changed:
             logger.warning("[PrivateCompanion] 保存数据前压缩主动候选重复计数: items=%s", repeat_changed)
+        if compacted:
+            logger.info("[PrivateCompanion] 保存前压缩历史存储: %s", compacted)
         manager = getattr(self, "store_manager", None)
         if manager is not None:
-            manager.save_store(self.data)
-            if getattr(self, "storage_backend", "json") == "sqlite":
-                try:
-                    manager.export_current_to_json(self.data)
-                except Exception as exc:
-                    logger.debug("[PrivateCompanion] SQLite 镜像 JSON 写出失败: %s", _single_line(exc, 160))
+            manager_backend = str(getattr(manager, "backend_name", "") or "").lower()
+            save_sections = getattr(manager, "save_sections", None)
+            if manager_backend == "sqlite" and callable(save_sections):
+                self._ensure_default_save_state()
+                revision = self._next_data_save_revision()
+                deleted = self._save_section_names(deleted_sections) or set()
+                changed_sections = {
+                    str(section): (revision, deepcopy(value))
+                    for section, value in self.data.items()
+                    if str(section) not in deleted
+                }
+                with self._data_save_io_lock():
+                    confirmed = save_sections(
+                        changed_sections,
+                        {section: revision for section in deleted},
+                    )
+                    if any(
+                        int(confirmed.get(section, -1)) < revision
+                        for section in changed_sections
+                    ):
+                        raise RuntimeError(
+                            "SQLite synchronous section save did not confirm all sections"
+                        )
+                    self._refresh_data_save_revision_from_manager()
+                    self._clear_default_data_save_dirty()
+                    self._advance_data_save_write_generation()
+                return
+            with self._data_save_io_lock():
+                manager.save_store(self.data)
+                self._refresh_data_save_revision_from_manager()
+                self._advance_data_save_write_generation()
             return
         if not self.data.get("worldbook_entries") and os.path.exists(self.data_file):
             try:
@@ -1039,21 +1299,24 @@ class CoreStoreMixin:
                         self.data[key] = existing.get(key, self.data.get(key))
             except Exception:
                 pass
-        self._atomic_write_data_file_sync(self.data)
+        with self._data_save_io_lock():
+            self._atomic_write_data_file_sync(self.data)
+            self._advance_data_save_write_generation()
 
     def _write_data_snapshot_sync(self, data: dict[str, Any]) -> int:
         changed = self._sanitize_store_control_tags_inplace(data)
+        self._sanitize_proactive_candidate_repeat_counts_inplace(data)
         self._compact_store_history_inplace(data)
         manager = getattr(self, "store_manager", None)
         if manager is not None:
-            manager.save_snapshot(data)
-            if getattr(self, "storage_backend", "json") == "sqlite":
-                try:
-                    manager.export_current_to_json(data)
-                except Exception as exc:
-                    logger.debug("[PrivateCompanion] SQLite 快照镜像 JSON 写出失败: %s", _single_line(exc, 160))
+            with self._data_save_io_lock():
+                manager.save_snapshot(data)
+                self._refresh_data_save_revision_from_manager()
+                self._advance_data_save_write_generation()
             return changed
-        self._atomic_write_data_file_sync(data)
+        with self._data_save_io_lock():
+            self._atomic_write_data_file_sync(data)
+            self._advance_data_save_write_generation()
         return changed
 
     def _atomic_write_data_file_sync(self, data: dict[str, Any]) -> None:
@@ -1104,166 +1367,978 @@ class CoreStoreMixin:
 
     def _write_persona_data_snapshot_sync(self, persona_id: str, data: dict[str, Any]) -> int:
         changed = self._sanitize_store_control_tags_inplace(data)
+        self._sanitize_proactive_candidate_repeat_counts_inplace(data)
         self._compact_store_history_inplace(data)
         saver = getattr(self, "_save_persona_profile_sync", None)
         if not callable(saver):
             raise RuntimeError("persona profile saver is unavailable")
-        saver(persona_id, data)
+        with self._data_save_io_lock(persona_id):
+            saver(persona_id, data)
+            self._advance_data_save_write_generation(persona_id)
         return changed
 
-    def _schedule_persona_data_save(self, persona_id: str, delay: float) -> None:
-        dirty = getattr(self, "_persona_data_save_dirty", None)
-        if not isinstance(dirty, set):
-            dirty = set()
-            self._persona_data_save_dirty = dirty
-        tasks = getattr(self, "_persona_data_save_tasks", None)
-        if not isinstance(tasks, dict):
-            tasks = {}
-            self._persona_data_save_tasks = tasks
-        dirty.add(persona_id)
+    @staticmethod
+    def _save_section_names(values: Collection[str] | None) -> set[str] | None:
+        if values is None:
+            return None
+        if isinstance(values, str):
+            values = (values,)
+        return {str(value).strip() for value in values if str(value).strip()}
+
+    def _save_is_stopping(self) -> bool:
         stop_event = getattr(self, "_stop_event", None)
-        if stop_event is not None and callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
+        return bool(
+            stop_event is not None
+            and callable(getattr(stop_event, "is_set", None))
+            and stop_event.is_set()
+        )
+
+    def _data_save_io_lock(self, persona_id: str = "") -> threading.RLock:
+        if not persona_id:
+            lock = getattr(self, "_data_save_io_lock_instance", None)
+            if lock is None:
+                lock = threading.RLock()
+                self._data_save_io_lock_instance = lock
+            return lock
+        locks = getattr(self, "_persona_data_save_io_locks", None)
+        if not isinstance(locks, dict):
+            locks = {}
+            self._persona_data_save_io_locks = locks
+        lock = locks.get(persona_id)
+        if lock is None:
+            lock = threading.RLock()
+            locks[persona_id] = lock
+        return lock
+
+    def _current_data_save_write_generation(self, persona_id: str = "") -> int:
+        if persona_id:
+            generations = getattr(self, "_persona_data_save_write_generation", None)
+            if not isinstance(generations, dict):
+                generations = {}
+                self._persona_data_save_write_generation = generations
+            return max(0, int(generations.get(persona_id, 0) or 0))
+        generation = getattr(self, "_data_save_write_generation", 0)
+        if not isinstance(generation, int) or isinstance(generation, bool):
+            generation = 0
+            self._data_save_write_generation = generation
+        return max(0, generation)
+
+    def _advance_data_save_write_generation(self, persona_id: str = "") -> int:
+        generation = self._current_data_save_write_generation(persona_id) + 1
+        if persona_id:
+            self._persona_data_save_write_generation[persona_id] = generation
+        else:
+            self._data_save_write_generation = generation
+        return generation
+
+    def _ensure_default_save_state(self) -> None:
+        legacy_dirty = getattr(self, "_data_save_dirty", None) is True
+        if not isinstance(getattr(self, "_data_save_dirty", None), dict):
+            self._data_save_dirty = {}
+        if not isinstance(getattr(self, "_data_save_deleted", None), dict):
+            self._data_save_deleted = {}
+        if not isinstance(getattr(self, "_data_save_dirty_since", None), dict):
+            self._data_save_dirty_since = {}
+        if not isinstance(getattr(self, "_data_save_section_revisions", None), dict):
+            self._data_save_section_revisions = {}
+        if not isinstance(getattr(self, "_data_save_full_revision", None), int):
+            self._data_save_full_revision = 0
+        if not isinstance(getattr(self, "_data_save_revision", None), int):
+            seed = 1
+            manager = getattr(self, "store_manager", None)
+            next_revision = getattr(manager, "next_revision", None)
+            if callable(next_revision):
+                try:
+                    seed = max(1, int(next_revision()))
+                except Exception:
+                    seed = 1
+            self._data_save_revision = seed - 1
+        if not isinstance(getattr(self, "_data_save_write_generation", None), int):
+            self._data_save_write_generation = 0
+        if legacy_dirty and not self._data_save_dirty and not self._data_save_deleted:
+            revision = self._next_data_save_revision()
+            now = time.monotonic()
+            live_data = getattr(self, "data", {})
+            for section in live_data if isinstance(live_data, dict) else ():
+                self._data_save_dirty[str(section)] = revision
+                self._data_save_dirty_since[str(section)] = now
+                self._data_save_section_revisions[str(section)] = revision
+            self._data_save_full_revision = revision
+            self._data_save_full_since = now
+
+    def _refresh_data_save_revision_from_manager(self) -> int:
+        manager = getattr(self, "store_manager", None)
+        next_revision = getattr(manager, "next_revision", None)
+        if not callable(next_revision):
+            return max(0, int(getattr(self, "_data_save_revision", 0) or 0))
+        try:
+            persisted = max(0, int(next_revision()) - 1)
+        except Exception:
+            return max(0, int(getattr(self, "_data_save_revision", 0) or 0))
+        current = max(0, int(getattr(self, "_data_save_revision", 0) or 0))
+        self._data_save_revision = max(current, persisted)
+        return self._data_save_revision
+
+    def _ensure_persona_save_state(self) -> None:
+        legacy_dirty = getattr(self, "_persona_data_save_dirty", None)
+        legacy_personas = set(legacy_dirty) if isinstance(legacy_dirty, set) else set()
+        for name in (
+            "_persona_data_save_dirty",
+            "_persona_data_save_deleted",
+            "_persona_data_save_dirty_since",
+            "_persona_data_save_full_revision",
+            "_persona_data_save_revision",
+            "_persona_data_save_section_revisions",
+        ):
+            if not isinstance(getattr(self, name, None), dict):
+                setattr(self, name, {})
+        if not isinstance(
+            getattr(self, "_persona_data_save_write_generation", None), dict
+        ):
+            self._persona_data_save_write_generation = {}
+        if not isinstance(getattr(self, "_persona_data_save_tasks", None), dict):
+            self._persona_data_save_tasks = {}
+        for persona_id in legacy_personas:
+            if persona_id in self._persona_data_save_dirty or persona_id in self._persona_data_save_deleted:
+                continue
+            revision = max(1, int(self._persona_data_save_revision.get(persona_id, 0) or 0) + 1)
+            self._persona_data_save_revision[persona_id] = revision
+            profile = self._persona_data_for_save(str(persona_id))
+            dirty = self._persona_data_save_dirty.setdefault(str(persona_id), {})
+            since = self._persona_data_save_dirty_since.setdefault(str(persona_id), {})
+            section_revisions = self._persona_data_save_section_revisions.setdefault(str(persona_id), {})
+            now = time.monotonic()
+            for section in profile if isinstance(profile, dict) else ():
+                dirty[str(section)] = revision
+                since[str(section)] = now
+                section_revisions[str(section)] = revision
+            self._persona_data_save_full_revision[str(persona_id)] = revision
+
+    def _next_data_save_revision(self, persona_id: str = "") -> int:
+        if persona_id:
+            self._ensure_persona_save_state()
+            current = max(0, int(self._persona_data_save_revision.get(persona_id, 0) or 0))
+            revision = current + 1
+            self._persona_data_save_revision[persona_id] = revision
+            return revision
+        self._ensure_default_save_state()
+        revision = max(0, int(self._data_save_revision or 0)) + 1
+        self._data_save_revision = revision
+        return revision
+
+    @staticmethod
+    def _expand_bookshelf_save_sections(
+        live_data: dict[str, Any],
+        changed: set[str],
+        deleted: set[str],
+        already_deleted: dict[str, int],
+    ) -> None:
+        bookshelf_sections = {
+            "bookshelf_items",
+            "bookshelf_secret",
+            "bookshelf_store_revision",
+            "jm_cosmos_integration",
+        }
+        if not (bookshelf_sections & (changed | deleted)):
             return
-        task = tasks.get(persona_id)
-        if isinstance(task, asyncio.Task) and not task.done():
+        for section in bookshelf_sections:
+            if section in live_data and section not in deleted and section not in already_deleted:
+                changed.add(section)
+
+    def _mark_default_data_dirty(
+        self,
+        *,
+        sections: Collection[str] | None,
+        deleted_sections: Collection[str],
+    ) -> bool:
+        self._ensure_default_save_state()
+        changed = self._save_section_names(sections)
+        deleted = self._save_section_names(deleted_sections) or set()
+        full = changed is None
+        if changed is None:
+            changed = {str(name) for name in self.data}
+        if changed & deleted:
+            raise ValueError("changed and deleted sections must be disjoint")
+        if not changed and not deleted and not full:
+            return False
+        self._expand_bookshelf_save_sections(self.data, changed, deleted, self._data_save_deleted)
+        revision = self._next_data_save_revision()
+        now = time.monotonic()
+        for section in changed:
+            self._data_save_dirty[section] = revision
+            self._data_save_deleted.pop(section, None)
+            self._data_save_dirty_since.setdefault(section, now)
+            self._data_save_section_revisions[section] = revision
+        for section in deleted:
+            self._data_save_deleted[section] = revision
+            self._data_save_dirty.pop(section, None)
+            self._data_save_dirty_since.setdefault(section, now)
+            self._data_save_section_revisions[section] = revision
+        if full:
+            self._data_save_full_revision = revision
+            self._data_save_full_since = now
+        return True
+
+    def _mark_persona_data_dirty(
+        self,
+        persona_id: str,
+        *,
+        sections: Collection[str] | None,
+        deleted_sections: Collection[str],
+    ) -> bool:
+        self._ensure_persona_save_state()
+        live_data = self._persona_data_for_save(persona_id)
+        changed = self._save_section_names(sections)
+        deleted = self._save_section_names(deleted_sections) or set()
+        full = changed is None
+        if changed is None:
+            changed = {str(name) for name in live_data}
+        if changed & deleted:
+            raise ValueError("changed and deleted sections must be disjoint")
+        if not changed and not deleted and not full:
+            return False
+        dirty = self._persona_data_save_dirty.setdefault(persona_id, {})
+        removed = self._persona_data_save_deleted.setdefault(persona_id, {})
+        dirty_since = self._persona_data_save_dirty_since.setdefault(persona_id, {})
+        section_revisions = self._persona_data_save_section_revisions.setdefault(persona_id, {})
+        self._expand_bookshelf_save_sections(live_data, changed, deleted, removed)
+        revision = self._next_data_save_revision(persona_id)
+        now = time.monotonic()
+        for section in changed:
+            dirty[section] = revision
+            removed.pop(section, None)
+            dirty_since.setdefault(section, now)
+            section_revisions[section] = revision
+        for section in deleted:
+            removed[section] = revision
+            dirty.pop(section, None)
+            dirty_since.setdefault(section, now)
+            section_revisions[section] = revision
+        if full:
+            self._persona_data_save_full_revision[persona_id] = revision
+        return True
+
+    def _default_data_save_is_dirty(self) -> bool:
+        dirty = getattr(self, "_data_save_dirty", None)
+        if not isinstance(dirty, dict):
+            return bool(dirty)
+        return bool(
+            dirty
+            or getattr(self, "_data_save_deleted", {})
+            or getattr(self, "_data_save_full_revision", 0)
+        )
+
+    def _persona_data_save_is_dirty(self, persona_id: str) -> bool:
+        self._ensure_persona_save_state()
+        return bool(
+            self._persona_data_save_dirty.get(persona_id)
+            or self._persona_data_save_deleted.get(persona_id)
+            or self._persona_data_save_full_revision.get(persona_id, 0)
+        )
+
+    def _dirty_persona_ids(self) -> set[str]:
+        self._ensure_persona_save_state()
+        return {
+            str(persona_id)
+            for source in (
+                self._persona_data_save_dirty,
+                self._persona_data_save_deleted,
+                self._persona_data_save_full_revision,
+            )
+            for persona_id, value in source.items()
+            if value
+        }
+
+    def _capture_data_save_batch(
+        self,
+        live_data: dict[str, Any],
+        dirty: dict[str, int],
+        deleted: dict[str, int],
+        full_revision: int,
+        section_revisions: dict[str, int],
+        *,
+        full_snapshot: bool,
+    ) -> dict[str, Any]:
+        captured_revisions = dict(dirty)
+        captured_deleted = dict(deleted)
+        payloads = {
+            section: deepcopy(live_data[section])
+            for section in captured_revisions
+            if section in live_data and section not in captured_deleted
+        }
+        missing = {
+            section: revision
+            for section, revision in captured_revisions.items()
+            if section not in live_data and section not in captured_deleted
+        }
+        readonly_context: dict[str, Any] = {}
+        dependency_revisions: dict[str, int] = {}
+        if "proactive_candidate_pool" in payloads and "users" not in payloads:
+            users = live_data.get("users")
+            if isinstance(users, dict):
+                readonly_context["users"] = deepcopy(users)
+                dependency_revisions["users"] = int(section_revisions.get("users", 0) or 0)
+        return {
+            "changed_revisions": {
+                section: revision
+                for section, revision in captured_revisions.items()
+                if section in payloads
+            },
+            "deleted_revisions": captured_deleted,
+            "missing_revisions": missing,
+            "payloads": payloads,
+            "readonly_context": readonly_context,
+            "dependency_revisions": dependency_revisions,
+            "full_revision": int(full_revision or 0),
+            "full_snapshot": deepcopy(live_data) if full_snapshot else None,
+        }
+
+    def _capture_default_data_save_batch(
+        self,
+        *,
+        force_full: bool = False,
+    ) -> dict[str, Any]:
+        self._ensure_default_save_state()
+        write_generation = self._current_data_save_write_generation()
+        manager = getattr(self, "store_manager", None)
+        manager_backend = str(getattr(manager, "backend_name", "") or "").lower()
+        full_compatibility_save = bool(self._data_save_full_revision)
+        full_replacement = bool(force_full and full_compatibility_save)
+        incremental = bool(
+            manager_backend == "sqlite"
+            and callable(getattr(manager, "save_sections", None))
+            and not full_replacement
+        )
+        batch = self._capture_data_save_batch(
+            self.data,
+            self._data_save_dirty,
+            self._data_save_deleted,
+            self._data_save_full_revision,
+            self._data_save_section_revisions,
+            full_snapshot=not incremental,
+        )
+        batch["incremental"] = incremental
+        batch["full_replacement"] = full_replacement
+        batch["preserve_tombstones"] = full_replacement
+        batch["write_generation"] = write_generation
+        return batch
+
+    async def _flush_default_data_save_on_terminate(self) -> None:
+        """Drain SQLite default-store revisions without replacing persisted tombstones."""
+        manager = getattr(self, "store_manager", None)
+        if not (
+            str(getattr(manager, "backend_name", "") or "").lower() == "sqlite"
+            and callable(getattr(manager, "save_sections", None))
+        ):
             return
 
-        async def _runner() -> None:
-            should_retry = False
+        current = asyncio.current_task()
+        task = getattr(self, "_data_save_task", None)
+        if isinstance(task, asyncio.Task) and not task.done() and task is not current:
             try:
-                while persona_id in dirty:
-                    dirty.discard(persona_id)
-                    await asyncio.sleep(max(0.0, float(delay)))
-                    live_data = self._persona_data_for_save(persona_id)
-                    snapshot = deepcopy(live_data)
-                    try:
-                        snapshot_changed = await asyncio.to_thread(
-                            self._write_persona_data_snapshot_sync,
-                            persona_id,
-                            snapshot,
-                        )
-                    finally:
-                        # Do not keep a full store copy alive while waiting for the
-                        # next coalesced write; this matters for large persona stores.
-                        snapshot = None
-                    if snapshot_changed:
-                        live_changed = self._sanitize_store_control_tags_inplace(live_data)
-                        if live_changed:
-                            dirty.add(persona_id)
-                            self._log_store_control_cleanup(
-                                "delayed_persona_save_live_sync",
-                                live_changed,
-                            )
+                await asyncio.shield(task)
             except asyncio.CancelledError:
-                raise
+                # A cancelled scheduled writer leaves its revisions dirty for this
+                # final pass to retry.
+                pass
             except Exception as exc:
-                dirty.add(persona_id)
-                should_retry = True
-                logger.warning(
-                    "[PrivateCompanion] 延迟保存人格数据失败: persona=%s error=%s",
-                    persona_id,
+                logger.debug(
+                    "[PrivateCompanion] Waiting for the default incremental writer "
+                    "during shutdown failed: %s",
                     _single_line(exc, 160),
                 )
-            finally:
-                tasks.pop(persona_id, None)
-                stop_event = getattr(self, "_stop_event", None)
-                stopping = bool(
-                    stop_event is not None
-                    and callable(getattr(stop_event, "is_set", None))
-                    and stop_event.is_set()
-                )
-                if not stopping and persona_id in dirty:
-                    retry_delay = (
-                        max(3.0, min(30.0, float(delay) * 2.0 if delay else 3.0))
-                        if should_retry
-                        else max(0.0, float(delay))
+
+        self._ensure_default_save_state()
+        while self._default_data_save_is_dirty():
+            # ``sections=None`` is the compatibility full-replacement path.
+            # Preserve that meaning during shutdown so a section removed from
+            # the live store is removed by the full snapshot, while ordinary
+            # partial batches still require explicit tombstones.
+            batch = self._capture_default_data_save_batch(force_full=True)
+            result = await asyncio.to_thread(
+                self._write_default_data_save_batch_sync,
+                batch,
+            )
+            self._finish_default_data_save_batch(batch, result)
+            if self._default_data_save_is_dirty():
+                await asyncio.sleep(0)
+
+    def _capture_persona_data_save_batch(self, persona_id: str) -> dict[str, Any]:
+        self._ensure_persona_save_state()
+        write_generation = self._current_data_save_write_generation(persona_id)
+        batch = self._capture_data_save_batch(
+            self._persona_data_for_save(persona_id),
+            self._persona_data_save_dirty.setdefault(persona_id, {}),
+            self._persona_data_save_deleted.setdefault(persona_id, {}),
+            int(self._persona_data_save_full_revision.get(persona_id, 0) or 0),
+            self._persona_data_save_section_revisions.setdefault(persona_id, {}),
+            full_snapshot=True,
+        )
+        batch["write_generation"] = write_generation
+        return batch
+
+    def _prepare_dirty_save_payloads_sync(
+        self,
+        payloads: dict[str, Any],
+        readonly_context: dict[str, Any],
+    ) -> tuple[dict[str, Any], int, int, dict[str, int], set[str]]:
+        prepared = payloads
+        original_payloads = deepcopy(payloads)
+        control_changed = self._sanitize_store_control_tags_inplace(prepared)
+        repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(prepared)
+        readonly_names: set[str] = set()
+        for section, value in readonly_context.items():
+            if section not in prepared:
+                prepared[section] = value
+                readonly_names.add(section)
+        compacted = self._compact_store_history_inplace(prepared)
+        for section in readonly_names:
+            prepared.pop(section, None)
+        cleaned_sections = {
+            section
+            for section, value in prepared.items()
+            if section not in original_payloads or original_payloads[section] != value
+        }
+        return prepared, control_changed, repeat_changed, compacted, cleaned_sections
+
+    def _write_default_data_save_batch_sync(self, batch: dict[str, Any]) -> dict[str, Any]:
+        if batch["incremental"] and batch["missing_revisions"]:
+            missing = ", ".join(sorted(batch["missing_revisions"]))
+            raise RuntimeError(
+                "SQLite incremental save found missing dirty sections without "
+                f"explicit tombstones: {missing}"
+            )
+        prepared, control_changed, repeat_changed, compacted, cleaned_sections = self._prepare_dirty_save_payloads_sync(
+            batch["payloads"],
+            batch["readonly_context"],
+        )
+        changed_revisions = dict(batch["changed_revisions"])
+        if (
+            "proactive_candidate_repeat_sanitized_at" in prepared
+            and "proactive_candidate_repeat_sanitized_at" not in changed_revisions
+            and "proactive_candidate_pool" in changed_revisions
+        ):
+            changed_revisions["proactive_candidate_repeat_sanitized_at"] = changed_revisions[
+                "proactive_candidate_pool"
+            ]
+        manager = getattr(self, "store_manager", None)
+        confirmed: dict[str, int] = {}
+        superseded = False
+        if batch["incremental"]:
+            with self._data_save_io_lock():
+                if batch["write_generation"] != self._current_data_save_write_generation():
+                    superseded = True
+                else:
+                    confirmed = manager.save_sections(
+                        {
+                            section: (revision, prepared[section])
+                            for section, revision in changed_revisions.items()
+                            if section in prepared
+                        },
+                        batch["deleted_revisions"],
                     )
-                    try:
-                        self._schedule_persona_data_save(persona_id, retry_delay)
-                    except Exception as retry_exc:
-                        logger.warning(
-                            "[PrivateCompanion] 延迟保存人格数据重试调度失败: persona=%s error=%s",
-                            persona_id,
-                            _single_line(retry_exc, 160),
+        else:
+            snapshot = batch["full_snapshot"]
+            for section, value in prepared.items():
+                snapshot[section] = value
+            for section in batch["deleted_revisions"]:
+                snapshot.pop(section, None)
+            # SQLite full replacement assigns one backend revision to the whole
+            # snapshot.  Raise that baseline to the newest revision captured in
+            # this batch so its confirmation never trails the payload it stores.
+            sqlite_snapshot = (
+                manager is not None
+                and str(getattr(manager, "backend_name", "") or "").lower()
+                == "sqlite"
+            )
+            expected_revisions = {
+                **changed_revisions,
+                **batch["deleted_revisions"],
+                **batch["missing_revisions"],
+            }
+            if sqlite_snapshot:
+                minimum_revision = max(
+                    int(batch["full_revision"] or 0),
+                    *(int(revision) for revision in expected_revisions.values()),
+                )
+                with self._data_save_io_lock():
+                    if batch["write_generation"] != self._current_data_save_write_generation():
+                        superseded = True
+                    else:
+                        persisted_revision = manager.save_snapshot(
+                            snapshot,
+                            minimum_revision=max(1, minimum_revision),
+                            deleted_sections=batch["deleted_revisions"],
+                            preserve_tombstones=bool(
+                                batch.get("preserve_tombstones", False)
+                            ),
                         )
+                        if (
+                            isinstance(persisted_revision, bool)
+                            or not isinstance(persisted_revision, int)
+                            or persisted_revision < minimum_revision
+                        ):
+                            raise RuntimeError(
+                                "SQLite full snapshot did not confirm its minimum revision"
+                            )
+                        confirmed = {
+                            section: persisted_revision for section in expected_revisions
+                        }
+            else:
+                with self._data_save_io_lock():
+                    if batch["write_generation"] != self._current_data_save_write_generation():
+                        superseded = True
+                    elif manager is not None:
+                        manager.save_snapshot(snapshot)
+                    else:
+                        # Keep the compatibility path behind the overridable
+                        # snapshot writer used by JSON/test harnesses.
+                        self._write_data_snapshot_sync(snapshot)
+                    if not superseded:
+                        confirmed = dict(expected_revisions)
+        return {
+            "confirmed": dict(confirmed or {}),
+            "superseded": superseded,
+            "prepared": prepared,
+            "changed_revisions": changed_revisions,
+            "control_changed": control_changed,
+            "repeat_changed": repeat_changed,
+            "compacted": compacted,
+            "cleaned_sections": cleaned_sections,
+        }
 
-        try:
-            tasks[persona_id] = asyncio.create_task(_runner())
-        except RuntimeError:
-            snapshot = deepcopy(self._persona_data_for_save(persona_id))
-            self._write_persona_data_snapshot_sync(persona_id, snapshot)
-            dirty.discard(persona_id)
+    def _write_persona_data_save_batch_sync(
+        self,
+        persona_id: str,
+        batch: dict[str, Any],
+    ) -> dict[str, Any]:
+        prepared, control_changed, repeat_changed, compacted, cleaned_sections = self._prepare_dirty_save_payloads_sync(
+            batch["payloads"],
+            batch["readonly_context"],
+        )
+        changed_revisions = dict(batch["changed_revisions"])
+        if (
+            "proactive_candidate_repeat_sanitized_at" in prepared
+            and "proactive_candidate_repeat_sanitized_at" not in changed_revisions
+            and "proactive_candidate_pool" in changed_revisions
+        ):
+            changed_revisions["proactive_candidate_repeat_sanitized_at"] = changed_revisions[
+                "proactive_candidate_pool"
+            ]
+        snapshot = batch["full_snapshot"]
+        for section, value in prepared.items():
+            snapshot[section] = value
+        for section in batch["deleted_revisions"]:
+            snapshot.pop(section, None)
+        saver = getattr(self, "_save_persona_profile_sync", None)
+        if not callable(saver):
+            raise RuntimeError("persona profile saver is unavailable")
+        superseded = False
+        confirmed: dict[str, int] = {}
+        with self._data_save_io_lock(persona_id):
+            if batch["write_generation"] != self._current_data_save_write_generation(
+                persona_id
+            ):
+                superseded = True
+            else:
+                saver(persona_id, snapshot)
+                confirmed = dict(changed_revisions)
+                confirmed.update(batch["deleted_revisions"])
+                confirmed.update(batch["missing_revisions"])
+        return {
+            "confirmed": confirmed,
+            "superseded": superseded,
+            "prepared": prepared,
+            "changed_revisions": changed_revisions,
+            "control_changed": control_changed,
+            "repeat_changed": repeat_changed,
+            "compacted": compacted,
+            "cleaned_sections": cleaned_sections,
+        }
 
-    def _schedule_default_data_save(self, delay: float) -> None:
-        self._data_save_dirty = True
-        stop_event = getattr(self, "_stop_event", None)
-        if stop_event is not None and callable(getattr(stop_event, "is_set", None)) and stop_event.is_set():
+    @classmethod
+    def _apply_cleaned_store_value_inplace(cls, target: Any, source: Any) -> bool:
+        if isinstance(target, dict) and isinstance(source, dict):
+            for key in tuple(target):
+                if key not in source:
+                    target.pop(key, None)
+            for key, value in source.items():
+                if key in target and cls._apply_cleaned_store_value_inplace(target[key], value):
+                    continue
+                target[key] = deepcopy(value)
+            return True
+        if isinstance(target, list) and isinstance(source, list):
+            target[:] = deepcopy(source)
+            return True
+        return target == source
+
+    def _apply_prepared_save_section(
+        self,
+        live_data: dict[str, Any],
+        section: str,
+        value: Any,
+    ) -> None:
+        if section in live_data and self._apply_cleaned_store_value_inplace(live_data[section], value):
+            return
+        live_data[section] = deepcopy(value)
+
+    def _finish_data_save_batch(
+        self,
+        live_data: dict[str, Any],
+        batch: dict[str, Any],
+        result: dict[str, Any],
+        dirty: dict[str, int],
+        deleted: dict[str, int],
+        dirty_since: dict[str, float],
+        section_revisions: dict[str, int],
+        *,
+        persona_id: str = "",
+    ) -> bool:
+        confirmed = result["confirmed"]
+        prepared = result["prepared"]
+        expected = {
+            **batch["changed_revisions"],
+            **batch["deleted_revisions"],
+            **batch["missing_revisions"],
+        }
+        derived = "proactive_candidate_repeat_sanitized_at"
+        derived_revision = result["changed_revisions"].get(derived)
+        if derived_revision is not None and derived not in batch["changed_revisions"]:
+            expected[derived] = derived_revision
+        dependency_stale = False
+        if (
+            "proactive_candidate_pool" in batch["changed_revisions"]
+            and "proactive_candidate_pool" in result["cleaned_sections"]
+        ):
+            dependency_stale = any(
+                int(section_revisions.get(section, 0) or 0) != int(revision or 0)
+                for section, revision in batch["dependency_revisions"].items()
+            )
+            if dependency_stale and dirty.get("proactive_candidate_pool") == batch["changed_revisions"].get(
+                "proactive_candidate_pool"
+            ):
+                revision = self._next_data_save_revision(persona_id)
+                dirty["proactive_candidate_pool"] = revision
+                section_revisions["proactive_candidate_pool"] = revision
+        for section, revision in batch["changed_revisions"].items():
+            if dirty.get(section) != revision or int(confirmed.get(section, -1)) < revision:
+                continue
+            if (
+                section == "proactive_candidate_pool"
+                and derived_revision is not None
+                and int(confirmed.get(derived, -1)) < derived_revision
+            ):
+                continue
+            if section == "proactive_candidate_pool" and dependency_stale:
+                continue
+            if section in prepared and section in result["cleaned_sections"]:
+                self._apply_prepared_save_section(live_data, section, prepared[section])
+            dirty.pop(section, None)
+            dirty_since.pop(section, None)
+        for section, revision in batch["deleted_revisions"].items():
+            if deleted.get(section) == revision and int(confirmed.get(section, -1)) >= revision:
+                deleted.pop(section, None)
+                dirty_since.pop(section, None)
+        for section, revision in batch["missing_revisions"].items():
+            if (
+                dirty.get(section) == revision
+                and int(confirmed.get(section, -1)) >= revision
+            ):
+                dirty.pop(section, None)
+                dirty_since.pop(section, None)
+        if derived in prepared and derived not in batch["changed_revisions"]:
+            source_revision = batch["changed_revisions"].get("proactive_candidate_pool")
+            if (
+                source_revision is not None
+                and not dependency_stale
+                and dirty.get("proactive_candidate_pool") in {None, source_revision}
+                and int(confirmed.get(derived, -1)) >= source_revision
+                and int(section_revisions.get(derived, 0) or 0) <= source_revision
+            ):
+                self._apply_prepared_save_section(live_data, derived, prepared[derived])
+                section_revisions[derived] = source_revision
+        complete = all(int(confirmed.get(section, -1)) >= revision for section, revision in expected.items())
+        return complete and not dependency_stale
+
+    def _finish_default_data_save_batch(self, batch: dict[str, Any], result: dict[str, Any]) -> None:
+        if result.get("superseded"):
+            return
+        complete = self._finish_data_save_batch(
+            self.data,
+            batch,
+            result,
+            self._data_save_dirty,
+            self._data_save_deleted,
+            self._data_save_dirty_since,
+            self._data_save_section_revisions,
+        )
+        if complete and self._data_save_full_revision == batch["full_revision"]:
+            self._data_save_full_revision = 0
+            self._data_save_full_since = 0.0
+        if not batch["incremental"]:
+            self._refresh_data_save_revision_from_manager()
+            self._rebase_default_pending_revisions()
+        if result["control_changed"]:
+            self._log_store_control_cleanup("delayed_save", result["control_changed"])
+
+    def _rebase_default_pending_revisions(self) -> None:
+        """Move mutations made during a full write above its persisted revision."""
+        self._ensure_default_save_state()
+        floor = int(self._data_save_revision or 0)
+        pending_revisions = sorted(
+            {
+                int(revision)
+                for source in (self._data_save_dirty, self._data_save_deleted)
+                for revision in source.values()
+                if int(revision) <= floor
+            }
+            | (
+                {int(self._data_save_full_revision)}
+                if 0 < int(self._data_save_full_revision or 0) <= floor
+                else set()
+            )
+        )
+        for previous in pending_revisions:
+            revision = self._next_data_save_revision()
+            for source in (self._data_save_dirty, self._data_save_deleted):
+                for section, current in tuple(source.items()):
+                    if current == previous:
+                        source[section] = revision
+                        self._data_save_section_revisions[section] = revision
+            if self._data_save_full_revision == previous:
+                self._data_save_full_revision = revision
+
+    def _finish_persona_data_save_batch(
+        self,
+        persona_id: str,
+        batch: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        if result.get("superseded"):
+            return
+        complete = self._finish_data_save_batch(
+            self._persona_data_for_save(persona_id),
+            batch,
+            result,
+            self._persona_data_save_dirty.setdefault(persona_id, {}),
+            self._persona_data_save_deleted.setdefault(persona_id, {}),
+            self._persona_data_save_dirty_since.setdefault(persona_id, {}),
+            self._persona_data_save_section_revisions.setdefault(persona_id, {}),
+            persona_id=persona_id,
+        )
+        if complete and self._persona_data_save_full_revision.get(persona_id, 0) == batch["full_revision"]:
+            self._persona_data_save_full_revision.pop(persona_id, None)
+        if result["control_changed"]:
+            self._log_store_control_cleanup("delayed_persona_save", result["control_changed"])
+        if not self._persona_data_save_dirty.get(persona_id):
+            self._persona_data_save_dirty.pop(persona_id, None)
+        if not self._persona_data_save_deleted.get(persona_id):
+            self._persona_data_save_deleted.pop(persona_id, None)
+        if not self._persona_data_save_dirty_since.get(persona_id):
+            self._persona_data_save_dirty_since.pop(persona_id, None)
+
+    def _bounded_data_save_delay(self, delay: float) -> float:
+        maximum = max(0.01, float(getattr(self, "_data_save_max_delay_seconds", 2.0) or 2.0))
+        return max(0.0, min(maximum, float(delay)))
+
+    def _retry_data_save_delay(self, failures: int) -> float:
+        base = max(0.0, float(getattr(self, "_data_save_retry_base_seconds", 1.0) or 1.0))
+        maximum = max(base, float(getattr(self, "_data_save_retry_max_seconds", 30.0) or 30.0))
+        return min(maximum, base * (2 ** max(0, failures - 1)))
+
+    def _start_default_data_save_writer(self, delay: float) -> None:
+        if self._save_is_stopping():
             return
         task = getattr(self, "_data_save_task", None)
         if isinstance(task, asyncio.Task) and not task.done():
             return
 
         async def _runner() -> None:
-            should_retry = False
+            failures = 0
             try:
-                while bool(getattr(self, "_data_save_dirty", False)):
-                    self._data_save_dirty = False
-                    await asyncio.sleep(max(0.0, float(delay)))
-                    snapshot = deepcopy(self.data)
+                await asyncio.sleep(self._bounded_data_save_delay(delay))
+                while self._default_data_save_is_dirty() and not self._save_is_stopping():
+                    batch = self._capture_default_data_save_batch()
                     try:
-                        snapshot_changed = await asyncio.to_thread(self._write_data_snapshot_sync, snapshot)
-                    finally:
-                        # A dirty burst can schedule another iteration immediately.
-                        # Release the previous full copy before that iteration starts.
-                        snapshot = None
-                    if snapshot_changed:
-                        live_changed = self._sanitize_store_control_tags_inplace(self.data)
-                        if live_changed:
-                            self._data_save_dirty = True
-                            self._log_store_control_cleanup("delayed_save_live_sync", live_changed)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self._data_save_dirty = True
-                should_retry = True
-                logger.warning("[PrivateCompanion] 延迟保存数据失败: %s", exc)
+                        result = await asyncio.to_thread(self._write_default_data_save_batch_sync, batch)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        failures += 1
+                        logger.warning(
+                            "[PrivateCompanion] Delayed data save failed: %s",
+                            _single_line(exc, 160),
+                        )
+                        if self._save_is_stopping():
+                            break
+                        await asyncio.sleep(self._retry_data_save_delay(failures))
+                        continue
+                    failures = 0
+                    self._finish_default_data_save_batch(batch, result)
+                    if self._default_data_save_is_dirty():
+                        await asyncio.sleep(0)
             finally:
-                self._data_save_task = None
-                stop_event = getattr(self, "_stop_event", None)
-                stopping = bool(
-                    stop_event is not None
-                    and callable(getattr(stop_event, "is_set", None))
-                    and stop_event.is_set()
-                )
-                if not stopping and bool(getattr(self, "_data_save_dirty", False)):
-                    retry_delay = (
-                        max(3.0, min(30.0, float(delay) * 2.0 if delay else 3.0))
-                        if should_retry
-                        else max(0.0, float(delay))
-                    )
-                    try:
-                        self._schedule_default_data_save(delay=retry_delay)
-                    except Exception as retry_exc:
-                        logger.warning("[PrivateCompanion] 延迟保存重试调度失败: %s", retry_exc)
+                current = asyncio.current_task()
+                if getattr(self, "_data_save_task", None) is current:
+                    self._data_save_task = None
 
         try:
             self._data_save_task = asyncio.create_task(_runner())
         except RuntimeError:
-            self._save_data_sync()
+            snapshot = deepcopy(self.data)
+            self._write_data_snapshot_sync(snapshot)
+            self._clear_default_data_save_dirty()
 
-    def _schedule_data_save(self, delay: float = 1.5) -> None:
+    def _start_persona_data_save_writer(self, persona_id: str, delay: float) -> None:
+        self._ensure_persona_save_state()
+        if self._save_is_stopping():
+            return
+        task = self._persona_data_save_tasks.get(persona_id)
+        if isinstance(task, asyncio.Task) and not task.done():
+            return
+
+        async def _runner() -> None:
+            failures = 0
+            try:
+                await asyncio.sleep(self._bounded_data_save_delay(delay))
+                while self._persona_data_save_is_dirty(persona_id) and not self._save_is_stopping():
+                    batch = self._capture_persona_data_save_batch(persona_id)
+                    try:
+                        result = await asyncio.to_thread(
+                            self._write_persona_data_save_batch_sync,
+                            persona_id,
+                            batch,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        failures += 1
+                        logger.warning(
+                            "[PrivateCompanion] Delayed persona data save failed: "
+                            "persona=%s error=%s",
+                            persona_id,
+                            _single_line(exc, 160),
+                        )
+                        if self._save_is_stopping():
+                            break
+                        await asyncio.sleep(self._retry_data_save_delay(failures))
+                        continue
+                    failures = 0
+                    self._finish_persona_data_save_batch(persona_id, batch, result)
+                    if self._persona_data_save_is_dirty(persona_id):
+                        await asyncio.sleep(0)
+            finally:
+                current = asyncio.current_task()
+                if self._persona_data_save_tasks.get(persona_id) is current:
+                    self._persona_data_save_tasks.pop(persona_id, None)
+
+        try:
+            self._persona_data_save_tasks[persona_id] = asyncio.create_task(_runner())
+        except RuntimeError:
+            snapshot = deepcopy(self._persona_data_for_save(persona_id))
+            self._write_persona_data_snapshot_sync(persona_id, snapshot)
+            self._clear_persona_data_save_dirty(persona_id)
+
+    def _schedule_persona_data_save(
+        self,
+        persona_id: str,
+        delay: float = 1.5,
+        *,
+        sections: Collection[str] | None = None,
+        deleted_sections: Collection[str] = (),
+    ) -> None:
+        if not self._mark_persona_data_dirty(
+            persona_id,
+            sections=sections,
+            deleted_sections=deleted_sections,
+        ):
+            return
+        self._start_persona_data_save_writer(persona_id, delay)
+
+    def _schedule_default_data_save(
+        self,
+        delay: float = 1.5,
+        *,
+        sections: Collection[str] | None = None,
+        deleted_sections: Collection[str] = (),
+    ) -> None:
+        if not self._mark_default_data_dirty(
+            sections=sections,
+            deleted_sections=deleted_sections,
+        ):
+            return
+        self._start_default_data_save_writer(delay)
+
+    def _schedule_data_save(
+        self,
+        *,
+        sections: Collection[str] | None = None,
+        deleted_sections: Collection[str] = (),
+        delay: float = 1.5,
+    ) -> None:
         scoped_scheduler = getattr(self, "_req041_schedule_scoped_sync", None)
         if callable(scoped_scheduler):
             scoped_scheduler()
         active_getter = getattr(self, "_active_persona_scope", None)
         persona_id = str(active_getter() if callable(active_getter) else "").strip()
         if bool(getattr(self, "enable_multi_persona_mode", False)) and persona_id:
-            self._schedule_persona_data_save(persona_id, delay)
+            self._schedule_persona_data_save(
+                persona_id,
+                delay,
+                sections=sections,
+                deleted_sections=deleted_sections,
+            )
             return
-        self._schedule_default_data_save(delay)
+        self._schedule_default_data_save(
+            delay,
+            sections=sections,
+            deleted_sections=deleted_sections,
+        )
+
+    def _clear_default_data_save_dirty(self, through_revision: int | None = None) -> None:
+        self._ensure_default_save_state()
+        for source in (self._data_save_dirty, self._data_save_deleted):
+            for section, revision in tuple(source.items()):
+                if through_revision is None or revision <= through_revision:
+                    source.pop(section, None)
+                    self._data_save_dirty_since.pop(section, None)
+        if through_revision is None or self._data_save_full_revision <= through_revision:
+            self._data_save_full_revision = 0
+            self._data_save_full_since = 0.0
+
+    def _clear_persona_data_save_dirty(
+        self,
+        persona_id: str,
+        through_revision: int | None = None,
+    ) -> None:
+        self._ensure_persona_save_state()
+        for source in (self._persona_data_save_dirty, self._persona_data_save_deleted):
+            values = source.get(persona_id, {})
+            for section, revision in tuple(values.items()):
+                if through_revision is None or revision <= through_revision:
+                    values.pop(section, None)
+                    self._persona_data_save_dirty_since.get(persona_id, {}).pop(section, None)
+            if not values:
+                source.pop(persona_id, None)
+        full_revision = int(self._persona_data_save_full_revision.get(persona_id, 0) or 0)
+        if through_revision is None or full_revision <= through_revision:
+            self._persona_data_save_full_revision.pop(persona_id, None)
+        if not self._persona_data_save_dirty_since.get(persona_id):
+            self._persona_data_save_dirty_since.pop(persona_id, None)
+
+    def _clear_scheduled_data_save_dirty(
+        self,
+        *,
+        persona_id: str = "",
+        through_revision: int | None = None,
+    ) -> None:
+        if persona_id:
+            self._clear_persona_data_save_dirty(persona_id, through_revision)
+        else:
+            self._clear_default_data_save_dirty(through_revision)
 
     async def _flush_scheduled_data_save(self) -> None:
-        """Wait until all coalesced writes, including writes queued while waiting, finish."""
+        """Wait until default and persona writers drain all revisions visible while flushing."""
         while True:
             pending: list[asyncio.Task] = []
             task = getattr(self, "_data_save_task", None)
@@ -1279,29 +2354,25 @@ class CoreStoreMixin:
             if pending:
                 await asyncio.gather(*(asyncio.shield(item) for item in pending))
                 continue
-            legacy_dirty = bool(getattr(self, "_data_save_dirty", False))
-            persona_dirty = set(getattr(self, "_persona_data_save_dirty", set()) or set())
-            if legacy_dirty or persona_dirty:
-                stop_event = getattr(self, "_stop_event", None)
-                if (
-                    stop_event is not None
-                    and callable(getattr(stop_event, "is_set", None))
-                    and stop_event.is_set()
-                ):
-                    return
-                for persona_id in persona_dirty:
-                    self._schedule_persona_data_save(persona_id, 0.0)
-                if legacy_dirty:
-                    self._schedule_default_data_save(delay=0.0)
-                continue
-            return
+            if not self._default_data_save_is_dirty() and not self._dirty_persona_ids():
+                return
+            if self._save_is_stopping():
+                return
+            for persona_id in self._dirty_persona_ids():
+                self._start_persona_data_save_writer(persona_id, 0.0)
+            if self._default_data_save_is_dirty():
+                self._start_default_data_save_writer(0.0)
 
     async def _reset_plugin_store(self) -> None:
         async with self._data_lock:
             self.data = self._new_store()
             if self.default_enable_configured_targets:
                 self._sync_configured_targets()
-            self._save_data_sync()
+            self._clear_default_data_save_dirty()
+            await asyncio.to_thread(
+                self._write_data_snapshot_sync,
+                deepcopy(self.data),
+            )
 
     async def _rebuild_today_after_reset(
         self,
@@ -2630,7 +3701,7 @@ class CoreStoreMixin:
                 pending_points = 0
             if str(role).strip().lower() != "owner" and pending_points > 0:
                 if score_migration.get("changed"):
-                    self._schedule_data_save()
+                    self._schedule_data_save(sections={"users"})
                 return {
                     "changed": False,
                     "code": "relationship_violation_recovery_pending",
@@ -2693,7 +3764,7 @@ class CoreStoreMixin:
                     _single_line(exc, 160),
                 )
         if result.get("changed") or score_migration.get("changed"):
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"users"})
         return result
 
     def _get_user(self, user_id: str) -> dict[str, Any]:
@@ -2759,7 +3830,7 @@ class CoreStoreMixin:
         if not user.get("style"):
             user["style"] = self.default_style
         if relationship_changed or alias_migration_changed:
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"users"})
         return user
 
     def _auto_profile_platform_set(self) -> set[str]:
@@ -2886,7 +3957,7 @@ class CoreStoreMixin:
         user["last_seen"] = max(_safe_float(user.get("last_seen"), 0), created_at)
         user["last_activity_at"] = max(_safe_float(user.get("last_activity_at"), 0), created_at)
         self._note_private_user_umo(canonical_user_id, user, getattr(event, "unified_msg_origin", ""))
-        self._schedule_data_save()
+        self._schedule_data_save(sections={"users"})
         return user, True
 
     def _latest_user_activity_ts(self, user: dict[str, Any] | None) -> float:

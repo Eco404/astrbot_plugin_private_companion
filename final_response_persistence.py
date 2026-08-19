@@ -972,7 +972,7 @@ class FinalResponsePersistenceMixin:
                 if changed:
                     scheduler = getattr(self, "_schedule_data_save", None)
                     if callable(scheduler):
-                        scheduler()
+                        scheduler(sections={"users"})
             return changed
         except Exception as exc:
             logger.debug(

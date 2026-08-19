@@ -2941,7 +2941,7 @@ class ProactiveMixin(UserRestGateMixin):
                 user["planned_candidate_id"] = item.get("id", "")
                 saver = getattr(self, "_schedule_data_save", None)
                 if callable(saver):
-                    saver()
+                    saver(sections={"users"})
                 return "情绪 hurt 收敛中,亲密主动候选已延后"
             scheduler = getattr(self, "_schedule_next_proactive", None)
             if callable(scheduler):
@@ -2953,7 +2953,7 @@ class ProactiveMixin(UserRestGateMixin):
                 user["planned_proactive_expire_at"] = base_after + 90 * 60
             saver = getattr(self, "_schedule_data_save", None)
             if callable(saver):
-                saver()
+                saver(sections={"users"})
             return f"情绪/关系 {mode} 收敛中,亲密主动候选已清理"
         defer = getattr(self, "_defer_or_replace_planned_impulse", None)
         if callable(defer):
@@ -2970,7 +2970,7 @@ class ProactiveMixin(UserRestGateMixin):
             user["next_proactive_at"] = max(_safe_float(user.get("next_proactive_at"), 0), base_after)
         saver = getattr(self, "_schedule_data_save", None)
         if callable(saver):
-            saver()
+            saver(sections={"users"})
         return f"情绪 {mode} 收敛中,主动候选已延后"
 
     def _normalize_existing_plan_for_emotion(self, user: dict[str, Any], *, now: float | None = None) -> str:
@@ -3002,7 +3002,7 @@ class ProactiveMixin(UserRestGateMixin):
         self._mark_planned_candidate_status(user, "accepted", note)
         saver = getattr(self, "_schedule_data_save", None)
         if callable(saver):
-            saver()
+            saver(sections={"users"})
         return note
 
     def _friend_proactive_scheduled_too_early(
@@ -3682,7 +3682,10 @@ class ProactiveMixin(UserRestGateMixin):
             except Exception as exc:
                 logger.debug("[PrivateCompanion] C3 Bot Personal outbox delivery failed: %s", _single_line(exc, 160))
         if snapshots and callable(getattr(self, "_schedule_data_save", None)):
-            self._schedule_data_save(delay=0.5)
+            self._schedule_data_save(
+                sections={"window_snapshots", "agenda_reconciliation_history"},
+                delay=0.5,
+            )
         return snapshots
 
     def _scheduler_persona_ids(self) -> list[str]:
@@ -3843,7 +3846,7 @@ class ProactiveMixin(UserRestGateMixin):
         if changed:
             saver = getattr(self, "_schedule_data_save", None)
             if callable(saver):
-                saver(delay=0.5)
+                saver(sections={"users"}, delay=0.5)
         if triggered:
             kicker = getattr(self, "_kick_proactive_loop_once", None)
             if callable(kicker):

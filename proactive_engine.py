@@ -4006,7 +4006,7 @@ class ProactiveEngineMixin:
             self._clear_pending_proactive_plan(user)
             schedule_save = getattr(self, "_schedule_data_save", None)
             if callable(schedule_save):
-                schedule_save()
+                schedule_save(sections={"users"})
             return False, "创作功能未开启"
         if not is_troubleshooting and planned_source == "timer" and not due_timer_active:
             self._clear_llm_timer_internal_plan_fields(user)
@@ -4099,7 +4099,7 @@ class ProactiveEngineMixin:
                 self._mark_planned_candidate_status(user, "deferred", defer_note)
                 schedule_save = getattr(self, "_schedule_data_save", None)
                 if callable(schedule_save):
-                    schedule_save()
+                    schedule_save(sections={"users"})
                 logger.info(
                     "[PrivateCompanion] %s已顺延主动消息: user=%s until=%s reason=%s source=%s detail=%s",
                     "实时共处期间" if external_realtime else "繁忙回复闸门",

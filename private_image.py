@@ -1280,7 +1280,7 @@ class PrivateImageMixin:
         scheduler = getattr(self, "_schedule_data_save", None)
         try:
             if callable(scheduler):
-                scheduler(delay=2.0)
+                scheduler(sections={"private_image_visual_provider_state"}, delay=2.0)
             else:
                 self._save_data_sync()
         except Exception as exc:
@@ -3323,7 +3323,7 @@ class PrivateImageMixin:
                 if updated:
                     scheduler = getattr(self, "_schedule_data_save", None)
                     if callable(scheduler):
-                        scheduler()
+                        scheduler(sections={"groups"})
                 return updated
         return update()
 
@@ -4228,6 +4228,9 @@ class PrivateImageMixin:
                     sender_id,
                     len(learned_messages),
                 )
+            scheduler = getattr(self, "_schedule_data_save", None)
+            if callable(scheduler):
+                scheduler(sections={"smart_message_debounce"})
         lines = []
         for item in messages[:8]:
             if not isinstance(item, dict):

@@ -77,7 +77,7 @@ class _WeatherCommandHarness(CommandHandlersMixin, DailyStateMixin):
     async def _save_config_if_possible(self) -> bool:
         return self.save_result
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, **_kwargs: Any) -> None:
         return None
 
 

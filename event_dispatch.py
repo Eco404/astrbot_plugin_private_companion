@@ -10,6 +10,7 @@ import gc
 import hashlib
 import html
 import importlib
+import inspect
 import json
 import math
 import os
@@ -1636,7 +1637,10 @@ class EventDispatchMixin:
                 sender_label=sender_label,
             )
         try:
-            self._schedule_data_save(delay=2.0)
+            self._schedule_data_save(
+                sections={"recent_prompt_injections", "recent_prompt_injection_events"},
+                delay=2.0,
+            )
         except Exception:
             pass
 
@@ -3707,12 +3711,12 @@ class EventDispatchMixin:
         messages: list[str],
         previous_decision: str = "",
         note: str = "",
-    ) -> None:
+    ) -> bool:
         if not self._smart_message_debounce_enabled():
-            return
+            return False
         cleaned = [_single_line(item, 160) for item in messages if _single_line(item, 160)]
         if not cleaned:
-            return
+            return False
         store = self._smart_message_debounce_store()
         examples = store.setdefault("examples", [])
         if not isinstance(examples, list):
@@ -3720,7 +3724,7 @@ class EventDispatchMixin:
             store["examples"] = examples
         signature = hashlib.sha1("\n".join([kind, scope, sender_id, *cleaned]).encode("utf-8", errors="ignore")).hexdigest()
         if any(isinstance(item, dict) and item.get("sig") == signature for item in examples[-20:]):
-            return
+            return False
         examples.append(
             {
                 "sig": signature,
@@ -3751,6 +3755,7 @@ class EventDispatchMixin:
             source=kind,
             message_count=len(cleaned),
         )
+        return True
 
     def _remember_smart_message_debounce_decision(
         self,
@@ -3764,7 +3769,10 @@ class EventDispatchMixin:
     ) -> None:
         if not self._smart_message_debounce_enabled():
             return
-        store = self._smart_message_debounce_store()
+        data = getattr(self, "data", None)
+        store = data.get("smart_message_debounce") if isinstance(data, dict) else None
+        if not isinstance(store, dict):
+            return
         last = store.setdefault("last_decisions", {})
         if not isinstance(last, dict):
             last = {}
@@ -3790,22 +3798,25 @@ class EventDispatchMixin:
         sender_id: str,
         text: str,
         now: float | None = None,
-    ) -> None:
+    ) -> bool:
         if not self._smart_message_debounce_enabled():
-            return
-        store = self._smart_message_debounce_store()
+            return False
+        data = getattr(self, "data", None)
+        store = data.get("smart_message_debounce") if isinstance(data, dict) else None
+        if not isinstance(store, dict):
+            return False
         last = store.get("last_decisions") if isinstance(store.get("last_decisions"), dict) else {}
         key = self._semantic_buffer_key(scope, sender_id)
         previous = last.get(key) if isinstance(last, dict) else None
         if not isinstance(previous, dict):
-            return
+            return False
         if str(previous.get("decision") or "") != "complete":
-            return
+            return False
         now = now or _now_ts()
         window = max(1.0, _safe_float(getattr(self, "smart_message_debounce_learning_window_seconds", 8.0), 8.0, 1.0))
         if now - _safe_float(previous.get("ts"), 0) > window:
-            return
-        self._record_smart_message_debounce_example(
+            return False
+        return self._record_smart_message_debounce_example(
             kind="false_complete",
             scope=scope,
             sender_id=sender_id,
@@ -4007,6 +4018,10 @@ class EventDispatchMixin:
         wait = max(0.0, min(15.0, _safe_float(getattr(self, "smart_message_debounce_wait_seconds", 3.0), 3.0, 0.0)))
         if wait <= 0:
             return 0.0
+        # Fast-rule decisions also need a durable section before they record
+        # ``last_decisions``; otherwise the first decision after startup can
+        # be lost because the log path initializes the store only afterward.
+        self._smart_message_debounce_store()
         buffers = getattr(self, "_semantic_message_buffers", None)
         existing = buffers.get(key) if isinstance(buffers, dict) else None
         if isinstance(existing, dict):

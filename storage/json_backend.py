@@ -6,6 +6,7 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
@@ -50,10 +51,18 @@ class JsonStoreBackend(StoreBackendBase):
     def save_store(self, data: dict[str, Any]) -> None:
         self._atomic_write_data_file_sync(data)
 
-    def save_snapshot(self, data: dict[str, Any]) -> None:
+    def save_snapshot(
+        self,
+        data: dict[str, Any],
+        *,
+        minimum_revision: int | None = None,
+        deleted_sections: Mapping[str, int] | None = None,
+        preserve_tombstones: bool = False,
+    ) -> int | None:
         self._atomic_write_data_file_sync(data)
+        return None
 
-    def health_check(self) -> dict[str, Any]:
+    def health_check(self, *, raise_on_error: bool = False) -> dict[str, Any]:
         return {
             "backend": self.backend_name(),
             "path": str(self.data_file),
@@ -63,7 +72,9 @@ class JsonStoreBackend(StoreBackendBase):
 
     def _atomic_write_data_file_sync(self, data: dict[str, Any]) -> None:
         base = str(self.data_file)
-        tmp_file = f"{base}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+        tmp_file = (
+            f"{base}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+        )
         try:
             with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)

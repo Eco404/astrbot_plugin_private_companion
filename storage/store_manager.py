@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable, Collection, Mapping
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from astrbot.api import logger
 
@@ -13,7 +14,6 @@ from .factory import build_store_backend
 from .json_backend import JsonStoreBackend
 from .migration import migrate_json_to_backend_if_needed
 from .sqlite_backend import SqliteStoreNotInitializedError
-
 
 _BOOKSHELF_SECTIONS = (
     "bookshelf_items",
@@ -82,10 +82,7 @@ def _is_jm_bookshelf_item(item: Any) -> bool:
     source = str(item.get("source") or "").strip()
     return bool(
         isinstance(item.get("pages"), list)
-        and (
-            str(item.get("album_id") or "").strip()
-            or source.startswith("bookshelf_")
-        )
+        and (str(item.get("album_id") or "").strip() or source.startswith("bookshelf_"))
     )
 
 
@@ -115,7 +112,9 @@ def _bookshelf_item_is_blocked(
     return bool(title and title in deleted_titles)
 
 
-def _merge_string_history(primary: Any, secondary: Any, *, limit: int = 300) -> list[Any]:
+def _merge_string_history(
+    primary: Any, secondary: Any, *, limit: int = 300
+) -> list[Any]:
     merged: list[Any] = []
     seen: set[str] = set()
     for source in (primary, secondary):
@@ -147,8 +146,12 @@ def reconcile_bookshelf_payload(
 
     primary_state_raw = primary.get("jm_cosmos_integration")
     secondary_state_raw = secondary.get("jm_cosmos_integration")
-    primary_state = deepcopy(primary_state_raw) if isinstance(primary_state_raw, dict) else None
-    secondary_state = deepcopy(secondary_state_raw) if isinstance(secondary_state_raw, dict) else None
+    primary_state = (
+        deepcopy(primary_state_raw) if isinstance(primary_state_raw, dict) else None
+    )
+    secondary_state = (
+        deepcopy(secondary_state_raw) if isinstance(secondary_state_raw, dict) else None
+    )
     if primary_state is not None:
         merged_state: dict[str, Any] | None = deepcopy(secondary_state or {})
         merged_state.update(primary_state)
@@ -159,12 +162,18 @@ def reconcile_bookshelf_payload(
 
     if preferred_revision == fallback_revision and merged_state is not None:
         deleted_ids = _merge_string_history(
-            primary_state.get("deleted_album_ids") if primary_state is not None else None,
-            secondary_state.get("deleted_album_ids") if secondary_state is not None else None,
+            primary_state.get("deleted_album_ids")
+            if primary_state is not None
+            else None,
+            secondary_state.get("deleted_album_ids")
+            if secondary_state is not None
+            else None,
         )
         deleted_titles = _merge_string_history(
             primary_state.get("deleted_titles") if primary_state is not None else None,
-            secondary_state.get("deleted_titles") if secondary_state is not None else None,
+            secondary_state.get("deleted_titles")
+            if secondary_state is not None
+            else None,
         )
         if deleted_ids:
             merged_state["deleted_album_ids"] = deleted_ids
@@ -177,7 +186,8 @@ def reconcile_bookshelf_payload(
             for value in merged_state.get("deleted_album_ids", [])
             if str(value).strip()
         }
-        if isinstance(merged_state, dict) and isinstance(merged_state.get("deleted_album_ids"), list)
+        if isinstance(merged_state, dict)
+        and isinstance(merged_state.get("deleted_album_ids"), list)
         else set()
     )
     blocked_titles = (
@@ -186,13 +196,16 @@ def reconcile_bookshelf_payload(
             for value in merged_state.get("deleted_titles", [])
             if (marker := _bookshelf_title_marker(value))
         }
-        if isinstance(merged_state, dict) and isinstance(merged_state.get("deleted_titles"), list)
+        if isinstance(merged_state, dict)
+        and isinstance(merged_state.get("deleted_titles"), list)
         else set()
     )
     primary_items_raw = primary.get("bookshelf_items")
     secondary_items_raw = secondary.get("bookshelf_items")
     primary_items = primary_items_raw if isinstance(primary_items_raw, list) else []
-    secondary_items = secondary_items_raw if isinstance(secondary_items_raw, list) else []
+    secondary_items = (
+        secondary_items_raw if isinstance(secondary_items_raw, list) else []
+    )
     primary_identities = {
         identity
         for raw_item in primary_items
@@ -239,13 +252,10 @@ def reconcile_bookshelf_payload(
         or preferred.get("bookshelf_items") is None
     ):
         result["bookshelf_items"] = merged_items
-    if (
-        merged_state is not None
-        and (
-            isinstance(preferred.get("jm_cosmos_integration"), dict)
-            or bool(merged_state)
-            or preferred.get("jm_cosmos_integration") is None
-        )
+    if merged_state is not None and (
+        isinstance(preferred.get("jm_cosmos_integration"), dict)
+        or bool(merged_state)
+        or preferred.get("jm_cosmos_integration") is None
     ):
         result["jm_cosmos_integration"] = merged_state
 
@@ -291,13 +301,19 @@ class StoreManager:
             ensure_defaults=ensure_defaults,
             new_store=new_store,
         )
-        self.backend = self.sqlite_backend if self.backend_name == "sqlite" else self.json_backend
-        active_path = self.sqlite_path if self.backend_name == "sqlite" else self.data_file
+        self.backend = (
+            self.sqlite_backend if self.backend_name == "sqlite" else self.json_backend
+        )
+        active_path = (
+            self.sqlite_path if self.backend_name == "sqlite" else self.data_file
+        )
         self._store_lock = _shared_store_lock(active_path)
         self._json_store_lock = _shared_store_lock(self.data_file)
 
     @staticmethod
-    def _load_optional_store(backend: Any, *, strict: bool = False) -> dict[str, Any] | None:
+    def _load_optional_store(
+        backend: Any, *, strict: bool = False
+    ) -> dict[str, Any] | None:
         if backend is None or not backend.exists():
             return None
         try:
@@ -324,7 +340,21 @@ class StoreManager:
     ) -> dict[str, Any]:
         if not isinstance(fallback, dict):
             return selected
+        deleted_revisions: Mapping[str, int] = {}
+        if self.backend.backend_name() == "sqlite":
+            deleted_revisions = self.backend.deleted_section_revisions(
+                _BOOKSHELF_SECTIONS
+            )
         reconciled, changed, recovered = reconcile_bookshelf_payload(selected, fallback)
+        if deleted_revisions:
+            for key in deleted_revisions:
+                if key in selected:
+                    reconciled[key] = deepcopy(selected[key])
+                else:
+                    reconciled.pop(key, None)
+            changed = any(
+                reconciled.get(key) != selected.get(key) for key in _BOOKSHELF_SECTIONS
+            )
         if not changed:
             return selected
         logger.warning(
@@ -335,7 +365,17 @@ class StoreManager:
         )
         if persist:
             try:
-                self.backend.save_store(reconciled)
+                if self.backend.backend_name() == "sqlite":
+                    revision = self.backend.next_revision()
+                    changed_sections = {
+                        key: (revision, deepcopy(reconciled[key]))
+                        for key in _BOOKSHELF_SECTIONS
+                        if key in reconciled and key not in deleted_revisions
+                    }
+                    deleted_sections = {key: revision for key in deleted_revisions}
+                    self.backend.save_sections(changed_sections, deleted_sections)
+                else:
+                    self.backend.save_store(reconciled)
             except Exception as exc:
                 logger.warning(
                     "[PrivateCompanion] 夹层恢复结果暂未写回 %s，本进程继续使用已恢复数据: %s",
@@ -355,7 +395,9 @@ class StoreManager:
                     fallback_name="SQLite",
                     persist=True,
                 )
-            selected = migrate_json_to_backend_if_needed(self.backend, self.json_backend, self.new_store())
+            selected = migrate_json_to_backend_if_needed(
+                self.backend, self.json_backend, self.new_store()
+            )
             fallback = self._load_optional_store(self.json_backend)
             return self._apply_bookshelf_recovery(
                 selected,
@@ -384,7 +426,11 @@ class StoreManager:
     def save_store(self, data: dict[str, Any]) -> None:
         with self._store_lock:
             data = self._prepare_store_for_save(data)
-            if self.backend.backend_name() == "json" and not data.get("worldbook_entries") and self.json_backend.exists():
+            if (
+                self.backend.backend_name() == "json"
+                and not data.get("worldbook_entries")
+                and self.json_backend.exists()
+            ):
                 existing = self.json_backend.load_store()
                 if isinstance(existing, dict) and existing.get("worldbook_entries"):
                     for key in (
@@ -396,13 +442,44 @@ class StoreManager:
                         data[key] = existing.get(key, data.get(key))
             self.backend.save_store(data)
 
-    def save_snapshot(self, data: dict[str, Any]) -> None:
+    def save_snapshot(
+        self,
+        data: dict[str, Any],
+        *,
+        minimum_revision: int | None = None,
+        deleted_sections: Mapping[str, int] | None = None,
+        preserve_tombstones: bool = False,
+    ) -> int | None:
         with self._store_lock:
-            self.backend.save_snapshot(self._prepare_store_for_save(data))
+            return self.backend.save_snapshot(
+                self._prepare_store_for_save(data),
+                minimum_revision=minimum_revision,
+                deleted_sections=deleted_sections,
+                preserve_tombstones=preserve_tombstones,
+            )
+
+    def save_sections(
+        self,
+        changed_sections: Mapping[str, tuple[int, Any]],
+        deleted_sections: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        with self._store_lock:
+            return self.backend.save_sections(changed_sections, deleted_sections)
+
+    def next_revision(self) -> int:
+        with self._store_lock:
+            return self.backend.next_revision()
+
+    def deleted_section_revisions(
+        self,
+        section_names: Collection[str],
+    ) -> Mapping[str, int]:
+        with self._store_lock:
+            return self.backend.deleted_section_revisions(section_names)
 
     def export_current_to_json(self, data: dict[str, Any]) -> None:
         with self._json_store_lock:
             self.json_backend.save_store(deepcopy(data))
 
-    def health_check(self) -> dict[str, Any]:
-        return self.backend.health_check()
+    def health_check(self, *, raise_on_error: bool = False) -> dict[str, Any]:
+        return self.backend.health_check(raise_on_error=raise_on_error)

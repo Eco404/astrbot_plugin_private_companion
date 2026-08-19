@@ -88,15 +88,15 @@ class StoreCompactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<bubble/>", data["groups"]["10001"]["summary"])
         self.assertEqual(data["memory"]["code"], "示例是 `<widget/>`，泄漏是。")
 
-    async def test_snapshot_cleanup_updates_live_data_and_writes_clean_followup(self) -> None:
+    async def test_snapshot_cleanup_updates_live_data_without_full_followup_write(self) -> None:
         harness = _CanonicalSanitizeHarness({"memory": {"text": "残留 <bubble/> 内容"}})
 
         harness._save_data_sync()
         await harness._flush_scheduled_data_save()
 
         self.assertEqual(harness.data["memory"]["text"], "残留 内容")
-        self.assertEqual(len(harness.writes), 2)
-        self.assertEqual(harness.writes[0], harness.writes[1])
+        self.assertEqual(len(harness.writes), 1)
+        self.assertEqual(harness.writes[0], harness.data)
 
     def test_cleanup_logs_are_aggregated_within_cooldown(self) -> None:
         harness = _ControlTagSanitizerHarness(True)

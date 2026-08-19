@@ -1989,9 +1989,23 @@ def initialize_plugin_runtime(self: Any) -> None:
     self._passive_light_injection_cache: dict[str, Any] = {}
     self._passive_state_session_cache: dict[str, dict[str, Any]] = {}
     self._data_save_task: asyncio.Task | None = None
-    self._data_save_dirty = False
+    self._data_save_dirty: dict[str, int] = {}
+    self._data_save_deleted: dict[str, int] = {}
+    self._data_save_dirty_since: dict[str, float] = {}
+    self._data_save_section_revisions: dict[str, int] = {}
+    self._data_save_full_revision = 0
+    self._data_save_full_since = 0.0
+    self._data_save_revision = 0
+    self._data_save_max_delay_seconds = 2.0
+    self._data_save_retry_base_seconds = 3.0
+    self._data_save_retry_max_seconds = 30.0
     self._persona_data_save_tasks: dict[str, asyncio.Task] = {}
-    self._persona_data_save_dirty: set[str] = set()
+    self._persona_data_save_dirty: dict[str, dict[str, int]] = {}
+    self._persona_data_save_deleted: dict[str, dict[str, int]] = {}
+    self._persona_data_save_dirty_since: dict[str, dict[str, float]] = {}
+    self._persona_data_save_section_revisions: dict[str, dict[str, int]] = {}
+    self._persona_data_save_full_revision: dict[str, int] = {}
+    self._persona_data_save_revision: dict[str, int] = {}
     self._maintenance_failure_cooldowns: dict[str, dict[str, Any]] = {}
     self._framework_captured_send_cache: dict[str, list[Any]] = {}
     self._framework_captured_send_cache_at: dict[str, float] = {}
@@ -2009,6 +2023,16 @@ def initialize_plugin_runtime(self: Any) -> None:
     self._qzone_last_bot = None
     startup_load_started = time.perf_counter()
     self.data = self._load_data_sync()
+    manager = getattr(self, "store_manager", None)
+    next_revision = getattr(manager, "next_revision", None)
+    if callable(next_revision):
+        try:
+            self._data_save_revision = max(
+                int(self._data_save_revision or 0),
+                max(0, int(next_revision()) - 1),
+            )
+        except Exception:
+            pass
     self._body_monitor_integration = BodyMonitorIntegration(self)
     self._apply_tts_runtime_overrides()
     load_elapsed_ms = int((time.perf_counter() - startup_load_started) * 1000)
@@ -2027,7 +2051,7 @@ def initialize_plugin_post_runtime_state(self: Any, config: Any) -> None:
     self.p5_attestation_registry = P5AttestationRegistry()
     self._bot_personal_outbox = BotPersonalOutbox(
         self.data,
-        save=lambda: self._schedule_data_save(delay=0.5),
+        save=lambda: self._schedule_data_save(sections={"bot_personal_outbox"}, delay=0.5),
         background_task=lambda operation, label: self._create_lifecycle_background_task(
             operation,
             label=label,

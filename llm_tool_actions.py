@@ -4961,7 +4961,11 @@ class LlmToolActionsMixin:
                         return bool(authorization["authorized"])
                     state = ensure_reaction_expression_state(user)
                     reaction_expression_scope_state(state, scope_key)["last_offer_at"] = now
-                    self._persist_reaction_expression_state()
+                    self._persist_reaction_expression_state(
+                        sections={"reaction_expression_group_states"}
+                        if scope == "group"
+                        else {"users"}
+                    )
             self._note_reaction_expression_runtime(offers=1, last_reason="offered")
         self._note_reaction_expression_runtime(
             trigger_mode=authorization.get("trigger_mode"),
@@ -5107,11 +5111,15 @@ class LlmToolActionsMixin:
             )
         runtime["last_at"] = _now_ts()
 
-    def _persist_reaction_expression_state(self) -> None:
+    def _persist_reaction_expression_state(
+        self,
+        *,
+        sections: set[str] | None = None,
+    ) -> None:
         scheduler = getattr(self, "_schedule_data_save", None)
         if callable(scheduler):
             try:
-                scheduler()
+                scheduler(sections=sections)
                 return
             except Exception:
                 pass
@@ -5763,7 +5771,11 @@ class LlmToolActionsMixin:
                     now=now,
                     candidate_limit=candidate_limit,
                 )
-                self._persist_reaction_expression_state()
+                self._persist_reaction_expression_state(
+                    sections={"reaction_expression_group_states"}
+                    if scope == "group"
+                    else {"users"}
+                )
                 return json.dumps(
                     self._reaction_expression_skip_result(
                         reason,
@@ -5857,7 +5869,11 @@ class LlmToolActionsMixin:
                     cache_hit=lookup_cache_hit,
                     latency_ms=lookup_latency_ms,
                 )
-                self._persist_reaction_expression_state()
+                self._persist_reaction_expression_state(
+                    sections={"reaction_expression_group_states"}
+                    if scope == "group"
+                    else {"users"}
+                )
             return json.dumps(
                 self._reaction_expression_skip_result(
                     reason,
@@ -5939,7 +5955,11 @@ class LlmToolActionsMixin:
                     cache_hit=lookup_cache_hit,
                     latency_ms=lookup_latency_ms,
                 )
-                self._persist_reaction_expression_state()
+                self._persist_reaction_expression_state(
+                    sections={"reaction_expression_group_states"}
+                    if scope == "group"
+                    else {"users"}
+                )
                 return json.dumps(
                     self._reaction_expression_skip_result(
                         final_reason,
@@ -5978,7 +5998,11 @@ class LlmToolActionsMixin:
                     cache_hit=lookup_cache_hit,
                     latency_ms=lookup_latency_ms,
                 )
-                self._persist_reaction_expression_state()
+                self._persist_reaction_expression_state(
+                    sections={"reaction_expression_group_states"}
+                    if scope == "group"
+                    else {"users"}
+                )
                 return json.dumps(
                     self._reaction_expression_skip_result(
                         "duplicate_image",
@@ -6163,7 +6187,11 @@ class LlmToolActionsMixin:
                     cache_hit=lookup_cache_hit,
                     latency_ms=lookup_latency_ms,
                 )
-                self._persist_reaction_expression_state()
+                self._persist_reaction_expression_state(
+                    sections={"reaction_expression_group_states"}
+                    if scope == "group"
+                    else {"users"}
+                )
             return json.dumps(
                 self._reaction_expression_skip_result(
                     delivery_reason,
@@ -6223,7 +6251,11 @@ class LlmToolActionsMixin:
                     reason="reaction_expression_experiment",
                     subject_owner="unknown",
                 )
-            self._persist_reaction_expression_state()
+            self._persist_reaction_expression_state(
+                sections={"reaction_expression_group_states"}
+                if scope == "group"
+                else {"users"}
+            )
 
         self._note_reaction_expression_runtime(sent=1, last_reason="delivered")
         self._mark_reaction_asset_used(image_id, event=event)
@@ -6401,7 +6433,11 @@ class LlmToolActionsMixin:
                     cache_hit=cache_hit,
                     latency_ms=latency_ms,
                 )
-            self._persist_reaction_expression_state()
+            self._persist_reaction_expression_state(
+                sections={"reaction_expression_group_states"}
+                if scope == "group"
+                else {"users"}
+            )
 
         if sent:
             self._note_reaction_expression_runtime(sent=1, last_reason="delivered")

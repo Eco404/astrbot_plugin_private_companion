@@ -163,7 +163,7 @@ class _DisabledCreativePlanHarness(ProactiveMixin, ProactiveEngineMixin):
     def _clear_planned_proactive_trigger(_user) -> None:
         return None
 
-    def _schedule_data_save(self) -> None:
+    def _schedule_data_save(self, *_args, **_kwargs) -> None:
         self.saved += 1
 
 
