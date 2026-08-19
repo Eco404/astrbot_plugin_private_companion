@@ -169,6 +169,13 @@ class OverallDebugRegressionTests(unittest.IsolatedAsyncioTestCase):
                 '可见正文 <pc_history_media images="1" />',
             ),
         )
+        self.assertEqual(
+            [],
+            plugin._clean_segmented_reply_chunks(
+                event,
+                [[Plain('<pc_history_media_records="1" />')]],
+            ),
+        )
 
     async def test_component_send_reports_core_acceptance(self) -> None:
         harness = _ComponentSendHarness(result=None)

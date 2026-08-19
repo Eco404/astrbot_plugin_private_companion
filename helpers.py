@@ -597,16 +597,29 @@ def _format_history_media_marker(*, images: int = 0, records: int = 0) -> str:
     return f"<pc_history_media {' '.join(attributes)} />"
 
 
+_HISTORY_MEDIA_MARKER_NAME = (
+    r"pc[_-]?history[_-]?media(?:[_-]?(?:records?|images?))?"
+)
+_HISTORY_MEDIA_MARKER_PATTERN = re.compile(
+    rf"<\s*{_HISTORY_MEDIA_MARKER_NAME}\b[^>]*>"
+    rf"(?:[\s\S]*?<\s*/\s*{_HISTORY_MEDIA_MARKER_NAME}\s*>)?",
+    re.IGNORECASE,
+)
+_ESCAPED_HISTORY_MEDIA_MARKER_PATTERN = re.compile(
+    rf"&lt;\s*/?\s*{_HISTORY_MEDIA_MARKER_NAME}\b[^&\r\n]{{0,240}}&gt;",
+    re.IGNORECASE,
+)
+
+
 def _strip_history_media_markers(text: Any) -> str:
     """Remove internal media metadata and legacy chat-like attachment notes."""
     normalized = str(text or "")
-    had_marker = bool(re.search(r"<pc_history_media\b", normalized, flags=re.IGNORECASE))
-    normalized = re.sub(
-        r"<pc_history_media\b[^>]*>(?:[\s\S]*?</pc_history_media\s*>)?",
-        "",
-        normalized,
-        flags=re.IGNORECASE,
+    had_marker = bool(
+        _HISTORY_MEDIA_MARKER_PATTERN.search(normalized)
+        or _ESCAPED_HISTORY_MEDIA_MARKER_PATTERN.search(normalized)
     )
+    normalized = _HISTORY_MEDIA_MARKER_PATTERN.sub("", normalized)
+    normalized = _ESCAPED_HISTORY_MEDIA_MARKER_PATTERN.sub("", normalized)
     normalized = re.sub(
         r"[（(]\s*(?:(?:随消息)?发送(?:了)?\s*(?:(?:一张|\d+\s*张)\s*图片|"
         r"(?:一条|\d+\s*条)\s*语音)\s*(?:[，,]\s*)?)+[）)]",
@@ -683,6 +696,11 @@ def _strip_nonstandard_chat_control_tags(text: Any) -> str:
     normalized = str(text or "")
     if not normalized:
         return ""
+    # This cleaner is also used by TTS/tool delivery paths that do not call the
+    # full outbound cleaner. Models occasionally mutate the internal marker to
+    # forms such as <pc_history_media_records="1" />.
+    normalized = _HISTORY_MEDIA_MARKER_PATTERN.sub("", normalized)
+    normalized = _ESCAPED_HISTORY_MEDIA_MARKER_PATTERN.sub("", normalized)
     normalized = _NONSTANDARD_SELF_CLOSING_TAG_PATTERN.sub("", normalized)
     normalized = _ESCAPED_NONSTANDARD_SELF_CLOSING_TAG_PATTERN.sub("", normalized)
     normalized = _LEAKED_CHAT_EMOTION_CONTROL_PATTERN.sub("", normalized)

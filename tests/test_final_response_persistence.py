@@ -177,6 +177,20 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("第一段\n\n第二段", _strip_outbound_control_blocks(raw))
 
+    def test_outbound_cleanup_removes_mutated_history_media_markers(self):
+        variants = (
+            '<pc_history_media_records="1" />',
+            '<pc-history-media-images="2" />',
+            '&lt;pc_history_media_records="1" /&gt;',
+        )
+
+        for marker in variants:
+            with self.subTest(marker=marker):
+                self.assertEqual(
+                    "前句 后句",
+                    _strip_outbound_control_blocks(f"前句 {marker} 后句"),
+                )
+
     def test_outbound_cleanup_removes_leaked_emotion_controls(self):
         raw = "[affectionate]嗯……\n[shy]才没有呢。[公告]明天见。"
 
