@@ -83,6 +83,16 @@ class ModelReplacementStrategyTests(unittest.TestCase):
             "没办法提交这个请求",
             contains_sensitive_refusal("抱歉，没办法提交这个请求。"),
         )
+        self.assertEqual(
+            "The prompt could not be submitted",
+            contains_sensitive_refusal(
+                "The prompt could not be submitted. The prompt contains sensitive words."
+            ),
+        )
+        self.assertEqual(
+            "露骨性行为",
+            contains_sensitive_refusal("自定义词表仍会保留内置拒答检测：露骨性行为", "自定义词"),
+        )
         self.assertEqual("", contains_sensitive_refusal("当然可以，我来帮你处理。"))
 
     def test_conversation_sensitive_response_is_replaced_before_send(self) -> None:

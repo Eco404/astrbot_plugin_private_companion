@@ -518,7 +518,7 @@ window.PrivateCompanionProviderTree = (() => {
       rules,
       sensitiveEnabled: Boolean(settings.enable_sensitive_model_replacement),
       sensitiveProvider: String(providers.SENSITIVE_REPLACEMENT_PROVIDER_ID || "").trim(),
-      sensitiveKeywords: String(settings.sensitive_replacement_keywords || "很抱歉，我无法；很抱歉,我无法；我有我自己的底线；我们可以聊聊别的；我无法满足；露骨性行为；没办法提交这个请求"),
+      sensitiveKeywords: String(settings.sensitive_replacement_keywords || "很抱歉，我无法；很抱歉,我无法；我有我自己的底线；我们可以聊聊别的；我无法满足；露骨性行为；没办法提交这个请求；这个请求没办法提交；The prompt could not be submitted；prompt could not be submitted；The request could not be submitted；request could not be submitted"),
     };
   }
 
@@ -562,7 +562,7 @@ window.PrivateCompanionProviderTree = (() => {
             <h3>模型替换策略</h3>
             <p>关键词换模、DeepSeek 高价时段替换和敏感拒答重试共用作用范围；未命中时保持原模型。</p>
           </div>
-          <label class="model-replacement-scope">作用范围
+          <label class="model-replacement-scope"><span>作用范围</span>
             <select data-model-replacement-scope>
               <option value="plugin" ${values.scope === "plugin" ? "selected" : ""}>仅插件调用</option>
               <option value="conversation" ${values.scope === "conversation" ? "selected" : ""}>仅普通对话模型</option>
@@ -572,12 +572,22 @@ window.PrivateCompanionProviderTree = (() => {
         </div>
         <div class="model-replacement-body">
           <label class="provider-field model-replacement-rules-field">
-            <span>关键词换模规则 <small>JSON 数组；支持 contains / exact / regex、优先级、任一/全部关键词</small></span>
+            <span class="model-replacement-field-label"><b>关键词换模规则</b><small>JSON 数组 · 支持 contains / exact / regex、优先级、任一/全部关键词</small></span>
             <textarea rows="9" data-model-replacement-rules spellcheck="false" placeholder="[{\"name\":\"代码问题\",\"keywords\":[\"写代码\"],\"provider_id\":\"替代模型\"}]">${escapeHtml(rulesText)}</textarea>
           </label>
           <section class="model-replacement-sensitive">
-            <label class="model-replacement-toggle"><input type="checkbox" data-sensitive-replacement-enabled ${values.sensitiveEnabled ? "checked" : ""} /> <span>启用敏感拒答替换</span></label>
-            <p>命中常见拒答表达时阻断原文本，切换指定模型重试；替代模型仍拒答则不发送原拒答。</p>
+            <div class="model-replacement-sensitive-head">
+              <div>
+                <span class="model-replacement-section-kicker">安全兜底</span>
+                <strong>敏感拒答重试</strong>
+                <p>命中常见拒答表达时切换模型重试，避免把原始拒答直接发出。</p>
+              </div>
+              <label class="model-replacement-toggle">
+                <input type="checkbox" data-sensitive-replacement-enabled ${values.sensitiveEnabled ? "checked" : ""} />
+                <span class="model-replacement-toggle-track" aria-hidden="true"></span>
+                <b>${values.sensitiveEnabled ? "已启用" : "未启用"}</b>
+              </label>
+            </div>
             <label class="provider-field">
               <span>敏感拒答替代模型</span>
               ${replacementProviderControl(context, values.sensitiveProvider, "data-sensitive-replacement-provider-select", "data-sensitive-replacement-provider-input", "自定义 Provider ID")}
@@ -592,7 +602,11 @@ window.PrivateCompanionProviderTree = (() => {
       </article>
     `;
     const toggle = root.querySelector("[data-sensitive-replacement-enabled]");
-    toggle?.addEventListener("change", () => root.querySelector(".model-replacement-card")?.classList.toggle("enabled", toggle.checked));
+    toggle?.addEventListener("change", () => {
+      root.querySelector(".model-replacement-card")?.classList.toggle("enabled", toggle.checked);
+      const label = root.querySelector(".model-replacement-toggle b");
+      if (label) label.textContent = toggle.checked ? "已启用" : "未启用";
+    });
     const select = root.querySelector("[data-sensitive-replacement-provider-select]");
     const input = root.querySelector("[data-sensitive-replacement-provider-input]");
     select?.addEventListener("change", () => {
@@ -639,15 +653,15 @@ window.PrivateCompanionProviderTree = (() => {
             <span>高价时段替代模型</span>
             ${deepseekPeakProviderControl(context, values.provider)}
           </label>
-          <label class="provider-field">
+          <label class="provider-field deepseek-peak-window-field">
             <span>高价时段 <small>每行或逗号分隔，支持跨午夜</small></span>
             <textarea rows="3" data-deepseek-peak-windows placeholder="09:00-12:00&#10;14:00-18:00">${escapeHtml(values.windows)}</textarea>
           </label>
-          <label class="provider-field">
+          <label class="provider-field deepseek-peak-timezone-field">
             <span>时区</span>
             <input data-deepseek-peak-timezone value="${escapeHtml(values.timezone)}" placeholder="Asia/Shanghai" />
           </label>
-          <label class="provider-field">
+          <label class="provider-field deepseek-peak-keywords-field">
             <span>DeepSeek 匹配关键词 <small>匹配 ID、名称、模型和 API Base</small></span>
             <textarea rows="2" data-deepseek-peak-keywords>${escapeHtml(values.keywords)}</textarea>
           </label>

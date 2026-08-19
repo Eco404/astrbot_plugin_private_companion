@@ -24,6 +24,11 @@ DEFAULT_SENSITIVE_REPLACEMENT_KEYWORDS = (
     "我无法满足",
     "露骨性行为",
     "没办法提交这个请求",
+    "这个请求没办法提交",
+    "The prompt could not be submitted",
+    "prompt could not be submitted",
+    "The request could not be submitted",
+    "request could not be submitted",
 )
 
 
@@ -224,7 +229,10 @@ def contains_sensitive_refusal(text: Any, keywords: Any = None) -> str:
     cleaned = re.sub(r"\s+", "", str(text or "")).casefold()
     if not cleaned:
         return ""
-    candidates = normalize_keywords(keywords) or DEFAULT_SENSITIVE_REPLACEMENT_KEYWORDS
+    # Custom terms extend the built-in high-confidence provider refusal terms.
+    # Keeping the built-ins active prevents an older saved custom list from
+    # disabling detection for newly observed provider error wording.
+    candidates = tuple(dict.fromkeys((*DEFAULT_SENSITIVE_REPLACEMENT_KEYWORDS, *normalize_keywords(keywords))))
     for keyword in candidates:
         compact = re.sub(r"\s+", "", keyword).casefold()
         if compact and compact in cleaned:

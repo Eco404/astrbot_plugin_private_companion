@@ -4952,8 +4952,8 @@
       "sensitive_replacement_keywords": {
         "description": "敏感拒答匹配词",
         "type": "text",
-        "hint": "每行或用分号分隔。默认包含“很抱歉，我无法”“我有我自己的底线”“我们可以聊聊别的”“我无法满足”“露骨性行为”“没办法提交这个请求”。",
-        "default": "很抱歉，我无法；很抱歉,我无法；我有我自己的底线；我们可以聊聊别的；我无法满足；露骨性行为；没办法提交这个请求",
+        "hint": "每行或用分号分隔。内置高置信度词会始终保留；默认包含中文拒答、提交失败及英文 Provider 错误提示。",
+        "default": "很抱歉，我无法；很抱歉,我无法；我有我自己的底线；我们可以聊聊别的；我无法满足；露骨性行为；没办法提交这个请求；这个请求没办法提交；The prompt could not be submitted；prompt could not be submitted；The request could not be submitted；request could not be submitted",
         "condition": {
           "enable_sensitive_model_replacement": true
         }
