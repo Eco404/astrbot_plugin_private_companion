@@ -6591,6 +6591,7 @@ async function loadRealityTouch(force = false) {
   try {
     const data = await fetchJson("/reality-touch");
     state.realityTouch = data || null;
+    syncRealityTouchOverviewState(state.realityTouch);
     const users = Array.isArray(data?.users) ? data.users : [];
     if (!users.some((item) => String(item.user_id) === String(state.realityTouchSelectedUserId))) {
       state.realityTouchSelectedUserId = String(users[0]?.user_id || "");
@@ -6604,6 +6605,18 @@ async function loadRealityTouch(force = false) {
     if (state.activeTab === "reality") {
       renderRealityTouchPage();
     }
+  }
+}
+
+function syncRealityTouchOverviewState(snapshot = null) {
+  if (!snapshot || typeof snapshot !== "object") return;
+  const enabled = Boolean(snapshot.global_enabled ?? snapshot.configuration?.enabled);
+  const pluginStatus = state.overview?.companion_plugins?.reality;
+  if (pluginStatus && typeof pluginStatus === "object") pluginStatus.enabled = enabled;
+  state.featureDraft = state.featureDraft || {};
+  state.featureDraft.enable_experimental_bluetooth_wakeup = enabled;
+  if (state.overview?.features) {
+    state.overview.features.enable_experimental_bluetooth_wakeup = enabled;
   }
 }
 
@@ -32565,6 +32578,7 @@ function renderRealityTouchPage() {
   const data = state.realityTouch;
   const status = state.overview?.companion_plugins?.reality || {};
   const enabled = Boolean(data?.global_enabled ?? status.enabled);
+  const canToggle = Boolean(data && !state.realityTouchLoading && !state.realityTouchError);
   const counts = data?.counts || {};
   root.innerHTML = `
     <div class="reality-touch-page ${enabled ? "on" : "off"}">
@@ -32576,15 +32590,15 @@ function renderRealityTouchPage() {
         </div>
         <div class="reality-page-actions">
           <label class="feature-detail-toggle reality-global-toggle">
-            <input type="checkbox" data-reality-global-toggle ${enabled ? "checked" : ""}>
+            <input type="checkbox" data-reality-global-toggle ${enabled ? "checked" : ""} ${canToggle ? "" : "disabled"}>
             <span class="feature-toggle-visual"></span>
-            <b>${enabled ? "已开启" : "未开启"}</b>
+            <b>${canToggle ? (enabled ? "已开启" : "未开启") : "读取中"}</b>
           </label>
           <button type="button" data-reality-touch-refresh>${state.realityTouchLoading ? "正在刷新" : "刷新状态"}</button>
         </div>
       </header>
       <div class="reality-page-status-grid">
-        <article class="${status.enabled ? "is-positive" : "is-muted"}"><span>扩展状态</span><b>${status.enabled ? "已启用" : "已安装 · 未启用"}</b><small>${status.available === false ? "当前不可用" : "已连接陪伴面板"}</small></article>
+        <article class="${enabled ? "is-positive" : "is-muted"}"><span>扩展状态</span><b>${enabled ? "已启用" : "已安装 · 未启用"}</b><small>${status.available === false ? "当前不可用" : "已连接陪伴面板"}</small></article>
         <article class="${data?.configuration?.mobile?.running ? "is-positive" : "is-muted"}"><span>手机终端</span><b>${data?.configuration?.mobile?.running ? "已连接网关" : (data?.configuration?.mobile?.enabled ? "等待绑定" : "未启用")}</b><small>${Number(data?.configuration?.mobile?.active_sessions || 0)} 个活动会话</small></article>
         <article class="is-info"><span>现实授权</span><b>${Number(counts.consented || 0)} 人</b><small>摄像头授权 ${Number(counts.camera_consented || 0)} 人</small></article>
         <article class="${Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0) ? "is-warm" : "is-muted"}"><span>待执行提醒</span><b>${Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0)}</b><small>官方任务与计划场景</small></article>
@@ -32629,9 +32643,16 @@ function realityGlobalConfigPayload(root, enabledOverride) {
       enabled: form ? Boolean(form.elements.mobile_enabled?.checked) : Boolean(mobile.enabled),
       host: form?.elements.mobile_host?.value || mobile.host || "0.0.0.0",
       port: Number(form?.elements.mobile_port?.value || mobile.port || 6322),
+      public_base_url: form?.elements.mobile_public_base_url?.value || mobile.public_base_url || "",
       allowed_user_id: form?.elements.mobile_allowed_user_id?.value || mobile.allowed_user_id || "",
       session_ttl_hours: Number(form?.elements.mobile_session_ttl_hours?.value || mobile.session_ttl_hours || 168),
       location_ttl_seconds: Number(form?.elements.mobile_location_ttl_seconds?.value || mobile.location_ttl_seconds || 900),
+      telemetry_enabled: form?.elements.mobile_telemetry_enabled
+        ? Boolean(form.elements.mobile_telemetry_enabled.checked)
+        : mobile.telemetry_enabled === true,
+      telemetry_ttl_seconds: Number(
+        form?.elements.mobile_telemetry_ttl_seconds?.value || mobile.telemetry_ttl_seconds || 3600,
+      ),
       proxy_rooms: form ? Boolean(form.elements.mobile_proxy_rooms?.checked) : mobile.proxy_rooms !== false,
       screen_upload_enabled: form ? Boolean(form.elements.mobile_screen_upload_enabled?.checked) : mobile.screen_upload_enabled !== false,
       pairing_token: form?.elements.mobile_pairing_token?.value || "",
@@ -35655,6 +35676,11 @@ function bindRealityTouchActions(root) {
   root.querySelector("[data-reality-global-toggle]")?.addEventListener("change", async (event) => {
     const input = event.currentTarget;
     const requested = Boolean(input.checked);
+    if (!state.realityTouch || state.realityTouchLoading) {
+      input.checked = !requested;
+      showToast("现实触及状态仍在读取，请稍后再试", "error");
+      return;
+    }
     const result = await runAction(
       () => postJson("/reality-touch/update", realityGlobalConfigPayload(root, requested)),
       requested ? "现实触及已开启" : "现实触及已关闭",
@@ -35663,6 +35689,7 @@ function bindRealityTouchActions(root) {
     );
     if (result) {
       state.realityTouch = result;
+      syncRealityTouchOverviewState(result);
       renderRealityTouchPage();
     } else {
       input.checked = !requested;

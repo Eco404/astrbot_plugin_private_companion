@@ -66,4 +66,17 @@ def test_reality_workspace_exposes_mobile_gateway_without_owning_implementation(
     assert 'action: "save_global_config"' in script
     assert 'postJson("/reality-touch/update"' in script
     assert "function renderRealityTouchPage()" in script
+    assert 'const canToggle = Boolean(data && !state.realityTouchLoading && !state.realityTouchError)' in script
+    assert 'mobile.telemetry_enabled === true' in script
+    assert 'mobile.telemetry_ttl_seconds || 3600' in script
+    assert "syncRealityTouchOverviewState(result)" in script
     assert '"enable_experimental_bluetooth_wakeup",\n  "enable_daily_case_review_experiment"' not in script
+
+
+def test_reality_feature_flag_uses_external_plugin_state() -> None:
+    extension = type("RealityExtension", (), {"status": lambda self: {"enabled": True}})()
+    plugin = type("Plugin", (), {"_reality_companion_api": lambda self: extension})()
+    api = PrivateCompanionPageApi(plugin)
+    api._screen_companion_available = lambda: False
+
+    assert api._feature_flags()["enable_experimental_bluetooth_wakeup"] is True

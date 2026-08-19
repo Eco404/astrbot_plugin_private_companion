@@ -18581,6 +18581,15 @@ class PrivateCompanionPageApi(
         ]
         values = {key: bool(getattr(self.plugin, key, False)) for key in keys}
         try:
+            reality_api_getter = getattr(self.plugin, "_reality_companion_api", None)
+            reality_api = reality_api_getter() if callable(reality_api_getter) else None
+            reality_status_getter = getattr(reality_api, "status", None) if reality_api is not None else None
+            reality_status = reality_status_getter() if callable(reality_status_getter) else None
+            if isinstance(reality_status, dict):
+                values["enable_experimental_bluetooth_wakeup"] = bool(reality_status.get("enabled"))
+        except Exception:
+            pass
+        try:
             bilibili_available = bool(getattr(self.plugin, "_bilibili_available", lambda: False)())
         except Exception:
             bilibili_available = False
