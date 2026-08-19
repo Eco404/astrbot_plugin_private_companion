@@ -16,6 +16,7 @@ class _Plugin:
     def __init__(self, self_ids):
         self._self_ids = set(self_ids)
         self._external_realtime_activities = {}
+        self._external_realtime_continuity = {}
         self.data = {"users": {"10001": {"nickname": "流星"}}}
 
     def _known_bot_self_ids(self):
@@ -64,6 +65,24 @@ class RealtimeExtensionAPITests(unittest.TestCase):
         self.assertEqual("shared_watch", context["external_activity"]["kind"])
         self.assertTrue(api.notify_external_activity_ended("together:room"))
         self.assertEqual({}, api.get_external_activity(user_id="10001"))
+
+    def test_short_term_continuity_preserves_speaker_attribution_and_public_view(self) -> None:
+        api = PrivateCompanionExtensionAPI(_Plugin({"12345678"}))
+
+        recorded = api.record_external_realtime_continuity(
+            "10001",
+            summary="小星：我想吃汤圆；主要用户：我去找店，到店再打给你",
+            public_summary="正在和主要用户约会",
+            facts=["小星提出想吃汤圆", "主要用户答应去找店"],
+        )
+
+        self.assertGreater(recorded["expires_at"], recorded["updated_at"] + 21000)
+        private = api.get_external_realtime_continuity(user_id="10001", public=False)
+        public = api.get_external_realtime_continuity(user_id="10001", public=True)
+        self.assertIn("小星：我想吃汤圆", private["summary"])
+        self.assertEqual("正在和主要用户约会", public["summary"])
+        self.assertNotIn("汤圆", public["summary"])
+        self.assertEqual([], public["facts"])
 
 
 class RealtimeVoiceExtensionAPITests(unittest.IsolatedAsyncioTestCase):

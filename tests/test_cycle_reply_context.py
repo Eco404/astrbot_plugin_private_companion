@@ -43,6 +43,30 @@ def _state_harness() -> PrivateCompanionPlugin:
 
 
 class CycleReplyContextTests(unittest.IsolatedAsyncioTestCase):
+    def test_direct_state_answer_prefers_active_shared_activity_to_schedule(self) -> None:
+        plugin = _state_harness()
+        plugin.data["daily_plan"] = {"items": [{"activity": "在家躺在床上"}]}
+        plugin._get_current_plan_item = lambda _plan: {"activity": "在家躺在床上"}
+        plugin._format_plan_item_for_prompt = lambda _item: "20:00-21:00 在家躺在床上"
+        plugin._external_realtime_activities = {
+            "together:date": {
+                "user_id": "10001",
+                "kind": "shared_call",
+                "label": "正在和主要用户约会并保持通话",
+                "expires_at": 4102444800,
+            }
+        }
+        plugin._external_realtime_continuity = {}
+
+        snapshot = plugin._format_private_passive_state_snapshot(
+            _period_state(),
+            {"user_id": "10001", "relationship_role": "owner"},
+            direct=True,
+        )
+
+        self.assertIn("当前活动：正在和主要用户约会并保持通话", snapshot)
+        self.assertIn("原定日程素材（已被实时共同活动覆盖）", snapshot)
+        self.assertIn("实时共同活动（若有），它高于固定日程", snapshot)
     async def test_ordinary_group_reply_receives_period_boundary_without_wakeup(self) -> None:
         plugin = _state_harness()
         plugin._ensure_daily_state = AsyncMock(return_value=_period_state())

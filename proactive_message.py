@@ -15648,6 +15648,22 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         quote_message_id: str = "",
         disable_segmenting: bool = False,
     ) -> _ProactiveSendOutcome:
+        # Recheck at the final delivery boundary. A realtime call may start
+        # after a proactive candidate was planned but before it is sent.
+        busy_context_getter = getattr(self, "_busy_reply_proactive_block_context", None)
+        if callable(busy_context_getter):
+            try:
+                busy_context = busy_context_getter({}, now=_now_ts())
+            except TypeError:
+                busy_context = busy_context_getter({}, now=_now_ts(), umo=umo)
+            except Exception:
+                busy_context = {}
+            if isinstance(busy_context, dict) and busy_context.get("kind") == "external_realtime":
+                logger.info(
+                    "[PrivateCompanion] 实时共同活动期间在最终发送边界取消主动消息: umo=%s",
+                    _single_line(umo, 140),
+                )
+                return _ProactiveSendOutcome(False, False, note="实时共同活动期间已取消主动消息")
         trigger_message_id = _single_line(quote_message_id, 120)
         placeholder_cleaner = getattr(self, "_sanitize_orphan_tts_placeholders", None)
         if callable(placeholder_cleaner):

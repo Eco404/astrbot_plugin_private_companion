@@ -761,14 +761,76 @@ class PrivateCompanionExtensionAPI:
                 "shared_call": "正在和主要用户通话",
                 "shared_watch": "正在和主要用户一起看视频",
             }.get(_single_line(activity.get("kind"), 40), "正在进行共同活动")
-            prompt = f"{prompt}；当前共同活动：{label}" if prompt else f"当前共同活动：{label}"
+            prompt = f"{prompt}\n实时共同活动（高于固定日程）：{label}" if prompt else f"实时共同活动（高于固定日程）：{label}"
+        continuity = self.get_external_realtime_continuity(user_id=user_id, public=False)
+        if continuity:
+            continuity_text = _single_line(continuity.get("summary"), 1800)
+            if continuity_text:
+                prompt = f"{prompt}\n短期实时连续性（优先于旧日程和旧记忆）：{continuity_text}" if prompt else continuity_text
         return {
             "snapshot": snapshot,
             "prompt": prompt,
             "purpose": normalized_purpose,
             "bot": self.get_bot_identity(),
             "external_activity": activity,
+            "realtime_continuity": continuity,
         }
+
+    def record_external_realtime_continuity(
+        self,
+        user_id: str,
+        *,
+        summary: str,
+        public_summary: str = "",
+        facts: list[str] | None = None,
+        ttl_seconds: int = 21600,
+        activity_id: str = "",
+    ) -> dict[str, Any]:
+        """Store bounded post-call continuity without writing long-term memory."""
+        key = _single_line(user_id, 80)
+        text = _single_line(summary, 2200)
+        if not key or not text:
+            return {}
+        registry = getattr(self._plugin, "_external_realtime_continuity", None)
+        if not isinstance(registry, dict):
+            registry = {}
+            self._plugin._external_realtime_continuity = registry
+        now = time.time()
+        ttl = _safe_int(ttl_seconds, 21600, 300, 86400)
+        bounded_facts = [
+            _single_line(item, 240)
+            for item in (facts or [])
+            if _single_line(item, 240)
+        ][:8]
+        item = {
+            "user_id": key,
+            "summary": text,
+            "public_summary": _single_line(public_summary, 360),
+            "facts": bounded_facts,
+            "activity_id": _single_line(activity_id, 120),
+            "updated_at": now,
+            "expires_at": now + ttl,
+        }
+        registry[key] = item
+        return dict(item)
+
+    def get_external_realtime_continuity(self, *, user_id: str = "", public: bool = False) -> dict[str, Any]:
+        registry = getattr(self._plugin, "_external_realtime_continuity", None)
+        if not isinstance(registry, dict):
+            return {}
+        now = time.time()
+        for key, item in list(registry.items()):
+            if not isinstance(item, dict) or _safe_float(item.get("expires_at"), 0.0) <= now:
+                registry.pop(key, None)
+        key = _single_line(user_id, 80)
+        item = registry.get(key) if key else None
+        if not isinstance(item, dict):
+            return {}
+        result = dict(item)
+        if public:
+            result["summary"] = _single_line(result.get("public_summary"), 360)
+            result["facts"] = []
+        return result if _single_line(result.get("summary"), 2200) else {}
 
     def notify_external_activity_started(
         self,
@@ -12587,13 +12649,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         now = self._environment_now()
         time_label, _ = self._current_time_period_label(now)
         pieces = [f"时间节奏：{time_label}", f"精神约 {energy}/100", f"情绪底色偏{mood}"]
+        realtime_formatter = getattr(self, "_format_external_realtime_context_for_prompt", None)
+        realtime_context = realtime_formatter(current_user, public=False) if callable(realtime_formatter) else ""
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         schedule = self._sanitize_schedule_context_for_private_user(
             self._format_plan_item_for_prompt(current_item),
             current_user or {},
         )
-        if schedule:
+        if schedule and not realtime_context:
             pieces.append(f"拟人化日程素材：{schedule}")
+        elif schedule:
+            pieces.append(f"原定日程素材（已被实时共同活动覆盖）：{schedule}")
         detail = self._current_detail_segment_for_update()
         if isinstance(detail, dict):
             summary = _single_line(detail.get("summary"), 90)
@@ -12624,20 +12690,96 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             else "本轮状态素材触发原因：Bot 自身模拟状态发生变化。"
         )
         guidance = (
-            "用户正在直接问 Bot 此刻在做什么或当前状态：先正面回答拟人化日程素材中的当前活动，"
-            "它高于旧对话、旧记忆和临场发挥。不得否认素材中明确的忙碌/专注状态，也不得另编素材未提供的动作、地点、饮食或娱乐活动。"
+            "用户正在直接问 Bot 此刻在做什么或当前状态：先回答实时共同活动（若有），它高于固定日程、旧对话、旧记忆和临场发挥。"
+            "固定日程只是原计划，若与实时共同活动冲突，必须说原计划被打断/覆盖，禁止继续声称仍在旧地点或旧动作中。"
+            "若没有实时共同活动，先正面回答拟人化日程素材中的当前活动。"
+            "不得另编素材未提供的动作、地点、饮食或娱乐活动。"
             "如果素材本身较笼统，就按原有粒度自然转述，例如只说正在专心处理手头的事；不要为了显得具体而补造细节。"
             if direct
             else "只用于语气、长短、节奏和轻微接话；不要把它改写成用户做过的事或现实已经发生的事件。"
         )
+        blocks = [
+            "【Bot 自身模拟状态更新】",
+            "以下只描述 Bot 的拟人化内部状态/场景素材，不是用户事实、不是现实证据，也不要写入长期记忆。",
+        ]
+        if realtime_context:
+            blocks.append(realtime_context)
+        blocks.extend([
+            guidance,
+            usage + " " + "；".join(pieces) + "。",
+        ])
         return "\n".join(
-            [
-                "【Bot 自身模拟状态更新】",
-                "以下只描述 Bot 的拟人化内部状态/场景素材，不是用户事实、不是现实证据，也不要写入长期记忆。",
-                guidance,
-                usage + " " + "；".join(pieces) + "。",
-            ]
+            blocks
         )
+
+    def _format_external_realtime_context_for_prompt(
+        self,
+        current_user: dict[str, Any] | None = None,
+        *,
+        public: bool = False,
+    ) -> str:
+        """Format extension state for ordinary private/group prompts.
+
+        Active shared activity is authoritative over the schedule. Continuity is
+        deliberately bounded and public views never include call transcript.
+        """
+        now = _now_ts()
+        user = current_user if isinstance(current_user, dict) else {}
+        user_id = _single_line(user.get("user_id"), 80)
+        role = _single_line(user.get("relationship_role"), 24)
+        role_getter = getattr(self, "_private_user_role", None)
+        if callable(role_getter):
+            try:
+                role = _single_line(role_getter(user, user_id), 24)
+            except TypeError:
+                role = _single_line(role_getter(user), 24)
+            except Exception:
+                pass
+        activity: dict[str, Any] = {}
+        registry = getattr(self, "_external_realtime_activities", None)
+        if isinstance(registry, dict):
+            for key, item in list(registry.items()):
+                if not isinstance(item, dict) or _safe_float(item.get("expires_at"), 0.0) <= now:
+                    registry.pop(key, None)
+                    continue
+                item_user = _single_line(item.get("user_id"), 80)
+                if item_user and item_user == user_id:
+                    activity = dict(item)
+                    break
+                if not activity and (public or role != "owner"):
+                    activity = dict(item)
+        continuity: dict[str, Any] = {}
+        continuity_registry = getattr(self, "_external_realtime_continuity", None)
+        if isinstance(continuity_registry, dict) and user_id:
+            item = continuity_registry.get(user_id)
+            if isinstance(item, dict) and _safe_float(item.get("expires_at"), 0.0) > now:
+                continuity = dict(item)
+        if not activity and not continuity:
+            return ""
+        label = _single_line(activity.get("label"), 140) or {
+            "shared_call": "正在和主要用户通话",
+            "shared_watch": "正在和主要用户一起看视频",
+            "shared_work": "正在和主要用户进行工作协同",
+        }.get(_single_line(activity.get("kind"), 40), "正在进行共同活动")
+        if public:
+            return (
+                "【实时共同活动公开状态】\n"
+                f"{label}。这是当前优先级最高的实时事实，固定日程只是原计划。"
+                "群聊只可概括说明正在与主要用户共同活动，不得透露电话内容、具体约定、逐字转写或私密地点。"
+            )
+        lines = [
+            "【实时共同活动与短期连续性】",
+            "实时共同活动是正在发生的高优先级事实；固定日程只是原计划，冲突时必须以实时活动为准。",
+        ]
+        if activity:
+            lines.append(f"当前活动：{label}")
+        summary = _single_line(continuity.get("summary"), 1800)
+        if summary:
+            lines.append(
+                "最近通话/共同活动的短期连续性（带说话人归属，仅作自然接续，不是长期记忆）："
+                + summary
+            )
+        return "\n".join(lines)
 
     def _private_passive_state_reply_policy_prompt(self) -> str:
         return "\n".join(

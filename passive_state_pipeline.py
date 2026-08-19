@@ -386,6 +386,11 @@ async def inject_humanized_state(
                     if recent_atrelay_context:
                         group_context_text = f"{group_context_text}\n\n{recent_atrelay_context}".strip()
                     group_context_text = f"{group_context_text}{wakeup_state_text}{extra}"
+                    realtime_formatter = getattr(self, "_format_external_realtime_context_for_prompt", None)
+                    if callable(realtime_formatter):
+                        realtime_context = realtime_formatter({}, public=True)
+                        if realtime_context:
+                            group_context_text = f"{realtime_context}\n\n{group_context_text}".strip()
                     if isinstance(high_intensity_for_context, dict) and high_intensity_for_context.get("active"):
                         before_compact_chars = len(group_context_text)
                         group_context_text = self._compact_high_intensity_prompt_lines(
@@ -506,6 +511,10 @@ async def inject_humanized_state(
     if not self._private_passive_profile_available(user_id, current_user):
         log_bookshelf_secret_skip("private_user_disabled", current_user)
         return
+    # Keep the extension context keyed to the canonical user even when the
+    # persisted profile predates the user_id field.
+    current_user = dict(current_user)
+    current_user.setdefault("user_id", user_id)
     if not bool(getattr(event, "private_companion_skip_passive_input_status", False)):
         self._start_passive_input_status_loop(event, user_id)
 
@@ -643,6 +652,18 @@ async def inject_humanized_state(
         worldview_context = self._sanitize_owner_environment_context_for_private_user(worldview_context, current_user)
         if worldview_context:
             prompt_surface.add("worldview.adaptation", worldview_context, priority=37, source="worldview")
+    realtime_formatter = getattr(self, "_format_external_realtime_context_for_prompt", None)
+    if callable(realtime_formatter):
+        realtime_context = realtime_formatter(current_user, public=False)
+        if realtime_context:
+            prompt_surface.add(
+                "realtime.activity_continuity",
+                realtime_context,
+                # Render after daily schedule and recall fragments so the
+                # current realtime fact is the last authoritative context.
+                priority=76,
+                source="external_realtime",
+            )
     departure_getter = getattr(self, "_format_conversation_departure_prompt", None)
     if callable(departure_getter):
         departure_prompt = departure_getter(current_user, inbound_text, state)

@@ -204,6 +204,35 @@ class SceneContextTests(unittest.IsolatedAsyncioTestCase):
         assert "日程打断线索" in formatted
         assert "不代表计划已完成" in formatted
 
+    def test_active_shared_activity_overrides_fixed_schedule(self) -> None:
+        harness = _SceneHarness(str(self.outfit_path))
+        harness._external_realtime_activities = {
+            "together:date": {
+                "user_id": "10001",
+                "kind": "shared_call",
+                "label": "正在和主要用户约会并保持通话",
+                "expires_at": 4102444800,
+            }
+        }
+        harness._external_realtime_continuity = {
+            "10001": {
+                "user_id": "10001",
+                "summary": "小星：我想吃汤圆；主要用户：到店再打给你",
+                "public_summary": "正在和主要用户约会",
+                "expires_at": 4102444800,
+            }
+        }
+        snapshot = harness._build_companion_scene_snapshot(
+            {**harness.data["users"]["10001"], "user_id": "10001"},
+            now=datetime(2026, 7, 19, 16, 20, tzinfo=timezone.utc),
+        )
+        formatted = harness._format_companion_scene_snapshot(snapshot)
+
+        self.assertTrue(snapshot["schedule"]["overridden_by_realtime_activity"])
+        self.assertIn("实时共同活动（最高优先级事实）", formatted)
+        self.assertIn("原定日程（仅作被打断的背景）", formatted)
+        self.assertIn("小星：我想吃汤圆", formatted)
+
     def test_extension_api_exposes_structured_snapshot(self) -> None:
         harness = _SceneHarness(str(self.outfit_path))
         api = PrivateCompanionExtensionAPI(harness)

@@ -136,6 +136,10 @@ def initialize_plugin_entrypoint_state(
     self.extension_api = extension_api_factory(self)
     self._external_proactive_abilities: dict[str, dict[str, Any]] = {}
     self._external_realtime_activities: dict[str, dict[str, Any]] = {}
+    # Short-lived continuity from realtime extensions. This is deliberately
+    # separate from long-term memory: it preserves the immediate thread while
+    # allowing stale call details to disappear automatically.
+    self._external_realtime_continuity: dict[str, dict[str, Any]] = {}
     self.config = config
     self.plugin_identity = plugin_identity_snapshot()
     self.runtime_capabilities = probe_runtime_capabilities(

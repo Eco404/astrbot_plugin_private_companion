@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from .helpers import _flat_get, _now_ts, _path_text, _safe_int, _single_line
+from .helpers import _flat_get, _now_ts, _path_text, _safe_float, _safe_int, _single_line
 
 
 SCENE_CONTEXT_VERSION = 3
@@ -117,6 +117,41 @@ class SceneContextMixin:
             except Exception:
                 pass
         return datetime.now().astimezone()
+
+    def _scene_context_realtime_extension(self, user_id: str, role: str = "") -> dict[str, Any]:
+        """Read active extension state for the shared scene without exposing stale data."""
+        now = _now_ts()
+        activities = getattr(self, "_external_realtime_activities", None)
+        active: dict[str, Any] = {}
+        if isinstance(activities, dict):
+            for key, item in list(activities.items()):
+                if not isinstance(item, dict) or _safe_float(item.get("expires_at"), 0.0) <= now:
+                    activities.pop(key, None)
+                    continue
+                item_user = _single_line(item.get("user_id"), 80)
+                if user_id and item_user == user_id:
+                    active = dict(item)
+                    break
+                if not active and role != "owner":
+                    active = dict(item)
+        continuity = getattr(self, "_external_realtime_continuity", None)
+        recent: dict[str, Any] = {}
+        if isinstance(continuity, dict):
+            for key, item in list(continuity.items()):
+                if not isinstance(item, dict) or _safe_float(item.get("expires_at"), 0.0) <= now:
+                    continuity.pop(key, None)
+                    continue
+                if _single_line(item.get("user_id"), 80) == user_id:
+                    recent = dict(item)
+                    break
+        if role != "owner":
+            # Group/secondary-user snapshots may use the public coarse view only.
+            recent = {
+                **recent,
+                "summary": _single_line(recent.get("public_summary"), 360),
+                "facts": [],
+            } if recent else {}
+        return {"activity": active, "continuity": recent}
 
     def _scene_context_current_schedule(
         self,
@@ -498,6 +533,8 @@ class SceneContextMixin:
             except Exception:
                 role_label = role
 
+        realtime_extension = self._scene_context_realtime_extension(user_id, role)
+
         mobile_context: dict[str, Any] = {}
         mobile_context_getter = getattr(self, "_reality_mobile_context", None)
         if user_id and callable(mobile_context_getter):
@@ -609,7 +646,9 @@ class SceneContextMixin:
                 "text": schedule_text,
                 "history": schedule_history,
                 "interruption": interruption_context if isinstance(interruption_context, dict) else {},
+                "overridden_by_realtime_activity": bool(realtime_extension.get("activity")),
             },
+            "realtime": realtime_extension,
             "location": {
                 "raw": location,
                 "coarse": coarse_location,
@@ -690,6 +729,9 @@ class SceneContextMixin:
         relationship = scene.get("relationship") if isinstance(scene.get("relationship"), dict) else {}
         game_afterglow = scene.get("game_afterglow") if isinstance(scene.get("game_afterglow"), dict) else {}
         visual = scene.get("visual") if isinstance(scene.get("visual"), dict) else {}
+        realtime = scene.get("realtime") if isinstance(scene.get("realtime"), dict) else {}
+        realtime_activity = realtime.get("activity") if isinstance(realtime.get("activity"), dict) else {}
+        realtime_continuity = realtime.get("continuity") if isinstance(realtime.get("continuity"), dict) else {}
 
         parts = [
             f"时间：{_single_line(scene.get('date'), 20)} {_single_line(scene.get('time'), 12)}（{_single_line(scene.get('daypart'), 12)}）",
@@ -698,8 +740,22 @@ class SceneContextMixin:
         conditions = state.get("conditions") if isinstance(state.get("conditions"), list) else []
         if conditions and purpose not in {"image_search"}:
             parts.append(f"状态余波：{'、'.join(_single_line(item, 32) for item in conditions[:4] if _single_line(item, 32))}")
-        if _single_line(schedule.get("text"), 320):
+        if _single_line(realtime_activity.get("label"), 120):
+            label = _single_line(realtime_activity.get("label"), 120)
+            parts.append(
+                f"实时共同活动（最高优先级事实）：{label}。固定日程只是原计划，已被当前共同活动覆盖；"
+                "不得继续声称 Bot 仍在原日程地点或动作中。"
+            )
+            if _single_line(schedule.get("text"), 320):
+                parts.append(f"原定日程（仅作被打断的背景）：{_single_line(schedule.get('text'), 320)}")
+        elif _single_line(schedule.get("text"), 320):
             parts.append(f"当前日程：{_single_line(schedule.get('text'), 320)}")
+        continuity_text = _single_line(realtime_continuity.get("summary"), 1800)
+        if continuity_text:
+            parts.append(
+                "短期实时连续性（优先于旧日程和旧记忆，仅用于自然接续，不自动写入长期记忆）："
+                + continuity_text
+            )
         interruption = schedule.get("interruption") if isinstance(schedule.get("interruption"), dict) else {}
         if interruption.get("active"):
             plan_title = _single_line(interruption.get("plan_title"), 100) or "原定日程"
