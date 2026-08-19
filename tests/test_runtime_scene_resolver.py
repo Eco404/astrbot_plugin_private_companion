@@ -49,8 +49,7 @@ def test_resolver_ignores_unbound_or_user_candidates() -> None:
         conversation_state=False,
         now=now,
     )
-    assert result["subject_actor_id"] == "bot-1"
-    assert result["state"] == "在休息"
+    assert result is None
 
 
 def test_schedule_authority_requires_structured_absolute_source_and_is_idempotent() -> None:

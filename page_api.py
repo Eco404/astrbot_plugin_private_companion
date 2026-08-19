@@ -27343,11 +27343,19 @@ class PrivateCompanionPageApi(
                 if callable(current_getter)
                 else self.plugin._get_current_plan_item(plan)
             )
+            if not isinstance(picked, dict):
+                display_getter = getattr(self.plugin, "_get_clock_plan_item_for_display", None)
+                picked = display_getter(plan) if callable(display_getter) else None
             current_item = picked if isinstance(picked, dict) else {}
             items = plan.get("items") if isinstance(plan.get("items"), list) else []
             current_index = next((index for index, item in enumerate(items) if item is picked), -1)
             if current_item:
-                current_lifecycle = self.plugin._plan_item_runtime_status(plan, current_item, current_index)
+                display_status = getattr(self.plugin, "_plan_item_display_status", None)
+                current_lifecycle = (
+                    display_status(plan, current_item, current_index)
+                    if callable(display_status)
+                    else self.plugin._plan_item_runtime_status(plan, current_item, current_index)
+                )
         except Exception:
             current_item = {}
 
@@ -27418,11 +27426,16 @@ class PrivateCompanionPageApi(
             segment = self._segment_from_key(str(key), plan, snapshot)
             seen_segment_keys.add(str(key))
             segment_item = segment.get("item") if isinstance(segment.get("item"), dict) else {}
-            lifecycle = self.plugin._plan_item_runtime_status(
-                plan,
-                segment_item,
-                self._int(segment.get("index"), -1, -1),
-            ) if segment_item else "planned"
+            display_status = getattr(self.plugin, "_plan_item_display_status", None)
+            lifecycle = (
+                display_status(plan, segment_item, self._int(segment.get("index"), -1, -1))
+                if segment_item and callable(display_status)
+                else self.plugin._plan_item_runtime_status(
+                    plan,
+                    segment_item,
+                    self._int(segment.get("index"), -1, -1),
+                ) if segment_item else "planned"
+            )
             segments.append(
                 {
                     "key": str(key),
@@ -27472,7 +27485,11 @@ class PrivateCompanionPageApi(
                     "window": f"{self.plugin._minutes_to_hhmm(start)}-{self.plugin._minutes_to_hhmm(end)}",
                     "start": start,
                     "end": end,
-                    "lifecycle": self.plugin._plan_item_runtime_status(plan, item, index),
+                    "lifecycle": (
+                        self.plugin._plan_item_display_status(plan, item, index)
+                        if callable(getattr(self.plugin, "_plan_item_display_status", None))
+                        else self.plugin._plan_item_runtime_status(plan, item, index)
+                    ),
                     "activity": self._single_line(item.get("activity"), 180),
                     "basis": self.plugin._normalize_schedule_basis(item.get("basis"), default=["coarse_plan"]),
                     "confidence": self._float(item.get("confidence"), 0.72, 0.0, 1.0),

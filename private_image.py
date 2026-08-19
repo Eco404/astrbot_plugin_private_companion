@@ -249,6 +249,34 @@ class PrivateImageMixin:
                     return True
         return False
 
+    @staticmethod
+    def _private_image_local_path_from_source(source: Any) -> Path | None:
+        """Normalize plain and file-URI paths, including Windows drive URIs."""
+
+        text = str(source or "").strip().strip('"')
+        if not text:
+            return None
+        if text.lower().startswith("file:"):
+            try:
+                parsed = urlsplit(text)
+                path_text = unquote(parsed.path or "")
+                netloc = unquote(parsed.netloc or "")
+                if re.fullmatch(r"[A-Za-z]:", netloc):
+                    path_text = netloc + path_text
+                elif netloc and netloc.lower() != "localhost":
+                    path_text = f"//{netloc}{path_text}"
+                if os.name == "nt" and re.match(r"^/[A-Za-z]:[\\/]", path_text):
+                    path_text = path_text[1:]
+                text = path_text
+            except (UnicodeError, ValueError):
+                return None
+        else:
+            text = unquote(text)
+        try:
+            return Path(text).expanduser()
+        except (OSError, ValueError):
+            return None
+
     async def _persist_private_inbound_images(self, event: AstrMessageEvent, user_id: str) -> list[str]:
         # Image files are private user state. Resolve the sender against the
         # current platform/adapter/bot account before choosing the debounce
@@ -478,15 +506,17 @@ class PrivateImageMixin:
                 if persisted and persisted not in prepared:
                     prepared.append(persisted)
                 continue
-            if not self._private_image_source_to_model_url(source):
+            local_path = self._private_image_local_path_from_source(source)
+            normalized_source = str(local_path) if local_path is not None else source
+            if not self._private_image_source_to_model_url(normalized_source):
                 logger.info(
                     "[PrivateCompanion] 本地图片源不可读,已跳过: namespace=%s source=%s",
                     namespace,
                     _single_line(source, 160),
                 )
                 continue
-            if source not in prepared:
-                prepared.append(source)
+            if normalized_source not in prepared:
+                prepared.append(normalized_source)
         return prepared
 
     def _sweep_stale_prepared_image_files(self, target_dir: Path) -> int:
@@ -534,13 +564,13 @@ class PrivateImageMixin:
         refs: list[str] = []
         for source in [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:5]:
             text = source
-            if text.startswith("file://"):
-                text = text[len("file://"):]
             if text.startswith("data:") or text.startswith("base64://"):
                 continue
             if re.match(r"^https?://", text, flags=re.I):
                 continue
-            path = Path(text)
+            path = self._private_image_local_path_from_source(text)
+            if path is None:
+                continue
             if not path.exists() or not path.is_file() or not self._private_image_local_path_is_allowed(path):
                 continue
             ref = str(path.resolve())
@@ -556,9 +586,9 @@ class PrivateImageMixin:
             return text
         if text.startswith("base64://"):
             return f"data:image/jpeg;base64,{text[len('base64://'):]}"
-        if text.startswith("file://"):
-            text = text[len("file://"):]
-        path = Path(text)
+        path = self._private_image_local_path_from_source(text)
+        if path is None:
+            return ""
         if not path.exists() or not path.is_file():
             return ""
         if not self._private_image_local_path_is_allowed(path):
@@ -583,9 +613,9 @@ class PrivateImageMixin:
             if text.startswith("base64://"):
                 raw = base64.b64decode(text[len("base64://"):], validate=False)
                 return "sha256:" + hashlib.sha256(raw).hexdigest()
-            if text.startswith("file://"):
-                text = text[len("file://"):]
-            path = Path(text)
+            path = self._private_image_local_path_from_source(text)
+            if path is None:
+                return ""
             if path.exists() and path.is_file() and self._private_image_local_path_is_allowed(path):
                 return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
         except Exception as exc:
@@ -2139,9 +2169,9 @@ class PrivateImageMixin:
             elif text.startswith("base64://"):
                 raw = base64.b64decode(text[len("base64://"):], validate=False)
             else:
-                if text.startswith("file://"):
-                    text = text[len("file://"):]
-                path = Path(text)
+                path = self._private_image_local_path_from_source(text)
+                if path is None:
+                    return b""
                 if not path.exists() or not path.is_file() or not self._private_image_local_path_is_allowed(path):
                     return b""
                 if path.suffix.lower() != ".gif":
@@ -3891,7 +3921,7 @@ class PrivateImageMixin:
                 continue
             source = str(item.get("source") or "").strip()
             tier = _single_line(item.get("tier"), 40)
-            if source and tier != "placeholder" and source not in sources:
+            if source and tier not in {"placeholder", "platform_file"} and source not in sources:
                 sources.append(source)
         if sources:
             return sources[:5]
@@ -3930,7 +3960,14 @@ class PrivateImageMixin:
         clean_sources = [str(item).strip() for item in sources if str(item or "").strip()][:5]
         if not clean_sources:
             return ""
-        wait_seconds = max(0.0, _safe_float(getattr(self, "context_image_caption_timeout_seconds", 8.0), 8.0, 0.0))
+        configured_wait = max(0.0, _safe_float(getattr(self, "context_image_caption_timeout_seconds", 30.0), 30.0, 0.0))
+        provider_timeout = self._private_image_provider_timeout_seconds()
+        vision_budget = self._private_image_vision_wait_budget_seconds()
+        wait_seconds = (
+            max(configured_wait, provider_timeout + 2.0, vision_budget)
+            if configured_wait > 0 and provider_timeout > 0
+            else configured_wait
+        )
         task = self._transcribe_private_inbound_images(clean_sources, umo=umo)
         try:
             if wait_seconds > 0:

@@ -287,7 +287,12 @@ class RuntimeSceneResolver:
         if conversation_active:
             state = "陪你聊天"
         else:
-            state = self._candidate_state(agenda_candidates) or "在休息"
+            state = self._candidate_state(agenda_candidates)
+            if not state:
+                # No current evidence means unknown, not resting.  A default
+                # rest commit otherwise renews every hour and becomes a fake
+                # persistent scene in the panel and prompts.
+                return None
         origin_refs = [f"window:{window}", f"conversation:{bool(conversation_active)}"]
         if isinstance(hard_constraints, dict):
             ref = _text(hard_constraints.get("event_id") or hard_constraints.get("id"), 160)

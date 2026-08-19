@@ -1723,16 +1723,24 @@ class EventDispatchMixin:
                     source = _single_line(extractor(comp), 1000)
                 except Exception:
                     source = ""
-            if source:
+            local_path_getter = getattr(self, "_private_image_local_path_from_source", None)
+            local_path = local_path_getter(source) if source and callable(local_path_getter) else None
+            source_is_resolved = bool(
+                source.startswith(("http://", "https://", "data:", "base64://"))
+                or (local_path is not None and local_path.exists() and local_path.is_file())
+            )
+            if source_is_resolved:
                 return source
             converter = getattr(comp, "convert_to_file_path", None)
             if callable(converter):
                 try:
                     maybe = converter()
-                    return str(await maybe if hasattr(maybe, "__await__") else maybe or "").strip()
+                    converted = str(await maybe if hasattr(maybe, "__await__") else maybe or "").strip()
+                    if converted:
+                        return converted
                 except Exception as exc:
                     logger.debug("[PrivateCompanion] 撤回图片组件转换失败: %s", exc)
-            return ""
+            return source
 
         for comp in self._event_components(event):
             class_name = comp.__class__.__name__.lower()
@@ -1809,10 +1817,10 @@ class EventDispatchMixin:
                         continue
                 add_persisted(text, "url")
                 continue
-            local_text = text[len("file://"):] if text.startswith("file://") else text
+            local_path_getter = getattr(self, "_private_image_local_path_from_source", None)
             try:
-                source_path = Path(local_text)
-                exists = source_path.exists() and source_path.is_file()
+                source_path = local_path_getter(text) if callable(local_path_getter) else Path(text)
+                exists = source_path is not None and source_path.exists() and source_path.is_file()
             except (OSError, ValueError):
                 exists = False
             if exists:

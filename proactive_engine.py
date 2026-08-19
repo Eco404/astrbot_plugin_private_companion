@@ -3440,6 +3440,64 @@ class ProactiveEngineMixin:
                 return True
         return False
 
+    def _weather_proactive_block_reason(
+        self,
+        user: dict[str, Any],
+        candidate: dict[str, Any],
+        *,
+        now: float,
+    ) -> str:
+        """Keep ordinary weather nudges from crowding out other proactive sources."""
+        source = _single_line(candidate.get("source"), 40).lower()
+        weather_linked = bool(candidate.get("weather_linked"))
+        if source not in {"weather_alert", "environment_change", "weather_context"} and not weather_linked:
+            return ""
+        if candidate.get("_mobile_location_transition_key") and weather_linked:
+            # A confirmed departure is a location event with a weather-aware
+            # wording, not a free-standing weather nudge.
+            return ""
+        score = _safe_int(candidate.get("score"), 0, 0, 100)
+        # Official high-severity alerts remain available; they are safety events,
+        # not ordinary weather chatter.
+        if source in {"weather_alert", "environment_change"} and score >= 90:
+            return ""
+        day = _today_key()
+        if _single_line(user.get("weather_proactive_budget_day"), 16) != day:
+            user["weather_proactive_budget_day"] = day
+            user["weather_proactive_budget_count"] = 0
+            user["weather_proactive_last_at"] = 0
+        count = _safe_int(user.get("weather_proactive_budget_count"), 0, 0, 20)
+        cap = _safe_int(getattr(self, "weather_proactive_daily_cap", 3), 3, 1, 8)
+        if count >= cap:
+            return "天气主动日配额已用尽"
+        last_at = _safe_float(user.get("weather_proactive_last_at"), 0)
+        cooldown = 6 * 3600 if source in {"weather_context", "weather_alert"} else 4 * 3600
+        if last_at > 0 and now - last_at < cooldown:
+            return "天气主动仍在冷却期"
+        return ""
+
+    def _remember_weather_proactive_accept(
+        self,
+        user: dict[str, Any],
+        candidate: dict[str, Any],
+        *,
+        now: float,
+    ) -> None:
+        source = _single_line(candidate.get("source"), 40).lower()
+        if source not in {"weather_alert", "environment_change", "weather_context"} and not bool(candidate.get("weather_linked")):
+            return
+        if candidate.get("_mobile_location_transition_key") and candidate.get("weather_linked"):
+            return
+        score = _safe_int(candidate.get("score"), 0, 0, 100)
+        if source in {"weather_alert", "environment_change"} and score >= 90:
+            return
+        day = _today_key()
+        if _single_line(user.get("weather_proactive_budget_day"), 16) != day:
+            user["weather_proactive_budget_day"] = day
+            user["weather_proactive_budget_count"] = 0
+        user["weather_proactive_budget_count"] = _safe_int(user.get("weather_proactive_budget_count"), 0, 0, 20) + 1
+        user["weather_proactive_last_at"] = now
+
     def _offer_proactive_candidate(self, user_id: str, user: dict[str, Any], candidate: dict[str, Any]) -> bool:
         user["user_id"] = str(user.get("user_id") or user_id)
         now = _now_ts()
@@ -3538,6 +3596,10 @@ class ProactiveEngineMixin:
         if not self._user_enabled_for_proactive(str(user_id), user):
             self._clear_pending_proactive_plan(user)
             return False
+        weather_block = self._weather_proactive_block_reason(user, candidate, now=now)
+        if weather_block:
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note=weather_block, user=user)
+            return False
         silence_reason_getter = getattr(self, "_friend_unanswered_silence_reason", None)
         silence_reason = silence_reason_getter(user, now=now) if callable(silence_reason_getter) else ""
         if silence_reason and source not in {"timer", "troubleshooting", "simulation"}:
@@ -3600,6 +3662,7 @@ class ProactiveEngineMixin:
         if preempted_for_timeliness:
             self._mark_planned_candidate_status(user, "deferred", "更高时效主动已优先进入当前发送窗口")
         item = self._record_proactive_candidate(user_id, candidate, status="accepted", note="进入主动计划", user=user)
+        self._remember_weather_proactive_accept(user, candidate, now=now)
         self._reset_planned_proactive_delivery_state(user)
         user["next_proactive_at"] = scheduled
         user["planned_proactive_reason"] = self._normalize_legacy_proactive_text(candidate.get("reason"), limit=40) or "check_in"
@@ -6259,13 +6322,18 @@ class ProactiveEngineMixin:
             return None
         if _single_line(user.get("last_mobile_location_arrival_key"), 80) == transition_key:
             return None
+        weather = _single_line(self._weather_summary_text(self.data.get("daily_weather", {})), 120)
+        risk_getter = getattr(self, "_mobile_location_weather_is_safety_relevant", None)
+        weather_risk = bool(risk_getter(weather) if callable(risk_getter) else any(
+            token in weather for token in ("暴雨", "雷雨", "雷暴", "台风", "大风", "强风")
+        ))
         if transition_kind == "departure" and place_kind == "home":
-            topic = "刚离开家后的路上"
-            motive = "刚出门，想顺手跟你说一声"
+            topic = "风雨天刚离开家后的路上" if weather_risk else "刚离开家后的路上"
+            motive = "外面风雨明显，刚出门，想提醒你路上留意一点" if weather_risk else "刚出门，想顺手跟你说一声"
             scene_hint = "用户刚离开已标记的家"
         elif transition_kind == "departure" and place_kind == "work":
-            topic = "刚离开公司后的这一段"
-            motive = "刚离开公司，想顺手问问接下来怎么走"
+            topic = "风雨天刚离开公司后的这一段" if weather_risk else "刚离开公司后的这一段"
+            motive = "外面风雨明显，刚离开公司，想提醒你路上留意一点" if weather_risk else "刚离开公司，想顺手问问接下来怎么走"
             scene_hint = "用户刚离开已标记的工作地点"
         elif transition_kind == "departure":
             topic = f"刚离开{place_name}后的这一段"
@@ -6287,6 +6355,9 @@ class ProactiveEngineMixin:
         priority_until = _safe_float(user.get("mobile_location_priority_until"), 0)
         is_priority_arrival = priority_key and priority_key == transition_key and priority_until > check_now
         delay_seconds = random.uniform(5, 20) if is_priority_arrival else random.uniform(45, 240)
+        battery = scene.get("battery_percent")
+        low_battery = isinstance(battery, int) and battery <= 15 and not bool(scene.get("charging"))
+        tone = "轻一点，短一点，不邀请长通话" if low_battery else "轻一点"
         return {
             "event_id": f"mobile-place-{transition_kind or 'arrival'}:{place_kind}:{transition_key}",
             "reason": "check_in",
@@ -6294,11 +6365,12 @@ class ProactiveEngineMixin:
             "topic": topic,
             "motive": motive,
             "scene": scene_hint,
-            "tone": "轻一点",
+            "tone": tone,
             "impulse": motive,
             "_scheduled_ts": check_now + delay_seconds,
             "_mobile_location_transition_key": transition_key,
             "_mobile_location_priority": bool(is_priority_arrival),
+            "weather_linked": bool(weather_risk and transition_kind == "departure"),
         }
 
     def _pick_mood_checkin_event(

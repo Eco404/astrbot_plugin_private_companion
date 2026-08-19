@@ -18,6 +18,7 @@ class MobileSceneHarness(PlaceCognitiveMapMixin, SceneContextMixin):
             "daily_state": {"date": "2026-08-12", "energy": 70, "mood_bias": "平稳"},
             "daily_plan": {"date": "2026-08-12", "items": []},
         }
+
         self.enable_weather_context = False
         self.enable_weather_alerts = False
         self.events: list[dict] = []
@@ -50,7 +51,30 @@ class MobileSceneHarness(PlaceCognitiveMapMixin, SceneContextMixin):
                     "radius_m": 150 if user_id in {"owner-1", "owner-home"} else 0,
                 },
             },
+            "device": {
+                "available": user_id == "owner-1",
+                "app_state": "foreground",
+                "battery_percent": 78,
+                "charging": True,
+                "stale": False,
+            },
         }
+
+
+def test_mobile_telemetry_is_added_as_non_diagnostic_companion_context() -> None:
+    harness = MobileSceneHarness()
+    context = MobileSceneHarness._reality_mobile_context("owner-1")
+    context["telemetry"] = {
+        "available": True,
+        "summary": "心率 78 bpm；当前活动：步行（约 18 分钟）",
+    }
+    harness._reality_mobile_context = lambda _user_id: context
+
+    formatted = harness._format_mobile_user_location_context({"user_id": "owner-1"})
+
+    assert "心率 78 bpm" in formatted
+    assert "不是医疗结论" in formatted
+    assert "不得据此诊断" in formatted
 
 
 class ProactiveLocationHarness(ProactiveMixin, ProactiveEngineMixin, PlaceCognitiveMapMixin, SceneContextMixin):
@@ -159,6 +183,7 @@ def test_authorized_mobile_location_has_dedicated_private_dialogue_context() -> 
 
     assert "【用户手机位置感知】" in rendered
     assert "用户当前位于已标记地点“公司”（工作地点）范围内" in rendered
+    assert "手机状态：正在使用手机，电量约 78%，正在充电" in rendered
     assert "不得把未标记地点猜成具体住址" in rendered
 
 
@@ -218,6 +243,20 @@ def test_proactive_weather_timing_uses_workplace_as_context() -> None:
     assert "下班回家前" in motive
 
 
+def test_location_weather_linking_is_configurable_without_removing_the_capability() -> None:
+    harness = ProactiveLocationHarness()
+
+    assert harness._mobile_location_weather_is_safety_relevant("刚下雨") is False
+    assert harness._mobile_location_weather_is_safety_relevant("暴雨") is True
+
+    harness.config = {"mobile_location_weather_sensitivity": "sensitive"}
+    assert harness._mobile_location_weather_is_safety_relevant("刚下雨") is True
+
+    harness.config = {"mobile_location_weather_sensitivity": "quiet"}
+    assert harness._mobile_location_weather_is_safety_relevant("中雨") is False
+    assert harness._mobile_location_weather_is_safety_relevant("台风") is True
+
+
 def test_recent_arrival_at_home_becomes_a_natural_proactive_anchor() -> None:
     harness = ProactiveTransitionHarness()
     user = {"user_id": "owner-route"}
@@ -273,9 +312,76 @@ def test_departure_from_home_becomes_a_prompt_and_proactive_anchor() -> None:
     event = harness._pick_mobile_location_arrival_event(user)
     prompt = harness._format_mobile_user_location_context_for_proactive(user)
 
+    assert scene["presence_state"] == "in_transit"
     assert scene["recent_departure"] is True
     assert scene["transition_kind"] == "departure"
     assert event is not None
     assert event["topic"] == "刚离开家后的路上"
     assert "用户刚离开已标记的家" == event["scene"]
     assert "刚离开已标记地点“家”" in prompt
+
+
+def test_unconfirmed_departure_changes_presence_without_emitting_an_event() -> None:
+    harness = ProactiveTransitionHarness()
+    user = harness.data["users"]["owner-route"]
+    context = {
+        "available": True,
+        "location": {
+            "available": True,
+            "speed_mps": 0.8,
+            "place": {
+                "matched": False,
+                "name": "公司",
+                "kind": "work",
+                "confidence": "departure_confirming",
+            },
+        },
+        "device": {
+            "available": True,
+            "app_state": "background",
+            "battery_percent": 48,
+            "charging": False,
+            "stale": False,
+        },
+    }
+    harness._reality_mobile_context = lambda _user_id: context
+
+    scene = harness._mobile_user_proactive_scene(user)
+    prompt = harness._format_mobile_user_location_context_for_proactive(user)
+
+    assert scene["presence_state"] == "departing"
+    assert scene["transition_key"] == ""
+    assert scene["recent_transition"] is False
+    assert harness._pick_mobile_location_arrival_event(user) is None
+    assert "正在离开已标记地点“公司”" in prompt
+    assert "离开事件尚未确认" in prompt
+
+
+def test_low_battery_adjusts_location_event_tone_without_becoming_the_topic() -> None:
+    harness = ProactiveTransitionHarness()
+    harness.current_place = ("家", "home")
+    user = harness.data["users"]["owner-route"]
+    harness._observe_mobile_place_context(
+        user["user_id"], harness._reality_mobile_context(user["user_id"])["location"], observed_at=time.time(),
+    )
+    harness.current_place = None
+    original_context = harness._reality_mobile_context
+
+    def low_battery_context(user_id: str):
+        context = original_context(user_id)
+        context["device"] = {
+            "available": True,
+            "app_state": "background",
+            "battery_percent": 9,
+            "charging": False,
+            "stale": False,
+        }
+        return context
+
+    harness._reality_mobile_context = low_battery_context
+    event = harness._pick_mobile_location_arrival_event(user)
+
+    assert event is not None
+    assert event["tone"] == "轻一点，短一点，不邀请长通话"
+    assert "电量" not in event["topic"]
+    assert "电量" not in event["motive"]

@@ -1871,11 +1871,18 @@ class DailyStateMixin(DailyStateTickMixin):
             enhanced = self.data.get("detail_enhanced_segments", {})
             snapshot = enhanced.get(key) if isinstance(enhanced, dict) else None
             status = snapshot.get("presence_status") if isinstance(snapshot, dict) else None
+        # An omitted/unchanged status still matters when moving away from a
+        # status that this plugin applied for the previous detail segment.
+        # Treat it as a transition request, while leaving unrelated manual
+        # QQ status changes untouched.
         if not isinstance(status, dict):
-            return
+            status = {"mode": "unchanged"}
+        key = str((segment or {}).get("key") or "")
+        state = self.data.setdefault("qq_presence_state", {})
+        if not isinstance(state, dict):
+            state = {}
+            self.data["qq_presence_state"] = state
         mode = str(status.get("mode") or status.get("status") or "unchanged").strip().lower()
-        if mode in {"", "unchanged", "keep", "保持", "不变"}:
-            return
         if mode in {"away", "invisible", "dnd", "do_not_disturb", "离开", "隐身", "请勿打扰", "勿扰"}:
             mode = "online"
         custom_text = _single_line(
@@ -1909,24 +1916,47 @@ class DailyStateMixin(DailyStateTickMixin):
             return
         if mode in {"custom", "自定义", "自定义状态"} and not custom_text:
             return
-        key = str((segment or {}).get("key") or "")
-        state = self.data.setdefault("qq_presence_state", {})
-        if not isinstance(state, dict):
-            state = {}
-            self.data["qq_presence_state"] = state
         same_presence = (
             str(state.get("mode") or "") == mode
             and str(state.get("custom_text") or "") == custom_text
         )
         elapsed = _now_ts() - _safe_float(state.get("updated_at"), 0)
+        previous_detail_key = str(state.get("detail_key") or "")
+        detail_changed = bool(key and previous_detail_key and previous_detail_key != key)
         same_plan = (
             str(state.get("date") or "") == _today_key()
             and str(state.get("plan_date") or "") == str(self.data.get("detail_enhanced_day") or "")
+            and previous_detail_key == key
         )
-        if same_presence and (
+        if same_presence and not detail_changed and (
             (same_plan and bool(state.get("ok", False)) and elapsed < 10 * 60)
             or (not bool(state.get("ok", False)) and elapsed < 60 * 60)
         ):
+            return
+        if mode in {"", "unchanged", "keep", "保持", "不变"}:
+            # Only reset a status with an explicit plugin ownership marker.
+            # This avoids turning a user's manually selected QQ status into
+            # online merely because the next schedule segment is quiet.
+            if not detail_changed or not bool(state.get("managed_by_plugin", bool(previous_detail_key))):
+                return
+            if str(state.get("mode") or "") == "online" and not str(state.get("custom_text") or ""):
+                state["detail_key"] = key
+                state["date"] = _today_key()
+                state["plan_date"] = str(self.data.get("detail_enhanced_day") or "")
+                self._save_data_sync()
+                return
+            ok, note = await self._set_qq_online_presence("online")
+            state["detail_key"] = key
+            state["date"] = _today_key()
+            state["plan_date"] = str(self.data.get("detail_enhanced_day") or "")
+            state["mode"] = "online"
+            state["custom_text"] = ""
+            state["reason"] = "当前日程段未要求自定义状态"
+            state["updated_at"] = _now_ts()
+            state["ok"] = bool(ok)
+            state["note"] = _single_line(note, 120)
+            state["managed_by_plugin"] = True
+            self._save_data_sync()
             return
         if mode in {"custom", "自定义", "自定义状态"}:
             ok, note = await self._set_qq_custom_presence(custom_text)
@@ -1946,11 +1976,10 @@ class DailyStateMixin(DailyStateTickMixin):
         state["updated_at"] = _now_ts()
         state["ok"] = bool(ok)
         state["note"] = _single_line(note, 120)
+        state["managed_by_plugin"] = True
         self._save_data_sync()
 
     async def _ensure_current_detail_presence_status(self) -> None:
-        if not self.enable_qq_presence_sync:
-            return
         plan = self.data.get("daily_plan", {})
         if not isinstance(plan, dict) or str(plan.get("date") or "") != _today_key():
             return
@@ -1962,6 +1991,17 @@ class DailyStateMixin(DailyStateTickMixin):
             return
         snapshot = enhanced.get(str(segment.get("key") or ""))
         if not isinstance(snapshot, dict) or snapshot.get("status") != "done":
+            if self._refresh_daily_state_location_from_plan(plan=plan, segment=segment):
+                self._save_data_sync()
+            if self.enable_qq_presence_sync:
+                # Clear a previous plugin-managed segment status while the
+                # new segment is still being generated. The completed detail
+                # will apply its own status when it becomes available.
+                await self._apply_detail_presence_status(segment, {})
+            return
+        if self._refresh_daily_state_location_from_plan(plan=plan, detail=snapshot, segment=segment):
+            self._save_data_sync()
+        if not self.enable_qq_presence_sync:
             return
         await self._apply_detail_presence_status(segment, snapshot)
 
@@ -3219,9 +3259,11 @@ class DailyStateMixin(DailyStateTickMixin):
         if weather == "暂无天气信息":
             return []
         events: list[dict[str, Any]] = []
-        if any(token in weather for token in ("雨", "阵雨", "雷", "小雨", "中雨", "大雨")) and random.random() < 0.65:
+        if any(token in weather for token in ("雨", "阵雨", "雷", "小雨", "中雨", "大雨")) and random.random() < 0.24:
             events.append(
                 {
+                    "source": "weather_context",
+                    "weather_linked": True,
                     "window": self._pick_weather_window("rain"),
                     "reason": "activity_share",
                     "action": "message",
@@ -3231,9 +3273,11 @@ class DailyStateMixin(DailyStateTickMixin):
                     "mood": "安静",
                 }
             )
-        if any(token in weather for token in ("晴", "阳光", "多云", "晚霞")) and random.random() < 0.35:
+        if any(token in weather for token in ("晴", "阳光", "多云", "晚霞")) and random.random() < 0.12:
             events.append(
                 {
+                    "source": "weather_context",
+                    "weather_linked": True,
                     "window": self._pick_weather_window("clear"),
                     "reason": "activity_share",
                     "action": "message",
@@ -3243,7 +3287,7 @@ class DailyStateMixin(DailyStateTickMixin):
                     "mood": "松弛",
                 }
             )
-        return events[:2]
+        return events[:1]
 
     def _pick_weather_window(self, weather_kind: str) -> str:
         hour = self._environment_now().hour
@@ -6078,6 +6122,19 @@ class DailyStateMixin(DailyStateTickMixin):
         return str(alert.get("id") or alert.get("fingerprint") or "").strip()
 
     @classmethod
+    def _weather_alert_terminal_identity(cls, alert: Any) -> str:
+        """Normalize resolved/cancelled variants to the warning they terminate."""
+        if not isinstance(alert, dict):
+            return ""
+        supersedes = alert.get("supersedes")
+        if isinstance(supersedes, list):
+            for value in supersedes:
+                identity = str(value or "").strip()
+                if identity:
+                    return identity
+        return cls._weather_alert_identity(alert)
+
+    @classmethod
     def _merge_weather_alert_cache(
         cls,
         cached: Any,
@@ -6586,6 +6643,14 @@ class DailyStateMixin(DailyStateTickMixin):
         if not isinstance(pending, list):
             pending = []
             state["pending_events"] = pending
+        terminal_history = state.get("terminal_event_identities")
+        if not isinstance(terminal_history, dict):
+            terminal_history = {}
+            state["terminal_event_identities"] = terminal_history
+        terminal_cutoff = _now_ts() - 7 * 24 * 3600
+        for identity, captured_at in list(terminal_history.items()):
+            if _safe_float(captured_at, 0) < terminal_cutoff:
+                terminal_history.pop(identity, None)
         known = {
             _single_line(item.get("event_key"), 260)
             for item in pending
@@ -6595,9 +6660,34 @@ class DailyStateMixin(DailyStateTickMixin):
             if not isinstance(event, dict):
                 continue
             key = _single_line(event.get("event_key"), 260)
+            kind = _single_line(event.get("kind"), 20)
+            alert = event.get("alert") if isinstance(event.get("alert"), dict) else {}
+            terminal_identity = self._weather_alert_terminal_identity(alert) if kind in {
+                "cancelled", "resolved", "expired"
+            } else ""
+            if terminal_identity and terminal_identity in terminal_history:
+                continue
             if key and key not in known:
                 pending.append(deepcopy(event))
                 known.add(key)
+        # A provider can emit both a resolved and an expired representation for
+        # the same warning in one refresh. Keep only the first terminal event.
+        terminal_seen: set[str] = set()
+        compact_pending: list[dict[str, Any]] = []
+        for item in pending:
+            if not isinstance(item, dict):
+                continue
+            kind = _single_line(item.get("kind"), 20)
+            alert = item.get("alert") if isinstance(item.get("alert"), dict) else {}
+            terminal_identity = self._weather_alert_terminal_identity(alert) if kind in {
+                "cancelled", "resolved", "expired"
+            } else ""
+            if terminal_identity:
+                if terminal_identity in terminal_seen:
+                    continue
+                terminal_seen.add(terminal_identity)
+            compact_pending.append(item)
+        pending[:] = compact_pending
         # Weather changes are time-sensitive. An outage or a disabled daily
         # quota must not turn yesterday's alert into today's proactive message.
         cutoff = _now_ts() - 6 * 3600
@@ -6702,6 +6792,12 @@ class DailyStateMixin(DailyStateTickMixin):
                 }
                 if offer(user_id, user, candidate):
                     delivered.append(user_id)
+                    if event.get("kind") in {"cancelled", "resolved", "expired"}:
+                        terminal_history = state.setdefault("terminal_event_identities", {})
+                        if isinstance(terminal_history, dict):
+                            terminal_identity = self._weather_alert_terminal_identity(alert)
+                            if terminal_identity:
+                                terminal_history[terminal_identity] = now
                     offered += 1
             if owner_ids and owner_ids.issubset(set(delivered)):
                 continue
@@ -9749,6 +9845,26 @@ class DailyStateMixin(DailyStateTickMixin):
             explicit_status=item.get("lifecycle_status"),
         )
 
+    def _plan_item_display_status(self, plan: dict[str, Any], item: dict[str, Any], index: int = -1) -> str:
+        """Return the user-facing clock phase without upgrading it to execution evidence."""
+
+        canonical = self._plan_item_runtime_status(plan, item, index)
+        if canonical in {"cancelled", "deferred", "overridden", "active", "completed", "partially_completed"}:
+            return canonical
+        items = plan.get("items") if isinstance(plan, dict) else None
+        starts = self._normalized_plan_item_starts(items)
+        start = starts[index] if isinstance(items, list) and 0 <= index < len(starts) else self._parse_hhmm_to_minutes(item.get("time"))
+        if start is None:
+            return canonical or "planned"
+        next_start = next((value for value in starts[index + 1 :] if value is not None), None) if index >= 0 else None
+        end = self._plan_item_end_minutes(start, item, next_start=next_start)
+        return self._schedule_window_runtime_status(
+            start,
+            end,
+            plan_date=str((plan or {}).get("date") or item.get("date") or ""),
+            explicit_status=item.get("lifecycle_status"),
+        )
+
     def _parse_hhmm_to_minutes(self, value: Any) -> int | None:
         match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", str(value or ""))
         if not match:
@@ -11570,7 +11686,7 @@ class DailyStateMixin(DailyStateTickMixin):
         return ""
 
     def _detail_model_location_policy_allowed(self, detail: dict[str, Any] | None = None) -> bool:
-        """Only evidence-backed detail may update production current location."""
+        """Allow a coherent schedule projection while keeping observed location distinct."""
 
         policy_getter = getattr(self, "_agenda_disclosure_view", None)
         if not callable(policy_getter):
@@ -11583,7 +11699,11 @@ class DailyStateMixin(DailyStateTickMixin):
         refs = payload.get("source_refs")
         has_refs = isinstance(refs, (list, tuple, set)) and any(_single_line(ref, 160) for ref in refs)
         if evidence_kind not in {"tool_action", "external_record"} or eligibility != "current_observed" or not has_refs:
-            return False
+            # A generated detail is part of the character's simulated day. It
+            # may keep the active scene coherent, but is not observed evidence.
+            location = _single_line(payload.get("location"), 60)
+            basis = self._normalize_schedule_basis(payload.get("location_basis"), default=[])
+            return bool(location and basis)
         try:
             view = policy_getter("current_fact", now=self._environment_now(), max_entries=128)
             entries = view.get("entries", []) if isinstance(view, dict) else getattr(view, "entries", [])
@@ -11634,6 +11754,15 @@ class DailyStateMixin(DailyStateTickMixin):
         if override_ts > 0 and _now_ts() - override_ts < 4 * 3600 and not model_location:
             return False
         location = model_location or self._infer_location_from_plan_context(plan=plan, detail=detail)
+        if not location and isinstance(segment, dict) and isinstance(segment.get("item"), dict):
+            item = segment["item"]
+            location = self._infer_location_from_text(
+                " ".join(
+                    _single_line(item.get(key), 120)
+                    for key in ("activity", "mood", "message_seed")
+                    if _single_line(item.get(key), 120)
+                )
+            )
         if not location:
             return False
         current = _single_line(state.get("location"), 40)
@@ -11643,6 +11772,14 @@ class DailyStateMixin(DailyStateTickMixin):
             metadata_changed = False
             if _single_line(state.get("location_source"), 40) != "detail_model":
                 state["location_source"] = "detail_model"
+                metadata_changed = True
+            projection_kind = (
+                "observed"
+                if _single_line(detail.get("fact_eligibility"), 48).lower() == "current_observed"
+                else "schedule"
+            )
+            if _single_line(state.get("location_projection"), 24) != projection_kind:
+                state["location_projection"] = projection_kind
                 metadata_changed = True
             confidence = min(1.0, _safe_float(detail.get("location_confidence"), 0.72))
             basis = self._normalize_schedule_basis(detail.get("location_basis"), default=["coarse_plan"])
@@ -11659,7 +11796,13 @@ class DailyStateMixin(DailyStateTickMixin):
                 state["location_updated_at"] = self._environment_now().strftime("%H:%M")
             return metadata_changed
         state["location"] = location
-        state["location_source"] = "detail_model" if model_location else ("detail" if isinstance(detail, dict) else "daily_plan")
+        if model_location:
+            observed_location = _single_line(detail.get("fact_eligibility"), 48).lower() == "current_observed"
+            state["location_source"] = "detail_model"
+            state["location_projection"] = "observed" if observed_location else "schedule"
+        else:
+            state["location_source"] = "detail" if isinstance(detail, dict) else "daily_plan"
+            state["location_projection"] = "schedule"
         if model_location:
             state["location_confidence"] = min(1.0, _safe_float(detail.get("location_confidence"), 0.72))
             state["location_basis"] = self._normalize_schedule_basis(detail.get("location_basis"), default=["coarse_plan"])
@@ -16769,6 +16912,32 @@ class DailyStateMixin(DailyStateTickMixin):
             return selected
         return None
 
+    def _get_clock_plan_item_for_display(self, plan: dict[str, Any]) -> dict[str, Any] | None:
+        """Pick the scheduled row covering now for UI only, without claiming it happened."""
+
+        if not isinstance(plan, dict) or not self._is_plan_date_active(plan.get("date")):
+            return None
+        items = plan.get("items")
+        if not isinstance(items, list):
+            return None
+        now_minutes = self._effective_plan_now_minutes(str(plan.get("date") or ""))
+        if now_minutes is None:
+            return None
+        starts = self._normalized_plan_item_starts(items)
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            if self._normalize_schedule_lifecycle_status(item.get("lifecycle_status")) == "cancelled":
+                continue
+            start = starts[index] if index < len(starts) else None
+            if start is None:
+                continue
+            next_start = next((value for value in starts[index + 1 :] if value is not None), None)
+            end = self._plan_item_end_minutes(start, item, next_start=next_start)
+            if start <= now_minutes < end:
+                return item
+        return None
+
     def _format_daily_plan(self, plan: dict[str, Any]) -> str:
         if not plan or not plan.get("items"):
             return "今天还没有日程。"
@@ -16796,7 +16965,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 continue
             mood = f"｜{item.get('mood')}" if item.get("mood") else ""
             window = f"{item.get('time')}-{item.get('end')}" if item.get("end") else str(item.get("time") or "")
-            lifecycle = self._plan_item_runtime_status(plan, item, index)
+            lifecycle = self._plan_item_display_status(plan, item, index)
             status = status_labels.get(lifecycle, "计划中")
             lines.append(f"{window}｜{status} {item.get('activity')}{mood}")
         return "\n".join(lines)

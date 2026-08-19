@@ -304,6 +304,12 @@ class PlaceCognitiveMapMixin:
         state = self._place_cognitive_map_user_state(store_key)
         if not state:
             return {"available": False, "current_place": {}, "known_places": [], "recent_routes": []}
+        raw_place = location.get("place") if isinstance(location.get("place"), dict) else {}
+        confidence = _single_line(raw_place.get("confidence"), 32)
+        if confidence in {"boundary_uncertain", "uncertain", "confirming", "departure_confirming"}:
+            # A noisy GPS fix near a boundary must not manufacture a departure
+            # event. Wait for an explicit outside/confirmed sample instead.
+            return self._place_cognitive_map_summary(state, include_transition=include_transition)
         timestamp = float(observed_at) if isinstance(observed_at, (int, float)) else self._place_cognitive_map_now_ts()
         timestamp = max(0.0, timestamp)
         places = state["places"]

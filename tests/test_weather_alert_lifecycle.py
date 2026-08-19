@@ -132,6 +132,27 @@ class WeatherAlertLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("owner", user_id)
         self.assertEqual("cancelled", candidate["context"]["kind"])
 
+    async def test_terminal_resolution_does_not_repeat_after_cancellation(self) -> None:
+        harness = _AlertLifecycleHarness()
+        harness.responses = [
+            _payload(alert_id="old-alert", color="red", headline="暴雨红色预警"),
+            _payload(
+                alert_id="cancel-alert",
+                color="",
+                headline="暴雨红色预警解除",
+                message_type="cancel",
+                supersedes=["old-alert"],
+            ),
+            {"code": "200", "alerts": []},
+        ]
+
+        await harness._maybe_refresh_weather_alerts(force=True)
+        await harness._maybe_refresh_weather_alerts(force=True)
+        await harness._maybe_refresh_weather_alerts(force=True)
+
+        self.assertEqual(1, len(harness.offered))
+        self.assertEqual("cancelled", harness.offered[0][1]["context"]["kind"])
+
     async def test_superseding_update_is_one_event_not_update_plus_resolution(self) -> None:
         harness = _AlertLifecycleHarness()
         harness.responses = [

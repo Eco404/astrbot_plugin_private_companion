@@ -1267,7 +1267,7 @@
   "context_image_caption_timeout_seconds": {
     "description": "Legacy flat config: 上下文图片补全等待秒数",
     "type": "float",
-    "default": 8,
+    "default": 30,
     "invisible": true
   },
   "enable_private_image_self_recognition": {
@@ -5753,13 +5753,13 @@
       "context_image_caption_timeout_seconds": {
         "description": "上下文图片补全等待秒数",
         "type": "float",
-        "hint": "历史上下文图片补全的单次等待预算。命中缓存通常很快；缓存未命中且视觉模型超时会放弃本次补全，不阻塞整轮回复太久。",
+        "hint": "历史上下文图片补全的单次等待预算。实际等待不会短于识图模型自身超时和图片视觉等待预算，避免模型仍在识别时被外层提前取消。",
         "slider": {
           "min": 0,
           "max": 600,
           "step": 0.5
         },
-        "default": 8,
+        "default": 30,
         "condition": "enable_context_image_captioning"
       },
       "enable_private_image_self_recognition": {
@@ -11938,6 +11938,17 @@
         "type": "bool",
         "hint": "开启后优先使用本插件配置的天气数据源；尚未配置自建天气时，会尝试回退复用 screen_companion。天气只作为日程、日记和主动契机的背景，不会每句聊天都提。",
         "default": true
+      },
+      "mobile_location_weather_sensitivity": {
+        "description": "地点事件天气联动敏感度",
+        "type": "string",
+        "options": ["quiet", "balanced", "sensitive"],
+        "labels": ["安静：仅高风险天气", "平衡：中到高风险天气", "敏感：普通降雨也联动"],
+        "hint": "控制用户离开家/公司等已标记地点时，天气是否参与主动消息。默认平衡；敏感会保留普通降雨的关心能力，但仍受主动消息去重、冷却和每日配额约束。",
+        "default": "balanced",
+        "condition": {
+          "enable_weather_context": true
+        }
       },
       "weather_source": {
         "description": "天气数据源",

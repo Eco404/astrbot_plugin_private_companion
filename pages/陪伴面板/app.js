@@ -3177,7 +3177,7 @@ const configDescriptions = {
   recall_message_cache_text_chars: "单条撤回文本或转述内容最多缓存多少字符。",
   enable_context_image_captioning: "把历史上下文中的图片占位补成视觉摘要；优先复用缓存，失败时保留原占位。",
   context_image_caption_max_items: "单次请求最多补全多少条历史图片，超出部分保留占位。",
-  context_image_caption_timeout_seconds: "历史图片补全的单次等待预算；超时不会阻塞整轮回复。",
+  context_image_caption_timeout_seconds: "历史图片补全等待预算；实际不会短于识图模型自身超时，避免识别尚未完成就被提前取消。",
   enable_memory_companion_private_recall: "仅在用户明确提到以前、约定、称呼、边界或稳定偏好时，从已联动的外部记忆插件选择性召回当前私聊的长期记忆。",
   forward_message_image_vision_timeout_seconds: "每个视觉模型识别合并消息图片时最多等待多久；多图通常需要几十秒，模型卡片里的任务超时设置优先。",
   max_group_topic_threads: "每个群最多保留多少条近期话题线。",

@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from .helpers import _now_ts, _path_text, _safe_int, _single_line
+from .helpers import _flat_get, _now_ts, _path_text, _safe_int, _single_line
 
 
 SCENE_CONTEXT_VERSION = 3
@@ -421,7 +421,7 @@ class SceneContextMixin:
             except Exception:
                 detail_location = ""
             if detail_location and detail_location == location:
-                location_source = "detail_model"
+                location_source = _single_line(state.get("location_source"), 40) or "detail_schedule"
         coarse_location = ""
         coarse_getter = getattr(self, "_coarse_roleplay_location_text", None)
         if location and callable(coarse_getter):
@@ -508,6 +508,7 @@ class SceneContextMixin:
             except Exception:
                 mobile_context = {}
         mobile_location = mobile_context.get("location") if isinstance(mobile_context.get("location"), dict) else {}
+        mobile_telemetry = mobile_context.get("telemetry") if isinstance(mobile_context.get("telemetry"), dict) else {}
         cognitive_map: dict[str, Any] = {}
         map_observer = getattr(self, "_observe_mobile_place_context", None)
         if user_id and callable(map_observer):
@@ -618,6 +619,7 @@ class SceneContextMixin:
                 "category": scene_category,
                 "category_label": scene_category_label,
                 "mobile": mobile_location,
+                "telemetry": mobile_telemetry,
                 "cognitive_map": cognitive_map,
             },
             "weather": {
@@ -711,6 +713,7 @@ class SceneContextMixin:
         if _single_line(location.get("category_label"), 24):
             parts.append(f"当前场景：{_single_line(location.get('category_label'), 24)}")
         mobile_location = location.get("mobile") if isinstance(location.get("mobile"), dict) else {}
+        mobile_telemetry = location.get("telemetry") if isinstance(location.get("telemetry"), dict) else {}
         cognitive_map = location.get("cognitive_map") if isinstance(location.get("cognitive_map"), dict) else {}
         if mobile_location.get("available"):
             lat = _single_line(mobile_location.get("latitude"), 16)
@@ -742,6 +745,11 @@ class SceneContextMixin:
             parts.append(
                 "手机定位上下文（用户已授权、仅作场景判断，不向用户主动暴露精确坐标）："
                 + coordinate_text
+            )
+        if mobile_telemetry.get("available") and _single_line(mobile_telemetry.get("summary"), 520):
+            parts.append(
+                "用户主动授权的近期身体/活动数据（仅作陪伴语境参考，不是医疗结论）："
+                + _single_line(mobile_telemetry.get("summary"), 520)
             )
         cognitive_context_formatter = getattr(self, "_format_place_cognitive_map_context", None)
         if callable(cognitive_context_formatter):
@@ -849,24 +857,50 @@ class SceneContextMixin:
                 cognitive_map = {}
 
         facts: list[str] = []
-        place = location.get("place") if isinstance(location.get("place"), dict) else {}
-        place_name = _single_line(place.get("name"), 40)
-        if location.get("available"):
-            if place.get("matched") and place_name:
-                kind = _single_line(place.get("kind"), 24)
-                kind_label = {"home": "家", "work": "工作地点", "custom": "自定义地点"}.get(kind, "已标记地点")
-                facts.append(f"用户当前位于已标记地点“{place_name}”（{kind_label}）范围内")
+        presence = self._mobile_presence_state(mobile_context, cognitive_map)
+        state = _single_line(presence.get("presence_state"), 32)
+        place_name = _single_line(presence.get("place_name"), 40)
+        kind = _single_line(presence.get("place_kind"), 24)
+        kind_label = {"home": "家", "work": "工作地点", "custom": "自定义地点"}.get(kind, "已标记地点")
+        if state == "at_place" and place_name:
+            facts.append(f"用户当前位于已标记地点“{place_name}”（{kind_label}）范围内")
+        elif state == "departing" and place_name:
+            facts.append(f"连续定位显示用户正在离开“{place_name}”范围，但尚未确认完全离开")
+        elif state == "arriving" and place_name:
+            facts.append(f"连续定位显示用户正在进入“{place_name}”范围，但尚未确认到达")
+        elif state == "near_place" and place_name:
+            facts.append(f"用户目前接近已标记地点“{place_name}”的识别边界，不能断言已经进入或离开")
+        elif state == "in_transit":
+            if place_name:
+                facts.append(f"用户已离开已标记地点“{place_name}”，目前处于地点范围外，可理解为在路上，但目的地未知")
             else:
-                latitude = _single_line(location.get("latitude"), 16)
-                longitude = _single_line(location.get("longitude"), 16)
-                accuracy = _single_line(location.get("accuracy_m"), 16)
-                if latitude and longitude:
-                    coordinate = f"用户当前约在纬度 {latitude}、经度 {longitude}"
-                    if accuracy:
-                        coordinate += f"，定位精度约 {accuracy} 米"
-                    facts.append(coordinate)
-                else:
-                    facts.append("用户已开启手机位置感知，但当前没有可用的地点名称")
+                facts.append("用户目前处于已标记地点范围外且位置仍在变化，可理解为在路上，但路线和目的地未知")
+        elif state == "away":
+            facts.append("用户当前处于已标记地点范围外，不能继续描述为仍在家或公司")
+        elif location.get("available"):
+            facts.append("用户已开启手机位置感知，但当前没有足够信息判断所处场景")
+
+        device = mobile_context.get("device") if isinstance(mobile_context.get("device"), dict) else {}
+        if device.get("available") and not device.get("stale"):
+            app_state = _single_line(device.get("app_state"), 24)
+            state_label = {"foreground": "正在使用手机", "background": "手机应用已退到后台"}.get(app_state)
+            battery = device.get("battery_percent")
+            battery_text = ""
+            if isinstance(battery, (int, float)):
+                battery_text = f"电量约 {max(0, min(100, int(round(battery))))}%"
+            if bool(device.get("charging")):
+                battery_text = f"{battery_text}，正在充电" if battery_text else "正在充电"
+            status_parts = [part for part in (state_label, battery_text) if part]
+            if status_parts:
+                facts.append("手机状态：" + "，".join(status_parts))
+
+        telemetry = mobile_context.get("telemetry") if isinstance(mobile_context.get("telemetry"), dict) else {}
+        telemetry_summary = _single_line(telemetry.get("summary"), 520)
+        if telemetry.get("available") and telemetry_summary:
+            facts.append(
+                "近期身体/活动数据（用户主动授权，仅作陪伴语境参考，不是医疗结论）："
+                + telemetry_summary
+            )
 
         map_formatter = getattr(self, "_format_place_cognitive_map_context", None)
         if callable(map_formatter):
@@ -881,10 +915,150 @@ class SceneContextMixin:
         return (
             "【用户手机位置感知】\n"
             + "；".join(facts)
-            + "\n这些是用户主动授权的短期环境事实，只用于理解用户所在场景、出行方向和行为语境。"
+            + "\n这些是用户主动授权的短期环境事实，只用于理解用户所在场景、出行方向、行为语境和设备可达性。"
             "除非用户明确询问位置，否则不要主动复述经纬度、轨迹或声称正在监视用户；"
-            "不得把未标记地点猜成具体住址。"
+            "不得把未标记地点猜成具体住址，也不要把手机状态说成后台监控或精确在线证明。"
+            "身体数据只能按已提供的数值和时间描述，不得据此诊断、夸大风险或替代专业建议。"
         )
+
+    def _mobile_location_weather_sensitivity(self) -> str:
+        config = getattr(self, "config", {})
+        raw = _flat_get(config, "mobile_location_weather_sensitivity", "balanced")
+        value = _single_line(raw, 24).lower()
+        aliases = {
+            "low": "quiet",
+            "quiet": "quiet",
+            "安静": "quiet",
+            "balanced": "balanced",
+            "normal": "balanced",
+            "平衡": "balanced",
+            "sensitive": "sensitive",
+            "high": "sensitive",
+            "敏感": "sensitive",
+        }
+        return aliases.get(value, "balanced")
+
+    def _mobile_location_weather_is_safety_relevant(self, weather: Any) -> bool:
+        text = _single_line(weather, 160)
+        mode = self._mobile_location_weather_sensitivity()
+        if mode == "sensitive":
+            tokens = ("雨", "阵雨", "雷", "暴雨", "大风", "强风", "阵风", "台风")
+        elif mode == "balanced":
+            tokens = ("中雨", "大雨", "暴雨", "雷雨", "雷暴", "大风", "强风", "阵风", "台风")
+        else:
+            tokens = ("暴雨", "雷雨", "雷暴", "台风", "大风", "强风")
+        return any(token in text for token in tokens)
+
+    def _mobile_presence_state(
+        self,
+        mobile_context: dict[str, Any],
+        cognitive_map: dict[str, Any] | None = None,
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Fuse short-lived mobile signals into one conservative semantic state."""
+        context = mobile_context if isinstance(mobile_context, dict) else {}
+        location = context.get("location") if isinstance(context.get("location"), dict) else {}
+        device = context.get("device") if isinstance(context.get("device"), dict) else {}
+        place = location.get("place") if isinstance(location.get("place"), dict) else {}
+        place_name = _single_line(place.get("name"), 40)
+        place_kind = _single_line(place.get("kind"), 24)
+        confidence = _single_line(place.get("confidence"), 32)
+        try:
+            speed_mps = max(0.0, float(location.get("speed_mps") or 0.0))
+        except (TypeError, ValueError, OverflowError):
+            speed_mps = 0.0
+        if not math.isfinite(speed_mps):
+            speed_mps = 0.0
+
+        map_state = cognitive_map if isinstance(cognitive_map, dict) else {}
+        transition = map_state.get("last_transition") if isinstance(map_state.get("last_transition"), dict) else {}
+        transition_kind = _single_line(transition.get("kind"), 24)
+        transition_at = _single_line(transition.get("at"), 40)
+        transition_age_minutes: float | None = None
+        if transition_at:
+            try:
+                transition_ts = datetime.fromisoformat(transition_at.replace("Z", "+00:00")).timestamp()
+                check_now = _now_ts() if now is None else float(now)
+                if transition_ts > 0 and check_now >= transition_ts:
+                    transition_age_minutes = max(0.0, (check_now - transition_ts) / 60.0)
+            except (TypeError, ValueError, OverflowError):
+                transition_age_minutes = None
+        recent_transition = transition_age_minutes is not None and transition_age_minutes <= 90.0
+
+        from_name = _single_line(transition.get("from_name"), 48)
+        from_kind = _single_line(transition.get("from_kind"), 24)
+        matched = bool(location.get("available") and place.get("matched") and place_name)
+        if not bool(location.get("available")):
+            presence_state = "device_only" if device.get("available") and not device.get("stale") else "unavailable"
+        elif matched:
+            presence_state = "at_place"
+        elif confidence == "departure_confirming" and place_name:
+            presence_state = "departing"
+        elif confidence == "confirming" and place_name:
+            presence_state = "arriving"
+        elif confidence in {"uncertain", "boundary_uncertain"} and place_name:
+            presence_state = "near_place"
+        elif transition_kind == "departure" and recent_transition and from_name:
+            presence_state = "in_transit"
+            place_name = from_name
+            place_kind = from_kind
+        elif speed_mps >= 1.2:
+            presence_state = "in_transit"
+            place_name = ""
+            place_kind = ""
+        elif place_name:
+            presence_state = "away"
+            place_name = ""
+            place_kind = ""
+        else:
+            presence_state = "unknown"
+            place_name = ""
+            place_kind = ""
+
+        recent_arrival = bool(
+            presence_state == "at_place"
+            and transition_kind == "arrival"
+            and recent_transition
+            and _single_line(transition.get("from_name"), 48)
+        )
+        recent_departure = bool(
+            presence_state in {"in_transit", "away"}
+            and transition_kind == "departure"
+            and recent_transition
+            and from_name
+        )
+        transition_key = ""
+        if recent_arrival:
+            transition_key = f"arrival:{_single_line(transition.get('from_name'), 48)}>{place_name}@{transition_at}"
+        elif recent_departure:
+            transition_key = f"departure:{from_name}@{transition_at}"
+
+        battery = device.get("battery_percent")
+        battery_percent = None
+        if isinstance(battery, (int, float)) and math.isfinite(float(battery)):
+            battery_percent = max(0, min(100, int(round(float(battery)))))
+        return {
+            "available": presence_state != "unavailable",
+            "presence_state": presence_state,
+            "matched": presence_state == "at_place",
+            "place_name": place_name,
+            "place_kind": place_kind,
+            "transition_kind": transition_kind,
+            "transition_key": transition_key,
+            "recent_transition": bool(recent_arrival or recent_departure),
+            "recent_arrival": recent_arrival,
+            "recent_departure": recent_departure,
+            "transition_age_minutes": transition_age_minutes,
+            "arrival_age_minutes": transition_age_minutes if recent_arrival else None,
+            "in_motion": speed_mps >= 1.2,
+            "speed_mps": speed_mps,
+            "device_app_state": _single_line(device.get("app_state"), 24)
+            if device.get("available") and not device.get("stale")
+            else "",
+            "battery_percent": battery_percent,
+            "charging": bool(device.get("charging")) if device.get("available") and not device.get("stale") else False,
+        }
 
     def _mobile_user_proactive_scene(
         self,
@@ -911,57 +1085,10 @@ class SceneContextMixin:
         if not isinstance(mobile_context, dict):
             return {}
         location = mobile_context.get("location") if isinstance(mobile_context.get("location"), dict) else {}
-        if not bool(location.get("available")):
-            return {}
-        place = location.get("place") if isinstance(location.get("place"), dict) else {}
-        place_name = _single_line(place.get("name"), 40)
         cognitive_map = self._mobile_cognitive_map(user_id, location, include_transition=True)
-        transition = cognitive_map.get("last_transition") if isinstance(cognitive_map.get("last_transition"), dict) else {}
-        transition_kind = _single_line(transition.get("kind"), 24)
-        transition_at = _single_line(transition.get("at"), 40)
-        transition_age_minutes: float | None = None
-        if transition_at:
-            try:
-                transition_ts = datetime.fromisoformat(transition_at.replace("Z", "+00:00")).timestamp()
-                check_now = _now_ts() if now is None else float(now)
-                if transition_ts > 0 and check_now >= transition_ts:
-                    transition_age_minutes = max(0.0, (check_now - transition_ts) / 60.0)
-            except (TypeError, ValueError, OverflowError):
-                transition_age_minutes = None
-        recent_transition = transition_age_minutes is not None and transition_age_minutes <= 90.0
-        if not bool(place.get("matched")) or not place_name:
-            scene: dict[str, Any] = {"available": True, "matched": False}
-            if transition_kind == "departure" and recent_transition:
-                from_name = _single_line(transition.get("from_name"), 48)
-                from_kind = _single_line(transition.get("from_kind"), 24)
-                scene.update({
-                    "place_name": from_name,
-                    "place_kind": from_kind,
-                    "transition_kind": "departure",
-                    "transition_key": f"departure:{from_name}@{transition_at}" if from_name else "",
-                    "recent_transition": bool(from_name),
-                    "recent_departure": bool(from_name),
-                    "transition_age_minutes": transition_age_minutes,
-                })
-            if include_map:
-                scene["known_places"] = self._known_places_from_map(cognitive_map)
-            return scene
-
-        previous_place_name = _single_line(transition.get("from_name"), 48)
-        is_recent_arrival = transition_kind == "arrival" and bool(previous_place_name) and recent_transition
-        scene = {
-            "available": True,
-            "matched": True,
-            "place_name": place_name,
-            "place_kind": _single_line(place.get("kind"), 24),
-            "transition_kind": transition_kind,
-            "transition_key": f"arrival:{previous_place_name}>{place_name}@{transition_at}" if is_recent_arrival else "",
-            "recent_transition": is_recent_arrival,
-            "recent_arrival": is_recent_arrival,
-            "recent_departure": False,
-            "arrival_age_minutes": transition_age_minutes if is_recent_arrival else None,
-            "transition_age_minutes": transition_age_minutes if is_recent_arrival else None,
-        }
+        scene = self._mobile_presence_state(mobile_context, cognitive_map, now=now)
+        if not scene.get("available"):
+            return {}
         if include_map:
             scene["known_places"] = self._known_places_from_map(cognitive_map)
         return scene
@@ -999,19 +1126,35 @@ class SceneContextMixin:
         if not scene:
             return ""
         facts: list[str] = []
-        if bool(scene.get("matched")):
+        presence_state = _single_line(scene.get("presence_state"), 32)
+        if presence_state == "at_place":
             place_name = _single_line(scene.get("place_name"), 40)
             kind = _single_line(scene.get("place_kind"), 24)
             kind_label = {"home": "家", "work": "工作地点", "custom": "自定义地点"}.get(kind, "已标记地点")
             facts.append(f"用户当前位于已标记地点“{place_name}”（{kind_label}）范围内")
             if bool(scene.get("recent_arrival")):
                 facts.append("这是最近一次进入该地点后的短时间窗口，可把它理解为刚到达后的生活节点")
+        elif presence_state == "departing":
+            place_name = _single_line(scene.get("place_name"), 40)
+            facts.append(f"用户正在离开已标记地点“{place_name}”的识别范围，但离开事件尚未确认")
+        elif presence_state == "arriving":
+            place_name = _single_line(scene.get("place_name"), 40)
+            facts.append(f"用户正在进入已标记地点“{place_name}”的识别范围，但到达事件尚未确认")
+        elif presence_state == "near_place":
+            place_name = _single_line(scene.get("place_name"), 40)
+            facts.append(f"用户接近已标记地点“{place_name}”的边界，当前不能断言在地点内或已经离开")
+        elif presence_state == "in_transit":
+            place_name = _single_line(scene.get("place_name"), 40)
+            if bool(scene.get("recent_departure")) and place_name:
+                facts.append(f"用户刚离开已标记地点“{place_name}”，目前处于范围外，可作为在路上的生活节点")
+            else:
+                facts.append("用户当前处于已标记地点范围外且位置仍在变化，只可理解为在路上，目的地未知")
+        elif presence_state == "away":
+            facts.append("用户当前处于已标记地点范围外，不能继续沿用在家或在公司的描述")
+        elif presence_state == "unknown":
+            facts.append("用户已授权位置感知，但当前没有足够地点信息判断是在固定地点还是路上")
         else:
-            facts.append("用户已授权手机位置感知，但当前未命中已标记地点（只作为模糊场景背景）")
-            if bool(scene.get("recent_departure")):
-                place_name = _single_line(scene.get("place_name"), 40)
-                if place_name:
-                    facts.append(f"用户刚离开已标记地点“{place_name}”，可把它理解为出发后的生活节点")
+            facts.append("当前仅有短期设备可达性信息，没有足够位置证据判断用户所在场景")
 
         # A few user-created place names can help distinguish home/work context, but
         # routes and coordinates are intentionally excluded from proactive prompts.
@@ -1021,7 +1164,7 @@ class SceneContextMixin:
             for item in known_places[:4]
             if isinstance(item, dict) and _single_line(item.get("name"), 32)
         ]
-        if known_names and not bool(scene.get("matched")):
+        if known_names and presence_state != "at_place":
             facts.append("用户主动标记过的地点背景包括：" + "、".join(known_names))
         elif known_names:
             # Keep the map signal bounded without copying its route history into the prompt.
@@ -1034,15 +1177,26 @@ class SceneContextMixin:
             )
         except Exception:
             weather = ""
-        if weather and bool(scene.get("matched")) and _single_line(scene.get("place_kind"), 24) == "work" and any(
+        weather_risk = self._mobile_location_weather_is_safety_relevant(weather)
+        if weather and bool(scene.get("recent_departure")) and weather_risk:
+            facts.append("用户刚离开已标记地点，且当前有风雨风险；可以把主动提醒落在路上留意安全，但不要夸大风险或假定用户正在室外")
+        elif weather and bool(scene.get("matched")) and _single_line(scene.get("place_kind"), 24) == "work" and any(
             token in weather for token in ("雨", "阵雨", "雷雨", "暴雨")
         ):
             facts.append("若本轮涉及雨天出行，优先把时机理解为下班或回家前；没有更近事实时，不必写成用户此刻正要出门")
         if bool(scene.get("recent_arrival")) and _single_line(scene.get("place_kind"), 24) == "home":
             facts.append("可优先把主动话题落在刚到家后的问候或收尾，避免继续使用上班、在路上等通勤措辞")
+        app_state = _single_line(scene.get("device_app_state"), 24)
+        battery = scene.get("battery_percent")
+        if app_state == "foreground":
+            facts.append("陪伴终端当前在前台，可把消息写得像自然承接，但这不等于用户正在持续注视屏幕")
+        elif app_state == "background":
+            facts.append("陪伴终端当前在后台；这不代表用户离线，也不要主动提及后台状态")
+        if isinstance(battery, int) and battery <= 15 and not bool(scene.get("charging")):
+            facts.append("设备电量偏低；若要主动表达应尽量简短，不邀请长通话，也不要把电量本身写成话题")
         return (
             "【主动场景位置线索】\n"
             + "；".join(facts)
             + "\n这是用户授权的弱场景证据，只用于调整主动话题、时机和语气（如通勤、到家或工作间隙）。"
-            "不要主动复述地点、坐标或轨迹，不要从位置推断用户正在做的具体动作，也不要把位置本身硬写成主动话题。"
+            "不要主动复述地点、坐标、轨迹或设备状态，不要从这些信号推断用户正在做的具体动作，也不要把感知本身硬写成主动话题。"
         )
