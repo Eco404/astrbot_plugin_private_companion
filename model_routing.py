@@ -23,6 +23,7 @@ DEFAULT_SENSITIVE_REPLACEMENT_KEYWORDS = (
     "我们可以聊聊别的",
     "我无法满足",
     "露骨性行为",
+    "没办法提交这个请求",
 )
 
 

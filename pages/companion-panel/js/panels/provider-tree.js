@@ -518,7 +518,7 @@ window.PrivateCompanionProviderTree = (() => {
       rules,
       sensitiveEnabled: Boolean(settings.enable_sensitive_model_replacement),
       sensitiveProvider: String(providers.SENSITIVE_REPLACEMENT_PROVIDER_ID || "").trim(),
-      sensitiveKeywords: String(settings.sensitive_replacement_keywords || "很抱歉，我无法；很抱歉,我无法；我有我自己的底线；我们可以聊聊别的；我无法满足；露骨性行为"),
+      sensitiveKeywords: String(settings.sensitive_replacement_keywords || "很抱歉，我无法；很抱歉,我无法；我有我自己的底线；我们可以聊聊别的；我无法满足；露骨性行为；没办法提交这个请求"),
     };
   }
 

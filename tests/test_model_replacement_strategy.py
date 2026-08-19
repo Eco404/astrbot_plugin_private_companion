@@ -79,6 +79,10 @@ class ModelReplacementStrategyTests(unittest.TestCase):
             "露骨性行为",
             contains_sensitive_refusal("这涉及露骨性行为，因此不能继续。"),
         )
+        self.assertEqual(
+            "没办法提交这个请求",
+            contains_sensitive_refusal("抱歉，没办法提交这个请求。"),
+        )
         self.assertEqual("", contains_sensitive_refusal("当然可以，我来帮你处理。"))
 
     def test_conversation_sensitive_response_is_replaced_before_send(self) -> None:
