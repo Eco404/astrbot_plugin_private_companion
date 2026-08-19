@@ -103,21 +103,59 @@ def normalize_keywords(value: Any) -> tuple[str, ...]:
     return tuple(result)
 
 
+def normalize_rule_configs(value: Any) -> list[dict[str, Any]]:
+    """Keep editable rule data JSON-safe while preserving disabled rules."""
+    if isinstance(value, str):
+        try:
+            import json
+
+            value = json.loads(value or "[]")
+        except Exception:
+            return []
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for raw in value[:80]:
+        if not isinstance(raw, dict):
+            continue
+        keywords = list(normalize_keywords(raw.get("keywords", [])))[:40]
+        try:
+            priority = int(raw.get("priority", 0))
+        except (TypeError, ValueError):
+            priority = 0
+        match_mode = str(raw.get("match_mode") or "contains").strip().lower()
+        if match_mode not in MATCH_MODES:
+            match_mode = "contains"
+        keyword_logic = str(raw.get("keyword_logic") or "any").strip().lower()
+        if keyword_logic not in KEYWORD_LOGICS:
+            keyword_logic = "any"
+        normalized.append(
+            {
+                "name": str(raw.get("name") or "").strip()[:120],
+                "enabled": bool(raw.get("enabled", True)),
+                "priority": max(-100000, min(100000, priority)),
+                "keywords": keywords,
+                "match_mode": match_mode,
+                "keyword_logic": keyword_logic,
+                "case_sensitive": bool(raw.get("case_sensitive", False)),
+                "provider_id": str(raw.get("provider_id") or "").strip()[:160],
+                "model": str(raw.get("model") or "").strip()[:160],
+            }
+        )
+    return normalized
+
+
 def build_rules(raw_rules: Any) -> tuple[list[ModelReplacementRule], list[str]]:
     warnings: list[str] = []
     if raw_rules is None:
         return [], warnings
-    if isinstance(raw_rules, str):
-        try:
-            import json
-
-            raw_rules = json.loads(raw_rules or "[]")
-        except Exception:
-            raw_rules = []
-    if not isinstance(raw_rules, list):
+    normalized_configs = normalize_rule_configs(raw_rules)
+    if raw_rules not in (None, "") and not normalized_configs and not isinstance(raw_rules, (list, tuple, dict, str)):
         return [], ["model_replacement_rules 必须是列表"]
     rules: list[ModelReplacementRule] = []
-    for index, item in enumerate(raw_rules):
+    for index, item in enumerate(normalized_configs):
         label = f"第 {index + 1} 条规则"
         if not isinstance(item, dict) or not bool(item.get("enabled", True)):
             continue

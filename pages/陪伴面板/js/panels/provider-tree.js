@@ -487,6 +487,122 @@ window.PrivateCompanionProviderTree = (() => {
     };
   }
 
+  function replacementProviderControl(context, value, selectAttr, inputAttr, placeholder) {
+    const { state, escapeHtml } = context;
+    const known = state.availableProviders.some((item) => item.id === value);
+    const options = [
+      `<option value="">留空不启用</option>`,
+      ...state.availableProviders.map((item) => {
+        const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
+        return `<option value="${escapeHtml(item.id)}" ${item.id === value ? "selected" : ""}>${escapeHtml(label)}</option>`;
+      }),
+      `<option value="__custom__" ${value && !known ? "selected" : ""}>手动输入 Provider ID</option>`,
+    ].join("");
+    return `
+      <select ${selectAttr}>${options}</select>
+      <input ${inputAttr} value="${escapeHtml(value || "")}" placeholder="${escapeHtml(placeholder)}" ${value && !known ? "" : "hidden"} />
+    `;
+  }
+
+  function modelReplacementValuesForRender(context) {
+    const { state } = context;
+    const settings = state.overview?.settings || {};
+    const providers = state.overview?.providers || {};
+    let rules = settings.model_replacement_rules;
+    if (typeof rules === "string") {
+      try { rules = JSON.parse(rules || "[]"); } catch (_error) { rules = []; }
+    }
+    if (!Array.isArray(rules)) rules = [];
+    return {
+      scope: String(settings.model_replacement_scope || "plugin").trim().toLowerCase() || "plugin",
+      rules,
+      sensitiveEnabled: Boolean(settings.enable_sensitive_model_replacement),
+      sensitiveProvider: String(providers.SENSITIVE_REPLACEMENT_PROVIDER_ID || "").trim(),
+      sensitiveKeywords: String(settings.sensitive_replacement_keywords || "很抱歉，我无法；很抱歉,我无法；我有我自己的底线；我们可以聊聊别的；我无法满足；露骨性行为"),
+    };
+  }
+
+  function currentModelReplacementValues(context) {
+    const { document } = context;
+    const defaults = modelReplacementValuesForRender(context);
+    const scope = document.querySelector("[data-model-replacement-scope]");
+    const rules = document.querySelector("[data-model-replacement-rules]");
+    const sensitiveEnabled = document.querySelector("[data-sensitive-replacement-enabled]");
+    const sensitiveProvider = document.querySelector("[data-sensitive-replacement-provider-input]");
+    const sensitiveKeywords = document.querySelector("[data-sensitive-replacement-keywords]");
+    let parsedRules = defaults.rules;
+    if (rules) {
+      try {
+        const candidate = JSON.parse(rules.value || "[]");
+        if (Array.isArray(candidate)) parsedRules = candidate;
+      } catch (_error) {
+        // Keep the last valid value until the user fixes the JSON.
+      }
+    }
+    return {
+      scope: scope?.value || defaults.scope,
+      rules: parsedRules,
+      sensitiveEnabled: sensitiveEnabled ? sensitiveEnabled.checked : defaults.sensitiveEnabled,
+      sensitiveProvider: sensitiveProvider ? sensitiveProvider.value.trim() : defaults.sensitiveProvider,
+      sensitiveKeywords: sensitiveKeywords ? sensitiveKeywords.value.trim() : defaults.sensitiveKeywords,
+    };
+  }
+
+  function renderModelReplacementCard(context) {
+    const { document, escapeHtml } = context;
+    const root = document.getElementById("modelReplacementCard");
+    if (!root) return;
+    const values = modelReplacementValuesForRender(context);
+    const rulesText = JSON.stringify(values.rules, null, 2);
+    root.innerHTML = `
+      <article class="model-replacement-card ${values.sensitiveEnabled ? "enabled" : ""}">
+        <div class="model-replacement-head">
+          <div>
+            <span class="model-replacement-kicker">模型路由 · 统一策略</span>
+            <h3>模型替换策略</h3>
+            <p>关键词换模、DeepSeek 高价时段替换和敏感拒答重试共用作用范围；未命中时保持原模型。</p>
+          </div>
+          <label class="model-replacement-scope">作用范围
+            <select data-model-replacement-scope>
+              <option value="plugin" ${values.scope === "plugin" ? "selected" : ""}>仅插件调用</option>
+              <option value="conversation" ${values.scope === "conversation" ? "selected" : ""}>仅普通对话模型</option>
+              <option value="all" ${values.scope === "all" ? "selected" : ""}>全部生效</option>
+            </select>
+          </label>
+        </div>
+        <div class="model-replacement-body">
+          <label class="provider-field model-replacement-rules-field">
+            <span>关键词换模规则 <small>JSON 数组；支持 contains / exact / regex、优先级、任一/全部关键词</small></span>
+            <textarea rows="9" data-model-replacement-rules spellcheck="false" placeholder="[{\"name\":\"代码问题\",\"keywords\":[\"写代码\"],\"provider_id\":\"替代模型\"}]">${escapeHtml(rulesText)}</textarea>
+          </label>
+          <section class="model-replacement-sensitive">
+            <label class="model-replacement-toggle"><input type="checkbox" data-sensitive-replacement-enabled ${values.sensitiveEnabled ? "checked" : ""} /> <span>启用敏感拒答替换</span></label>
+            <p>命中常见拒答表达时阻断原文本，切换指定模型重试；替代模型仍拒答则不发送原拒答。</p>
+            <label class="provider-field">
+              <span>敏感拒答替代模型</span>
+              ${replacementProviderControl(context, values.sensitiveProvider, "data-sensitive-replacement-provider-select", "data-sensitive-replacement-provider-input", "自定义 Provider ID")}
+            </label>
+            <label class="provider-field">
+              <span>敏感拒答匹配词 <small>每行或用分号分隔</small></span>
+              <textarea rows="3" data-sensitive-replacement-keywords>${escapeHtml(values.sensitiveKeywords)}</textarea>
+            </label>
+          </section>
+        </div>
+        <div class="model-replacement-note">规则目标 Provider 必须是 AstrBot 当前可用模型；敏感拒答替换只作为重试路由，不会修改原模型配置。</div>
+      </article>
+    `;
+    const toggle = root.querySelector("[data-sensitive-replacement-enabled]");
+    toggle?.addEventListener("change", () => root.querySelector(".model-replacement-card")?.classList.toggle("enabled", toggle.checked));
+    const select = root.querySelector("[data-sensitive-replacement-provider-select]");
+    const input = root.querySelector("[data-sensitive-replacement-provider-input]");
+    select?.addEventListener("change", () => {
+      const custom = select.value === "__custom__";
+      input.hidden = !custom;
+      if (!custom) input.value = select.value;
+      if (custom) input.focus();
+    });
+  }
+
   function renderDeepseekPeakCard(context) {
     const { document, state, escapeHtml } = context;
     const root = document.getElementById("deepseekPeakCard");
@@ -511,7 +627,7 @@ window.PrivateCompanionProviderTree = (() => {
           <div>
             <span class="deepseek-peak-kicker">成本路由 · 可选</span>
             <h3>DeepSeek 高价时段替代</h3>
-            <p>仅临时替换插件任务的运行时路由，不改写原有模型分工；离开高价时段会自动恢复。</p>
+            <p>按上方统一作用范围临时替换 DeepSeek 的运行时路由，不改写原有模型分工；离开高价时段会自动恢复。</p>
           </div>
           <div class="deepseek-peak-head-actions">
             <span class="deepseek-peak-status ${escapeHtml(statusTone)}">${escapeHtml(statusLabel)}</span>
@@ -541,7 +657,7 @@ window.PrivateCompanionProviderTree = (() => {
             <span>当前替代 <b>${escapeHtml(runtime.replacement_provider_id || values.provider || "未配置")}</b></span>
           </div>
         </div>
-        <div class="deepseek-peak-note">定价公告：预计 2026 年 7 月中旬启用；北京时间每日 09:00-12:00、14:00-18:00 为高峰，高峰价格为平时 2 倍并适用于所有计费项。公告未给出精确生效日期，请确认正式启用后再打开开关，并以后续官方通知为准。</div>
+        <div class="deepseek-peak-note">高价时段仅控制临时路由，不会覆盖任务模型配置；是否作用于插件、普通对话或全部请求由“模型替换策略”的作用范围统一决定。</div>
       </article>
     `;
     const enabled = root.querySelector("[data-deepseek-peak-enabled]");
@@ -692,6 +808,7 @@ window.PrivateCompanionProviderTree = (() => {
     const providers = providerValuesForRender(context);
     renderProviderSummary(context, providers);
     renderDeepseekPeakCard(context);
+    renderModelReplacementCard(context);
     renderProviderFlow(context, providers);
     const entries = Object.entries(providerLabels)
       .filter(([key]) => visibleConfigKey(key))
@@ -748,6 +865,7 @@ window.PrivateCompanionProviderTree = (() => {
     currentProviderTokenLimitValues,
     currentProviderFallbackValues,
     currentDeepseekPeakValues,
+    currentModelReplacementValues,
     resolveProviderId,
     bindProviderTests,
     testProvider: (context, key) => testProvider(context, key),

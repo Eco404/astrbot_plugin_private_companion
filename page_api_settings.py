@@ -22,6 +22,7 @@ from .photo_reference_catalog import CatalogValidationError, validate_and_serial
 from .relationship_ledger import normalize_relationship_positive_stage_cap_key
 from .relationship_policy import relationship_stage_policy_json
 from .segmented_message import normalize_component_order
+from .model_routing import normalize_rule_configs, normalize_scope
 
 _SETTING_UNHANDLED = object()
 
@@ -192,6 +193,12 @@ class PageSettingNormalizerMixin:
             return _normalize_timezone_setting(value)
         if key == "deepseek_peak_timezone":
             return _normalize_timezone_name(value)
+        if key == "model_replacement_scope":
+            return normalize_scope(value)
+        if key == "model_replacement_rules":
+            return normalize_rule_configs(value)
+        if key == "sensitive_replacement_keywords":
+            return str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()[:4000]
         if key == "target_user_ids":
             return self._normalize_private_target_id_list(value)
         if key == "plugin_specific_persona_id":

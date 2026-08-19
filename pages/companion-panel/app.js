@@ -38171,18 +38171,24 @@ $("#saveProvidersBtn").addEventListener("click", async () => {
   const tokenLimitOverrides = currentProviderTokenLimitValues();
   const fallbackOverrides = currentProviderFallbackValues();
   const deepseekPeak = window.PrivateCompanionProviderTree.currentDeepseekPeakValues({ document, state });
+  const modelReplacement = window.PrivateCompanionProviderTree.currentModelReplacementValues({ document, state });
   const provider_config_mode = currentProviderConfigMode();
   const providers = {};
   Object.keys(providerLabels).forEach((key) => {
     if (visibleConfigKey(key) && providerAllowedInCurrentMode(key)) providers[key] = values[key] || "";
   });
   providers.DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID = deepseekPeak.provider;
+  providers.SENSITIVE_REPLACEMENT_PROVIDER_ID = modelReplacement.sensitiveProvider;
   const saved = await runAction(
     () => postJson("/settings/update", { settings: {
       provider_config_mode,
       model_timeout_overrides: timeoutOverrides,
       model_token_limit_overrides: tokenLimitOverrides,
       model_fallback_overrides: fallbackOverrides,
+      model_replacement_scope: modelReplacement.scope,
+      model_replacement_rules: modelReplacement.rules,
+      enable_sensitive_model_replacement: modelReplacement.sensitiveEnabled,
+      sensitive_replacement_keywords: modelReplacement.sensitiveKeywords,
       enable_deepseek_peak_replacement: deepseekPeak.enabled,
       deepseek_peak_windows: deepseekPeak.windows,
       deepseek_peak_timezone: deepseekPeak.timezone,
@@ -38201,6 +38207,11 @@ $("#saveProvidersBtn").addEventListener("click", async () => {
   state.overview.settings.model_timeout_overrides = { ...timeoutOverrides };
   state.overview.settings.model_token_limit_overrides = { ...tokenLimitOverrides };
   state.overview.settings.model_fallback_overrides = { ...fallbackOverrides };
+  state.overview.settings.model_replacement_scope = modelReplacement.scope;
+  state.overview.settings.model_replacement_rules = modelReplacement.rules;
+  state.overview.settings.enable_sensitive_model_replacement = modelReplacement.sensitiveEnabled;
+  state.overview.settings.sensitive_replacement_keywords = modelReplacement.sensitiveKeywords;
+  state.overview.providers = { ...(state.overview.providers || {}), SENSITIVE_REPLACEMENT_PROVIDER_ID: modelReplacement.sensitiveProvider };
   state.providerConfigMode = provider_config_mode;
   renderProviders();
 });

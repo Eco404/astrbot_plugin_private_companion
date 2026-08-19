@@ -89,6 +89,7 @@ from .relationship_policy import (
 from .page_api_qzone import PrivateCompanionPageApiQzoneMixin
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 from .page_api_settings import PageSettingNormalizerMixin
+from .model_routing import build_rules, normalize_scope
 from .planning import evaluate_daily_plan_quality, generate_daily_plan, generate_detail_enhancement
 from .memo_notes import (
     apply_memo_note_action,
@@ -20544,6 +20545,10 @@ class PrivateCompanionPageApi(
             "model_timeout_overrides",
             "model_token_limit_overrides",
             "model_fallback_overrides",
+            "model_replacement_scope",
+            "model_replacement_rules",
+            "enable_sensitive_model_replacement",
+            "sensitive_replacement_keywords",
             "enable_deepseek_peak_replacement",
             "enable_body_monitor_integration",
             "deepseek_peak_windows",
@@ -22842,6 +22847,21 @@ class PrivateCompanionPageApi(
             normalizer = getattr(self.plugin, "_normalize_model_fallback_overrides", None)
             self.plugin.model_fallback_overrides = normalizer(value) if callable(normalizer) else {}
             return
+        if key == "model_replacement_scope":
+            self.plugin.model_replacement_scope = normalize_scope(value)
+            return
+        if key == "model_replacement_rules":
+            rules, warnings = build_rules(value)
+            self.plugin.model_replacement_rules = rules
+            for warning in warnings:
+                logger.warning("[PrivateCompanionPage] 模型替换规则：%s", self._single_line(warning, 180))
+            return
+        if key == "enable_sensitive_model_replacement":
+            self.plugin.enable_sensitive_model_replacement = self._normalize_bool_value(value)
+            return
+        if key == "sensitive_replacement_keywords":
+            self.plugin.sensitive_replacement_keywords = str(value or "").strip()
+            return
         if key == "environment_perception_timezone":
             timezone_setting = _normalize_timezone_setting(value)
             resolver = getattr(self.plugin, "_resolve_environment_perception_timezone", None)
@@ -22933,6 +22953,7 @@ class PrivateCompanionPageApi(
             "NEWS_PROVIDER_ID": "news_provider_id",
             "WEB_EXPLORATION_PROVIDER_ID": "web_exploration_provider_id",
             "DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID": "deepseek_peak_replacement_provider_id",
+            "SENSITIVE_REPLACEMENT_PROVIDER_ID": "sensitive_replacement_provider_id",
             "WEB_EXPLORATION_API_BASE_URL": "web_exploration_api_base_url",
             "WEB_EXPLORATION_API_KEY": "web_exploration_api_key",
             "WEB_EXPLORATION_API_MODEL": "web_exploration_api_model",
@@ -23711,6 +23732,10 @@ class PrivateCompanionPageApi(
             "model_timeout_overrides",
             "model_token_limit_overrides",
             "model_fallback_overrides",
+            "model_replacement_scope",
+            "model_replacement_rules",
+            "enable_sensitive_model_replacement",
+            "sensitive_replacement_keywords",
             "enable_deepseek_peak_replacement",
             "deepseek_peak_windows",
             "deepseek_peak_timezone",
