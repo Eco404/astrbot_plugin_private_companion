@@ -904,6 +904,47 @@ class CoreStoreMixin:
                     changed["web_last_digest_results"] = len(compacted_results)
         return changed
 
+    @staticmethod
+    def _strip_ephemeral_group_transcripts_inplace(data: Any) -> dict[str, int]:
+        """Project group chat to a bounded restart-safe context window for snapshots."""
+        if not isinstance(data, dict):
+            return {}
+        groups = data.get("groups")
+        if not isinstance(groups, dict):
+            return {}
+        removed_messages = 0
+        removed_phrases = 0
+        for group in groups.values():
+            if not isinstance(group, dict):
+                continue
+            recent = group.get("recent_messages")
+            if isinstance(recent, list) and recent:
+                # Keep only a small restart-safe tail. The live store still
+                # retains its configured window for in-process reasoning.
+                keep = [item for item in recent[-12:] if isinstance(item, dict)]
+                for item in keep:
+                    item["text"] = _single_line(item.get("text"), 180)
+                    item.pop("image_vision", None)
+                removed_messages += max(0, len(recent) - len(keep))
+                group["recent_messages"] = keep
+            members = group.get("members")
+            if not isinstance(members, dict):
+                continue
+            for member in members.values():
+                if not isinstance(member, dict):
+                    continue
+                phrases = member.get("recent_phrases")
+                if isinstance(phrases, list) and phrases:
+                    keep_phrases = [_single_line(item, 80) for item in phrases[:4] if _single_line(item, 80)]
+                    removed_phrases += max(0, len(phrases) - len(keep_phrases))
+                    member["recent_phrases"] = keep_phrases
+        changed: dict[str, int] = {}
+        if removed_messages:
+            changed["group_recent_messages"] = removed_messages
+        if removed_phrases:
+            changed["group_member_recent_phrases"] = removed_phrases
+        return changed
+
     def _mark_bookshelf_store_changed(self, data: dict[str, Any] | None = None) -> int:
         target = data if isinstance(data, dict) else self.data
         try:
@@ -949,7 +990,9 @@ class CoreStoreMixin:
                     manager.save_store(data)
                     if getattr(self, "storage_backend", "json") == "sqlite":
                         try:
-                            manager.export_current_to_json(data)
+                            mirror = deepcopy(data)
+                            self._strip_ephemeral_group_transcripts_inplace(mirror)
+                            manager.export_current_to_json(mirror, force=True)
                         except Exception as exc:
                             logger.debug("[PrivateCompanion] 夹层恢复后的 JSON 镜像写出失败: %s", _single_line(exc, 160))
                 return data
@@ -989,6 +1032,9 @@ class CoreStoreMixin:
         scoped_scheduler = getattr(self, "_req041_schedule_scoped_sync", None)
         if callable(scoped_scheduler):
             scoped_scheduler()
+        group_observation_save = bool(getattr(self, "_group_observation_dirty", False))
+        if group_observation_save:
+            self._group_observation_dirty = False
         active_persona = str(getattr(self, "_active_persona_scope", lambda: "")() or "")
         if bool(getattr(self, "enable_multi_persona_mode", False)) and active_persona:
             try:
@@ -997,7 +1043,7 @@ class CoreStoreMixin:
                 snapshot = deepcopy(self.data)
                 self._write_persona_data_snapshot_sync(active_persona, snapshot)
                 return
-            self._schedule_data_save(delay=0.35)
+            self._schedule_data_save(delay=15.0 if group_observation_save else 0.35)
             return
         compacted = self._compact_store_history_inplace(self.data)
         if compacted:
@@ -1007,7 +1053,7 @@ class CoreStoreMixin:
         except RuntimeError:
             self._save_data_now_sync()
             return
-        self._schedule_data_save(delay=0.35)
+        self._schedule_data_save(delay=15.0 if group_observation_save else 0.35)
 
     def _save_data_now_sync(self) -> None:
         changed = self._sanitize_store_control_tags_inplace(self.data)
@@ -1021,7 +1067,9 @@ class CoreStoreMixin:
             manager.save_store(self.data)
             if getattr(self, "storage_backend", "json") == "sqlite":
                 try:
-                    manager.export_current_to_json(self.data)
+                    mirror = deepcopy(self.data)
+                    self._strip_ephemeral_group_transcripts_inplace(mirror)
+                    manager.export_current_to_json(mirror)
                 except Exception as exc:
                     logger.debug("[PrivateCompanion] SQLite 镜像 JSON 写出失败: %s", _single_line(exc, 160))
             return
@@ -1039,7 +1087,9 @@ class CoreStoreMixin:
                         self.data[key] = existing.get(key, self.data.get(key))
             except Exception:
                 pass
-        self._atomic_write_data_file_sync(self.data)
+        snapshot = deepcopy(self.data)
+        self._strip_ephemeral_group_transcripts_inplace(snapshot)
+        self._atomic_write_data_file_sync(snapshot)
 
     def _write_data_snapshot_sync(self, data: dict[str, Any]) -> int:
         changed = self._sanitize_store_control_tags_inplace(data)
@@ -1049,11 +1099,15 @@ class CoreStoreMixin:
             manager.save_snapshot(data)
             if getattr(self, "storage_backend", "json") == "sqlite":
                 try:
-                    manager.export_current_to_json(data)
+                    mirror = deepcopy(data)
+                    self._strip_ephemeral_group_transcripts_inplace(mirror)
+                    manager.export_current_to_json(mirror)
                 except Exception as exc:
                     logger.debug("[PrivateCompanion] SQLite 快照镜像 JSON 写出失败: %s", _single_line(exc, 160))
             return changed
-        self._atomic_write_data_file_sync(data)
+        mirror = deepcopy(data)
+        self._strip_ephemeral_group_transcripts_inplace(mirror)
+        self._atomic_write_data_file_sync(mirror)
         return changed
 
     def _atomic_write_data_file_sync(self, data: dict[str, Any]) -> None:
@@ -1255,12 +1309,19 @@ class CoreStoreMixin:
         scoped_scheduler = getattr(self, "_req041_schedule_scoped_sync", None)
         if callable(scoped_scheduler):
             scoped_scheduler()
+        if bool(getattr(self, "_group_observation_dirty", False)):
+            delay = max(float(delay), 15.0)
+            self._group_observation_dirty = False
         active_getter = getattr(self, "_active_persona_scope", None)
         persona_id = str(active_getter() if callable(active_getter) else "").strip()
         if bool(getattr(self, "enable_multi_persona_mode", False)) and persona_id:
             self._schedule_persona_data_save(persona_id, delay)
             return
         self._schedule_default_data_save(delay)
+
+    def _schedule_group_observation_save(self, delay: float = 15.0) -> None:
+        """Coalesce high-frequency group observations into a bounded save window."""
+        self._schedule_data_save(delay=max(5.0, float(delay)))
 
     async def _flush_scheduled_data_save(self) -> None:
         """Wait until all coalesced writes, including writes queued while waiting, finish."""

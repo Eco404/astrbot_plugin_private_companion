@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import time
 from pathlib import Path
@@ -81,11 +82,37 @@ class SqliteStoreBackend(StoreBackendBase):
             )
             raise
 
+    def load_sections(self, section_names: tuple[str, ...] | list[str]) -> dict[str, Any]:
+        """Load a small subset without rebuilding the complete live store."""
+        names = [str(name) for name in section_names if str(name)]
+        if not names or not self.exists():
+            return {}
+        conn = self._connect()
+        try:
+            placeholders = ",".join("?" for _ in names)
+            rows = conn.execute(
+                f"SELECT section_name, payload_json FROM store_sections "
+                f"WHERE section_name IN ({placeholders})",
+                names,
+            ).fetchall()
+        finally:
+            conn.close()
+        result: dict[str, Any] = {}
+        for section_name, payload_json in rows:
+            result[str(section_name)] = json.loads(payload_json)
+        return result
+
     def save_store(self, data: dict[str, Any]) -> None:
         conn = self._connect()
         try:
             now = time.time()
             with conn:
+                existing_checksums = {
+                    str(section_name): str(checksum or "")
+                    for section_name, checksum in conn.execute(
+                        "SELECT section_name, checksum FROM store_sections"
+                    ).fetchall()
+                }
                 section_names = [str(section_name) for section_name in data.keys()]
                 if section_names:
                     placeholders = ",".join("?" for _ in section_names)
@@ -96,10 +123,17 @@ class SqliteStoreBackend(StoreBackendBase):
                 else:
                     conn.execute("DELETE FROM store_sections")
                 for section_name, payload in data.items():
+                    payload_json = json.dumps(payload, ensure_ascii=False)
+                    checksum = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+                    if existing_checksums.get(str(section_name)) == checksum:
+                        continue
                     conn.execute(
-                        "REPLACE INTO store_sections(section_name, payload_json, updated_at, checksum, schema_version) "
-                        "VALUES (?, ?, ?, '', 1)",
-                        (str(section_name), json.dumps(payload, ensure_ascii=False), now),
+                        "INSERT INTO store_sections(section_name, payload_json, updated_at, checksum, schema_version) "
+                        "VALUES (?, ?, ?, ?, 1) "
+                        "ON CONFLICT(section_name) DO UPDATE SET "
+                        "payload_json=excluded.payload_json, updated_at=excluded.updated_at, "
+                        "checksum=excluded.checksum, schema_version=excluded.schema_version",
+                        (str(section_name), payload_json, now, checksum),
                     )
         finally:
             conn.close()

@@ -1060,6 +1060,10 @@ class GroupObservationMixin:
             })
         recent.append(record)
         del recent[:-self.max_group_recent_messages]
+        # Group transcripts are useful for the live context window, but they
+        # should be flushed in batches instead of causing a full store write
+        # for every inbound message.
+        setattr(self, "_group_observation_dirty", True)
         if self.enable_group_relationship_graph:
             members = group.setdefault("members", {})
             if not isinstance(members, dict):

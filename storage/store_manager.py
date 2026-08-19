@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
@@ -295,6 +296,7 @@ class StoreManager:
         active_path = self.sqlite_path if self.backend_name == "sqlite" else self.data_file
         self._store_lock = _shared_store_lock(active_path)
         self._json_store_lock = _shared_store_lock(self.data_file)
+        self._last_json_export_at = 0.0
 
     @staticmethod
     def _load_optional_store(backend: Any, *, strict: bool = False) -> dict[str, Any] | None:
@@ -365,7 +367,11 @@ class StoreManager:
             )
 
     def _prepare_store_for_save(self, data: dict[str, Any]) -> dict[str, Any]:
-        existing = self._load_optional_store(self.backend, strict=True)
+        section_loader = getattr(self.backend, "load_sections", None)
+        if callable(section_loader):
+            existing = section_loader(_BOOKSHELF_SECTIONS)
+        else:
+            existing = self._load_optional_store(self.backend, strict=True)
         if not isinstance(existing, dict):
             return data
         reconciled, changed, recovered = reconcile_bookshelf_payload(data, existing)
@@ -400,9 +406,20 @@ class StoreManager:
         with self._store_lock:
             self.backend.save_snapshot(self._prepare_store_for_save(data))
 
-    def export_current_to_json(self, data: dict[str, Any]) -> None:
+    def export_current_to_json(
+        self,
+        data: dict[str, Any],
+        *,
+        force: bool = False,
+        min_interval_seconds: float = 300.0,
+    ) -> bool:
+        now = time.monotonic()
         with self._json_store_lock:
+            if not force and now - self._last_json_export_at < max(1.0, float(min_interval_seconds)):
+                return False
             self.json_backend.save_store(deepcopy(data))
+            self._last_json_export_at = now
+            return True
 
     def health_check(self) -> dict[str, Any]:
         return self.backend.health_check()
