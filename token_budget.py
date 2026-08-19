@@ -17,6 +17,7 @@ from .constants import (
     MODEL_TASK_PROVIDER_PREFIXES,
 )
 from .helpers import _flat_get, _now_ts, _safe_float, _safe_int, _single_line, _today_key
+from .model_routing import contains_sensitive_refusal, scope_allows
 
 
 def _looks_like_upstream_llm_error_response(text: Any) -> bool:
@@ -966,6 +967,28 @@ class TokenBudgetMixin:
     def _resolve_chat_provider_id(self, provider_id: str | None = None, *, umo: str = "") -> str:
         return str(provider_id or self.llm_provider_id or self._default_chat_provider_id(umo) or "").strip()
 
+    def _sensitive_model_replacement_provider(self, primary_provider_id: str = "") -> str:
+        if not bool(getattr(self, "enable_sensitive_model_replacement", False)):
+            return ""
+        if not scope_allows(getattr(self, "model_replacement_scope", "plugin"), "plugin"):
+            return ""
+        replacement = _single_line(getattr(self, "sensitive_replacement_provider_id", ""), 160)
+        if not replacement or replacement == _single_line(primary_provider_id, 160):
+            return ""
+        getter = getattr(getattr(self, "context", None), "get_provider_by_id", None)
+        if not callable(getter):
+            return ""
+        try:
+            return replacement if getter(replacement) is not None else ""
+        except Exception:
+            return ""
+
+    def _sensitive_model_replacement_keyword(self, text: Any) -> str:
+        return contains_sensitive_refusal(
+            text,
+            getattr(self, "sensitive_replacement_keywords", ""),
+        )
+
     def _chat_provider_id_from_registry(self, context: Any) -> str:
         """从 AstrBot Provider 注册表/配置里兜底取一个已加载的对话 Provider。"""
         get_all = getattr(context, "get_all_providers", None)
@@ -1410,6 +1433,8 @@ class TokenBudgetMixin:
         candidates = ([fallback_provider] if token_routed else [selected_provider])
         if not token_routed and fallback_provider:
             candidates.append(fallback_provider)
+        sensitive_replacement = self._sensitive_model_replacement_provider(selected_provider)
+        sensitive_replacement_used = False
         for attempt_index, attempt_provider in enumerate(candidates):
             started_at = time.time()
             response = None
@@ -1443,6 +1468,24 @@ class TokenBudgetMixin:
 
                 completion = str(getattr(response, "completion_text", "") or "").strip()
                 usage_completion = self._llm_tool_response_for_usage(response, completion)
+                sensitive_keyword = self._sensitive_model_replacement_keyword(completion)
+                if sensitive_keyword:
+                    if sensitive_replacement and not sensitive_replacement_used:
+                        sensitive_replacement_used = True
+                        candidates.append(sensitive_replacement)
+                        logger.info(
+                            "[PrivateCompanion] 插件工具模型命中敏感拒答，切换指定模型重试: provider=%s target=%s keyword=%s",
+                            _single_line(attempt_provider, 120),
+                            _single_line(sensitive_replacement, 120),
+                            _single_line(sensitive_keyword, 80),
+                        )
+                        continue
+                    logger.warning(
+                        "[PrivateCompanion] 插件工具指定模型仍返回敏感拒答，丢弃本次文本: provider=%s keyword=%s",
+                        _single_line(attempt_provider, 120),
+                        _single_line(sensitive_keyword, 80),
+                    )
+                    return None
                 response_role = _single_line(getattr(response, "role", ""), 20).lower()
                 semantic_provider_error = _looks_like_upstream_llm_error_response(completion)
                 if response_role == "err" or semantic_provider_error:
@@ -1587,6 +1630,8 @@ class TokenBudgetMixin:
         candidates = ([fallback_provider] if token_routed else [selected_provider])
         if not token_routed and fallback_provider:
             candidates.append(fallback_provider)
+        sensitive_replacement = self._sensitive_model_replacement_provider(selected_provider)
+        sensitive_replacement_used = False
         for attempt_index, attempt_provider in enumerate(candidates):
             start = time.time()
             resp = None
@@ -1615,6 +1660,24 @@ class TokenBudgetMixin:
                 if resp and resp.completion_text:
                     completion = resp.completion_text.strip()
                     if completion:
+                        sensitive_keyword = self._sensitive_model_replacement_keyword(completion)
+                        if sensitive_keyword:
+                            if sensitive_replacement and not sensitive_replacement_used:
+                                sensitive_replacement_used = True
+                                candidates.append(sensitive_replacement)
+                                logger.info(
+                                    "[PrivateCompanion] 插件模型命中敏感拒答，切换指定模型重试: provider=%s target=%s keyword=%s",
+                                    _single_line(attempt_provider, 120),
+                                    _single_line(sensitive_replacement, 120),
+                                    _single_line(sensitive_keyword, 80),
+                                )
+                                continue
+                            logger.warning(
+                                "[PrivateCompanion] 插件指定模型仍返回敏感拒答，丢弃本次文本: provider=%s keyword=%s",
+                                _single_line(attempt_provider, 120),
+                                _single_line(sensitive_keyword, 80),
+                            )
+                            return None
                         response_role = _single_line(getattr(resp, "role", ""), 20).lower()
                         semantic_provider_error = _looks_like_upstream_llm_error_response(
                             completion

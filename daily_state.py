@@ -106,6 +106,7 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _normalize_outbound_punctuation_flow, _normalize_photo_subject_owner, _now_ts, _path_text, _photo_subject_owner_prompt_label, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
+from .model_routing import CURRENT_MODEL_REPLACEMENT_SOURCES, find_route, scope_allows
 from .domains.affect.affect_modulation import compose_affect_modulation
 from .daily_state_tick import DailyStateTickMixin
 from .memo_notes import memo_note_due_state, memo_note_sort_key, normalize_memo_note
@@ -16457,8 +16458,16 @@ class DailyStateMixin(DailyStateTickMixin):
         haystack = " ".join(parts).lower()
         return any(keyword in haystack for keyword in keywords)
 
-    def _apply_deepseek_peak_replacement(self, provider_id: str, *, now: datetime | None = None) -> str:
+    def _apply_deepseek_peak_replacement(
+        self,
+        provider_id: str,
+        *,
+        now: datetime | None = None,
+        target: str = "plugin",
+    ) -> str:
         original = str(provider_id or "").strip()
+        if not scope_allows(getattr(self, "model_replacement_scope", "plugin"), target):
+            return original
         status = self._deepseek_peak_status(now)
         replacement = str(status.get("replacement_provider_id") or "").strip()
         if not status.get("active") or not original or not replacement or replacement == original:
@@ -16475,7 +16484,22 @@ class DailyStateMixin(DailyStateTickMixin):
         for provider_id in provider_ids:
             value = str(provider_id or "").strip()
             if value:
-                return self._apply_deepseek_peak_replacement(value)
+                routed = value
+                if scope_allows(getattr(self, "model_replacement_scope", "plugin"), "plugin"):
+                    sources = CURRENT_MODEL_REPLACEMENT_SOURCES.get(())
+                    rules = getattr(self, "model_replacement_rules", None)
+                    if sources and isinstance(rules, list):
+                        match = find_route(rules, sources)
+                        if match is not None:
+                            candidate = str(match.rule.provider_id or "").strip()
+                            getter = getattr(getattr(self, "context", None), "get_provider_by_id", None)
+                            if candidate and callable(getter):
+                                try:
+                                    if getter(candidate) is not None:
+                                        routed = candidate
+                                except Exception:
+                                    pass
+                return self._apply_deepseek_peak_replacement(routed, target="plugin")
         return ""
 
     def _parse_plan_items(self, raw_text: str) -> list[dict[str, str]]:

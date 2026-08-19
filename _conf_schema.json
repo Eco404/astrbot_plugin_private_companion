@@ -4830,8 +4830,133 @@
       "enable_deepseek_peak_replacement": {
         "description": "启用 DeepSeek 高价时段替换",
         "type": "bool",
-        "hint": "开启后，仅在下方自定义高价时段内，把插件任务中识别为 DeepSeek 的 Provider 临时路由到替代 Provider；不会修改原模型配置，时段结束后自动恢复。",
+        "hint": "开启后，在模型替换策略允许的作用范围内，于下方自定义高价时段把识别为 DeepSeek 的 Provider 临时路由到替代 Provider；不会修改原模型配置，时段结束后自动恢复。",
         "default": false
+      },
+      "model_replacement_scope": {
+        "description": "模型替换策略作用范围",
+        "type": "string",
+        "hint": "plugin=仅插件内部调用；conversation=仅普通对话模型；all=两者都生效。关键词换模、DeepSeek 高价时段替换和敏感拒答替换共用此范围。",
+        "default": "plugin",
+        "options": [
+          "plugin",
+          "conversation",
+          "all"
+        ],
+        "labels": [
+          "仅插件调用",
+          "仅对话模型",
+          "全部生效"
+        ]
+      },
+      "model_replacement_rules": {
+        "description": "关键词模型替换规则",
+        "type": "template_list",
+        "default": [],
+        "hint": "兼容关键词换模插件的规则格式。作用范围由上方统一策略控制；优先级越高越先匹配，未命中时保持原模型。",
+        "templates": {
+          "route": {
+            "name": "关键词换模规则",
+            "items": {
+              "name": {
+                "description": "规则名称",
+                "type": "string",
+                "default": "代码问题"
+              },
+              "enabled": {
+                "description": "启用本规则",
+                "type": "bool",
+                "default": true
+              },
+              "priority": {
+                "description": "优先级",
+                "type": "int",
+                "default": 100
+              },
+              "keywords": {
+                "description": "关键词列表",
+                "type": "list",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "写代码",
+                  "调试",
+                  "报错"
+                ]
+              },
+              "match_mode": {
+                "description": "匹配模式",
+                "type": "string",
+                "default": "contains",
+                "options": [
+                  "contains",
+                  "exact",
+                  "regex"
+                ],
+                "labels": [
+                  "包含",
+                  "完全匹配",
+                  "正则"
+                ]
+              },
+              "keyword_logic": {
+                "description": "多关键词逻辑",
+                "type": "string",
+                "default": "any",
+                "options": [
+                  "any",
+                  "all"
+                ],
+                "labels": [
+                  "任一命中",
+                  "全部命中"
+                ]
+              },
+              "case_sensitive": {
+                "description": "区分英文大小写",
+                "type": "bool",
+                "default": false
+              },
+              "provider_id": {
+                "description": "目标模型 Provider",
+                "type": "string",
+                "default": "",
+                "_special": "select_provider"
+              },
+              "model": {
+                "description": "覆盖模型名称",
+                "type": "string",
+                "default": ""
+              }
+            }
+          }
+        }
+      },
+      "enable_sensitive_model_replacement": {
+        "description": "启用敏感拒答模型替换",
+        "type": "bool",
+        "hint": "模型返回常见拒答词时，阻断原文本并改用指定 Provider 重试；替换模型仍拒答时不发送原拒答。",
+        "default": false
+      },
+      "SENSITIVE_REPLACEMENT_PROVIDER_ID": {
+        "description": "敏感拒答替换模型",
+        "type": "string",
+        "hint": "用于承接敏感拒答重试的聊天模型 Provider，请选择与原模型不同的模型。",
+        "default": "",
+        "_special": "select_provider",
+        "condition": {
+          "enable_sensitive_model_replacement": true
+        }
+      },
+      "sensitive_replacement_keywords": {
+        "description": "敏感拒答匹配词",
+        "type": "text",
+        "hint": "每行或用分号分隔。默认包含“很抱歉，我无法”“我有我自己的底线”“我们可以聊聊别的”“我无法满足”“露骨性行为”。",
+        "default": "很抱歉，我无法；很抱歉,我无法；我有我自己的底线；我们可以聊聊别的；我无法满足；露骨性行为",
+        "condition": {
+          "enable_sensitive_model_replacement": true
+        }
       },
       "DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID": {
         "description": "DeepSeek 高价时段替代模型",

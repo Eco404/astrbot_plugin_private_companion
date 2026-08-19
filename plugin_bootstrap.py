@@ -41,6 +41,7 @@ from .relationship_policy import normalize_relationship_stage_policy
 from .runtime_compat import probe_runtime_capabilities
 from .migration_coordinator import MigrationCoordinator
 from .migration_outbox import MigrationOutbox
+from .model_routing import DEFAULT_SENSITIVE_REPLACEMENT_KEYWORDS, build_rules, normalize_scope
 from .segmented_message import normalize_component_order, normalize_component_strategy
 from .unified_person_registry import UnifiedPersonRegistry
 
@@ -502,6 +503,40 @@ def _initialize_world_and_model_config(self: Any, c: Any) -> None:
         self._cfg_raw(c, "model_fallback_overrides", {})
     )
     self.enable_deepseek_peak_replacement = self._cfg_bool(c, "enable_deepseek_peak_replacement", False)
+    self.model_replacement_scope = normalize_scope(
+        self._cfg_raw(c, "model_replacement_scope", "plugin"),
+    )
+    raw_model_replacement_rules = self._cfg_raw(c, "model_replacement_rules", [])
+    self.model_replacement_rules, model_replacement_warnings = build_rules(raw_model_replacement_rules)
+    if not self.model_replacement_rules:
+        legacy_metadata = None
+        legacy_getter = getattr(getattr(self, "context", None), "get_registered_star", None)
+        if callable(legacy_getter):
+            try:
+                legacy_metadata = legacy_getter("astrbot_plugin_keyword_model_router")
+            except Exception:
+                legacy_metadata = None
+        legacy_config = getattr(getattr(legacy_metadata, "star_cls", None), "config", None)
+        if isinstance(legacy_config, dict):
+            self.model_replacement_rules, legacy_warnings = build_rules(legacy_config.get("route_rules", []))
+            model_replacement_warnings.extend(f"兼容旧插件：{warning}" for warning in legacy_warnings)
+    for warning in model_replacement_warnings:
+        logger.warning("[PrivateCompanion] 模型替换规则：%s", warning)
+    self.enable_sensitive_model_replacement = self._cfg_bool(
+        c,
+        "enable_sensitive_model_replacement",
+        False,
+    )
+    self.sensitive_replacement_provider_id = self._cfg_str(
+        c,
+        "SENSITIVE_REPLACEMENT_PROVIDER_ID",
+        "",
+    )
+    self.sensitive_replacement_keywords = self._cfg_str(
+        c,
+        "sensitive_replacement_keywords",
+        "；".join(DEFAULT_SENSITIVE_REPLACEMENT_KEYWORDS),
+    )
     self.deepseek_peak_replacement_provider_id = self._cfg_str(c, "DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID", "")
     self.deepseek_peak_windows = self._cfg_str(c, "deepseek_peak_windows", "09:00-12:00\n14:00-18:00")
     self.deepseek_peak_timezone = self._cfg_str(c, "deepseek_peak_timezone", "Asia/Shanghai", "Asia/Shanghai")

@@ -105,6 +105,7 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .model_routing import CURRENT_MODEL_REPLACEMENT_SOURCES, build_rules, find_route, scope_allows
 
 _ON_WAITING_LLM_REQUEST = getattr(filter, "on_waiting_llm_request", None)
 if not callable(_ON_WAITING_LLM_REQUEST):
@@ -3420,6 +3421,165 @@ class EventDispatchMixin:
         current["event_id"] = message_id
         current["updated_ts"] = _now_ts()
         current["prompt_text"] = self._message_debounce_pending_prompt_text(event)
+
+    def _model_replacement_rules_for_event(self) -> list[Any]:
+        rules = getattr(self, "model_replacement_rules", None)
+        if isinstance(rules, list) and rules:
+            return rules
+        # Compatibility bridge for installations that still keep the old
+        # keyword-model-router plugin enabled while migrating its settings.
+        context = getattr(self, "context", None)
+        getter = getattr(context, "get_registered_star", None)
+        metadata = None
+        if callable(getter):
+            try:
+                metadata = getter("astrbot_plugin_keyword_model_router")
+            except Exception:
+                metadata = None
+        legacy = getattr(getattr(metadata, "star_cls", None), "config", None)
+        raw_rules = legacy.get("route_rules", []) if isinstance(legacy, dict) else []
+        parsed, warnings = build_rules(raw_rules)
+        for warning in warnings:
+            logger.warning("[PrivateCompanion] 兼容旧关键词换模规则：%s", warning)
+        return parsed
+
+    @staticmethod
+    def _model_replacement_event_extra(event: AstrMessageEvent, key: str, default: Any = None) -> Any:
+        getter = getattr(event, "get_extra", None)
+        if callable(getter):
+            try:
+                value = getter(key, default)
+                if value is not None:
+                    return value
+            except Exception:
+                pass
+        return getattr(event, key, default)
+
+    @staticmethod
+    def _set_model_replacement_event_extra(event: AstrMessageEvent, key: str, value: Any) -> None:
+        setter = getattr(event, "set_extra", None)
+        if callable(setter):
+            try:
+                setter(key, value)
+                return
+            except Exception:
+                pass
+        try:
+            setattr(event, key, value)
+        except Exception:
+            pass
+
+    def _model_replacement_provider_exists(self, provider_id: str) -> bool:
+        value = str(provider_id or "").strip()
+        getter = getattr(getattr(self, "context", None), "get_provider_by_id", None)
+        if not value or not callable(getter):
+            return False
+        try:
+            return getter(value) is not None
+        except Exception:
+            return False
+
+    async def _prepare_model_replacement_sources(self, event: AstrMessageEvent) -> list[tuple[str, str]]:
+        sources: list[tuple[str, str]] = []
+        message = getattr(event, "message_str", "")
+        if isinstance(message, str) and message.strip():
+            sources.append(("wake_message", message))
+        for field in (
+            "private_companion_image_caption_route_text",
+            "private_companion_delayed_image_vision_text",
+            "private_companion_reply_image_vision_text",
+        ):
+            value = getattr(event, field, "")
+            if isinstance(value, str) and value.strip():
+                sources.append(("companion_image_caption", value))
+        if not any(source == "companion_image_caption" for source, _ in sources):
+            prepare = getattr(self, "prepare_keyword_model_router_image_caption", None)
+            if callable(prepare):
+                try:
+                    caption = prepare(event)
+                    if inspect.isawaitable(caption):
+                        caption = await caption
+                    if isinstance(caption, str) and caption.strip():
+                        sources.append(("companion_image_caption", caption))
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] 模型替换读取图片转述失败：%s", _single_line(exc, 120))
+        return sources
+
+    @_ON_WAITING_LLM_REQUEST(priority=110000)
+    async def route_model_replacement_before_agent(self, event: AstrMessageEvent, *args: Any, **kwargs: Any) -> None:
+        """Select the conversation Provider before AstrBot builds its agent."""
+        if not bool(getattr(self, "enabled", False)):
+            return
+        sources = await self._prepare_model_replacement_sources(event)
+        try:
+            token = CURRENT_MODEL_REPLACEMENT_SOURCES.set(tuple(sources))
+            setattr(event, "private_companion_model_replacement_sources_token", token)
+        except Exception:
+            pass
+        if not scope_allows(getattr(self, "model_replacement_scope", "plugin"), "conversation"):
+            return
+        match = find_route(self._model_replacement_rules_for_event(), sources)
+        provider_id = ""
+        model = ""
+        if match is not None:
+            provider_id = str(match.rule.provider_id or "").strip()
+            model = str(match.rule.model or "").strip()
+            if not self._model_replacement_provider_exists(provider_id):
+                logger.warning("[PrivateCompanion] 模型替换规则目标 Provider 不存在，保留原路由：%s", provider_id)
+                provider_id = ""
+        if not provider_id:
+            getter = getattr(self, "_default_chat_provider_id", None)
+            if callable(getter):
+                try:
+                    provider_id = str(getter(str(getattr(event, "unified_msg_origin", "") or "")) or "").strip()
+                except Exception:
+                    provider_id = ""
+        peak_router = getattr(self, "_apply_deepseek_peak_replacement", None)
+        if provider_id and callable(peak_router):
+            provider_id = peak_router(provider_id, target="conversation")
+        if not provider_id:
+            return
+        self._set_model_replacement_event_extra(event, "selected_provider", provider_id)
+        self._set_model_replacement_event_extra(event, "selected_model", model or None)
+        self._set_model_replacement_event_extra(
+            event,
+            "private_companion_model_replacement_route",
+            {
+                "provider_id": provider_id,
+                "model": model,
+                "matched_keyword": match.matched_keyword if match else "",
+                "source": match.source if match else "deepseek_peak",
+            },
+        )
+
+    @filter.on_llm_response(priority=-100000)
+    async def clear_model_replacement_context(self, event: AstrMessageEvent, resp: LLMResponse, *args: Any, **kwargs: Any) -> None:
+        token = getattr(event, "private_companion_model_replacement_sources_token", None)
+        if token is None:
+            return
+        try:
+            CURRENT_MODEL_REPLACEMENT_SOURCES.reset(token)
+            delattr(event, "private_companion_model_replacement_sources_token")
+        except Exception:
+            pass
+
+    @filter.on_llm_request(priority=110000)
+    async def enforce_model_replacement_request(self, event: AstrMessageEvent, req: ProviderRequest, *args: Any, **kwargs: Any) -> None:
+        if req is None or not bool(getattr(self, "enabled", False)):
+            return
+        self._set_model_replacement_event_extra(event, "provider_request", req)
+        selected_provider = str(self._model_replacement_event_extra(event, "selected_provider", "") or "").strip()
+        selected_model = self._model_replacement_event_extra(event, "selected_model", None)
+        if selected_provider:
+            try:
+                setattr(req, "provider_id", selected_provider)
+            except Exception:
+                pass
+        if selected_model:
+            try:
+                req.model = str(selected_model).strip()
+            except Exception:
+                pass
 
     @_ON_WAITING_LLM_REQUEST(priority=100000)
     async def guard_pending_message_debounce(self, event: AstrMessageEvent, *args: Any, **kwargs: Any) -> None:
