@@ -3363,6 +3363,24 @@ class GroupObservationMixin:
 
     def _group_repeat_signature(self, text: str) -> str:
         cleaned = self._compact_repeat_text(text)
+        # Platform adapters often collapse every image-only message to the
+        # same visible placeholder. It is not a meaningful repeat signal:
+        # distinct images must not accumulate under one signature.
+        if cleaned in {
+            "[图片]",
+            "【图片】",
+            "图片",
+            "[语音]",
+            "【语音】",
+            "语音",
+            "[视频]",
+            "【视频】",
+            "视频",
+            "[文件]",
+            "【文件】",
+            "文件",
+        }:
+            return ""
         cleaned = re.sub(r"[!！?？。.,，~～…]+$", "", cleaned).strip()
         return cleaned
 

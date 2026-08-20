@@ -310,6 +310,27 @@ class GroupLinkReplyGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_wakeup_message_does_not_compete_with_interjection(self) -> None:
         await self.interjection._maybe_group_interject(_WakeEvent(), {}, "有没有人知道这个怎么弄？")
 
+    def test_media_placeholders_are_not_repeat_signatures(self) -> None:
+        harness = _RepeatHarness()
+        for placeholder in ("[图片]", "【图片】", "图片", "[语音]", "[视频]", "[文件]"):
+            self.assertEqual("", harness._group_repeat_signature(placeholder))
+
+    async def test_distinct_image_placeholders_do_not_trigger_repeat_follow(self) -> None:
+        harness = _RepeatHarness()
+        group = {}
+
+        with patch("astrbot_plugin_private_companion.group_observation.random.random", return_value=0.5):
+            for _ in range(3):
+                await harness._maybe_group_interject(
+                    _RepeatEvent(),
+                    group,
+                    "[图片]",
+                    allow_interjection=False,
+                )
+
+        self.assertEqual([], harness.replies)
+        self.assertEqual({}, group.get("repeat_follow_state", {}))
+
     async def test_repeat_still_works_when_general_interjection_is_disabled(self) -> None:
         harness = _RepeatHarness()
         group = {}
