@@ -8886,20 +8886,143 @@ Output:
 
         scene = await self._build_photo_scene_prompt(user, name, reason)
         workflow_kind = scene.get("kind", "text2img")
-        subject_owner = _normalize_photo_subject_owner(scene.get("subject_owner"))
+        normalized_workflow_kind = _single_line(workflow_kind, 40).strip().lower()
+        raw_subject_owner = _normalize_photo_subject_owner(scene.get("subject_owner"))
+        subject_owner = raw_subject_owner
         if not subject_owner:
-            subject_owner = "bot" if bool(scene.get("use_persona_reference")) or workflow_kind == "selfie" else "scene"
-        session_key = str(user.get("umo") or user.get("user_id") or name)
-        continuity_key = self._compose_photo_continuity_key(session_key, user.get("user_id"))
+            subject_owner = (
+                "bot"
+                if bool(scene.get("use_persona_reference"))
+                or normalized_workflow_kind in {"selfie", "portrait", "自拍", "人像"}
+                else "scene"
+            )
+        if normalized_workflow_kind in {"selfie", "portrait", "自拍", "人像"} and subject_owner == "scene":
+            subject_owner = "bot"
+        non_bot_identity_owner = raw_subject_owner in {"third_party", "unknown"} or subject_owner in {
+            "third_party",
+            "unknown",
+        }
+        bot_identity_required = (
+            not non_bot_identity_owner
+            and (
+                bool(scene.get("use_persona_reference"))
+                or normalized_workflow_kind in {"selfie", "portrait", "自拍", "人像"}
+                or subject_owner == "bot"
+            )
+        )
         reference_image_path = ""
-        if bool(scene.get("use_persona_reference")):
+        reference_selection_source = ""
+
+        def valid_reference_path(value: Any) -> str:
+            """Return a local image path only when it is an existing file."""
+            if isinstance(value, SelectionResult):
+                value = value.selected
+            if isinstance(value, dict):
+                value = value.get("path") or value.get("source") or value.get("file_path")
+            raw = _path_text(value, 1000)
+            if not raw or re.match(r"^(?:https?|data):", raw, flags=re.I):
+                return ""
+            try:
+                path = Path(raw).expanduser()
+                if not path.is_absolute():
+                    data_dir = _path_text(getattr(self, "data_dir", ""), 1000)
+                    if data_dir:
+                        path = Path(data_dir) / path
+                path = path.resolve()
+                if not path.is_file() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+                    return ""
+            except (OSError, ValueError, TypeError, RuntimeError):
+                return ""
+            return str(path)
+
+        # A third-party or ambiguous owner must never inherit Bot's persona image.
+        # Such scenes may proceed only with an explicitly supplied, valid reference.
+        if non_bot_identity_owner:
+            reference_image_path = valid_reference_path(scene.get("reference_image_path"))
+            reference_selection_source = "explicit_reference" if reference_image_path else ""
+            if not reference_image_path:
+                return (
+                    "photo_text：缺少有效身份参考图，已停止提交人物画面\n"
+                    f"画面草稿：{_single_line(scene.get('caption'), 180)}\n"
+                    "失败原因：第三方或归属不明的人物只能使用对应的可验证参考图，不能套用 Bot 身份图。"
+                )
+
+        if bot_identity_required:
             # Character-bearing photo_text scenes need identity continuity even when
             # their rendering workflow is text2img rather than selfie.
-            reference_image_path = await self._photo_persona_reference_image_for_kind_async(
-                "selfie",
-                allow_daily_outfit=True,
-                request_text=scene["prompt"],
+            reference_image_path = valid_reference_path(scene.get("reference_image_path"))
+            if reference_image_path:
+                reference_selection_source = "explicit_reference"
+            async_reference_getter = getattr(
+                self,
+                "_photo_persona_reference_image_for_kind_async",
+                None,
             )
+            if not reference_image_path and callable(async_reference_getter):
+                try:
+                    selected_path = await async_reference_getter(
+                        "selfie",
+                        allow_daily_outfit=True,
+                        requester_user_id=str(user.get("user_id") or ""),
+                        request_text=_single_line(scene.get("prompt"), 900),
+                        ambient_context=_single_line(scene.get("scene_context"), 900),
+                    )
+                    reference_image_path = valid_reference_path(selected_path)
+                    if reference_image_path:
+                        reference_selection_source = "selected_reference"
+                except Exception as exc:
+                    logger.debug(
+                        "[PrivateCompanion] proactive photo reference selection failed: %s",
+                        _single_line(exc, 160),
+                    )
+            if not reference_image_path:
+                fallback_getter = getattr(
+                    self,
+                    "_photo_persona_reference_image_for_kind",
+                    None,
+                )
+                if callable(fallback_getter):
+                    try:
+                        reference_image_path = valid_reference_path(
+                            fallback_getter("selfie", allow_daily_outfit=False)
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "[PrivateCompanion] proactive photo identity fallback failed: %s",
+                            _single_line(exc, 160),
+                        )
+                if not reference_image_path:
+                    fallback_path_getter = getattr(
+                        self,
+                        "_photo_persona_reference_image_path_async",
+                        None,
+                    )
+                    if callable(fallback_path_getter):
+                        try:
+                            reference_image_path = valid_reference_path(
+                                await fallback_path_getter()
+                            )
+                        except Exception as exc:
+                            logger.debug(
+                                "[PrivateCompanion] proactive photo identity path fallback failed: %s",
+                                _single_line(exc, 160),
+                            )
+                if reference_image_path:
+                    reference_selection_source = "identity_fallback"
+            if not reference_image_path:
+                return (
+                    "photo_text：缺少有效身份参考图，已停止提交人物画面\n"
+                    f"画面草稿：{_single_line(scene.get('caption'), 180)}\n"
+                    "失败原因：需要 Bot 或其他人物的可验证参考图，不能生成无来源的人脸。"
+                )
+        elif subject_owner == "scene":
+            scene["prompt"] = self._append_photo_negative_terms(
+                scene.get("prompt", ""),
+                ["people", "human figures", "faces", "silhouettes"],
+                limit=900,
+            )
+        session_key = str(user.get("umo") or user.get("user_id") or name)
+        continuity_key = self._compose_photo_continuity_key(session_key, user.get("user_id"))
         backend_name, image_path, workflow_note = await self._generate_photo_image(
             workflow_kind=workflow_kind,
             prompt_text=scene["prompt"],
@@ -8949,7 +9072,7 @@ Output:
             f"图片路径：{image_path}\n"
             f"画面：{scene['caption']}\n"
             f"图片主体归属：{subject_owner}\n"
-            f"人物参考图：{'已使用' if reference_image_path else '未使用'}\n"
+            f"人物参考图：{('已使用（' + (reference_selection_source or 'selected_reference') + '）') if reference_image_path else '未使用'}\n"
             + (f"统一情境：{scene_context_line}\n" if scene_context_line else "")
             + f"生图提示：{_single_line(scene['prompt'], 240)}"
         )
@@ -12036,9 +12159,66 @@ Output:
         state = self.data.get("daily_state", {})
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         style_name, style_instruction = self._get_photo_style_instruction()
+        style_prompt_en = self._photo_style_prompt_en(style_name, style_instruction)
         topic_hint = _single_line(user.get("planned_proactive_topic"), 60)
         motive_hint = _single_line(user.get("planned_proactive_motive"), 120)
         schedule_context = self._format_plan_item_for_prompt(current_item)
+        pure_scene_context = "；".join(
+            part for part in (topic_hint, motive_hint, schedule_context) if part
+        )
+        explicit_person_scene = bool(
+            re.search(
+                r"自拍|合影|合照|人像|人物|角色|穿搭|女孩|男孩|女生|男生|女人|男人|"
+                r"少女|少年|路人|猫女|拟人|"
+                r"\b(?:selfie|portrait|character|person|people|woman|man|girl|boy|outfit)\b",
+                pure_scene_context,
+                flags=re.I,
+            )
+        )
+        explicit_pure_scene = reason == "birthday_celebration" or (
+            bool(
+                re.search(
+                    r"风景|景色|风光|日落|晚霞|天空|海边风景|海边景色|"
+                    r"食物|美食|早餐|午餐|晚餐|甜点|蛋糕|咖啡|饮料|"
+                    r"动物|猫|狗|小猫|小狗|桌面(?:物品)?|物品|礼物|花束|花瓶|"
+                    r"卡片|生日卡|手机屏幕|屏幕|"
+                    r"\b(?:scenery|landscape|sunset|sky|seascape|food|breakfast|lunch|"
+                    r"dinner|dessert|cake|coffee|drink|animal|cat|dog|tabletop|object|"
+                    r"gift|bouquet|vase|card|birthday card|screen)\b",
+                    pure_scene_context,
+                    flags=re.I,
+                )
+            )
+            and not explicit_person_scene
+        )
+
+        def scene_subject_flags(text: Any) -> tuple[bool, bool]:
+            """Classify explicit person and pure-scene cues in scene text."""
+            value = _single_line(text, 900)
+            has_person = bool(
+                re.search(
+                    r"自拍|合影|合照|人像|人物|角色|穿搭|女孩|男孩|女生|男生|女人|男人|"
+                    r"少女|少年|路人|猫女|拟人|"
+                    r"\b(?:selfie|portrait|character|person|people|woman|man|girl|boy|outfit|human)\b",
+                    value,
+                    flags=re.I,
+                )
+            )
+            has_scene = bool(
+                re.search(
+                    r"风景|景色|风光|日落|晚霞|天空|海边风景|海边景色|"
+                    r"食物|美食|早餐|午餐|晚餐|甜点|蛋糕|咖啡|饮料|"
+                    r"动物|猫|狗|小猫|小狗|桌面(?:物品)?|物品|礼物|花束|花瓶|"
+                    r"卡片|生日卡|手机屏幕|屏幕|"
+                    r"\b(?:scenery|landscape|sunset|sky|seascape|food|breakfast|lunch|"
+                    r"dinner|dessert|cake|coffee|drink|soup|ramen|noodles|meal|bread|"
+                    r"toast|sandwich|rice|fruit|animal|cat|dog|tabletop|object|"
+                    r"gift|bouquet|vase|card|birthday card|screen)\b",
+                    value,
+                    flags=re.I,
+                )
+            )
+            return has_person, has_scene
         delayed_scene = bool(self._deferred_immediate_share_tense_hint(user, "photo_text"))
         if delayed_scene:
             schedule_context = "本次画面对应较早的生活片段；日程只用于保持人物与场景连续，不可作为发送当下的事实依据。"
@@ -12153,14 +12333,24 @@ Output:
 10. 服装语义优先级为：本次明确服装需求优先；具体场景服装参考用于落实该需求；今日穿搭仅在没有新服装意图时作为连续性补充。不要同时写入彼此冲突的两套服装。
 11. 只有当前请求明确要求关系角色出现/合影，且选中了对应的角色参考图时，才可让该角色按参考图自然入镜；否则禁止凭文字补画另一人的脸、身体、背影、剪影、倒影或肖像。未明确要求时，关系卡只影响情境，并用非人物生活线索间接表达关系。
 """.strip()
-        text = await self._llm_call(
-            prompt,
-            max_tokens=260,
-            provider_id=self._task_provider(self.photo_prompt_provider_id, self.mai_style_provider_id),
-            task="photo_prompt",
-        )
+        text = ""
+        try:
+            text = await self._llm_call(
+                prompt,
+                max_tokens=260,
+                provider_id=self._task_provider(self.photo_prompt_provider_id, self.mai_style_provider_id),
+                task="photo_prompt",
+            )
+        except Exception as exc:
+            logger.debug(
+                "[PrivateCompanion] proactive photo prompt model failed; using deterministic fallback: %s",
+                _single_line(exc, 160),
+            )
         payload = self._extract_json_payload(text or "")
-        if isinstance(payload, dict):
+        model_scene_valid = isinstance(payload, dict) and bool(
+            _single_line(payload.get("prompt"), 600)
+        )
+        if model_scene_valid:
             kind = _single_line(payload.get("kind"), 20).lower()
             image_prompt = _single_line(payload.get("prompt"), 600)
             caption = _single_line(payload.get("caption"), 180)
@@ -12172,14 +12362,27 @@ Output:
             elif str(raw_use_reference or "").strip().lower() in {"false", "0", "no", "否", "不使用"}:
                 use_persona_reference = False
             else:
-                use_persona_reference = False
+                use_persona_reference = not explicit_pure_scene
         else:
             kind = "text2img"
-            image_prompt = _single_line(text, 600)
-            caption = image_prompt
+            image_prompt = ""
+            caption = ""
             # When the scene model is unavailable, prefer a stable character photo
             # for ordinary proactive sharing instead of allowing an arbitrary face.
-            use_persona_reference = reason != "birthday_celebration"
+            use_persona_reference = not explicit_pure_scene
+        model_person_scene, model_pure_scene = scene_subject_flags(
+            f"{image_prompt} {caption}"
+        )
+        if model_pure_scene and not model_person_scene:
+            explicit_pure_scene = True
+            raw_model_reference = payload.get("use_persona_reference") if isinstance(payload, dict) else None
+            explicit_model_reference = (
+                isinstance(raw_model_reference, bool)
+                or str(raw_model_reference or "").strip().lower()
+                in {"true", "1", "yes", "是", "使用", "false", "0", "no", "否", "不使用"}
+            )
+            if not explicit_model_reference:
+                use_persona_reference = False
         if kind not in {"selfie", "portrait", "自拍", "人像", "text2img", "scene", "photo", "风景"}:
             kind = "text2img"
         if kind in {"portrait", "自拍", "人像"}:
@@ -12189,21 +12392,22 @@ Output:
         if kind == "selfie":
             use_persona_reference = True
         elif isinstance(payload, dict) and payload.get("use_persona_reference") is None:
-            character_text = f"{image_prompt} {caption}"
-            use_persona_reference = bool(
-                re.search(
-                    r"\b(?:girl|woman|female|character|portrait|solo|face|hairstyle|outfit)\b",
-                    character_text,
-                    flags=re.I,
-                )
-                or any(token in character_text for token in ("人物", "角色", "女孩", "少女", "自拍", "人像", "穿搭"))
-            )
+            use_persona_reference = not explicit_pure_scene
         if not image_prompt:
-            current = schedule_context
-            image_prompt = (
-                f"社交媒体随手拍,当前背景：{current},温柔自然的生活感,"
-                f"清晰构图,柔和光线,{style_instruction}"
-            )
+            if topic_hint:
+                image_prompt = (
+                    f"Visual note: {topic_hint}; concrete visual subject kept faithful to this topic, "
+                    f"natural everyday snapshot shared with a close friend, "
+                    f"the moment is motivated by {motive_hint or 'a small moment worth sharing'}, "
+                    f"{style_prompt_en}, clear composition, soft natural light"
+                )
+            else:
+                image_prompt = (
+                    f"Casual everyday snapshot with a concrete subject from the current context: "
+                    f"{schedule_context or 'an ordinary daily moment'}, "
+                    f"{motive_hint or 'a small moment worth sharing'}, "
+                    f"{style_prompt_en}, clear composition, soft natural light"
+                )
         if kind == "selfie":
             mirror_context = "；".join(
                 part
@@ -12221,7 +12425,12 @@ Output:
                 limit=900,
             )
         if not caption:
-            caption = "今天看到一个很适合拍下来分享的小画面。"
+            if topic_hint:
+                caption = f"我把{topic_hint}这个小画面拍下来分享给你。"
+            elif motive_hint:
+                caption = f"刚好想把这个片刻拍下来给你看看：{motive_hint}。"
+            else:
+                caption = "今天看到一个很适合拍下来分享的小画面。"
         if use_persona_reference:
             subject_owner = "bot"
         else:
@@ -12231,6 +12440,12 @@ Output:
                 if re.search(r"\b(?:person|people|man|woman|boy|girl|character|human)\b", character_text, flags=re.I)
                 or any(token in character_text for token in ("人物", "男人", "女人", "男生", "女生", "男孩", "女孩", "路人"))
                 else "scene"
+            )
+        if not use_persona_reference and subject_owner == "scene":
+            image_prompt = _single_line(
+                f"{image_prompt}; do not insert an unrequested person, character, visible photographer, "
+                "back-view figure, face, body, silhouette, or reflection",
+                900,
             )
         return {
             "kind": kind,
@@ -12618,6 +12833,53 @@ Output:
             if outfit_path:
                 return outfit_path
         return self._photo_persona_reference_image_path()
+
+    async def _photo_persona_reference_image_for_kind_async(
+        self,
+        workflow_kind: str,
+        *,
+        allow_daily_outfit: bool = True,
+        requester_user_id: str = "",
+        request_text: str = "",
+        ambient_context: str = "",
+        selection_context: str = "",
+        suggested_scene_preset: str = "",
+        continuity_key: str = "",
+    ) -> str:
+        if not bool(getattr(self, "enable_photo_reference_image", False)):
+            return ""
+        if str(workflow_kind or "").strip().lower() not in {
+            "selfie",
+            "portrait",
+            "自拍",
+            "人像",
+        }:
+            return ""
+        selector = getattr(self, "_select_photo_reference_candidate_async", None)
+        if not callable(selector):
+            return ""
+        try:
+            selected = await selector(
+                workflow_kind,
+                allow_daily_outfit=allow_daily_outfit,
+                requester_user_id=requester_user_id,
+                request_text=request_text,
+                ambient_context=ambient_context,
+                selection_context=selection_context,
+                suggested_scene_preset=suggested_scene_preset,
+                continuity_key=continuity_key,
+            )
+        except TypeError:
+            selected = await selector(
+                workflow_kind,
+                allow_daily_outfit=allow_daily_outfit,
+                request_text=request_text,
+                ambient_context=ambient_context,
+                selection_context=selection_context,
+            )
+        if isinstance(selected, SelectionResult):
+            selected = selected.selected
+        return _path_text(selected.get("path") if isinstance(selected, dict) else "", 1000)
 
     async def _photo_persona_reference_image_path_async(self) -> str:
         if not bool(getattr(self, "enable_photo_reference_image", False)):

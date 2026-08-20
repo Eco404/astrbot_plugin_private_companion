@@ -76,9 +76,9 @@ class _PhotoActionHarness(ProactiveMessageMixin):
     async def _build_photo_scene_prompt(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {
             "kind": "text2img",
-            "prompt": "single character by a sunlit window",
-            "caption": "我站在窗边晒太阳。",
-            "subject_owner": "bot",
+            "prompt": "a cup on a desk beside a sunlit window",
+            "caption": "窗边桌上的一杯饮料。",
+            "subject_owner": "scene",
             "use_persona_reference": False,
         }
 

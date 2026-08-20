@@ -5,6 +5,7 @@ import asyncio
 import os
 import tempfile
 import time
+from pathlib import Path
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -18,11 +19,12 @@ from astrbot_plugin_private_companion.proactive_message import ProactiveMessageM
 
 
 class _PhotoActionHarness(ProactiveMessageMixin):
-    def __init__(self) -> None:
+    def __init__(self, reference_path: str = "C:/reference/persona.png") -> None:
         self.enable_photo_text_action = True
         self._data_lock = asyncio.Lock()
         self.reference_received = ""
         self.prompt_format_received = ""
+        self.reference_path = reference_path
 
     def _private_user_role(self, _user) -> str:
         return "owner"
@@ -42,8 +44,10 @@ class _PhotoActionHarness(ProactiveMessageMixin):
             "prompt_format": "nai",
         }
 
-    async def _photo_persona_reference_image_for_kind_async(self, *_args, **_kwargs) -> str:
-        return "C:/reference/persona.png"
+    async def _photo_persona_reference_image_for_kind_async(
+        self, *_args, **_kwargs
+    ) -> str:
+        return self.reference_path
 
     async def _generate_photo_image(self, **kwargs):
         self.reference_received = kwargs.get("reference_image_path", "")
@@ -328,13 +332,16 @@ class PhotoFollowupFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(harness._private_image_framework_context(), native_context)
 
     async def test_character_text2img_receives_persona_reference(self) -> None:
-        harness = _PhotoActionHarness()
-        result = await harness._run_photo_text_action(
-            {"user_id": "10001", "umo": "default:FriendMessage:10001"},
-            "主人",
-            "quiet_care",
-        )
-        self.assertEqual(harness.reference_received, "C:/reference/persona.png")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reference = Path(temp_dir) / "persona.png"
+            reference.write_bytes(b"png")
+            harness = _PhotoActionHarness(str(reference))
+            result = await harness._run_photo_text_action(
+                {"user_id": "10001", "umo": "default:FriendMessage:10001"},
+                "主人",
+                "quiet_care",
+            )
+        self.assertEqual(harness.reference_received, str(reference.resolve()))
         self.assertEqual(harness.prompt_format_received, "nai")
         self.assertIn("人物参考图：已使用", result)
         self.assertIn("图片主体归属：bot", result)
