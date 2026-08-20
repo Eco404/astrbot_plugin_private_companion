@@ -249,3 +249,33 @@ def test_module_scan_ignores_unstringifiable_plugin_name() -> None:
             sys.modules.pop(module_name, None)
         else:
             sys.modules[module_name] = previous
+
+
+def test_module_scan_does_not_trigger_unrelated_lazy_imports() -> None:
+    module_name = "transformers.lazy_torch_probe"
+
+    class LazyModule(types.ModuleType):
+        def __init__(self, name: str) -> None:
+            super().__init__(name)
+            self.dynamic_lookups: list[str] = []
+
+        def __getattr__(self, name: str):
+            self.dynamic_lookups.append(name)
+            raise ModuleNotFoundError("No module named 'torch'", name="torch")
+
+    module = LazyModule(module_name)
+    previous = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        candidates = _module_candidates(
+            ("astrbot_plugin_missing_bridge.main",),
+            getter_name="get_missing_api",
+            star_name="astrbot_plugin_missing_bridge",
+        )
+        assert module not in candidates
+        assert module.dynamic_lookups == []
+    finally:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous

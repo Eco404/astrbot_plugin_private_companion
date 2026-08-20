@@ -10,6 +10,7 @@ from typing import Any
 _POSITIVE_TTL = 15.0
 # 未安装外部插件时负向结果可缓存更久，避免频繁全量扫描 sys.modules。
 _NEGATIVE_TTL = 10.0
+_MISSING = object()
 
 
 def _lifecycle_active(api: Any) -> bool:
@@ -59,6 +60,20 @@ def _safe_identity_text(value: Any) -> str:
         return ""
 
 
+def _static_module_field(module: Any, name: str, default: Any = None) -> Any:
+    """Read an already-registered module field without invoking lazy imports."""
+    if module is None:
+        return default
+    try:
+        namespace = object.__getattribute__(module, "__dict__")
+    except Exception:
+        return default
+    if not isinstance(namespace, dict):
+        return default
+    value = namespace.get(name, _MISSING)
+    return default if value is _MISSING else value
+
+
 def _identity_segments(value: Any) -> set[str]:
     text = _safe_identity_text(value).strip().casefold().replace("\\", "/")
     if not text:
@@ -76,8 +91,8 @@ def _metadata_matches_star(metadata: Any, star_name: str) -> bool:
         getattr(metadata, "name", ""),
         getattr(metadata, "root_dir_name", ""),
         getattr(metadata, "module_path", ""),
-        getattr(getattr(metadata, "module", None), "__name__", ""),
-        getattr(getattr(metadata, "module", None), "PLUGIN_NAME", ""),
+        _static_module_field(getattr(metadata, "module", None), "__name__", ""),
+        _static_module_field(getattr(metadata, "module", None), "PLUGIN_NAME", ""),
         getattr(getattr(metadata, "star_cls", None), "plugin_id", ""),
         getattr(type(getattr(metadata, "star_cls", None)), "__module__", ""),
     )
@@ -85,7 +100,7 @@ def _metadata_matches_star(metadata: Any, star_name: str) -> bool:
 
 
 def _api_from_module(module: Any, getter_name: str) -> Any | None:
-    getter = getattr(module, getter_name, None) if module is not None else None
+    getter = _static_module_field(module, getter_name)
     try:
         return getter() if callable(getter) else None
     except Exception:
@@ -109,12 +124,12 @@ def _module_candidates(
     for name, module in list(sys.modules.items()):
         if module is None or id(module) in seen:
             continue
-        module_identity = getattr(module, "PLUGIN_NAME", "")
+        module_identity = _static_module_field(module, "PLUGIN_NAME", "")
         if (
             any(name.endswith(suffix) for suffix in suffixes)
             or _safe_identity_text(star_name).casefold().replace("-", "_")
             in _identity_segments(module_identity)
-            or callable(getattr(module, getter_name, None))
+            or callable(_static_module_field(module, getter_name))
         ):
             candidates.append(module)
             seen.add(id(module))
