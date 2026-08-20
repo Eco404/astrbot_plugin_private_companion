@@ -11167,6 +11167,18 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             raw = self._cfg_raw(config, config_key, None)
             return fallback if raw is None else str(raw or "").strip()
 
+        # These routes are independent of quick/precision text assignment and
+        # must be refreshed in either mode when the page saves a new value.
+        for attr, config_key in (
+            ("embedding_provider_id", "EMBEDDING_PROVIDER_ID"),
+            ("adult_content_provider_id", "ADULT_CONTENT_PROVIDER_ID"),
+            ("group_member_safety_provider_id", "GROUP_MEMBER_SAFETY_PROVIDER_ID"),
+            ("reaction_expression_embedding_provider_id", "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"),
+            ("deepseek_peak_replacement_provider_id", "DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID"),
+            ("sensitive_replacement_provider_id", "SENSITIVE_REPLACEMENT_PROVIDER_ID"),
+        ):
+            setattr(self, attr, self._cfg_str(config, config_key, ""))
+
         attr_config_keys = {
             "llm_provider_id": "LLM_PROVIDER_ID",
             "mai_style_provider_id": "MAI_STYLE_PROVIDER_ID",
@@ -11201,6 +11213,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "dream_provider_id": "DREAM_DIARY_PROVIDER_ID",
             "diary_provider_id": "DREAM_DIARY_PROVIDER_ID",
             "photo_prompt_provider_id": "PHOTO_PROMPT_PROVIDER_ID",
+            "embedding_provider_id": "EMBEDDING_PROVIDER_ID",
+            "adult_content_provider_id": "ADULT_CONTENT_PROVIDER_ID",
+            "group_member_safety_provider_id": "GROUP_MEMBER_SAFETY_PROVIDER_ID",
+            "reaction_expression_embedding_provider_id": "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID",
+            "deepseek_peak_replacement_provider_id": "DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID",
+            "sensitive_replacement_provider_id": "SENSITIVE_REPLACEMENT_PROVIDER_ID",
             "private_reading_vision_provider_id": "PRIVATE_READING_VISION_PROVIDER_ID",
         }
 

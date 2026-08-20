@@ -679,6 +679,52 @@ process.stdout.write(JSON.stringify({{ precision, quick }}));
         plugin._apply_quick_provider_defaults()
         self.assertEqual(plugin.plugin_vision_provider_id, "")
 
+    def test_grouped_provider_clear_does_not_fall_back_to_stale_legacy_value(self) -> None:
+        plugin = SimpleNamespace(
+            config={
+                "model_assignment_config": {"LLM_PROVIDER_ID": ""},
+                "LLM_PROVIDER_ID": "stale-legacy-provider",
+            }
+        )
+        api = PrivateCompanionPageApi(plugin)
+
+        self.assertEqual(api._config_get("LLM_PROVIDER_ID"), "")
+
+        api._schema_provider_keys = lambda public_only=True: set()
+        plugin.llm_provider_id = "stale-runtime-provider"
+        self.assertEqual(api._provider_settings()["LLM_PROVIDER_ID"], "")
+
+    def test_precision_hot_refresh_updates_specialized_provider_assignments(self) -> None:
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        plugin.config = {
+            "model_assignment_config": {
+                "ADULT_CONTENT_PROVIDER_ID": "adult-new",
+                "GROUP_MEMBER_SAFETY_PROVIDER_ID": "safety-new",
+                "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID": "embedding-new",
+                "DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID": "peak-new",
+                "SENSITIVE_REPLACEMENT_PROVIDER_ID": "sensitive-new",
+            }
+        }
+        plugin.provider_config_mode = "precision"
+        plugin.fast_response_provider_id = "fast"
+        plugin.complex_reasoning_provider_id = "complex"
+        plugin.creative_model_provider_id = "creative"
+        plugin.plugin_vision_provider_id = "vision"
+        plugin.private_reading_vision_provider_id = "reading"
+        plugin.adult_content_provider_id = "adult-old"
+        plugin.group_member_safety_provider_id = "safety-old"
+        plugin.reaction_expression_embedding_provider_id = "embedding-old"
+        plugin.deepseek_peak_replacement_provider_id = "peak-old"
+        plugin.sensitive_replacement_provider_id = "sensitive-old"
+
+        plugin._apply_quick_provider_defaults()
+
+        self.assertEqual(plugin.adult_content_provider_id, "adult-new")
+        self.assertEqual(plugin.group_member_safety_provider_id, "safety-new")
+        self.assertEqual(plugin.reaction_expression_embedding_provider_id, "embedding-new")
+        self.assertEqual(plugin.deepseek_peak_replacement_provider_id, "peak-new")
+        self.assertEqual(plugin.sensitive_replacement_provider_id, "sensitive-new")
+
     def test_model_page_invalidates_closed_setup_guide_provider_draft(self) -> None:
         root = Path(__file__).resolve().parents[1]
         primary = (root / "pages" / "companion-panel" / "app.js").read_text(encoding="utf-8")

@@ -64,7 +64,7 @@ from .constants import (
 )
 from .config_migration import _ensure_config_parent_dir
 from .diagnostic_envelope import DIAGNOSTIC_ENVELOPE_VERSION, diagnostic_test_id, normalize_diagnostic_result
-from .helpers import _flat_get, _normalize_timezone_name, _normalize_timezone_setting, _path_text, _redact_outbound_secrets, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key, normalize_bot_relationship_cards
+from .helpers import _MISSING, _flat_get, _normalize_timezone_name, _normalize_timezone_setting, _path_text, _redact_outbound_secrets, _safe_int, _set_into_config, _set_today_key_timezone, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key, normalize_bot_relationship_cards
 from .reference_asset_gate import ReferenceAssetGate
 from .owned_reaction_asset_catalog import MAX_ASSET_BYTES, OwnedReactionAssetCatalog
 from .companion_interaction_expression import current_interaction_projection, normalize_normal_interaction_band_cap
@@ -18709,32 +18709,29 @@ class PrivateCompanionPageApi(
             if key not in keys:
                 keys.append(key)
         values = {key: self._config_get(key) for key in keys}
-        if not values.get("FAST_RESPONSE_PROVIDER_ID"):
-            values["FAST_RESPONSE_PROVIDER_ID"] = str(getattr(self.plugin, "fast_response_provider_id", "") or "")
-        if not values.get("COMPLEX_REASONING_PROVIDER_ID"):
-            values["COMPLEX_REASONING_PROVIDER_ID"] = str(getattr(self.plugin, "complex_reasoning_provider_id", "") or "")
-        if not values.get("CREATIVE_MODEL_PROVIDER_ID"):
-            values["CREATIVE_MODEL_PROVIDER_ID"] = str(getattr(self.plugin, "creative_model_provider_id", "") or "")
-        if not values.get("PLUGIN_VISION_PROVIDER_ID"):
-            values["PLUGIN_VISION_PROVIDER_ID"] = str(getattr(self.plugin, "plugin_vision_provider_id", "") or "")
-        if not values.get("EMBEDDING_PROVIDER_ID"):
-            values["EMBEDDING_PROVIDER_ID"] = str(getattr(self.plugin, "embedding_provider_id", "") or "")
-        if not values.get("PRIVATE_READING_VISION_PROVIDER_ID"):
-            values["PRIVATE_READING_VISION_PROVIDER_ID"] = str(
-                getattr(self.plugin, "private_reading_vision_provider_id", "") or ""
-            )
-        if not values.get("DREAM_DIARY_PROVIDER_ID"):
-            values["DREAM_DIARY_PROVIDER_ID"] = str(getattr(self.plugin, "dream_diary_provider_id", "") or "")
-        if not values.get("SMART_MESSAGE_DEBOUNCE_PROVIDER_ID"):
-            values["SMART_MESSAGE_DEBOUNCE_PROVIDER_ID"] = str(getattr(self.plugin, "smart_message_debounce_provider_id", "") or "")
-        if not values.get("SMART_SILENCE_PROVIDER_ID"):
-            values["SMART_SILENCE_PROVIDER_ID"] = str(getattr(self.plugin, "smart_silence_provider_id", "") or "")
-        if not values.get("REST_WAKEUP_PROVIDER_ID"):
-            values["REST_WAKEUP_PROVIDER_ID"] = str(getattr(self.plugin, "rest_wakeup_provider_id", "") or "")
-        if not values.get("PROACTIVE_PERSONA_JUDGE_PROVIDER_ID"):
-            values["PROACTIVE_PERSONA_JUDGE_PROVIDER_ID"] = str(getattr(self.plugin, "proactive_persona_judge_provider_id", "") or "")
-        if not values.get("tts_conversion_provider_id"):
-            values["tts_conversion_provider_id"] = str(getattr(self.plugin, "tts_conversion_provider_id", "") or "")
+
+        def runtime_fallback(config_key: str, attr_name: str) -> None:
+            # Runtime values are only a compatibility fallback for configs
+            # that predate the grouped Provider key.  They must not override
+            # an explicit empty value saved by the user.
+            if self._config_get_raw(config_key, _MISSING) is _MISSING:
+                values[config_key] = str(getattr(self.plugin, attr_name, "") or "")
+
+        for config_key, attr_name in (
+            ("FAST_RESPONSE_PROVIDER_ID", "fast_response_provider_id"),
+            ("COMPLEX_REASONING_PROVIDER_ID", "complex_reasoning_provider_id"),
+            ("CREATIVE_MODEL_PROVIDER_ID", "creative_model_provider_id"),
+            ("PLUGIN_VISION_PROVIDER_ID", "plugin_vision_provider_id"),
+            ("EMBEDDING_PROVIDER_ID", "embedding_provider_id"),
+            ("PRIVATE_READING_VISION_PROVIDER_ID", "private_reading_vision_provider_id"),
+            ("DREAM_DIARY_PROVIDER_ID", "dream_diary_provider_id"),
+            ("SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "smart_message_debounce_provider_id"),
+            ("SMART_SILENCE_PROVIDER_ID", "smart_silence_provider_id"),
+            ("REST_WAKEUP_PROVIDER_ID", "rest_wakeup_provider_id"),
+            ("PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_provider_id"),
+            ("tts_conversion_provider_id", "tts_conversion_provider_id"),
+        ):
+            runtime_fallback(config_key, attr_name)
         return values
 
     def _deepseek_peak_routing_summary(self) -> dict[str, Any]:
@@ -23466,19 +23463,22 @@ class PrivateCompanionPageApi(
         return _Overlay()
 
     def _config_get_raw(self, key: str, default: Any = None) -> Any:
+        # An explicitly cleared value is still a value.  Treating ``""`` as
+        # missing makes an old flat compatibility key (or a stale runtime
+        # attribute) reappear after the user clears a grouped Provider field.
         config = getattr(self.plugin, "config", None)
-        value = _flat_get(config, key, None)
-        if value not in (None, ""):
+        value = _flat_get(config, key, _MISSING)
+        if value is not _MISSING and value is not None:
             return value
         data = getattr(config, "data", None)
         if isinstance(data, dict):
-            value = _flat_get(data, key, None)
-            if value not in (None, ""):
+            value = _flat_get(data, key, _MISSING)
+            if value is not _MISSING and value is not None:
                 return value
         raw = getattr(config, "config", None)
         if isinstance(raw, dict):
-            value = _flat_get(raw, key, None)
-            if value not in (None, ""):
+            value = _flat_get(raw, key, _MISSING)
+            if value is not _MISSING and value is not None:
                 return value
         try:
             return getattr(config, key, default)
