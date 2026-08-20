@@ -5411,6 +5411,7 @@ function bindRelationshipCardEditor(root = document) {
     const action = button.dataset.relationshipCardAction;
     if (button.dataset.relationshipRoleReferenceUpload !== undefined || button.dataset.relationshipRoleReferenceDelete !== undefined) {
       event.preventDefault();
+      event.stopPropagation();
       void handleRelationshipRoleReferenceAction(button);
       return;
     }
@@ -15326,7 +15327,7 @@ async function renderUserDetail(forceFetch = false) {
       ${emotionGateBlock(detail)}
       ${renderEmotionDiagnostics(detail)}
       ${renderUserP4RuntimeStatus(detail.p4_runtime)}
-      <div class="toolbar user-danger-actions"><button data-user-action="clear_emotion_state">重置情绪状态</button><button data-user-action="delete" class="danger">删除私聊用户</button></div>
+      <div class="toolbar user-danger-actions"><button type="button" data-user-action="clear_emotion_state">重置情绪状态</button><button type="button" data-user-action="delete" class="danger">删除私聊用户</button></div>
     </section>
   `;
   document.querySelectorAll("[data-user-detail-view]").forEach((button) => button.addEventListener("click", () => {
@@ -17427,7 +17428,11 @@ function bindUserActions(detail) {
     await copyTextToClipboard(event.currentTarget.dataset.copyCurrentUser || "", "已复制用户 ID");
   });
   document.querySelectorAll("[data-user-action]").forEach((button) => {
-    button.addEventListener("click", async () => {
+    button.addEventListener("click", async (event) => {
+      if (button.dataset.userAction === "delete") {
+        event.preventDefault();
+        event.stopPropagation();
+      }
       const action = button.dataset.userAction;
       const body = { user_id: detail.user_id };
       if (action === "toggle_proactive") body.proactive_private_enabled = !Boolean(detail.proactive_private_enabled);
@@ -17645,11 +17650,11 @@ async function renderGroupDetail(forceFetch = false) {
         </div>
       </div>
       <div class="group-detail-actions">
-        <button data-group-action="toggle">${escapeHtml(detail.enabled ? "停用" : "启用")}</button>
-        <button data-group-action="reset_interjection">重置插话</button>
-        <button data-group-action="reset_atmosphere">重置气氛</button>
-        <button data-group-action="clear_observation" class="danger">清空观测</button>
-        <button data-group-action="delete" class="danger">删除群聊</button>
+        <button type="button" data-group-action="toggle">${escapeHtml(detail.enabled ? "停用" : "启用")}</button>
+        <button type="button" data-group-action="reset_interjection">重置插话</button>
+        <button type="button" data-group-action="reset_atmosphere">重置气氛</button>
+        <button type="button" data-group-action="clear_observation" class="danger">清空观测</button>
+        <button type="button" data-group-action="delete" class="danger">删除群聊</button>
       </div>
     </div>
     <div class="visual-strip group-visual-strip">
@@ -18250,7 +18255,11 @@ function bindGroupActions(detail) {
     await renderGroupMemberSafetyPage(true);
   });
   document.querySelectorAll("[data-group-action]").forEach((button) => {
-    button.addEventListener("click", async () => {
+    button.addEventListener("click", async (event) => {
+      if (button.dataset.groupAction === "delete") {
+        event.preventDefault();
+        event.stopPropagation();
+      }
       const action = button.dataset.groupAction;
       const body = { group_id: detail.group_id };
       if (action === "toggle") body.enabled = !detail.enabled;
@@ -18297,7 +18306,9 @@ function bindGroupActions(detail) {
     });
   });
   document.querySelectorAll("[data-slang-delete]").forEach((button) => {
-    button.addEventListener("click", async () => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
       const row = button.closest("[data-slang-term]");
       const term = row?.dataset?.slangTerm || "";
       if (!term) return;
@@ -18855,27 +18866,7 @@ async function handleWorldbookMemberAction(button) {
       showToast("没有找到要删除的关系节点 ID", "error");
       return;
     }
-    const now = Date.now();
-    const armed = button.dataset.deleteArmed === userId && now - Number(button.dataset.deleteArmedAt || 0) < 6000;
-    if (!armed) {
-      button.dataset.deleteArmed = userId;
-      button.dataset.deleteArmedAt = String(now);
-      button.dataset.originalText = button.textContent || "删除";
-      button.textContent = "再次点击删除";
-      showToast(`再次点击删除关系节点 ${userId}`);
-      window.clearTimeout(button._deleteArmedTimer);
-      button._deleteArmedTimer = window.setTimeout(() => {
-        if (button.dataset.deleteArmed === userId) {
-          delete button.dataset.deleteArmed;
-          delete button.dataset.deleteArmedAt;
-          button.textContent = button.dataset.originalText || "删除";
-          delete button.dataset.originalText;
-        }
-      }, 6000);
-      return;
-    }
-    delete button.dataset.deleteArmed;
-    delete button.dataset.deleteArmedAt;
+    if (!requireSecondClick(button, `worldbook-delete:${userId}`, `再次点击删除关系节点 ${userId}`, "再次点击删除")) return;
     await runAction(() => postJson("/worldbook/member/update", { user_id: userId, delete: true }), "已删除关系节点", button);
   }
 }
@@ -18905,27 +18896,7 @@ async function handleWorldbookGroupAction(button) {
   if (button.dataset.worldbookGroupDelete !== undefined) {
     const groupId = button.dataset.worldbookGroupDelete;
     if (!groupId) return;
-    const now = Date.now();
-    const armed = button.dataset.deleteArmed === groupId && now - Number(button.dataset.deleteArmedAt || 0) < 6000;
-    if (!armed) {
-      button.dataset.deleteArmed = groupId;
-      button.dataset.deleteArmedAt = String(now);
-      button.dataset.originalText = button.textContent || "删除";
-      button.textContent = "再次点击删除";
-      showToast(`再次点击删除群资料 ${groupId}`);
-      window.clearTimeout(button._deleteArmedTimer);
-      button._deleteArmedTimer = window.setTimeout(() => {
-        if (button.dataset.deleteArmed === groupId) {
-          delete button.dataset.deleteArmed;
-          delete button.dataset.deleteArmedAt;
-          button.textContent = button.dataset.originalText || "删除";
-          delete button.dataset.originalText;
-        }
-      }, 6000);
-      return;
-    }
-    delete button.dataset.deleteArmed;
-    delete button.dataset.deleteArmedAt;
+    if (!requireSecondClick(button, `worldbook-group-delete:${groupId}`, `再次点击删除群资料 ${groupId}`, "再次点击删除")) return;
     await runAction(() => postJson("/worldbook/group/update", { group_id: groupId, delete: true }), "已删除群资料", button);
   }
 }
@@ -19250,7 +19221,9 @@ function bindFoodMenuActions() {
     });
   });
   document.querySelectorAll("[data-food-delete]").forEach((button) => {
-    button.addEventListener("click", async () => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
       const id = button.dataset.foodDelete || "";
       if (!requireSecondClick(button, `food:${id}`, "再次点击删除候选", "再次点击删除")) return;
       await runAction(() => postJson("/food_menu/update", { id, delete: true }), "已删除候选", button);
@@ -19456,7 +19429,9 @@ function bindPersonalGoalActions() {
     const id = button.dataset.goalSave || "";
     await runAction(() => postJson("/personal_goal/update", {id, title: goalField(id,"title")?.value || "", category: goalField(id,"category")?.value || "生活", status: goalField(id,"status")?.value || "active", progress: Number(goalField(id,"progress")?.value || 0), auto_step: Number(goalField(id,"auto_step")?.value || 10), next_step: goalField(id,"next_step")?.value || "", keywords: goalField(id,"keywords")?.value || "", note: goalField(id,"note")?.value || ""}), "已保存个人目标", button);
   }));
-  document.querySelectorAll("[data-goal-delete]").forEach((button) => button.addEventListener("click", async () => {
+  document.querySelectorAll("[data-goal-delete]").forEach((button) => button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     const id = button.dataset.goalDelete || "";
     if (!requireSecondClick(button, `goal:${id}`, "再次点击删除目标", "再次点击删除")) return;
     await runAction(() => postJson("/personal_goal/update", {id, delete: true}), "已删除个人目标", button);
@@ -19604,7 +19579,9 @@ function bindSkillGrowthActions() {
     });
   });
   document.querySelectorAll("[data-skill-delete]").forEach((button) => {
-    button.addEventListener("click", async () => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
       const id = button.dataset.skillDelete || "";
       if (!requireSecondClick(button, `skill:${id}`, "再次点击删除技能", "再次点击删除")) return;
       await runAction(() => postJson("/skill/update", { id, delete: true }), "已删除技能", button);
@@ -29955,7 +29932,9 @@ function bindPhotoReferenceManagerActions() {
     });
   });
   manager.querySelectorAll("[data-photo-reference-delete]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
       if (photoReferenceManagerBusy()) return;
       const index = Number(button.dataset.index);
       if (!photoReferenceManagerItems()[index]) return;
@@ -31239,10 +31218,12 @@ function setActionBusy(control, busy) {
   if (busy) {
     control.dataset.originalText = control.textContent || "";
     control.disabled = true;
+    control.setAttribute("aria-busy", "true");
     control.classList.add("is-busy");
     control.textContent = "处理中...";
   } else {
     control.disabled = keepManagerLocked;
+    control.removeAttribute("aria-busy");
     control.classList.remove("is-busy");
     if (control.dataset.originalText) {
       control.textContent = control.dataset.originalText;
@@ -31258,18 +31239,24 @@ function requireSecondClick(control, key, message, nextText = "再次点击确�
   if (armed) {
     delete control.dataset.confirmKey;
     delete control.dataset.confirmAt;
+    control.classList.remove("is-confirming");
+    control.removeAttribute("aria-pressed");
     return true;
   }
   control.dataset.confirmKey = key;
   control.dataset.confirmAt = String(now);
   control.dataset.originalText = control.dataset.originalText || control.textContent || "";
   control.textContent = nextText;
+  control.classList.add("is-confirming");
+  control.setAttribute("aria-pressed", "true");
   showToast(message);
   window.clearTimeout(control._confirmTimer);
   control._confirmTimer = window.setTimeout(() => {
     if (control.dataset.confirmKey === key) {
       delete control.dataset.confirmKey;
       delete control.dataset.confirmAt;
+      control.classList.remove("is-confirming");
+      control.removeAttribute("aria-pressed");
       control.textContent = control.dataset.originalText || "";
       delete control.dataset.originalText;
     }
@@ -31307,6 +31294,7 @@ async function runAction(action, successMessage = "", control = null, options = 
     return result;
   } catch (error) {
     showToast(`操作失败：${error.message}`, "error");
+    return null;
   } finally {
     setActionBusy(control, false);
   }
@@ -31868,17 +31856,21 @@ function bindReactionLibraryActions() {
     const result = await runAction(() => postJson("/reaction_library/analyze", { ids: [id], force: true }), "已加入自动识别", event.currentTarget, { reload: false });
     if (result) await loadReactionLibrary(true);
   });
-  root.querySelectorAll("[data-reaction-delete-one]").forEach((button) => button.addEventListener("click", async () => {
+  root.querySelectorAll("[data-reaction-delete-one]").forEach((button) => button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     const id = button.dataset.reactionDeleteOne || "";
     if (!requireSecondClick(button, `reaction-delete-${id}`, "再次点击确认删除这张素材")) return;
     const result = await runAction(() => postJson("/reaction_library/delete", { ids: [id], confirm: true }), "已删除素材", button, { reload: false });
     if (result) { state.reactionLibraryEditorId = ""; state.reactionLibraryImageData.clear(); await loadReactionLibrary(true); }
   }));
   root.querySelector("[data-reaction-clear-selection]")?.addEventListener("click", () => { state.reactionLibrarySelected.clear(); renderExperimentalPage(); });
-  root.querySelectorAll("[data-reaction-batch]").forEach((button) => button.addEventListener("click", async () => {
+  root.querySelectorAll("[data-reaction-batch]").forEach((button) => button.addEventListener("click", async (event) => {
     const ids = [...state.reactionLibrarySelected];
     const action = button.dataset.reactionBatch || "";
     if (action === "delete") {
+      event.preventDefault();
+      event.stopPropagation();
       if (!requireSecondClick(button, "reaction-batch-delete", `再次点击确认删除 ${ids.length} 张素材`)) return;
       const result = await runAction(() => postJson("/reaction_library/delete", { ids, confirm: true }), `已删除 ${ids.length} 张素材`, button, { reload: false });
       if (result) { state.reactionLibrarySelected.clear(); state.reactionLibraryEditorId = ""; state.reactionLibraryImageData.clear(); await loadReactionLibrary(true); }
@@ -36862,6 +36854,10 @@ document.addEventListener("click", async (event) => {
   }
   const memoActionButton = element?.closest("[data-memo-action]");
   if (memoActionButton) {
+    if (memoActionButton.dataset.memoAction === "delete") {
+      event.preventDefault();
+      event.stopPropagation();
+    }
     const noteId = memoActionButton.dataset.memoId || "";
     const note = currentMemoNotes().find((item) => String(item.id || "") === noteId);
     if (note) await updateMemoAction(memoActionButton.dataset.memoAction || "", note, memoActionButton);
@@ -37028,21 +37024,12 @@ document.addEventListener("click", async (event) => {
   }
   const imageCacheSelectControl = element?.closest("[data-image-cache-select-control]");
   if (imageCacheSelectControl) return;
-  const row = element?.closest("[data-image-cache-key]");
-  if (row) {
-    const key = row.dataset.imageCacheKey || "";
-    if (!key) return;
-    if (state.imageCacheBatchMode) {
-      if (state.selectedImageCacheKeys.has(key)) state.selectedImageCacheKeys.delete(key);
-      else state.selectedImageCacheKeys.add(key);
-    } else {
-      state.selectedImageCacheKey = key;
-    }
-    renderImageCache();
-    return;
-  }
+  // Delete controls may live inside a selectable cache row in future layouts.
+  // Resolve the destructive action before the row click branch so it cannot be swallowed.
   const deleteButton = element?.closest("[data-image-cache-delete]");
   if (deleteButton) {
+    event.preventDefault();
+    event.stopPropagation();
     const key = deleteButton.dataset.imageCacheDelete || "";
     if (!key) return;
     if (!requireSecondClick(deleteButton, `image-cache:${key}`, "再次点击会删除这条图片缓存")) return;
@@ -37059,6 +37046,20 @@ document.addEventListener("click", async (event) => {
     } finally {
       setActionBusy(deleteButton, false);
     }
+    return;
+  }
+  const row = element?.closest("[data-image-cache-key]");
+  if (row) {
+    const key = row.dataset.imageCacheKey || "";
+    if (!key) return;
+    if (state.imageCacheBatchMode) {
+      if (state.selectedImageCacheKeys.has(key)) state.selectedImageCacheKeys.delete(key);
+      else state.selectedImageCacheKeys.add(key);
+    } else {
+      state.selectedImageCacheKey = key;
+    }
+    renderImageCache();
+    return;
   }
 });
 
@@ -37732,12 +37733,14 @@ $("#worldbookMembers").addEventListener("click", async (event) => {
   const button = event.target instanceof Element ? event.target.closest("[data-worldbook-living-memory], [data-worldbook-living-memory-close], [data-worldbook-edit], [data-worldbook-member], [data-worldbook-save], [data-worldbook-reference-upload], [data-worldbook-reference-delete], [data-worldbook-memory-toggle], [data-worldbook-memory-delete], [data-worldbook-observation-accept], [data-worldbook-observation-reject], [data-worldbook-delete]") : null;
   if (!button) return;
   event.preventDefault();
+  event.stopPropagation();
   await handleWorldbookMemberAction(button);
 });
 $("#worldbookGroups").addEventListener("click", async (event) => {
   const button = event.target instanceof Element ? event.target.closest("[data-worldbook-group-save], [data-worldbook-group-delete]") : null;
   if (!button) return;
   event.preventDefault();
+  event.stopPropagation();
   await handleWorldbookGroupAction(button);
 });
 $("#roleplayKnowledgeSources")?.addEventListener("click", async (event) => {
@@ -37746,6 +37749,7 @@ $("#roleplayKnowledgeSources")?.addEventListener("click", async (event) => {
     : null;
   if (!button) return;
   event.preventDefault();
+  event.stopPropagation();
   await handleKnowledgeReferenceAction(button);
 });
 $("#worldbookImportBtn").addEventListener("click", async () => {
@@ -37868,7 +37872,8 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("click", async (event) => {
-  const addType = event.target?.dataset?.newsSourceAdd;
+  const clicked = event.target instanceof Element ? event.target : null;
+  const addType = clicked?.closest("[data-news-source-add]")?.dataset?.newsSourceAdd;
   if (addType) {
     const items = newsSourceItemsFromDom();
     items.push({
@@ -37881,11 +37886,11 @@ document.addEventListener("click", async (event) => {
     syncNewsSourcesRaw();
     return;
   }
-  if (event.target?.dataset?.newsSourceReset !== undefined) {
+  if (clicked?.closest("[data-news-source-reset]")) {
     resetNewsSourcesToDefault();
     return;
   }
-  const removeIndex = event.target?.dataset?.newsSourceRemove;
+  const removeIndex = clicked?.closest("[data-news-source-remove]")?.dataset?.newsSourceRemove;
   if (removeIndex !== undefined) {
     const index = Number(removeIndex);
     const items = newsSourceItemsFromDom().filter((_, itemIndex) => itemIndex !== index);
