@@ -132,6 +132,7 @@ const state = {
   personaStandardizationStyleScenarioFocusId: "",
   personaStandardizationStyleBatchLoading: false,
   personaStandardizationStyleBatchRequestedOffset: null,
+  personaStandardizationStyleBatchError: "",
   personaStandardizationQuestionnaire: null,
   roleplayPersonas: [],
   multiPersona: { enabled: false, primary: "", profiles: [], current: "", window_bindings: {} },
@@ -33735,6 +33736,7 @@ function personaStyleShouldPrefetchNextBatch() {
   const styleDraft = state.personaStandardizationStyleDraft || null;
   if (!styleDraft || state.personaStandardizationStyleStale || state.personaStandardizationBaseStale) return false;
   if (state.personaStandardizationStyleBatchLoading) return false;
+  if (state.personaStandardizationStyleBatchError) return false;
   const scenarios = styleDraft?.draft?.scenarios || [];
   if (!scenarios.length) return false;
   const progress = personaStyleScenarioProgress();
@@ -34050,6 +34052,7 @@ function renderPersonaStandardizationWorkbench() {
     const nextLoadedId = personaStyleNextUnansweredScenarioId(scenario.id);
     const hasMore = Boolean(styleResult?.has_more) || scenarioList.length < styleProgress.total;
     const loadingNext = Boolean(state.personaStandardizationStyleBatchLoading);
+    const batchError = String(state.personaStandardizationStyleBatchError || "");
     const previousLoadedId = personaStyleAdjacentScenarioId(scenario.id, -1);
     const nextLoadedSequentialId = personaStyleAdjacentScenarioId(scenario.id, 1);
     const nextButtonText = nextLoadedId
@@ -34057,7 +34060,7 @@ function renderPersonaStandardizationWorkbench() {
       : styleProgress.complete
         ? "全部完成，可以生成风格规则"
         : hasMore
-          ? (loadingNext ? "下一组三个情景生成中" : "完成，加载下一组三个情景")
+          ? (loadingNext ? "下一组三个情景生成中" : (batchError ? "完成，重试加载下一组三个情景" : "完成，加载下一组三个情景"))
           : "完成";
     const options = (scenario.options || []).map((option) => `
       <label class="persona-style-option ${selected === option.id ? "selected" : ""}">
@@ -34106,14 +34109,15 @@ function renderPersonaStandardizationWorkbench() {
             <button type="button" data-persona-style-next="${escapeHtml(scenario.id)}" ${!answered || styleStale || (loadingNext && !nextLoadedId) ? "disabled" : ""}>${escapeHtml(nextButtonText)}</button>
           </div>
         </footer>
+        ${batchError && hasMore && !loadingNext ? `<div class="setup-guide-hint warn">下一组情景加载失败：${escapeHtml(batchError)}。可以点击上面的完成按钮重试。</div>` : ""}
       </section>
     `;
   }).join("");
   const scenarioPanelHtml = scenarioRows || (scenarioCount ? `
     <div class="persona-standard-empty">
-      <b>${state.personaStandardizationStyleBatchLoading ? "下一组三个情景生成中" : "当前已加载情景已完成"}</b>
-      <span>${state.personaStandardizationStyleBatchLoading ? "等它回来后会自动显示下一个情景。" : "可以手动加载下一组三个情景；正常情况下完成第二个情景后会自动预取。"}</span>
-      ${!state.personaStandardizationStyleBatchLoading && !styleProgress.complete ? `<button type="button" data-persona-style-load-more>加载下一组三个情景</button>` : ""}
+      <b>${state.personaStandardizationStyleBatchLoading ? "下一组三个情景生成中" : (state.personaStandardizationStyleBatchError ? "下一组情景加载失败" : "当前已加载情景已完成")}</b>
+      <span>${state.personaStandardizationStyleBatchLoading ? "等它回来后会自动显示下一个情景。" : (state.personaStandardizationStyleBatchError ? `可以重试加载；${escapeHtml(state.personaStandardizationStyleBatchError)}` : "可以手动加载下一组三个情景；正常情况下完成第二个情景后会自动预取。")}</span>
+      ${!state.personaStandardizationStyleBatchLoading && !styleProgress.complete ? `<button type="button" data-persona-style-load-more>${state.personaStandardizationStyleBatchError ? "重试加载下一组三个情景" : "加载下一组三个情景"}</button>` : ""}
     </div>
   ` : `<div class="persona-standard-empty"><b>还没有情景候选</b><span>确认基础信息后，模型会先生成前三个聊天场景候选。</span></div>`);
   const styleSummaryHtml = scenarioCount ? `
@@ -34351,6 +34355,7 @@ async function generatePersonaStandardizationDraft(button) {
     state.personaStandardizationStyleScenarioFocusId = "";
     state.personaStandardizationStyleBatchLoading = false;
     state.personaStandardizationStyleBatchRequestedOffset = null;
+    state.personaStandardizationStyleBatchError = "";
     draft.base_confirmed = false;
     draft.style_choices = {};
     draft.style_custom = {};
@@ -34390,6 +34395,7 @@ async function generatePersonaStyleScenarios(button) {
     state.personaStandardizationVoiceDraft = null;
     state.personaStandardizationVoiceDraftStale = false;
     state.personaStandardizationStyleStale = false;
+    state.personaStandardizationStyleBatchError = "";
     const styleState = personaStandardizationDraftState();
     styleState.style_choices = {};
     styleState.style_custom = {};
@@ -34467,11 +34473,21 @@ async function loadMorePersonaStyleScenarios({ silent = false, button = null } =
   const offset = Number(styleDraft.next_offset || scenarios.length || 0);
   state.personaStandardizationStyleBatchLoading = true;
   state.personaStandardizationStyleBatchRequestedOffset = offset;
+  state.personaStandardizationStyleBatchError = "";
+  let requestError = null;
   try {
     const action = () => postJson("/roleplay/persona_style_scenarios", personaStyleScenarioRequestPayload(offset));
+    const request = async () => {
+      try {
+        return await promiseWithTimeout(action(), 50000, "请求超时，请稍后重试");
+      } catch (error) {
+        requestError = error;
+        throw error;
+      }
+    };
     const result = silent
-      ? await action()
-      : await runAction(action, "已加载下一组情景", button, { reload: false });
+      ? await request()
+      : await runAction(request, "已加载下一组情景", button, { reload: false });
     if (result) {
       applyPersonaStyleScenarioBatchResult(result, { append: true });
       state.personaStandardizationStyleSummaryDraft = null;
@@ -34480,15 +34496,20 @@ async function loadMorePersonaStyleScenarios({ silent = false, button = null } =
       state.personaStandardizationVoiceDraftStale = false;
       state.personaStandardizationStyleStale = false;
       if (!silent) renderExperimentalPage();
+    } else {
+      const message = String(requestError?.message || requestError || "").trim();
+      state.personaStandardizationStyleBatchError = message || "请求未完成，请点击重试";
     }
     return result || null;
   } catch (error) {
-    if (!silent) showToast(`加载下一组情景失败：${error.message}`, "error");
+    const message = String(error?.message || error || "请求失败").trim();
+    state.personaStandardizationStyleBatchError = message || "请求失败，请点击重试";
+    if (!silent) showToast(`加载下一组情景失败：${state.personaStandardizationStyleBatchError}`, "error");
     return null;
   } finally {
     state.personaStandardizationStyleBatchLoading = false;
     state.personaStandardizationStyleBatchRequestedOffset = null;
-    if (silent) renderExperimentalPage();
+    renderExperimentalPage();
   }
 }
 
@@ -36213,6 +36234,7 @@ function bindExperimentalSubpageActions(key) {
     state.personaStandardizationStyleScenarioFocusId = "";
     state.personaStandardizationStyleBatchLoading = false;
     state.personaStandardizationStyleBatchRequestedOffset = null;
+    state.personaStandardizationStyleBatchError = "";
     const draft = personaStandardizationDraftState();
     draft.base_confirmed = false;
     draft.style_choices = {};
