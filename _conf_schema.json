@@ -5860,8 +5860,9 @@
       "enable_context_image_captioning": {
         "description": "上下文图片摘要补全",
         "type": "bool",
-        "hint": "开启后，LLM 请求前会尝试把历史上下文里的 [图片]/【图片】占位替换为视觉摘要。优先复用图片视觉缓存；找不到原图源或识图超时时保留原占位，不编造内容。",
-        "default": true
+        "hint": "图片转述增强的可选子功能。开启后，LLM 请求前会尝试把历史上下文里的 [图片]/【图片】占位替换为视觉摘要。优先复用图片视觉缓存；找不到原图源或识图超时时保留原占位，不编造内容。关闭图片转述增强时不会运行。",
+        "default": true,
+        "condition": "enable_private_image_self_recognition"
       },
       "context_image_caption_max_items": {
         "description": "单轮上下文补全图片数",

@@ -40,6 +40,7 @@ from .segmented_message import (
 
 
 PREPARED_IMAGE_MAX_AGE_SECONDS = 30 * 60
+CONTEXT_IMAGE_FAILURE_COOLDOWN_SECONDS = 5 * 60
 
 
 class _PublicOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -2358,7 +2359,7 @@ class PrivateImageMixin:
             return ""
 
     def _private_image_self_recognition_prompt(self) -> str:
-        if not bool(getattr(self, "enable_private_image_self_recognition", True)):
+        if not self._private_image_enhancement_enabled():
             return ""
         context_prompt = self._private_image_self_recognition_context_prompt()
         if not context_prompt:
@@ -2369,7 +2370,7 @@ class PrivateImageMixin:
         )
 
     def _private_image_self_recognition_context_prompt(self) -> str:
-        if not bool(getattr(self, "enable_private_image_self_recognition", True)):
+        if not self._private_image_enhancement_enabled():
             return ""
         bot_name = _single_line(getattr(self, "bot_name", ""), 40)
         default_persona = self._private_image_default_persona_prompt()
@@ -2394,6 +2395,16 @@ class PrivateImageMixin:
             "视觉锚点过少、只能泛泛说可爱/少女/二次元时,标为“无法判断”；明显无关人物/物品时,标为“非当前角色”。\n"
             f"{context}\n"
         )
+
+    def _private_image_enhancement_enabled(self) -> bool:
+        """Return the effective master state for private-image enhancement."""
+        checker = getattr(self, "_feature_enabled_or_temp_unlocked", None)
+        if callable(checker):
+            try:
+                return bool(checker("enable_private_image_self_recognition"))
+            except Exception:
+                pass
+        return bool(getattr(self, "enable_private_image_self_recognition", True))
 
     def _private_image_visual_profile_parts(self, default_persona: str = "", schedule_persona: str = "") -> list[str]:
         labels = (
@@ -2850,6 +2861,8 @@ class PrivateImageMixin:
         clean_log_subject = _single_line(log_subject, 40) or "图片"
         clean_namespace = _single_line(namespace, 60) or "vision"
         group_mode = clean_cache_scope == "group_image"
+        if not group_mode and not self._private_image_enhancement_enabled():
+            return ""
         original_sources = [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:5]
         try:
             sources = await self._prepare_private_image_sources_for_model(
@@ -3957,9 +3970,23 @@ class PrivateImageMixin:
         return None
 
     async def _caption_context_image_sources(self, sources: list[str], *, umo: str = "") -> str:
+        if not self._private_image_enhancement_enabled():
+            return ""
         clean_sources = [str(item).strip() for item in sources if str(item or "").strip()][:5]
         if not clean_sources:
             return ""
+        failure_cache = getattr(self, "_context_image_caption_failure_cache", None)
+        if not isinstance(failure_cache, dict):
+            failure_cache = {}
+            self._context_image_caption_failure_cache = failure_cache
+        now = _now_ts()
+        cache_key = tuple(clean_sources)
+        retry_after = _safe_float(failure_cache.get(cache_key), 0.0)
+        if retry_after > now:
+            return ""
+        for key, expires_at in list(failure_cache.items()):
+            if _safe_float(expires_at, 0.0) <= now:
+                failure_cache.pop(key, None)
         configured_wait = max(0.0, _safe_float(getattr(self, "context_image_caption_timeout_seconds", 30.0), 30.0, 0.0))
         provider_timeout = self._private_image_provider_timeout_seconds()
         vision_budget = self._private_image_vision_wait_budget_seconds()
@@ -3971,17 +3998,28 @@ class PrivateImageMixin:
         task = self._transcribe_private_inbound_images(clean_sources, umo=umo)
         try:
             if wait_seconds > 0:
-                return _single_line(await asyncio.wait_for(task, timeout=wait_seconds), self._private_image_vision_text_limit(len(clean_sources)))
-            return _single_line(await task, self._private_image_vision_text_limit(len(clean_sources)))
+                caption = _single_line(await asyncio.wait_for(task, timeout=wait_seconds), self._private_image_vision_text_limit(len(clean_sources)))
+            else:
+                caption = _single_line(await task, self._private_image_vision_text_limit(len(clean_sources)))
+            if caption:
+                failure_cache.pop(cache_key, None)
+            else:
+                failure_cache[cache_key] = _now_ts() + CONTEXT_IMAGE_FAILURE_COOLDOWN_SECONDS
+            return caption
         except asyncio.TimeoutError:
+            failure_cache[cache_key] = _now_ts() + CONTEXT_IMAGE_FAILURE_COOLDOWN_SECONDS
             logger.warning("[PrivateCompanion] 上下文图片补全等待超时: images=%s timeout=%.1fs", len(clean_sources), wait_seconds)
             return ""
         except Exception as exc:
+            failure_cache[cache_key] = _now_ts() + CONTEXT_IMAGE_FAILURE_COOLDOWN_SECONDS
             logger.warning("[PrivateCompanion] 上下文图片补全失败: images=%s error=%s", len(clean_sources), _single_line(exc, 120))
             return ""
 
     async def _enrich_request_context_image_placeholders(self, event: AstrMessageEvent, req: ProviderRequest) -> dict[str, int]:
-        if not bool(getattr(self, "enable_context_image_captioning", True)):
+        if (
+            not self._private_image_enhancement_enabled()
+            or not bool(getattr(self, "enable_context_image_captioning", True))
+        ):
             return {"contexts": 0, "replaced": 0, "missed": 0}
         contexts = getattr(req, "contexts", None)
         if not isinstance(contexts, list) or not contexts:
@@ -4021,11 +4059,11 @@ class PrivateImageMixin:
                 continue
 
             cache_key = tuple(sources)
-            caption = caption_cache.get(cache_key, "")
-            if not caption:
+            if cache_key not in caption_cache:
                 caption = await self._caption_context_image_sources(sources, umo=umo)
-                if caption:
-                    caption_cache[cache_key] = caption
+                caption_cache[cache_key] = caption
+            else:
+                caption = caption_cache[cache_key]
             if not caption:
                 missed += 1
                 continue
