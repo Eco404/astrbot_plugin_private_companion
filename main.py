@@ -17313,7 +17313,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                             user.pop("reality_touch_pending_consent", None)
                             self._save_data_sync()
                     confirmation_reply = "主机摄像头只允许 AstrBot 管理员或主要用户本人授权和使用。"
-            elif isinstance(user, dict):
+            elif isinstance(user, dict) and isinstance(
+                user.get("reality_touch_pending_consent"), dict
+            ):
                 try:
                     confirmation_reply = pending_confirmation_handler(user, feedback_text)
                 except Exception as exc:

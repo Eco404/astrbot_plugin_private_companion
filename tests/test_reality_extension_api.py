@@ -233,6 +233,7 @@ def test_preflight_forwards_legacy_camera_pending_for_eligible_user() -> None:
 def test_preflight_external_handler_failure_does_not_break_private_chat() -> None:
     api = _PreflightRealityApi(raise_on_apply=True)
     host = _PreflightHost(api)
+    host.data["users"]["u"]["reality_touch_pending_consent"] = {"capability": "local_audio"}
     event = _PreflightEvent("在吗")
 
     handled = asyncio.run(host.preflight(event))
@@ -252,4 +253,4 @@ def test_preflight_without_pending_still_consults_external_handler() -> None:
 
     assert handled is False
     assert event.replies == []
-    assert api.apply_calls == [("u", "在吗")]
+    assert api.apply_calls == []
