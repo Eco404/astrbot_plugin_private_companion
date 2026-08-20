@@ -1054,14 +1054,14 @@ class TtsEnhancementMixin:
             settings.pop("tts_voice_language", None)
             configured = self._normalize_tts_voice_language_value(getattr(self, "config", {}).get("tts_voice_language", "zh") if getattr(self, "config", None) is not None else "zh")
             self.tts_voice_language = configured or "zh"
-            self._save_data_sync()
+            self._save_data_sync(sections={"runtime_settings"})
             return f"已恢复 TTS 语音语种为配置页设置：{self._tts_language_label()}。"
         lang = self._normalize_tts_voice_language_value(text)
         if not lang:
             return "没认出这个 TTS 语种。可用：日语 / 中文 / 英语；例如：陪伴 TTS语种 日语。"
         self.tts_voice_language = lang
         settings["tts_voice_language"] = lang
-        self._save_data_sync()
+        self._save_data_sync(sections={"runtime_settings"})
         return f"已切换 TTS 语音语种：{self._tts_language_label()}。之后 <tts> 和自动语音转换会按这个语种处理。"
 
     def _normalize_tts_tags(self, text: str) -> str:

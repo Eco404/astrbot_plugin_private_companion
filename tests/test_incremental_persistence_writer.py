@@ -282,6 +282,58 @@ class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(harness.store_manager.section_writes))
         self.assertFalse(harness.store_manager.snapshot_writes)
 
+    async def test_sync_save_with_explicit_sections_only_writes_target_section(self) -> None:
+        harness = _WriterHarness(
+            {
+                "users": {"owner": {"name": "changed"}},
+                "groups": {"room": {"name": "untouched"}},
+                "daily_state": {"mood": "steady"},
+            }
+        )
+
+        await asyncio.to_thread(harness._save_data_sync, sections={"users"})
+
+        self.assertEqual(1, len(harness.store_manager.section_writes))
+        changed, deleted = harness.store_manager.section_writes[0]
+        self.assertEqual({"users"}, set(changed))
+        self.assertFalse(deleted)
+        self.assertFalse(harness._default_data_save_is_dirty())
+
+    async def test_sync_save_without_sections_keeps_full_compatibility_scope(self) -> None:
+        harness = _WriterHarness(
+            {
+                "users": {},
+                "groups": {},
+                "daily_state": {},
+            }
+        )
+
+        await asyncio.to_thread(harness._save_data_sync)
+
+        self.assertEqual(1, len(harness.store_manager.section_writes))
+        changed, deleted = harness.store_manager.section_writes[0]
+        self.assertEqual({"users", "groups", "daily_state"}, set(changed))
+        self.assertFalse(deleted)
+
+    async def test_sync_json_save_keeps_full_file_replacement_but_dirty_scope(self) -> None:
+        harness = _WriterHarness(
+            {
+                "users": {"owner": {"summary": "clean <bubble/> me"}},
+                "groups": {"room": {"summary": "keep <bubble/> raw"}},
+            },
+            backend="json",
+        )
+
+        await asyncio.to_thread(harness._save_data_sync, sections={"users"})
+
+        self.assertFalse(harness.store_manager.section_writes)
+        self.assertEqual(1, len(harness.store_manager.snapshot_writes))
+        snapshot = harness.store_manager.snapshot_writes[0]
+        self.assertNotIn("<bubble/>", snapshot["users"]["owner"]["summary"])
+        self.assertIn("<bubble/>", snapshot["groups"]["room"]["summary"])
+        self.assertNotIn("<bubble/>", harness.data["users"]["owner"]["summary"])
+        self.assertIn("<bubble/>", harness.data["groups"]["room"]["summary"])
+
     async def test_writer_keeps_newer_same_section_revision_for_second_batch(
         self,
     ) -> None:

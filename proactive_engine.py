@@ -5780,7 +5780,7 @@ class ProactiveEngineMixin:
                 "updated_ts": _now_ts(),
             })
             store[name] = item
-            self._save_data_sync()
+            self._save_data_sync(sections={"external_proactive_abilities"})
         except Exception as exc:
             logger.debug("[PrivateCompanion] 外部主动能力状态保存失败: %s", exc)
         logger.info("[PrivateCompanion] 已注册外部主动能力: %s", name)
@@ -5795,7 +5795,7 @@ class ProactiveEngineMixin:
             if isinstance(item, dict):
                 item["registered"] = False
                 item["updated_ts"] = _now_ts()
-                self._save_data_sync()
+                self._save_data_sync(sections={"external_proactive_abilities"})
         except Exception:
             pass
         return removed
@@ -8046,7 +8046,7 @@ class ProactiveEngineMixin:
         user["screen_peek_failure_reason"] = _single_line(reason, 180)
         user["screen_peek_failure_count"] = _safe_int(user.get("screen_peek_failure_count"), 0, 0) + 1
         try:
-            self._save_data_sync()
+            self._save_data_sync(sections={"users"})
         except Exception:
             pass
 

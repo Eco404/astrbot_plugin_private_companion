@@ -10,6 +10,7 @@ import gc
 import hashlib
 import html
 import importlib
+import inspect
 import json
 import math
 import os
@@ -1217,8 +1218,40 @@ class CoreStoreMixin:
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
-                snapshot = deepcopy(self.data)
-                self._write_persona_data_snapshot_sync(active_persona, snapshot)
+                self._ensure_persona_save_state()
+                pending_dirty = dict(
+                    self._persona_data_save_dirty.get(active_persona, {})
+                )
+                pending_deleted = dict(
+                    self._persona_data_save_deleted.get(active_persona, {})
+                )
+                pending_full = bool(
+                    self._persona_data_save_full_revision.get(active_persona, 0)
+                )
+                if self._mark_persona_data_dirty(
+                    active_persona,
+                    sections=sections,
+                    deleted_sections=deleted_sections,
+                ):
+                    batch = self._capture_persona_data_save_batch(active_persona)
+                    result = self._write_persona_data_save_batch_sync(
+                        active_persona,
+                        batch,
+                        advance_generation=True,
+                    )
+                    self._finish_persona_data_save_batch(
+                        active_persona,
+                        batch,
+                        result,
+                    )
+                    if not result.get("superseded") and (
+                        pending_dirty or pending_deleted or pending_full
+                    ):
+                        self._mark_persona_data_dirty(
+                            active_persona,
+                            sections=None if pending_full else set(pending_dirty),
+                            deleted_sections=set(pending_deleted),
+                        )
                 return
             self._schedule_data_save(
                 sections=sections,
@@ -1229,7 +1262,10 @@ class CoreStoreMixin:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            self._save_data_now_sync(deleted_sections=deleted_sections)
+            self._save_data_now_sync(
+                sections=sections,
+                deleted_sections=deleted_sections,
+            )
             return
         self._schedule_data_save(
             sections=sections,
@@ -1240,52 +1276,40 @@ class CoreStoreMixin:
     def _save_data_now_sync(
         self,
         *,
+        sections: Collection[str] | None = None,
         deleted_sections: Collection[str] = (),
     ) -> None:
-        changed = self._sanitize_store_control_tags_inplace(self.data)
-        repeat_changed = self._sanitize_proactive_candidate_repeat_counts_inplace(self.data)
-        compacted = self._compact_store_history_inplace(self.data)
-        if changed:
-            self._log_store_control_cleanup("immediate_save", changed)
-        if repeat_changed:
-            logger.warning("[PrivateCompanion] 保存数据前压缩主动候选重复计数: items=%s", repeat_changed)
-        if compacted:
-            logger.info("[PrivateCompanion] 保存前压缩历史存储: %s", compacted)
-        manager = getattr(self, "store_manager", None)
-        if manager is not None:
-            manager_backend = str(getattr(manager, "backend_name", "") or "").lower()
-            save_sections = getattr(manager, "save_sections", None)
-            if manager_backend == "sqlite" and callable(save_sections):
-                self._ensure_default_save_state()
-                revision = self._next_data_save_revision()
-                deleted = self._save_section_names(deleted_sections) or set()
-                changed_sections = {
-                    str(section): (revision, deepcopy(value))
-                    for section, value in self.data.items()
-                    if str(section) not in deleted
-                }
-                with self._data_save_io_lock():
-                    confirmed = save_sections(
-                        changed_sections,
-                        {section: revision for section in deleted},
-                    )
-                    if any(
-                        int(confirmed.get(section, -1)) < revision
-                        for section in changed_sections
-                    ):
-                        raise RuntimeError(
-                            "SQLite synchronous section save did not confirm all sections"
-                        )
-                    self._refresh_data_save_revision_from_manager()
-                    self._clear_default_data_save_dirty()
-                    self._advance_data_save_write_generation()
-                return
-            with self._data_save_io_lock():
-                manager.save_store(self.data)
-                self._refresh_data_save_revision_from_manager()
-                self._advance_data_save_write_generation()
+        self._ensure_default_save_state()
+        pending_dirty = dict(self._data_save_dirty)
+        pending_deleted = dict(self._data_save_deleted)
+        pending_full = bool(self._data_save_full_revision)
+        if not self._mark_default_data_dirty(
+            sections=sections,
+            deleted_sections=deleted_sections,
+        ):
             return
-        if not self.data.get("worldbook_entries") and os.path.exists(self.data_file):
+        batch = self._capture_default_data_save_batch()
+        result = self._write_default_data_save_batch_sync(
+            batch,
+            advance_generation=True,
+        )
+        self._finish_default_data_save_batch(batch, result)
+        if not result.get("superseded") and (
+            pending_dirty or pending_deleted or pending_full
+        ):
+            self._mark_default_data_dirty(
+                sections=None if pending_full else set(pending_dirty),
+                deleted_sections=set(pending_deleted),
+            )
+
+    def _write_data_snapshot_sync(
+        self,
+        data: dict[str, Any],
+        *,
+        advance_generation: bool = True,
+    ) -> int:
+        manager = getattr(self, "store_manager", None)
+        if manager is None and not data.get("worldbook_entries") and os.path.exists(self.data_file):
             try:
                 with open(self.data_file, "r", encoding="utf-8") as f:
                     existing = json.load(f)
@@ -1296,28 +1320,45 @@ class CoreStoreMixin:
                         "worldbook_group_profiles",
                         "worldbook_import_state",
                     ):
-                        self.data[key] = existing.get(key, self.data.get(key))
+                        data[key] = existing.get(key, data.get(key))
             except Exception:
                 pass
-        with self._data_save_io_lock():
-            self._atomic_write_data_file_sync(self.data)
-            self._advance_data_save_write_generation()
-
-    def _write_data_snapshot_sync(self, data: dict[str, Any]) -> int:
         changed = self._sanitize_store_control_tags_inplace(data)
         self._sanitize_proactive_candidate_repeat_counts_inplace(data)
         self._compact_store_history_inplace(data)
-        manager = getattr(self, "store_manager", None)
         if manager is not None:
             with self._data_save_io_lock():
                 manager.save_snapshot(data)
                 self._refresh_data_save_revision_from_manager()
-                self._advance_data_save_write_generation()
+                if advance_generation:
+                    self._advance_data_save_write_generation()
             return changed
         with self._data_save_io_lock():
             self._atomic_write_data_file_sync(data)
-            self._advance_data_save_write_generation()
+            if advance_generation:
+                self._advance_data_save_write_generation()
         return changed
+
+    def _invoke_data_snapshot_writer_sync(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        advance_generation: bool,
+    ) -> int:
+        """Invoke an overridable snapshot writer with legacy signature support."""
+        writer = self._write_data_snapshot_sync
+        try:
+            parameters = inspect.signature(writer).parameters.values()
+            accepts_generation = any(
+                parameter.name == "advance_generation"
+                or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            accepts_generation = False
+        if accepts_generation:
+            return writer(snapshot, advance_generation=advance_generation)
+        return writer(snapshot)
 
     def _atomic_write_data_file_sync(self, data: dict[str, Any]) -> None:
         base = self.data_file
@@ -1801,7 +1842,12 @@ class CoreStoreMixin:
         }
         return prepared, control_changed, repeat_changed, compacted, cleaned_sections
 
-    def _write_default_data_save_batch_sync(self, batch: dict[str, Any]) -> dict[str, Any]:
+    def _write_default_data_save_batch_sync(
+        self,
+        batch: dict[str, Any],
+        *,
+        advance_generation: bool = False,
+    ) -> dict[str, Any]:
         if batch["incremental"] and batch["missing_revisions"]:
             missing = ", ".join(sorted(batch["missing_revisions"]))
             raise RuntimeError(
@@ -1837,6 +1883,8 @@ class CoreStoreMixin:
                         },
                         batch["deleted_revisions"],
                     )
+                    if advance_generation:
+                        self._advance_data_save_write_generation()
         else:
             snapshot = batch["full_snapshot"]
             for section, value in prepared.items():
@@ -1884,6 +1932,8 @@ class CoreStoreMixin:
                         confirmed = {
                             section: persisted_revision for section in expected_revisions
                         }
+                        if advance_generation:
+                            self._advance_data_save_write_generation()
             else:
                 with self._data_save_io_lock():
                     if batch["write_generation"] != self._current_data_save_write_generation():
@@ -1893,8 +1943,13 @@ class CoreStoreMixin:
                     else:
                         # Keep the compatibility path behind the overridable
                         # snapshot writer used by JSON/test harnesses.
-                        self._write_data_snapshot_sync(snapshot)
+                        self._invoke_data_snapshot_writer_sync(
+                            snapshot,
+                            advance_generation=False,
+                        )
                     if not superseded:
+                        if advance_generation:
+                            self._advance_data_save_write_generation()
                         confirmed = dict(expected_revisions)
         return {
             "confirmed": dict(confirmed or {}),
@@ -1911,6 +1966,8 @@ class CoreStoreMixin:
         self,
         persona_id: str,
         batch: dict[str, Any],
+        *,
+        advance_generation: bool = False,
     ) -> dict[str, Any]:
         prepared, control_changed, repeat_changed, compacted, cleaned_sections = self._prepare_dirty_save_payloads_sync(
             batch["payloads"],
@@ -1942,6 +1999,8 @@ class CoreStoreMixin:
                 superseded = True
             else:
                 saver(persona_id, snapshot)
+                if advance_generation:
+                    self._advance_data_save_write_generation(persona_id)
                 confirmed = dict(changed_revisions)
                 confirmed.update(batch["deleted_revisions"])
                 confirmed.update(batch["missing_revisions"])

@@ -50,7 +50,7 @@ class _BridgeHarness(ProactiveMessageMixin):
     def _get_user(self, user_id: str) -> dict:
         return self.data["users"][user_id]
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, **_kwargs) -> None:
         self.saved += 1
 
     @staticmethod
@@ -174,7 +174,7 @@ def _plugin_harness() -> PrivateCompanionPlugin:
     plugin._canonical_private_user_id = lambda value: str(value or "")
     plugin._user_enabled_for_proactive = lambda _user_id, user: bool(user.get("enabled", True))
     plugin._get_user = lambda user_id: plugin.data["users"][user_id]
-    plugin._save_data_sync = lambda: None
+    plugin._save_data_sync = lambda **_kwargs: None
     plugin._sanitize_proactive_text = lambda text: str(text or "").strip()
     plugin._visible_text_without_tts_reading = lambda text, limit=500: str(text or "").strip()[:limit]
     plugin._reset_daily_counter_if_needed = lambda user: user.update({"sent_day": "test-day", "sent_today": 0})

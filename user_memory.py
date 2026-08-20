@@ -6175,7 +6175,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
                 )
             else:
                 user["last_emotion_judgement_error"] = review_outcome
-            self._save_data_sync()
+            self._save_data_sync(sections={"users"})
 
     def _decay_relationship_mood_score(self, state: dict[str, Any], *, now: float | None = None) -> int:
         now = now or _now_ts()
@@ -7056,7 +7056,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
                         item["status"] = "delivered"
                         item["delivered_at"] = _now_ts()
                         break
-            self._save_data_sync()
+            self._save_data_sync(sections={"boundary_feedback_reports"})
 
     def _register_relationship_boundary_proactive_ability(self) -> bool:
         registrar = getattr(self, "register_external_proactive_ability", None)
@@ -8877,7 +8877,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
                 consume_suspended = True
                 current = self._get_user(user_id)
                 current["suspended_proactive"] = {}
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
 
             last_proactive_text = _single_line(user.get("last_proactive_message"), 500)
             last_proactive_at = _safe_float(user.get("last_proactive_sent_at"), 0)
@@ -8920,7 +8920,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
                     )
                 current = self._get_user(user_id)
                 current["last_proactive_reply_context_consumed_for"] = last_proactive_at
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
 
         suspended = user.get("suspended_proactive")
         if isinstance(suspended, dict) and suspended.get("active") and (
@@ -9245,7 +9245,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                     operation_id=f"req041-dialogue-episode:{user_id}:{expression_batch_key}",
                 ):
                     return
-            self._save_data_sync()
+            self._save_data_sync(sections={"users"})
 
     def _build_expression_decision_for_user(
         self,
@@ -9686,7 +9686,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                     operation_id=f"req041-memory-profile:{user_id}:{memory_fingerprint}",
                 ):
                     return
-            self._save_data_sync()
+            self._save_data_sync(sections={"users"})
 
     async def _try_acquire_user_background_task(
         self,
@@ -9709,7 +9709,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             if running_at > 0 and now - running_at < 10 * 60:
                 return False
             current[running_key] = now
-            self._save_data_sync()
+            self._save_data_sync(sections={"users"})
         return True
 
     async def _mark_user_background_retry(self, user_id: str, task: str, now: float, error: Any) -> None:
@@ -9728,7 +9728,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             current[retry_key] = now + delay
             current[error_key] = _single_line(error, 180)
             current[running_key] = 0
-            self._save_data_sync()
+            self._save_data_sync(sections={"users"})
         logger.warning(
             "[PrivateCompanion] 私聊后台整理失败,已进入短冷却避免重复请求: user=%s task=%s retry=%ss error=%s",
             user_id,

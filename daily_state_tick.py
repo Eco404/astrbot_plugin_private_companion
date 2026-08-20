@@ -131,7 +131,10 @@ class DailyStateTickMixin:
                         self._restore_troubleshooting_proactive_plan(current_for_clear)
                     else:
                         self._clear_pending_proactive_plan(current_for_clear)
-                    self._save_data_sync()
+                    save_sections = {"users"}
+                    if self._is_troubleshooting_proactive_plan(user):
+                        save_sections.add("troubleshooting_test_results")
+                    self._save_data_sync(sections=save_sections)
             return
         now = _now_ts()
         due_timer_id = self._due_internal_llm_timer_id(user, now=now)
@@ -140,7 +143,7 @@ class DailyStateTickMixin:
         if not should_send:
             async with self._data_lock:
                 if self._sync_live_user_proactive_schedule(user_id, user):
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
         if not should_send:
             if not is_troubleshooting_for_send and _safe_float(user.get("next_proactive_at"), 0) <= now:
                 guard_reason = _single_line(reason, 120)
@@ -153,7 +156,7 @@ class DailyStateTickMixin:
                         )
                         if handled:
                             self._sync_live_user_proactive_schedule(user_id, current_for_quiet)
-                            self._save_data_sync()
+                            self._save_data_sync(sections={"users"})
                             logger.info(
                                 "[PrivateCompanion] 免打扰主动任务已一次性改期: user=%s next=%s note=%s",
                                 user_id,
@@ -183,7 +186,7 @@ class DailyStateTickMixin:
                             user["planned_proactive_origin_key"] = current_for_guard.get("planned_proactive_origin_key", "")
                             user["planned_proactive_freshness"] = current_for_guard.get("planned_proactive_freshness", "")
                             user["planned_proactive_delivery_state"] = current_for_guard.get("planned_proactive_delivery_state", "")
-                            self._save_data_sync()
+                            self._save_data_sync(sections={"users"})
                             logger.info(
                                 "[PrivateCompanion] 主动发送检查未通过且无未来调度,已兜底延后: user=%s reason=%s delay=%ss",
                                 user_id,
@@ -202,7 +205,7 @@ class DailyStateTickMixin:
                         error=reason,
                     )
                     self._restore_troubleshooting_proactive_plan(current_for_failed_check)
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "troubleshooting_test_results"})
             self._debug_tick_skip(user_id, reason)
             return
 
@@ -241,7 +244,7 @@ class DailyStateTickMixin:
                                 delay_minutes=(60, 150),
                                 block_current=False,
                             )
-                            self._save_data_sync()
+                            self._save_data_sync(sections={"users", "proactive_candidate_pool"})
                             self._debug_tick_skip(user_id, note, prefix="延后")
                             return
                         if changed:
@@ -256,7 +259,7 @@ class DailyStateTickMixin:
                                 _single_line(model_judgement.get("reason"), 120),
                             )
                         user = dict(current_for_model)
-                        self._save_data_sync()
+                        self._save_data_sync(sections={"users", "proactive_candidate_pool"})
                     elif model_decision == "defer":
                         note = "模型人格判定延后: " + _single_line(model_judgement.get("reason"), 120)
                         delay = _safe_int(model_judgement.get("delay_minutes"), 90, 20, 360)
@@ -270,7 +273,7 @@ class DailyStateTickMixin:
                         )
                         if not replaced and _safe_float(current_for_model.get("next_proactive_at"), 0) <= 0:
                             self._schedule_next_proactive(current_for_model, now=_now_ts(), delay_hours=(1.5, 4.0))
-                        self._save_data_sync()
+                        self._save_data_sync(sections={"users", "proactive_candidate_pool"})
                         self._debug_tick_skip(user_id, note, prefix="延后")
                         return
                     elif model_decision == "drop":
@@ -279,7 +282,7 @@ class DailyStateTickMixin:
                         self._mark_planned_candidate_status(current_for_model, "blocked", note)
                         self._clear_pending_proactive_plan(current_for_model)
                         self._schedule_next_proactive(current_for_model, now=_now_ts(), delay_hours=(2.0, 6.0))
-                        self._save_data_sync()
+                        self._save_data_sync(sections={"users", "proactive_candidate_pool"})
                         self._debug_tick_skip(user_id, note, prefix="取消")
                         return
             else:
@@ -289,7 +292,7 @@ class DailyStateTickMixin:
                     judged_signature = _single_line(model_judgement.get("signature"), 80) or current_signature
                     if current_signature == judged_signature:
                         self._cache_proactive_model_judgement(current_for_model_cache, model_judgement, now=_now_ts())
-                        self._save_data_sync()
+                        self._save_data_sync(sections={"users"})
 
         async with self._data_lock:
             current_for_mark = self._get_user(user_id)
@@ -314,7 +317,10 @@ class DailyStateTickMixin:
                     self._restore_troubleshooting_proactive_plan(current_for_mark)
                 else:
                     self._clear_pending_proactive_plan(current_for_mark)
-                self._save_data_sync()
+                save_sections = {"users"}
+                if is_troubleshooting_for_send:
+                    save_sections.add("troubleshooting_test_results")
+                self._save_data_sync(sections=save_sections)
                 self._debug_tick_skip(user_id, "私聊对象未启用")
                 return
             self._recover_stale_proactive_sending(current_for_mark)
@@ -329,7 +335,10 @@ class DailyStateTickMixin:
                         error="已有主动发送正在进行",
                     )
                     self._restore_troubleshooting_proactive_plan(current_for_mark)
-                    self._save_data_sync()
+                    save_sections = {"users"}
+                    if is_troubleshooting_for_send:
+                        save_sections.add("troubleshooting_test_results")
+                    self._save_data_sync(sections=save_sections)
                 self._debug_tick_skip(user_id, "主动发送仍在进行中")
                 return
             current_reason = normalize_legacy_tag_text(current_for_mark.get("planned_proactive_reason"))
@@ -369,7 +378,7 @@ class DailyStateTickMixin:
                 self._clear_pending_proactive_plan(current_for_mark)
                 current_for_mark["planned_meal_care_context"] = {}
                 self._schedule_next_proactive(current_for_mark, now=_now_ts())
-                self._save_data_sync()
+                self._save_data_sync(sections={"users", "proactive_candidate_pool"})
                 self._debug_tick_skip(user_id, "近期已经聊过饮食，本次饭点关心或补问进入共享冷却", prefix="取消")
                 return
             if (
@@ -383,7 +392,7 @@ class DailyStateTickMixin:
                 self._clear_pending_proactive_plan(current_for_mark)
                 current_for_mark["planned_meal_care_context"] = {}
                 self._schedule_next_proactive(current_for_mark, now=_now_ts())
-                self._save_data_sync()
+                self._save_data_sync(sections={"users", "proactive_candidate_pool"})
                 self._debug_tick_skip(user_id, "早餐关心等待用户回应早安", prefix="取消")
                 return
             if (
@@ -395,7 +404,7 @@ class DailyStateTickMixin:
                 if isinstance(suppressed_greetings, list) and current_reason in suppressed_greetings:
                     self._mark_planned_candidate_status(current_for_mark, "blocked", "用户在该问候窗口内已经活跃过")
                     self._clear_pending_proactive_plan(current_for_mark)
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "proactive_candidate_pool"})
                     self._debug_tick_skip(user_id, "问候窗口已被用户互动占掉", prefix="取消")
                     return
                 recent_user_at = self._latest_user_activity_ts(current_for_mark)
@@ -410,7 +419,7 @@ class DailyStateTickMixin:
                         self._clear_pending_proactive_plan(current_for_mark)
                     else:
                         self._reschedule_greeting_within_window(current_for_mark, current_reason, now=_now_ts())
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "proactive_candidate_pool"})
                     self._debug_tick_skip(user_id, "用户刚自然来聊,已取消或延后问候主动")
                     return
             recent_chat_guard_reason = self._route_recent_chat_guard_reason(
@@ -426,7 +435,7 @@ class DailyStateTickMixin:
                     now=_now_ts(),
                     note=recent_chat_guard_reason,
                 )
-                self._save_data_sync()
+                self._save_data_sync(sections={"users", "proactive_candidate_pool"})
                 logger.info(
                     "[PrivateCompanion] 刚聊完,延后本轮普通主动: user=%s reason=%s planned=%s/%s",
                     user_id,
@@ -461,7 +470,7 @@ class DailyStateTickMixin:
                     action=str(current_for_mark.get("planned_proactive_action") or "message"),
                     reason=normalize_legacy_tag_text(current_for_mark.get("planned_proactive_reason")) or "check_in",
                 )
-            self._save_data_sync()
+            self._save_data_sync(sections={"users", "troubleshooting_test_results"})
 
         planned_action_for_send = str(user.get("planned_proactive_action") or "message")
         planned_motive_for_send = _single_line(user.get("planned_proactive_motive"), 140)
@@ -500,7 +509,7 @@ class DailyStateTickMixin:
                     self._clear_pending_proactive_plan(current_for_duplicate_cooldown)
                     self._update_proactive_audit(audit_id, status="cancelled", note=f"活动分享去重冷却中: {note}")
                     self._schedule_next_proactive(current_for_duplicate_cooldown, now=_now_ts(), delay_hours=(2.0, 5.0))
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "proactive_candidate_pool", "proactive_audit_log"})
                 logger.info(
                     "[PrivateCompanion] 活动分享去重冷却中,跳过本轮主动: user=%s remain=%.0fs note=%s",
                     user_id,
@@ -527,7 +536,7 @@ class DailyStateTickMixin:
                         "accepted",
                         "photo_text 后端不可用,已降级为普通主动消息",
                     )
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "proactive_candidate_pool"})
         load_defer_note = self._photo_text_load_defer_note(planned_action_for_send, force_refresh=True)
         if load_defer_note:
             async with self._data_lock:
@@ -536,7 +545,7 @@ class DailyStateTickMixin:
                 current_for_defer["proactive_sending"] = False
                 current_for_defer["proactive_sending_started_at"] = 0
                 self._update_proactive_audit(audit_id, status="deferred", note=load_defer_note)
-                self._save_data_sync()
+                self._save_data_sync(sections={"users", "proactive_candidate_pool", "proactive_audit_log"})
             self._debug_tick_skip(user_id, load_defer_note, prefix="延后")
             return
         group_share_block_reason = ""
@@ -553,7 +562,7 @@ class DailyStateTickMixin:
                     self._clear_pending_proactive_plan(current_for_group_check)
                     current_for_group_check["group_share_context"] = {}
                     self._update_proactive_audit(audit_id, status="cancelled", note=group_share_block_reason)
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "proactive_candidate_pool", "proactive_audit_log"})
             if group_share_block_reason:
                 logger.info(
                     "[PrivateCompanion] 群聊分享主动发送前复核取消: user=%s reason=%s",
@@ -610,7 +619,7 @@ class DailyStateTickMixin:
                         current_after_render_failure["next_proactive_at"] = 0
                         self._schedule_next_proactive(current_after_render_failure, now=_now_ts(), delay_hours=(1, 3))
                     self._update_proactive_audit(audit_id, status="failed", note=f"生成失败: {_single_line(e, 140)}")
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "proactive_audit_log", "troubleshooting_test_results"})
                 return
         render_failure_stage = _single_line(user.pop("_proactive_render_failure_stage", ""), 240)
         if is_troubleshooting_for_send:
@@ -634,7 +643,7 @@ class DailyStateTickMixin:
                     reason=reason or "check_in",
                     extra_count=len(extra_components),
                 )
-                self._save_data_sync()
+                self._save_data_sync(sections={"users", "troubleshooting_test_results"})
         review_candidate_text = text
         if not review_candidate_text and (image_path or extra_components):
             if image_path:
@@ -686,7 +695,7 @@ class DailyStateTickMixin:
                             "last_error": _single_line(exc, 160),
                             "updated_at": _now_ts(),
                         }
-                        self._save_data_sync()
+                        self._save_data_sync(sections={"users"})
                     if failure_count >= 3:
                         review_strength_getter = getattr(self, "_proactive_review_strength", None)
                         review_strength = review_strength_getter() if callable(review_strength_getter) else str(getattr(self, "proactive_review_strength", "lenient") or "lenient")
@@ -745,7 +754,7 @@ class DailyStateTickMixin:
                         review_decision.get("review_fallback_reason") or review_decision.get("reason"),
                         180,
                     )
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"proactive_review_runtime"})
                 if release_count == 10 or release_count % 10 == 0:
                     logger.warning(
                         "[PrivateCompanion] 主动复核模型已连续放行 %s 条原文，请检查 RESPONSE_REVIEW_PROVIDER_ID",
@@ -766,7 +775,7 @@ class DailyStateTickMixin:
                     if isinstance(review_runtime, dict) and _safe_int(review_runtime.get("consecutive_fallback_releases"), 0) > 0:
                         review_runtime["consecutive_fallback_releases"] = 0
                         review_runtime["last_recovered_at"] = _now_ts()
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "proactive_review_runtime"})
             if decision == "defer":
                 delay_minutes = max(
                     5,
@@ -839,7 +848,7 @@ class DailyStateTickMixin:
                         note=note,
                         text=text or review_candidate_text,
                     )
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "proactive_candidate_pool", "proactive_audit_log"})
                 logger.info(
                     "[PrivateCompanion] 主动消息发送前复核%s: user=%s delay=%s reason=%s",
                     "作废过期候选" if stale_candidate else "延后",
@@ -902,7 +911,9 @@ class DailyStateTickMixin:
                                 reason=reason or "check_in",
                                 extra_count=len(extra_components),
                             )
-                        self._save_data_sync()
+                        self._save_data_sync(
+                            sections={"users", "proactive_audit_log", "troubleshooting_test_results"}
+                        )
             elif decision == "drop":
                 note = _single_line(review_decision.get("reason"), 120) or "proactive final content gate dropped the candidate"
                 async with self._data_lock:
@@ -929,7 +940,14 @@ class DailyStateTickMixin:
                         self._clear_pending_proactive_plan(current_for_review)
                         self._schedule_next_proactive(current_for_review, now=_now_ts(), delay_hours=(1.5, 4.0))
                     self._update_proactive_audit(audit_id, status="cancelled", note=note, text=text or review_candidate_text)
-                    self._save_data_sync()
+                    self._save_data_sync(
+                        sections={
+                            "users",
+                            "proactive_candidate_pool",
+                            "proactive_audit_log",
+                            "troubleshooting_test_results",
+                        }
+                    )
                 logger.info("[PrivateCompanion] Proactive final content gate dropped: user=%s reason=%s text=%s", user_id, note, _single_line(text, 120))
                 self._debug_tick_skip(user_id, note, prefix="dropped")
                 return
@@ -981,7 +999,14 @@ class DailyStateTickMixin:
                             self._schedule_next_proactive(current_for_outbound_guard, now=_now_ts(), delay_hours=(1.5, 4.0))
                     self._update_proactive_audit(audit_id, status="cancelled", note=note, text=text)
                     self._clear_pending_proactive_send_retry(current_for_outbound_guard)
-                    self._save_data_sync()
+                    self._save_data_sync(
+                        sections={
+                            "users",
+                            "proactive_candidate_pool",
+                            "proactive_audit_log",
+                            "troubleshooting_test_results",
+                        }
+                    )
                 logger.warning(
                     "[PrivateCompanion] 主动消息发送前统一校验拦截: user=%s reason=%s text=%s",
                     user_id,
@@ -1027,7 +1052,7 @@ class DailyStateTickMixin:
                 self._clear_pending_proactive_send_retry(current_for_meta_leak)
                 self._clear_pending_proactive_plan(current_for_meta_leak)
                 self._schedule_next_proactive(current_for_meta_leak, now=_now_ts(), delay_hours=(1.5, 4.0))
-                self._save_data_sync()
+                self._save_data_sync(sections={"users", "proactive_candidate_pool", "proactive_audit_log"})
             logger.warning(
                 "[PrivateCompanion] 主动消息发送前硬拦截元叙述泄漏: user=%s text=%s",
                 user_id,
@@ -1079,7 +1104,9 @@ class DailyStateTickMixin:
                         audit_note = f"{audit_note}；已移除候选碎片 {len(removed_can_do)} 条"
                     self._update_proactive_audit(audit_id, status="cancelled", note=audit_note)
                     self._schedule_next_proactive(current_for_dedupe, now=_now_ts(), delay_hours=(2.0, 5.0))
-                    self._save_data_sync()
+                    self._save_data_sync(
+                        sections={"users", "proactive_candidate_pool", "proactive_audit_log", "can_do"}
+                    )
             if duplicate_note:
                 logger.info(
                     "[PrivateCompanion] 取消重复活动分享: user=%s duplicate=%s",
@@ -1129,7 +1156,14 @@ class DailyStateTickMixin:
                     self._clear_pending_proactive_plan(current_for_time_guard)
                     self._schedule_next_proactive(current_for_time_guard, now=_now_ts(), delay_hours=(1.5, 4.0))
                 self._update_proactive_audit(audit_id, status="cancelled", note=time_mismatch_reason)
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={
+                        "users",
+                        "proactive_candidate_pool",
+                        "proactive_audit_log",
+                        "troubleshooting_test_results",
+                    }
+                )
             self._debug_tick_skip(user_id, "主动消息时间不一致", prefix="取消")
             return
         if not is_troubleshooting_for_send and (effective_action_for_send or planned_action_for_send or "message") == "message":
@@ -1165,7 +1199,7 @@ class DailyStateTickMixin:
                     self._clear_pending_proactive_plan(current_for_similarity_guard)
                     self._schedule_next_proactive(current_for_similarity_guard, now=_now_ts(), delay_hours=(0.5, 1.5))
                     self._update_proactive_audit(audit_id, status="cancelled", note=similar_note, text=text)
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "proactive_candidate_pool", "proactive_audit_log"})
             if similar_note:
                 logger.info(
                     "[PrivateCompanion] 主动消息正文近似重复,已取消: user=%s reason=%s text=%s",
@@ -1194,7 +1228,7 @@ class DailyStateTickMixin:
                     self._clear_pending_proactive_plan(current_for_greeting_text)
                     self._schedule_next_proactive(current_for_greeting_text, now=_now_ts(), delay_hours=(2.0, 5.0))
                     self._update_proactive_audit(audit_id, status="cancelled", note=textual_greeting_note, text=text)
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "proactive_candidate_pool", "proactive_audit_log"})
             if textual_greeting_note:
                 logger.info(
                     "[PrivateCompanion] 主动消息正文命中重复问候,已取消: user=%s reason=%s text=%s",
@@ -1220,7 +1254,7 @@ class DailyStateTickMixin:
                     reason=reason or "check_in",
                     extra_count=len(extra_components),
                 )
-                self._save_data_sync()
+                self._save_data_sync(sections={"users", "troubleshooting_test_results"})
         async with self._data_lock:
             current_after_render = self._get_user(user_id)
             has_new_user_message = (
@@ -1253,7 +1287,7 @@ class DailyStateTickMixin:
                         reason=reason or "check_in",
                         extra_count=len(extra_components),
                     )
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "troubleshooting_test_results"})
             elif not bool(route_options_for_send.get("cancel_if_new_inbound", True)):
                 logger.info(
                     "[PrivateCompanion] 生成期间收到新消息，但 %s 路线保留独立投递: user=%s",
@@ -1271,7 +1305,7 @@ class DailyStateTickMixin:
                     current_for_clear["proactive_sending"] = False
                     current_for_clear["proactive_sending_started_at"] = 0
                     self._update_proactive_audit(audit_id, status="cancelled", note="用户在生成期间发来新消息,已取消本次主动")
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "proactive_audit_log"})
                 return
         delivery_freshness_reason = ""
         if not is_troubleshooting_for_send:
@@ -1290,7 +1324,7 @@ class DailyStateTickMixin:
                     self._clear_pending_proactive_plan(current_for_freshness)
                     self._schedule_next_proactive(current_for_freshness, now=_now_ts(), delay_hours=(1.5, 4.0))
                     self._update_proactive_audit(audit_id, status="cancelled", note=delivery_freshness_reason)
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "proactive_candidate_pool", "proactive_audit_log"})
         if delivery_freshness_reason:
             logger.info(
                 "[PrivateCompanion] 主动候选在生成期间失效,已取消发送: user=%s reason=%s",
@@ -1303,7 +1337,7 @@ class DailyStateTickMixin:
             async with self._data_lock:
                 current_disabled = self._get_user(str(user_id))
                 if self._suspend_user_proactive_generation(current_disabled):
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
             return
         async with self._data_lock:
             current_for_recent_chat = self._get_user(user_id)
@@ -1338,7 +1372,14 @@ class DailyStateTickMixin:
                         note=recent_chat_guard_reason,
                     )
                 self._update_proactive_audit(audit_id, status="deferred", note=recent_chat_guard_reason)
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={
+                        "users",
+                        "proactive_candidate_pool",
+                        "proactive_audit_log",
+                        "troubleshooting_test_results",
+                    }
+                )
         if recent_chat_guard_reason:
             logger.info(
                 "[PrivateCompanion] 发送前发现刚聊完,延后普通主动: user=%s reason=%s",
@@ -1378,7 +1419,14 @@ class DailyStateTickMixin:
                     self._clear_pending_proactive_plan(current)
                     self._schedule_next_proactive(current, now=_now_ts(), delay_hours=(2, 8))
                 self._update_proactive_audit(audit_id, status="dropped", note=note, text=text)
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={
+                        "users",
+                        "proactive_candidate_pool",
+                        "proactive_audit_log",
+                        "troubleshooting_test_results",
+                    }
+                )
             self._debug_tick_skip(user_id, note, prefix="放弃")
             return
         if not text and not image_path and not extra_components:
@@ -1410,7 +1458,14 @@ class DailyStateTickMixin:
                     if not materialized:
                         self._schedule_next_proactive(current, now=_now_ts(), delay_hours=(0.33, 1.0))
                 self._update_proactive_audit(audit_id, status="dropped", note=empty_note)
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={
+                        "users",
+                        "proactive_candidate_pool",
+                        "proactive_audit_log",
+                        "troubleshooting_test_results",
+                    }
+                )
             self._debug_tick_skip(user_id, empty_note, prefix="放弃")
             return
         try:
@@ -1507,7 +1562,14 @@ class DailyStateTickMixin:
                         note=cancel_note,
                         text=text,
                     )
-                    self._save_data_sync()
+                    self._save_data_sync(
+                        sections={
+                            "users",
+                            "proactive_candidate_pool",
+                            "proactive_audit_log",
+                            "troubleshooting_test_results",
+                        }
+                    )
                 self._debug_tick_skip(user_id, cancel_note, prefix="取消")
                 return
             delivery_complete = bool(getattr(delivered, "complete", True))
@@ -1587,7 +1649,7 @@ class DailyStateTickMixin:
                             sent_at=sent_at,
                             delivery_umo=send_umo_for_send,
                         )
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
             if not is_troubleshooting_for_send and reason == "creative_share":
                 # Keep a per-user anchor before history archival so an immediate reply has context.
                 self._remember_recent_creative_share_snapshot(
@@ -1612,7 +1674,7 @@ class DailyStateTickMixin:
                         reason=reason or "check_in",
                         extra_count=len(extra_components),
                     )
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "troubleshooting_test_results"})
             logger.info(
                 "[PrivateCompanion] 主动发送完成: user=%s reason=%s action=%s complete=%s",
                 user_id,
@@ -1659,7 +1721,7 @@ class DailyStateTickMixin:
                         reason=reason or "check_in",
                         extra_count=len(extra_components),
                     )
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users", "troubleshooting_test_results"})
         except Exception as e:
             formatter = getattr(self, "_format_send_exception", None)
             error_text = formatter(e) if callable(formatter) else (_single_line(str(e), 180) or repr(e))
@@ -1714,14 +1776,21 @@ class DailyStateTickMixin:
                     note=f"发送失败: {_single_line(error_text, 140)}",
                     diagnostic_detail=diagnostic_detail,
                 )
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={
+                        "users",
+                        "proactive_candidate_pool",
+                        "proactive_audit_log",
+                        "troubleshooting_test_results",
+                    }
+                )
             return
         finally:
             async with self._data_lock:
                 current_for_clear = self._get_user(user_id)
                 current_for_clear["proactive_sending"] = False
                 current_for_clear["proactive_sending_started_at"] = 0
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
 
         memory_companion_proactive_payload: dict[str, Any] = {}
         async with self._data_lock:
@@ -1897,7 +1966,7 @@ class DailyStateTickMixin:
                     extra_count=len(extra_components),
                 )
                 self._restore_troubleshooting_proactive_plan(current)
-                self._save_data_sync()
+                self._save_data_sync(sections={"users", "troubleshooting_test_results"})
                 return
             self._note_proactive_daypart_sent(current, current["last_sent"])
             opener_mode = planned_opener_mode_for_send
@@ -2121,7 +2190,15 @@ class DailyStateTickMixin:
                     schedule_now = _now_ts()
                     next_delay = self._friend_proactive_spread_delay_hours(current, now=schedule_now)
                     self._schedule_next_proactive(current, now=schedule_now, delay_hours=next_delay)
-            self._save_data_sync()
+            self._save_data_sync(
+                sections={
+                    "users",
+                    "proactive_candidate_pool",
+                    "proactive_audit_log",
+                    "proactive_runtime",
+                    "troubleshooting_test_results",
+                }
+            )
             current_snapshot = dict(current)
             if not simulation_active and visible_text:
                 memory_companion_proactive_payload = {

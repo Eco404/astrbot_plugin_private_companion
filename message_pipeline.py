@@ -1198,7 +1198,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
     if existing_reply_preview:
         async with self._data_lock:
             if self._is_duplicate_inbound_message(event, scope=f"group:{group_id}", sender_id=sender_id, text=text):
-                self._save_data_sync()
+                self._save_data_sync(sections={"inbound_debounce_stats"})
                 return
             group = self._get_group(group_id)
             group["umo"] = _single_line(getattr(event, "unified_msg_origin", ""), 160)
@@ -1213,7 +1213,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                 message_id=self._event_message_id(event),
                 event=event,
             )
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})
             group_snapshot = deepcopy(group)
         logger.info(
             "[PrivateCompanion] 已有其他链路回复,仅记录群聊观察: group=%s sender=%s text=%s result=%s",
@@ -1287,7 +1287,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
     group_snapshot_high_intensity: dict[str, Any] = {}
     async with self._data_lock:
         if self._is_duplicate_inbound_message(event, scope=f"group:{group_id}", sender_id=sender_id, text=text):
-            self._save_data_sync()
+            self._save_data_sync(sections={"inbound_debounce_stats"})
             event.stop_event()
             return
         group = self._get_group(group_id)
@@ -1384,7 +1384,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             now=received_ts,
         )
         if resting_mention_notice:
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})
         scene = self._infer_group_scene(event, group, sender_id=sender_id, sender_name=sender_name, text=text)
         if quoted_link_payload:
             scene["quoted_link_payload"] = True
@@ -1744,7 +1744,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                     message_id=self._event_message_id(event),
                     event=event,
                 )
-                self._save_data_sync()
+                self._save_data_sync(sections={"groups"})
                 logger.info(
                     "[PrivateCompanion] 群聊高强度消息已合并等待: group=%s sender=%s scope=%s recent_wakeups=%s floor=%s reason=%s wait=%ss text=%s",
                     group_id,
@@ -1788,7 +1788,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                     "recent_bot_replies": _safe_int(air_guard.get("recent_bot_replies"), 0, 0, 99),
                     "recent_polite_replies": _safe_int(air_guard.get("recent_polite_replies"), 0, 0, 99),
                 }
-                self._save_data_sync()
+                self._save_data_sync(sections={"groups"})
                 logger.info(
                     "[PrivateCompanion] 群聊读空气拦截回复: group=%s sender=%s reason=%s text=%s",
                     group_id,
@@ -1850,7 +1850,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                 kind="group_short_wakeup" if short_wait > 0 else "group_text",
             )
         ):
-            self._save_data_sync()
+            self._save_data_sync(sections={"smart_message_debounce"})
             event.stop_event()
             return
         self._capture_group_observation_once(
@@ -1891,7 +1891,18 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                 forwarded=group_reference_media_with_text,
             )
         share_scheduled = self._maybe_schedule_group_private_share(group_id, group, trigger_sender_id=sender_id)
-        self._save_data_sync()
+        save_sections = {"groups", "users", "proactive_candidate_pool"}
+        if isinstance(registration_payload, dict):
+            if registration_payload.get("updated_observation_profile"):
+                save_sections.add("worldbook_member_profiles")
+            if registration_payload.get("user_id"):
+                save_sections.update(
+                    {
+                        "worldbook_member_profiles",
+                        "worldbook_deleted_member_ids",
+                    }
+                )
+        self._save_data_sync(sections=save_sections)
         group_snapshot = deepcopy(group)
         group_snapshot_high_intensity = dict(high_intensity_state)
     await self._dispatch_due_atrelay_tasks(event, group_id, sender_id)
@@ -1956,4 +1967,4 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             current["interject_today"] = group_snapshot.get("interject_today", current.get("interject_today", 0))
             current["last_bot_interjection"] = group_snapshot.get("last_bot_interjection", current.get("last_bot_interjection", {}))
             current["repeat_follow_state"] = group_snapshot.get("repeat_follow_state", current.get("repeat_follow_state", {}))
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})

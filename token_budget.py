@@ -577,7 +577,7 @@ class TokenBudgetMixin:
         if now_ts - last_save >= 60:
             self._token_usage_last_save_at = now_ts
             try:
-                self._save_data_sync()
+                self._save_data_sync(sections={"token_usage"})
             except Exception:
                 pass
 
@@ -693,7 +693,7 @@ class TokenBudgetMixin:
         if now_ts - last_save >= 30:
             self._external_token_usage_last_save_at = now_ts
             try:
-                self._save_data_sync()
+                self._save_data_sync(sections={"token_usage"})
             except Exception:
                 pass
 
@@ -891,7 +891,7 @@ class TokenBudgetMixin:
         if now_ts - last_save >= 60:
             self._token_usage_last_save_at = now_ts
             try:
-                self._save_data_sync()
+                self._save_data_sync(sections={"token_usage"})
             except Exception:
                 pass
 

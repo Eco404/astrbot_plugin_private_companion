@@ -28,6 +28,19 @@ def _private_handler() -> ast.AsyncFunctionDef:
     )
 
 
+def _group_handler() -> ast.AsyncFunctionDef:
+    tree = ast.parse(
+        (ROOT / "message_pipeline.py").read_text(encoding="utf-8"),
+        filename="message_pipeline.py",
+    )
+    return next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "handle_group_message"
+    )
+
+
 def _if_node(function: ast.AST, condition: str) -> ast.If:
     return next(
         node
@@ -173,6 +186,31 @@ class IncrementalPersistenceCallsiteTests(unittest.TestCase):
                 for branch in branches
             )
         )
+
+    def test_group_registration_persists_worldbook_profile_sections(self) -> None:
+        source = ast.unparse(_group_handler())
+
+        self.assertIn("registration_payload", source)
+        self.assertIn("worldbook_member_profiles", source)
+        self.assertIn("worldbook_deleted_member_ids", source)
+        self.assertIn("self._save_data_sync(sections=save_sections)", source)
+
+    def test_proactive_message_has_no_implicit_full_save_calls(self) -> None:
+        tree = ast.parse(
+            (ROOT / "proactive_message.py").read_text(encoding="utf-8"),
+            filename="proactive_message.py",
+        )
+        bare_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_save_data_sync"
+            and not node.args
+            and not node.keywords
+        ]
+
+        self.assertEqual([], bare_calls)
 
     def test_private_image_buffer_persists_smart_learning_state(self) -> None:
         source = (ROOT / "private_image.py").read_text(encoding="utf-8")

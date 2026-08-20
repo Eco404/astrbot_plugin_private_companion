@@ -53,7 +53,7 @@ class _PhotoActionHarness(ProactiveMessageMixin):
     def _note_photo_generation_attempt(self, *_args, **_kwargs) -> None:
         return None
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, **_kwargs) -> None:
         return None
 
 

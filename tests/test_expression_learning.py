@@ -1331,7 +1331,7 @@ class PrivateEpisodeExpressionHarness(ExpressionLearningHarness):
         return ""
 
     @staticmethod
-    def _save_data_sync() -> None:
+    def _save_data_sync(**_kwargs) -> None:
         return None
 
 
@@ -1411,7 +1411,7 @@ class GroupEpisodeExpressionHarness(GroupObservationMixin, ExpressionLearningHar
         return ""
 
     @staticmethod
-    def _save_data_sync() -> None:
+    def _save_data_sync(**_kwargs) -> None:
         return None
 
 
@@ -1608,7 +1608,7 @@ class ExpressionScopeLifecyclePlugin(ExpressionLearningHarness):
         return str(user.get("relationship_role") or "friend")
 
     @staticmethod
-    def _save_data_sync() -> None:
+    def _save_data_sync(**_kwargs) -> None:
         return None
 
     def _refresh_expression_voice_profile(self) -> dict:
