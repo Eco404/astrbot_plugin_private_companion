@@ -1387,6 +1387,17 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
             [[type(item).__name__ for item in chunk] for chunk in chunks],
         )
 
+    def test_mixed_voice_text_keeps_reply_for_text_chunk(self):
+        harness = _TtsHarness()
+        chunks = harness._split_tts_chain_for_ordered_send(
+            [Reply(id="quoted-image"), Record(file="voice.wav"), Plain("对应正文")]
+        )
+
+        self.assertEqual(
+            [["Record"], ["Reply", "Plain"]],
+            [[type(item).__name__ for item in chunk] for chunk in chunks],
+        )
+
     async def test_record_chain_still_cleans_raw_tts_markup(self):
         harness = _TtsHarness()
         record = Record(file="voice.wav")

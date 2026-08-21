@@ -93,6 +93,7 @@ class _TtsRemainderHarness(TtsEnhancementMixin):
         self.enabled = True
         self.enable_tts_enhancement = True
         self.tts_generation_mode = "fast_tag"
+        self._reply_turn_generation_by_scope = {}
         self.background_jobs: list[tuple[Any, str]] = []
 
     @staticmethod
@@ -133,6 +134,12 @@ class _TtsRemainderHarness(TtsEnhancementMixin):
 
     def _create_lifecycle_background_task(self, operation: Any, *, label: str) -> None:
         self.background_jobs.append((operation, label))
+
+    _reply_turn_is_current = PrivateCompanionPlugin._reply_turn_is_current
+
+    @staticmethod
+    def _event_scope_key(event: Any) -> str:
+        return str(getattr(event, "unified_msg_origin", "") or "")
 
 
 class _ReplyInterceptionHarness:
@@ -288,6 +295,18 @@ class BackgroundTaskLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("tts_reply_remainder", harness.background_jobs[0][1])
         self.assertFalse(hasattr(event, "_private_companion_tts_reply_remainder"))
         harness.background_jobs[0][0].close()
+
+    async def test_passive_tts_remainder_is_dropped_after_new_inbound_turn(self) -> None:
+        harness = _TtsRemainderHarness()
+        event = self._tts_remainder_event()
+        event._private_companion_reply_turn_generation = 1
+        harness._reply_turn_generation_by_scope[event.unified_msg_origin] = 2
+        event._has_send_oper = True
+
+        await harness.apply_tts_enhancement_before_send(event)
+        await harness.release_tts_reply_remainder_after_send(event)
+
+        self.assertEqual([], harness.background_jobs)
 
     async def test_reply_interception_forward_uses_lifecycle_tracker(self) -> None:
         harness = _ReplyInterceptionHarness()

@@ -7916,6 +7916,17 @@ class PrivateCompanionPlugin(
         chunks = pending.get("chunks")
         if not isinstance(chunks, list) or not chunks:
             return
+        scope = self._event_scope_key(event)
+        generation_checker = getattr(self, "_reply_turn_is_current", None)
+        if callable(generation_checker) and not generation_checker(
+            scope,
+            pending.get("turn_generation", 0),
+        ):
+            logger.info(
+                "[PrivateCompanion] 新回合已到达，跳过旧 TTS 尾段: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
+            return
         operation = self._send_tts_chain_chunks_after_first(
             event,
             chunks,
@@ -9834,31 +9845,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 chunk for chunk in pending_chunks if isinstance(chunk, list)
             )
 
-        suppress_reply_reason = ""
-        if any(
+        has_voice = any(
             isinstance(component, Record)
             for chunk in delivery_chunks
             for component in chunk
-        ):
-            suppress_reply_reason = "voice_component"
-        else:
-            official_tts_checker = getattr(
-                self,
-                "_should_defer_segmenting_to_astrbot_tts",
-                None,
-            )
-            if callable(official_tts_checker):
-                try:
-                    if await official_tts_checker(event, result, chain):
-                        suppress_reply_reason = "framework_tts"
-                except Exception as exc:
-                    logger.debug(
-                        "[PrivateCompanion] 语音引用抑制预判失败: session=%s error=%s",
-                        _single_line(getattr(event, "unified_msg_origin", ""), 120)
-                        or "unknown",
-                        _single_line(exc, 120),
-                    )
-        if suppress_reply_reason:
+        )
+        has_visible_text = any(
+            isinstance(component, Plain)
+            and bool(str(getattr(component, "text", "") or "").strip())
+            for chunk in delivery_chunks
+            for component in chunk
+        )
+        # Keep quotes whenever a visible text companion exists. A voice
+        # component must not erase a quote needed by image/forward/vision
+        # consumers or by a delayed text chunk from this reply.
+        if has_voice and not has_visible_text:
             cleaned_chunks = [
                 self._without_reply_components(chunk) for chunk in delivery_chunks
             ]
@@ -9889,10 +9890,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             except Exception:
                 event.set_result(self._build_result_from_chain(primary_chunk))
             logger.info(
-                "[PrivateCompanion] 语音回复已自动屏蔽消息引用: session=%s reason=%s removed=%s",
+                "[PrivateCompanion] 纯语音回复已移除孤立消息引用: session=%s removed=%s",
                 _single_line(getattr(event, "unified_msg_origin", ""), 120)
                 or "unknown",
-                suppress_reply_reason,
                 removed_count,
             )
             return
@@ -9939,6 +9939,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         primary_chunk = bound_chunks[0]
         pending_index = 1
+        has_pending_delivery = False
         for attr_name in (
             "_private_companion_tts_reply_remainder",
             "_private_companion_reaction_expression_segmented_remainder",
@@ -9947,11 +9948,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             pending_chunks = pending.get("chunks") if isinstance(pending, dict) else None
             if not isinstance(pending_chunks, list):
                 continue
+            has_pending_delivery = True
             replacement_count = len(
                 [chunk for chunk in pending_chunks if isinstance(chunk, list)]
             )
             pending["chunks"] = bound_chunks[pending_index : pending_index + replacement_count]
             pending_index += replacement_count
+        if not has_pending_delivery and len(bound_chunks) > 1:
+            # This result is still delivered as one message. Do not discard
+            # text merely because quote binding split the in-memory chain.
+            primary_chunk = flatten_component_chunks(bound_chunks)
         try:
             result.chain = primary_chunk
         except Exception:
@@ -17550,7 +17556,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 event=event,
             )
             if captured:
-                self._schedule_data_save()
+                self._schedule_group_observation_save()
         activity_recorder = getattr(self, "_record_c3_inbound_activity", None)
         if callable(activity_recorder):
             activity_recorder(
@@ -17674,7 +17680,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 group_id=group_id,
                 source="group_observation",
             )
-            self._schedule_data_save()
+            self._schedule_group_observation_save()
         if not self._proactive_only_blocks_passive_event(event, "group_repeat_early"):
             original_repeat_state = deepcopy(repeat_group_snapshot.get("repeat_follow_state", {}))
             original_interject_at = _safe_float(repeat_group_snapshot.get("last_interject_at"), 0)

@@ -2964,6 +2964,11 @@ TTS 朗读文本：
                         "normalized": normalized,
                         "fallback_plain": visible_text,
                         "started_at": started_at,
+                        "turn_generation": _safe_int(
+                            getattr(event, "_private_companion_reply_turn_generation", 0),
+                            0,
+                            0,
+                        ),
                     },
                 )
                 event.set_result(self._build_result_from_chain(primary_chain))
@@ -3073,6 +3078,11 @@ TTS 朗读文本：
             pending = {
                 "chunks": ordered_chunks[1:],
                 "started_at": remainder_started_at,
+                "turn_generation": _safe_int(
+                    getattr(event, "_private_companion_reply_turn_generation", 0),
+                    0,
+                    0,
+                ),
             }
             proactive_umo = _single_line(
                 getattr(event, "_private_companion_proactive_delivery_umo", ""),
@@ -3301,9 +3311,21 @@ TTS 朗读文本：
         ]
 
     def _suppress_reply_components_for_voice_chain(self, chain: list[Any]) -> list[Any]:
-        """Voice replies must not retain a quote, including on transcript chunks."""
+        """Drop quotes only when a voice chain has no visible text companion.
+
+        A quote on a mixed voice/text reply remains meaningful to the platform
+        and to downstream image/forward/vision consumers, so it must be moved
+        to the text chunk instead of being removed merely because a ``Record``
+        is present.
+        """
         working_chain = list(chain or [])
         if not any(isinstance(component, Record) for component in working_chain):
+            return working_chain
+        if any(
+            isinstance(component, Plain)
+            and bool(str(getattr(component, "text", "") or "").strip())
+            for component in working_chain
+        ):
             return working_chain
         return self._without_reply_components(working_chain)
 
@@ -3570,10 +3592,24 @@ TTS 朗读文本：
         lock_getter = getattr(self, "_segmented_remainder_lock", None)
         lock = lock_getter(scope) if callable(lock_getter) else asyncio.Lock()
         previous_text = ""
+        turn_generation = _safe_int(
+            getattr(event, "_private_companion_reply_turn_generation", 0),
+            0,
+            0,
+        )
+        generation_checker = getattr(self, "_reply_turn_is_current", None)
         async with lock:
             for chunk in expanded_chunks:
                 if not chunk:
                     continue
+                if callable(generation_checker) and not generation_checker(scope, turn_generation):
+                    logger.info(
+                        "[PrivateCompanion] 新回合已到达，停止旧 TTS 尾段: session=%s sent=%s/%s",
+                        _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                        sent_chunks,
+                        total_chunks,
+                    )
+                    return
                 delay = 0.45
                 if previous_text and len(expanded_chunks) > 1:
                     calc_interval = getattr(self, "_calc_segmented_proactive_interval", None)
@@ -3587,6 +3623,12 @@ TTS 朗读文本：
                         except Exception:
                             delay = 0.45
                 await asyncio.sleep(delay)
+                if callable(generation_checker) and not generation_checker(scope, turn_generation):
+                    logger.info(
+                        "[PrivateCompanion] 等待期间收到新回合，停止旧 TTS 尾段: session=%s",
+                        _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                    )
+                    return
                 proactive_umo = _single_line(
                     getattr(event, "_private_companion_proactive_delivery_umo", ""),
                     180,
@@ -3676,6 +3718,24 @@ TTS 朗读文本：
         event: Any,
         pending: dict[str, Any],
     ) -> None:
+        scope_getter = getattr(self, "_event_scope_key", None)
+        scope = ""
+        if callable(scope_getter):
+            try:
+                scope = _single_line(scope_getter(event), 160)
+            except Exception:
+                scope = ""
+        scope = scope or _single_line(getattr(event, "unified_msg_origin", ""), 160)
+        generation_checker = getattr(self, "_reply_turn_is_current", None)
+        if callable(generation_checker) and not generation_checker(
+            scope,
+            pending.get("turn_generation", 0),
+        ):
+            logger.info(
+                "[PrivateCompanion] 新回合已到达，跳过旧表情 TTS: session=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            )
+            return
         normalized = str(pending.get("normalized") or "").strip()
         fallback_plain = self._sanitize_tts_visible_text(
             pending.get("fallback_plain"),

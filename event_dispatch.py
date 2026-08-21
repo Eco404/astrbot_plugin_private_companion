@@ -1231,6 +1231,16 @@ class EventDispatchMixin:
             setattr(event, "_private_companion_inbound_ts", noted_at)
         except Exception:
             pass
+        generation_map = getattr(self, "_reply_turn_generation_by_scope", None)
+        if not isinstance(generation_map, dict):
+            generation_map = {}
+            self._reply_turn_generation_by_scope = generation_map
+        generation = _safe_int(generation_map.get(scope), 0, 0) + 1
+        generation_map[scope] = generation
+        try:
+            setattr(event, "_private_companion_reply_turn_generation", generation)
+        except Exception:
+            pass
         activity = getattr(self, "_recent_inbound_activity_by_scope", None)
         if not isinstance(activity, dict):
             activity = {}
@@ -1248,6 +1258,19 @@ class EventDispatchMixin:
             )
             for key, _ in stale[: len(activity) - 500]:
                 activity.pop(key, None)
+
+    def _reply_turn_generation(self, scope: str) -> int:
+        """Return the latest inbound turn number for a conversation scope."""
+        value = getattr(self, "_reply_turn_generation_by_scope", None)
+        if not isinstance(value, dict):
+            return 0
+        return _safe_int(value.get(_single_line(scope, 160)), 0, 0)
+
+    def _reply_turn_is_current(self, scope: str, generation: Any) -> bool:
+        expected = _safe_int(generation, 0, 0)
+        if expected <= 0:
+            return True
+        return self._reply_turn_generation(scope) == expected
 
     def _scope_has_new_inbound_activity(self, scope: str, since_ts: float, *, ignore_self: bool = True) -> bool:
         activity = getattr(self, "_recent_inbound_activity_by_scope", None)

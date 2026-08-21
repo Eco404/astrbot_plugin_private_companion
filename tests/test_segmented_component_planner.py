@@ -162,7 +162,7 @@ class SegmentedComponentPlannerTests(unittest.TestCase):
 
 
 class SegmentedQuoteBindingIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_voice_reply_drops_quote_from_pending_text_chunk(self):
+    async def test_voice_reply_keeps_quote_for_pending_text_chunk(self):
         from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 
         plugin = object.__new__(PrivateCompanionPlugin)
@@ -201,11 +201,35 @@ class SegmentedQuoteBindingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             [type(component).__name__ for component in result.chain],
         )
         self.assertEqual(
-            [["At", "Plain"]],
+            [["Reply", "At", "Plain"]],
             [
                 [type(component).__name__ for component in chunk]
                 for chunk in event._private_companion_tts_reply_remainder["chunks"]
             ],
+        )
+
+    async def test_voice_and_text_keep_inbound_quote_for_downstream_consumers(self):
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        plugin = object.__new__(PrivateCompanionPlugin)
+        plugin.enabled = True
+        result = SimpleNamespace(
+            chain=[Reply(id="quoted-image"), Record(file="voice.wav"), Plain("看起来不错。")],
+            is_llm_result=lambda: True,
+        )
+
+        class Event:
+            unified_msg_origin = "default:GroupMessage:10001"
+
+            @staticmethod
+            def get_result():
+                return result
+
+        await PrivateCompanionPlugin.attach_group_reply_quote(plugin, Event())
+
+        self.assertEqual(
+            ["Record", "Reply", "Plain"],
+            [type(component).__name__ for component in result.chain],
         )
 
     async def test_voice_only_reply_drops_orphan_quote_component(self):

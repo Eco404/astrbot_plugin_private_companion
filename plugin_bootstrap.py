@@ -2016,6 +2016,9 @@ def initialize_plugin_runtime(self: Any) -> None:
     self._last_input_status_at: dict[str, float] = {}
     self._passive_input_status_tasks: dict[str, asyncio.Task] = {}
     self._recent_inbound_activity_by_scope: dict[str, dict[str, Any]] = {}
+    # Monotonic per-conversation turn marker used to stop delayed TTS/remainder
+    # tasks from delivering content belonging to an older inbound message.
+    self._reply_turn_generation_by_scope: dict[str, int] = {}
     self._recent_outfit_command_sends: dict[str, float] = {}
     self._startup_maintenance_task: asyncio.Task | None = None
     self._startup_background_tasks: dict[str, asyncio.Task] = {}
