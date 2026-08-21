@@ -658,7 +658,7 @@ class GroupObservationMixin:
         async with self._data_lock:
             group = self._get_group(group_id)
             self._apply_group_role_member_list(group, raw_members, self_id=self_id, now=now)
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})
         return True
 
     def _group_injection_guard_threshold(self) -> int:
@@ -4004,7 +4004,7 @@ class GroupObservationMixin:
             current["last_expression_rule_attempt_at"] = now
             current["last_expression_rule_batch_key"] = batch_key
             current["last_expression_rule_candidate_count"] = max(0, int(candidate_count))
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups", "expression_learning_runtime"})
         return True
 
     async def _maybe_refresh_group_episode(self, group_id: str, group: dict[str, Any]) -> None:
@@ -4149,7 +4149,10 @@ class GroupObservationMixin:
             current["group_episode_retry_after"] = 0
             current["group_episode_last_error"] = ""
             current["group_episode_running_at"] = 0
-            self._save_data_sync()
+            save_sections = {"groups"}
+            if expression_rules:
+                save_sections.add("expression_voice_profile")
+            self._save_data_sync(sections=save_sections)
 
     async def _maybe_refresh_group_slang_meanings(self, group_id: str, group: dict[str, Any]) -> None:
         if not self.enable_group_slang_meanings:
@@ -4300,7 +4303,7 @@ class GroupObservationMixin:
             current["group_slang_running_at"] = 0
             if removed_uncertain:
                 logger.info("[PrivateCompanion] 已清理低置信度群黑话释义: group=%s removed=%s", group_id, removed_uncertain)
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})
 
     async def _try_acquire_group_background_task(
         self,
@@ -4323,7 +4326,7 @@ class GroupObservationMixin:
             if running_at > 0 and now - running_at < 10 * 60:
                 return False
             current[running_key] = now
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})
         return True
 
     async def _mark_group_background_retry(self, group_id: str, task: str, now: float, error: Any) -> None:
@@ -4338,7 +4341,7 @@ class GroupObservationMixin:
                 current[retry_key] = 0
                 current[error_key] = ""
                 current[running_key] = 0
-                self._save_data_sync()
+                self._save_data_sync(sections={"groups"})
             logger.debug(
                 "[PrivateCompanion] 群黑话释义 JSON 解析失败,已跳过本轮刷新: group=%s",
                 group_id,
@@ -4354,7 +4357,7 @@ class GroupObservationMixin:
             current[retry_key] = now + delay
             current[error_key] = error_text
             current[running_key] = 0
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})
         logger.warning(
             "[PrivateCompanion] 群聊后台整理失败,已进入短冷却避免重复请求: group=%s task=%s retry=%ss error=%s",
             group_id,
@@ -4446,7 +4449,7 @@ class GroupObservationMixin:
                         web_state["cursor"] = 0
                     web_state["last_error"] = error_text
                     web_state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self._save_data_sync()
+                self._save_data_sync(sections={"groups"})
             logger.info(
                 "[PrivateCompanion] 群黑话联网参考单词搜索失败并冷却: group=%s term=%s error=%s",
                 group_id,
@@ -4484,7 +4487,7 @@ class GroupObservationMixin:
                 except ValueError:
                     web_state["cursor"] = 0
                 web_state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})
         if lines:
             logger.info("[PrivateCompanion] 群黑话联网参考已收集: group=%s term=%s", group_id, term)
         return "\n".join(lines)[:1800]

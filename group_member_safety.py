@@ -615,7 +615,7 @@ class GroupMemberSafetyMixin:
                     blocked_now = True
                     if events and isinstance(events[-1], dict) and _safe_float(events[-1].get("ts"), 0.0) == now:
                         events[-1]["blocked"] = True
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})
         if counted:
             setattr(event, "_private_companion_member_safety_counted", True)
         return {

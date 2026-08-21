@@ -527,7 +527,15 @@ class DailyStateMixin(DailyStateTickMixin):
                 if plan_changed:
                     self._refresh_daily_state_location_from_plan(plan=current_plan)
                 if plan_changed or detail_day_changed:
-                    self._save_data_sync()
+                    self._save_data_sync(
+                        sections={
+                            "daily_plan",
+                            "daily_state",
+                            "detail_enhanced_day",
+                            "detail_enhanced_segments",
+                            "daily_story_plan",
+                        }
+                    )
                 source = _single_line(current_plan.get("source"), 40).lower()
                 retry_after = _safe_float(current_plan.get("retry_after"), 0.0)
                 fallback_retry_due = source.startswith("fallback") and (
@@ -544,7 +552,15 @@ class DailyStateMixin(DailyStateTickMixin):
                 if plan_changed:
                     self._refresh_daily_state_location_from_plan(plan=current_plan)
                 if plan_changed or detail_day_changed:
-                    self._save_data_sync()
+                    self._save_data_sync(
+                        sections={
+                            "daily_plan",
+                            "daily_state",
+                            "detail_enhanced_day",
+                            "detail_enhanced_segments",
+                            "daily_story_plan",
+                        }
+                    )
                 return current_plan
             if not force and not known_users:
                 return current_plan if current_plan.get("date") == today else None
@@ -554,7 +570,15 @@ class DailyStateMixin(DailyStateTickMixin):
                     if plan_changed:
                         self._refresh_daily_state_location_from_plan(plan=current_plan)
                     if plan_changed or detail_day_changed:
-                        self._save_data_sync()
+                        self._save_data_sync(
+                            sections={
+                                "daily_plan",
+                                "daily_state",
+                                "detail_enhanced_day",
+                                "detail_enhanced_segments",
+                                "daily_story_plan",
+                            }
+                        )
                     return current_plan
                 return None
 
@@ -563,7 +587,15 @@ class DailyStateMixin(DailyStateTickMixin):
             self.data["daily_plan"] = plan
             self._sync_detail_enhancement_day_locked(plan.get("date"), reset=True)
             self._refresh_daily_state_location_from_plan(plan=plan)
-            self._save_data_sync()
+            self._save_data_sync(
+                sections={
+                    "daily_plan",
+                    "daily_state",
+                    "detail_enhanced_day",
+                    "detail_enhanced_segments",
+                    "daily_story_plan",
+                }
+            )
         outfit_generator = getattr(self, "_ensure_daily_outfit_photo", None)
         if callable(outfit_generator):
             try:
@@ -619,7 +651,13 @@ class DailyStateMixin(DailyStateTickMixin):
                 self.data["daily_diary_failed_day"] = request_day
                 self.data["daily_diary_failed_at"] = _now_ts()
                 self.data["daily_diary_last_error"] = _single_line(exc, 180)
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={
+                        "daily_diary_failed_day",
+                        "daily_diary_failed_at",
+                        "daily_diary_last_error",
+                    }
+                )
             if force:
                 raise
             logger.warning(
@@ -745,7 +783,19 @@ class DailyStateMixin(DailyStateTickMixin):
             story_plan = diary.get("story_plan") if isinstance(diary, dict) else None
             if isinstance(story_plan, dict):
                 self.data["daily_story_plan"] = story_plan
-            self._save_data_sync()
+            self._save_data_sync(
+                sections={
+                    "bot_diaries",
+                    "diary_generated_day",
+                    "daily_diary_deleted_days",
+                    "daily_diary_failed_day",
+                    "daily_diary_failed_at",
+                    "daily_diary_last_error",
+                    "daily_diary_postprocess_error",
+                    "dream_fragments",
+                    "daily_story_plan",
+                }
+            )
         diary_recorder = getattr(self, "_memory_companion_record_daily_diary", None)
         if callable(diary_recorder):
             try:
@@ -782,7 +832,9 @@ class DailyStateMixin(DailyStateTickMixin):
             segments = self._collect_due_detail_segments(plan, enhanced, force=force)
             if not segments:
                 if sanitized_existing:
-                    self._save_data_sync()
+                    self._save_data_sync(
+                        sections={"detail_enhanced_segments", "daily_story_plan"}
+                    )
                 return None
             for segment in segments:
                 generation_id = uuid.uuid4().hex
@@ -793,7 +845,7 @@ class DailyStateMixin(DailyStateTickMixin):
                     "started_ts": _now_ts(),
                     "generation_id": generation_id,
                 }
-            self._save_data_sync()
+            self._save_data_sync(sections={"detail_enhanced_segments"})
 
         last_detail = None
         for segment in segments:
@@ -830,7 +882,7 @@ class DailyStateMixin(DailyStateTickMixin):
                             "interaction_updates": [],
                             "coverage_repair_done": bool(segment.get("_coverage_repair")),
                         }
-                        self._save_data_sync()
+                        self._save_data_sync(sections={"detail_enhanced_segments"})
                     else:
                         retry_after = ""
                 if failure_is_current:
@@ -902,12 +954,23 @@ class DailyStateMixin(DailyStateTickMixin):
                     segment=segment,
                 )
                 self._reschedule_users_for_new_detail_events(segment)
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={
+                        "daily_plan",
+                        "daily_state",
+                        "detail_enhanced_segments",
+                        "detail_enhanced_history",
+                        "daily_story_plan",
+                        "daily_story_plan_history",
+                        "users",
+                        "self_meal_log",
+                    }
+                )
                 last_detail = detail
             for meal_entry in meal_entries:
                 await self._memory_companion_record_self_meal(meal_entry)
             if meal_entries:
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"self_meal_log"})
             await self._apply_detail_presence_status(segment, detail)
         return last_detail
 
@@ -1381,7 +1444,16 @@ class DailyStateMixin(DailyStateTickMixin):
             enhanced[key] = cancelled
             story = self._rebuild_story_plan_from_detail_snapshots(str(plan.get("date") or _today_key()))
             self._remember_detail_enhancement_history(str(plan.get("date") or _today_key()), enhanced, story)
-            self._save_data_sync()
+            self._save_data_sync(
+                sections={
+                    "daily_plan",
+                    "detail_enhanced_day",
+                    "detail_enhanced_segments",
+                    "detail_enhanced_history",
+                    "daily_story_plan",
+                    "daily_story_plan_history",
+                }
+            )
             return True, f"已取消：{label}"
 
     async def _regenerate_daily_plan_segment_by_selector(
@@ -1453,7 +1525,9 @@ class DailyStateMixin(DailyStateTickMixin):
                     "regenerated": True,
                     "generation_id": generation_id,
                 }
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={"daily_plan", "detail_enhanced_day", "detail_enhanced_segments"}
+                )
 
             detail = await generator(self, segment, plan, state)
             if not isinstance(detail, dict) or not isinstance(detail.get("today_events"), list) or not detail.get("today_events"):
@@ -1495,7 +1569,17 @@ class DailyStateMixin(DailyStateTickMixin):
                     detail=detail,
                     segment=segment,
                 )
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={
+                        "daily_plan",
+                        "daily_state",
+                        "detail_enhanced_day",
+                        "detail_enhanced_segments",
+                        "detail_enhanced_history",
+                        "daily_story_plan",
+                        "daily_story_plan_history",
+                    }
+                )
                 label = self._schedule_segment_label(segment)
             return True, f"已重新细化：{label}", detail
         except Exception as exc:
@@ -1522,7 +1606,9 @@ class DailyStateMixin(DailyStateTickMixin):
                                 live_item[field] = value
                             else:
                                 live_item.pop(field, None)
-                    self._save_data_sync()
+                    self._save_data_sync(
+                        sections={"daily_plan", "detail_enhanced_segments"}
+                    )
             return False, _single_line(exc, 180) or "局部重生成失败。", {}
 
     def _detail_generation_is_current(self, segment: dict[str, Any], generation_id: str) -> bool:
@@ -1944,7 +2030,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 state["detail_key"] = key
                 state["date"] = _today_key()
                 state["plan_date"] = str(self.data.get("detail_enhanced_day") or "")
-                self._save_data_sync()
+                self._save_data_sync(sections={"qq_presence_state"})
                 return
             ok, note = await self._set_qq_online_presence("online")
             state["detail_key"] = key
@@ -1957,7 +2043,7 @@ class DailyStateMixin(DailyStateTickMixin):
             state["ok"] = bool(ok)
             state["note"] = _single_line(note, 120)
             state["managed_by_plugin"] = True
-            self._save_data_sync()
+            self._save_data_sync(sections={"qq_presence_state"})
             return
         if mode in {"custom", "自定义", "自定义状态"}:
             ok, note = await self._set_qq_custom_presence(custom_text)
@@ -1978,7 +2064,7 @@ class DailyStateMixin(DailyStateTickMixin):
         state["ok"] = bool(ok)
         state["note"] = _single_line(note, 120)
         state["managed_by_plugin"] = True
-        self._save_data_sync()
+        self._save_data_sync(sections={"qq_presence_state"})
 
     async def _ensure_current_detail_presence_status(self) -> None:
         plan = self.data.get("daily_plan", {})
@@ -1993,7 +2079,7 @@ class DailyStateMixin(DailyStateTickMixin):
         snapshot = enhanced.get(str(segment.get("key") or ""))
         if not isinstance(snapshot, dict) or snapshot.get("status") != "done":
             if self._refresh_daily_state_location_from_plan(plan=plan, segment=segment):
-                self._save_data_sync()
+                self._save_data_sync(sections={"daily_state"})
             if self.enable_qq_presence_sync:
                 # Clear a previous plugin-managed segment status while the
                 # new segment is still being generated. The completed detail
@@ -2001,7 +2087,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 await self._apply_detail_presence_status(segment, {})
             return
         if self._refresh_daily_state_location_from_plan(plan=plan, detail=snapshot, segment=segment):
-            self._save_data_sync()
+            self._save_data_sync(sections={"daily_state"})
         if not self.enable_qq_presence_sync:
             return
         await self._apply_detail_presence_status(segment, snapshot)
@@ -3361,13 +3447,21 @@ class DailyStateMixin(DailyStateTickMixin):
                     return state
                 async with self._data_lock:
                     before = json.dumps(self.data.get("daily_state", {}), ensure_ascii=False, sort_keys=True, default=str)
-                    self._cleanup_expired_conditions()
+                    deleted_sections = self._cleanup_expired_conditions() or set()
                     self._ensure_time_based_hunger_condition()
                     state = self._compose_state_from_conditions(weather)
                     after = json.dumps(state, ensure_ascii=False, sort_keys=True, default=str)
-                    if before != after:
+                    if before != after or deleted_sections:
                         self.data["daily_state"] = state
-                        self._save_data_sync()
+                        save_sections = {
+                            "daily_state",
+                            "state_conditions",
+                            "body_cycle_state",
+                        } - set(deleted_sections)
+                        self._save_data_sync(
+                            sections=save_sections,
+                            deleted_sections=deleted_sections,
+                        )
                     return state
             cached_weather = self.data.get("daily_weather", {})
             weather = cached_weather if isinstance(cached_weather, dict) and cached_weather.get("date") == today else {
@@ -3393,16 +3487,25 @@ class DailyStateMixin(DailyStateTickMixin):
                 state["date"] = today
                 state["weather"] = self._weather_summary_text(weather)
                 self.data["daily_state"] = state
-                self._save_data_sync()
+                self._save_data_sync(sections={"daily_state"})
                 return state
 
             needs_generation = force or self.data.get("state_generated_day") != today
             if not needs_generation:
-                self._cleanup_expired_conditions()
+                deleted_sections = self._cleanup_expired_conditions() or set()
                 self._ensure_time_based_hunger_condition()
                 state = self._compose_state_from_conditions(weather)
                 self.data["daily_state"] = state
-                self._save_data_sync()
+                save_sections = {
+                    "daily_state",
+                    "state_conditions",
+                    "body_cycle_state",
+                    "hunger_window_attempts",
+                } - set(deleted_sections)
+                self._save_data_sync(
+                    sections=save_sections,
+                    deleted_sections=deleted_sections,
+                )
                 return state
 
         generation_day = _today_key()
@@ -3413,10 +3516,11 @@ class DailyStateMixin(DailyStateTickMixin):
         )
 
         async with self._data_lock:
+            deleted_sections: set[str] = set()
             if not force and self.data.get("state_generated_day") == generation_day:
-                self._cleanup_expired_conditions()
+                deleted_sections = self._cleanup_expired_conditions() or set()
             else:
-                self._cleanup_expired_conditions()
+                deleted_sections = self._cleanup_expired_conditions() or set()
                 if force:
                     self.data["state_conditions"] = []
                 dream_pick = deferred_updates.get("dream_pick")
@@ -3442,7 +3546,18 @@ class DailyStateMixin(DailyStateTickMixin):
             self._ensure_time_based_hunger_condition()
             state = self._compose_state_from_conditions(weather)
             self.data["daily_state"] = state
-            self._save_data_sync()
+            save_sections = {
+                "daily_state",
+                "state_conditions",
+                "state_generated_day",
+                "daily_dream",
+                "body_cycle_state",
+                "hunger_window_attempts",
+            } - set(deleted_sections)
+            self._save_data_sync(
+                sections=save_sections,
+                deleted_sections=deleted_sections,
+            )
             return state
 
     async def _generate_state_conditions(
@@ -4493,7 +4608,7 @@ class DailyStateMixin(DailyStateTickMixin):
             )
             state = self._compose_state_from_conditions(self.data.get("daily_weather", {}))
             self.data["daily_state"] = state
-            self._save_data_sync()
+            self._save_data_sync(sections={"daily_state", "state_conditions"})
         return True, f"已增添状态：{label}（约持续 {duration_hours} 小时）"
 
     def _recent_diary_tags(self) -> set[str]:
@@ -4783,11 +4898,17 @@ class DailyStateMixin(DailyStateTickMixin):
             state["last_observation"] = self._environment_weather_observation(current)
             state["initialized"] = True
             if not initialized:
-                self._schedule_data_save(delay=0.5)
+                self._schedule_data_save(
+                    sections={"environment_change_awareness", "daily_weather"},
+                    delay=0.5,
+                )
                 return
             change = self._detect_environment_weather_change(previous, current)
             if not change:
-                self._schedule_data_save(delay=0.5)
+                self._schedule_data_save(
+                    sections={"environment_change_awareness", "daily_weather"},
+                    delay=0.5,
+                )
                 return
             fingerprint = _single_line(change.get("fingerprint"), 160)
             cooldown_minutes = max(
@@ -4810,7 +4931,10 @@ class DailyStateMixin(DailyStateTickMixin):
             # 形同虚设（实测 30-40 分钟就 offer 一条）。score>=90 的极端变化保留逃生口。
             too_soon = now - last_prompted_at < cooldown_minutes * 60 and _safe_int(change.get("score"), 0) < 90
             if recently_repeated or too_soon:
-                self._schedule_data_save(delay=0.5)
+                self._schedule_data_save(
+                    sections={"environment_change_awareness", "daily_weather"},
+                    delay=0.5,
+                )
                 return
             offered = 0
             async with self._data_lock:
@@ -4822,7 +4946,14 @@ class DailyStateMixin(DailyStateTickMixin):
                     state["last_prompted_at"] = now
                     state["last_prompted_users"] = offered
                     recent_fingerprints[fingerprint] = now
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={
+                        "environment_change_awareness",
+                        "daily_weather",
+                        "users",
+                        "proactive_candidate_pool",
+                    }
+                )
             if offered:
                 logger.info(
                     "[PrivateCompanion] 环境突变已进入即时主动候选: kind=%s targets=%s topic=%s",
@@ -4901,7 +5032,7 @@ class DailyStateMixin(DailyStateTickMixin):
         }
         async with self._data_lock:
             self.data["daily_weather"] = weather
-            self._save_data_sync()
+            self._save_data_sync(sections={"daily_weather"})
         return weather
 
     @staticmethod
@@ -5105,7 +5236,7 @@ class DailyStateMixin(DailyStateTickMixin):
             payload = self._load_yesterday_screen_diary_context(yesterday)
         async with self._data_lock:
             self.data["screen_diary_context"] = payload
-            self._save_data_sync()
+            self._save_data_sync(sections={"screen_diary_context"})
         return payload
 
     def _load_yesterday_screen_diary_context(self, target_date: date) -> dict[str, Any]:
@@ -5727,7 +5858,7 @@ class DailyStateMixin(DailyStateTickMixin):
             saver = getattr(self, "_save_data_sync", None)
             if callable(saver):
                 try:
-                    saver()
+                    saver(sections={"qweather_location"})
                 except Exception as exc:
                     logger.debug("[PrivateCompanion] 保存和风天气地点缓存失败: %s", _single_line(exc, 160))
 
@@ -6365,7 +6496,7 @@ class DailyStateMixin(DailyStateTickMixin):
             saver = getattr(self, "_save_data_sync", None)
             if callable(saver):
                 try:
-                    saver()
+                    saver(sections={"weather_alerts"})
                 except Exception as exc:
                     logger.debug("[PrivateCompanion] 保存天气预警缓存失败: %s", _single_line(exc, 160))
         return result
@@ -6888,7 +7019,13 @@ class DailyStateMixin(DailyStateTickMixin):
             state["last_offered_count"] = offered
             saver = getattr(self, "_save_data_sync", None)
             if callable(saver):
-                saver()
+                saver(
+                    sections={
+                        "weather_alert_awareness",
+                        "users",
+                        "proactive_candidate_pool",
+                    }
+                )
             return deepcopy(result)
 
     @classmethod
@@ -8200,7 +8337,7 @@ class DailyStateMixin(DailyStateTickMixin):
         if changed:
             state["updated_ts"] = now
             self.data["food_menu"] = state
-            self._save_data_sync()
+            self._save_data_sync(sections={"food_menu"})
 
     def _food_menu_candidates_for_prompt(self, text: str, *, limit: int = 3, user: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         profile = self._food_menu_query_profile(text, user=user)
@@ -8976,7 +9113,9 @@ class DailyStateMixin(DailyStateTickMixin):
                     changed = True
             if changed:
                 self.data["memo_notes"] = notes[-200:]
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={"memo_notes", "users", "proactive_candidate_pool"}
+                )
 
     def _synchronize_body_cycle_strategy(self, conditions: list[Any], now: float) -> list[Any]:
         advanced_enabled = self._advanced_cycle_enabled()
@@ -9081,12 +9220,13 @@ class DailyStateMixin(DailyStateTickMixin):
         )
         return kept
 
-    def _cleanup_expired_conditions(self):
+    def _cleanup_expired_conditions(self) -> set[str]:
         now = _now_ts()
+        had_body_cycle_state = "body_cycle_state" in self.data
         conditions = self.data.setdefault("state_conditions", [])
         if not isinstance(conditions, list):
             self.data["state_conditions"] = []
-            return
+            return set()
         profile = self._persona_state_profile()
         if not profile.get("allow_cycle", False):
             before_count = len(conditions)
@@ -9129,6 +9269,9 @@ class DailyStateMixin(DailyStateTickMixin):
         active = self._reconcile_advanced_cycle_condition(active, now)
         active = self._prune_active_hunger_conditions(active, now)
         self.data["state_conditions"] = active
+        return {
+            "body_cycle_state"
+        } if had_body_cycle_state and "body_cycle_state" not in self.data else set()
 
     def _prune_active_hunger_conditions(self, conditions: list[dict[str, Any]], now: float) -> list[dict[str, Any]]:
         hunger_items = [
@@ -9918,7 +10061,7 @@ class DailyStateMixin(DailyStateTickMixin):
             summary = await self._summarize_yesterday_conversation_for_schedule(raw_text)
         async with self._data_lock:
             self.data["yesterday_conversation_summary"] = summary
-            self._save_data_sync()
+            self._save_data_sync(sections={"yesterday_conversation_summary"})
         return summary
 
     async def _collect_yesterday_conversation_text(self) -> str:
@@ -11824,7 +11967,7 @@ class DailyStateMixin(DailyStateTickMixin):
         state["location_source"] = "dialogue_override"
         state["location_updated_at"] = self._environment_now().strftime("%H:%M")
         state["location_override_ts"] = _now_ts()
-        self._save_data_sync()
+        self._save_data_sync(sections={"daily_state"})
 
     def _current_detail_model_location(self) -> str:
         segment = self._current_detail_segment_for_update()
@@ -12978,20 +13121,20 @@ class DailyStateMixin(DailyStateTickMixin):
             if not force and now_ts - _safe_float(state.get("last_check_ts"), 0) < 20 * 60:
                 if profile_changed:
                     state["updated_ts"] = now_ts
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"skill_growth"})
                 return
             state["last_check_ts"] = now_ts
             plan = self.data.get("daily_plan", {})
             if not isinstance(plan, dict):
                 if profile_changed:
                     state["updated_ts"] = now_ts
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"skill_growth"})
                 return
             items = plan.get("items") if isinstance(plan.get("items"), list) else plan.get("schedule")
             if not isinstance(items, list):
                 if profile_changed:
                     state["updated_ts"] = now_ts
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"skill_growth"})
                 return
             day_key = _single_line(plan.get("date"), 20) or _today_key()
             processed = state.get("processed_schedule_keys") if isinstance(state.get("processed_schedule_keys"), list) else []
@@ -13042,7 +13185,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 del processed[:-120]
             if changed:
                 state["updated_ts"] = now_ts
-                self._save_data_sync()
+                self._save_data_sync(sections={"skill_growth"})
 
     @staticmethod
     def _personal_goal_status(value: Any) -> str:
@@ -13287,7 +13430,14 @@ class DailyStateMixin(DailyStateTickMixin):
                     changed = True
             if changed:
                 state["updated_at"] = now
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={
+                        "personal_goal_state",
+                        "personal_goals",
+                        "users",
+                        "proactive_candidate_pool",
+                    }
+                )
 
     def _format_skill_growth_for_prompt(self, limit: int = 8) -> str:
         if not self.enable_skill_growth_simulation:
@@ -14260,7 +14410,7 @@ class DailyStateMixin(DailyStateTickMixin):
                     current["job_id"] = metadata["job_id"]
                     current["cron_job_id"] = metadata["job_id"]
                 self._clear_llm_timer_internal_plan_fields(current_user)
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
         logger.info(
             "[PrivateCompanion] 官方临时预约开始执行: user=%s timer=%s job=%s",
             user_id,
@@ -14306,7 +14456,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 current["status"] = "delivered" if succeeded else "delivery_failed"
                 current["delivery_at"] = _now_ts()
                 current["delivery_error"] = "" if succeeded else "send_message_to_user 未确认发送成功"
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
         return True
 
     async def _complete_official_llm_timer_event(self, event: Any) -> bool:
@@ -14333,7 +14483,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 else:
                     return False
                 current["completed_at"] = _now_ts()
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
         return True
 
     def _expire_stale_official_llm_timers_locked(self, *, now: float | None = None) -> int:
@@ -14476,7 +14626,7 @@ class DailyStateMixin(DailyStateTickMixin):
                         "status": "cancel_skipped",
                         "error": "没有可取消的对话临时预约",
                     }
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
                     return False
 
             runtime_supported, runtime_status = await self._official_llm_timer_job_runtime(existing_job_id)
@@ -14498,7 +14648,7 @@ class DailyStateMixin(DailyStateTickMixin):
                         current["cancel_status"] = "not_found"
                         current["cancel_error"] = "官方任务已结束或不存在，无法确认取消"
                     current.pop("cancel_requested_at", None)
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
                 return False
 
             async with self._data_lock:
@@ -14513,7 +14663,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 current["cancel_origin"] = source_origin
                 current["cancel_topic"] = _single_line(payload.get("topic") or "取消临时约定", 60)
                 current["cancel_source_text"] = _single_line(source_text, 140)
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
 
             ok, error = await self._delete_official_llm_timer_job(existing_job_id)
             async with self._data_lock:
@@ -14538,7 +14688,7 @@ class DailyStateMixin(DailyStateTickMixin):
                     restored["cancel_failed_at"] = _now_ts()
                     restored.pop("cancel_requested_at", None)
                     user["llm_timer_event"] = restored
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
             logger.info(
                 "[PrivateCompanion] 对话临时预约取消%s: user=%s job=%s error=%s",
                 "完成" if ok else "失败",
@@ -14700,7 +14850,7 @@ class DailyStateMixin(DailyStateTickMixin):
             user = self._get_user(user_id)
             if not self._user_enabled_for_proactive(user_id, user):
                 self._clear_pending_proactive_plan(user)
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
                 return
             reason = _single_line(payload.get("reason"), 40) or self._infer_timer_reason(
                 scheduled_ts,
@@ -14814,7 +14964,7 @@ class DailyStateMixin(DailyStateTickMixin):
             user_snapshot = dict(user)
             user["llm_timer_event"] = deepcopy(timer_event)
             self._clear_llm_timer_internal_plan_fields(user)
-            self._save_data_sync()
+            self._save_data_sync(sections={"users"})
 
         previous_running_job_id = ""
         if replaced_job_id:
@@ -14851,7 +15001,7 @@ class DailyStateMixin(DailyStateTickMixin):
                         timer_event["error"] = error or "官方定时计划登记失败"
                         timer_event.pop("operation_id", None)
                         user["llm_timer_event"] = timer_event
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
             logger.warning(
                 "[PrivateCompanion] LLM 临时预约登记失败,已保留原任务: user=%s old_job=%s error=%s",
                 user_id,
@@ -14870,7 +15020,7 @@ class DailyStateMixin(DailyStateTickMixin):
             )
             if reservation_current:
                 current["candidate_job_id"] = job_id
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
         if not reservation_current:
             await self._delete_official_llm_timer_job(job_id)
             logger.warning(
@@ -14905,7 +15055,7 @@ class DailyStateMixin(DailyStateTickMixin):
                             current["candidate_job_id"] = job_id
                             current["replace_error"] = replace_error or "旧官方任务删除失败"
                             current["rollback_error"] = rollback_error or "新官方任务回滚失败"
-                        self._save_data_sync()
+                        self._save_data_sync(sections={"users"})
                 logger.warning(
                     "[PrivateCompanion] LLM 临时预约替换失败,新任务回滚%s: user=%s old_job=%s new_job=%s error=%s rollback_error=%s",
                     "完成" if rollback_ok else "失败",
@@ -14936,7 +15086,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 timer_event.pop("operation_id", None)
                 user["llm_timer_event"] = timer_event
                 self._clear_llm_timer_internal_plan_fields(user)
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
         if not reservation_current:
             await self._delete_official_llm_timer_job(job_id)
             return
@@ -17644,7 +17794,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 runtime["last_tick_error"] = ""
             stale_timer_count = self._expire_stale_official_llm_timers_locked()
             if stale_timer_count:
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
             if self._proactive_generation_disabled():
                 changed = False
                 users_root = self.data.get("users") if isinstance(self.data.get("users"), dict) else {}
@@ -17667,13 +17817,22 @@ class DailyStateMixin(DailyStateTickMixin):
                     runtime["generation_disabled_reason"] = "max_daily_messages=0"
                     runtime["last_tick_finished_at"] = _now_ts()
                 if changed:
-                    self._save_data_sync()
+                    self._save_data_sync(
+                        sections={"users", "proactive_candidate_pool", "proactive_runtime"}
+                    )
                 return
             if isinstance(runtime, dict):
                 runtime["generation_disabled"] = False
                 runtime["generation_disabled_reason"] = ""
             if self._maybe_schedule_bilibili_video_share():
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={
+                        "users",
+                        "proactive_candidate_pool",
+                        "external_event_pool",
+                        "external_event_self_link_cache",
+                    }
+                )
             users = list(self.data.get("users", {}).items())
 
         for user_id, user in users:

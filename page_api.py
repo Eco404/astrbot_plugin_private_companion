@@ -951,7 +951,7 @@ class PrivateCompanionPageApi(
                     "updated_at": time.time(),
                 }
                 self.plugin.data["extension_migration_notice_preferences"] = dict(list(preferences.items())[-12:])
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"extension_migration_notice_preferences"})
             return self._ok({"version": version, "dismissed": dismissed, "persistent": True})
         except Exception as exc:
             logger.warning("[PrivateCompanionPage] 保存拓展迁移提示偏好失败: %s", self._single_line(exc, 160))
@@ -986,67 +986,6 @@ class PrivateCompanionPageApi(
         degraded_sections: list[str] = []
         try:
             async with self.plugin._data_lock:
-                refresher = getattr(self.plugin, "_refresh_sleep_runtime_state", None)
-                if callable(refresher):
-                    self._overview_section_value(
-                        "sleep_runtime",
-                        refresher,
-                        degraded_sections=degraded_sections,
-                    )
-                schedule_content_changed = False
-                plan_sanitizer = getattr(self.plugin, "_sanitize_daily_plan_inplace", None)
-                plan = self.plugin.data.get("daily_plan")
-                plan_sanitized = self._overview_section_value(
-                    "daily_plan_sanitizer",
-                    lambda: plan_sanitizer(plan),
-                    fallback=False,
-                    degraded_sections=degraded_sections,
-                ) if callable(plan_sanitizer) and isinstance(plan, dict) else False
-                if plan_sanitized:
-                    schedule_content_changed = True
-                if isinstance(plan, dict) and isinstance(plan.get("items"), list) and not isinstance(plan.get("quality"), dict):
-                    quality = self._overview_section_value(
-                        "daily_plan_quality",
-                        lambda: evaluate_daily_plan_quality(self.plugin, plan.get("items")),
-                        fallback=None,
-                        degraded_sections=degraded_sections,
-                    )
-                    if isinstance(quality, dict):
-                        plan["quality"] = quality
-                        schedule_content_changed = True
-                detail_sanitizer = getattr(self.plugin, "_sanitize_detail_enhanced_segments_inplace", None)
-                enhanced = self.plugin.data.get("detail_enhanced_segments")
-                detail_sanitized = self._overview_section_value(
-                    "detail_segments_sanitizer",
-                    lambda: detail_sanitizer(enhanced),
-                    fallback=False,
-                    degraded_sections=degraded_sections,
-                ) if callable(detail_sanitizer) and isinstance(enhanced, dict) else False
-                if detail_sanitized:
-                    schedule_content_changed = True
-                story_sanitizer = getattr(self.plugin, "_sanitize_story_plan_social_facts_inplace", None)
-                story = self.plugin.data.get("daily_story_plan")
-                story_sanitized = self._overview_section_value(
-                    "story_plan_sanitizer",
-                    lambda: story_sanitizer(story),
-                    fallback=False,
-                    degraded_sections=degraded_sections,
-                ) if callable(story_sanitizer) and isinstance(story, dict) else False
-                if story_sanitized:
-                    schedule_content_changed = True
-                expression_profile_getter = getattr(self.plugin, "_expression_voice_profile", None)
-                if callable(expression_profile_getter):
-                    self._overview_section_value(
-                        "expression_voice_profile",
-                        expression_profile_getter,
-                        degraded_sections=degraded_sections,
-                    )
-                if schedule_content_changed:
-                    self._overview_section_value(
-                        "data_save",
-                        self.plugin._save_data_sync,
-                        degraded_sections=degraded_sections,
-                    )
                 data = self._overview_section_value(
                     "data_snapshot",
                     lambda: self._overview_data_snapshot_locked(self.plugin.data),
@@ -1068,6 +1007,48 @@ class PrivateCompanionPageApi(
                     fallback={},
                     degraded_sections=degraded_sections,
                 )
+            plan = deepcopy(data.get("daily_plan"))
+            if isinstance(plan, dict):
+                data["daily_plan"] = plan
+                plan_sanitizer = getattr(self.plugin, "_sanitize_daily_plan_inplace", None)
+                if callable(plan_sanitizer):
+                    self._overview_section_value(
+                        "daily_plan_sanitizer",
+                        lambda: plan_sanitizer(plan),
+                        fallback=False,
+                        degraded_sections=degraded_sections,
+                    )
+                if isinstance(plan.get("items"), list) and not isinstance(plan.get("quality"), dict):
+                    quality = self._overview_section_value(
+                        "daily_plan_quality",
+                        lambda: evaluate_daily_plan_quality(self.plugin, plan.get("items")),
+                        fallback=None,
+                        degraded_sections=degraded_sections,
+                    )
+                    if isinstance(quality, dict):
+                        plan["quality"] = quality
+            enhanced = deepcopy(data.get("detail_enhanced_segments"))
+            if isinstance(enhanced, dict):
+                data["detail_enhanced_segments"] = enhanced
+                detail_sanitizer = getattr(self.plugin, "_sanitize_detail_enhanced_segments_inplace", None)
+                if callable(detail_sanitizer):
+                    self._overview_section_value(
+                        "detail_segments_sanitizer",
+                        lambda: detail_sanitizer(enhanced),
+                        fallback=False,
+                        degraded_sections=degraded_sections,
+                    )
+            story = deepcopy(data.get("daily_story_plan"))
+            if isinstance(story, dict):
+                data["daily_story_plan"] = story
+                story_sanitizer = getattr(self.plugin, "_sanitize_story_plan_social_facts_inplace", None)
+                if callable(story_sanitizer):
+                    self._overview_section_value(
+                        "story_plan_sanitizer",
+                        lambda: story_sanitizer(story),
+                        fallback=False,
+                        degraded_sections=degraded_sections,
+                    )
             users = data.get("users") if isinstance(data.get("users"), dict) else {}
             groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
             enabled_users = len(users)
@@ -2593,7 +2574,7 @@ class PrivateCompanionPageApi(
                     if next_scope:
                         item["scope"] = next_scope
                 item["edited_ts"] = time.time()
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"private_image_vision_cache"})
                 updated = deepcopy(item)
             return self._ok(self._image_cache_item_summary(key, updated))
         except Exception as exc:
@@ -2719,7 +2700,7 @@ class PrivateCompanionPageApi(
             if path is None:
                 return self._error("缓存预览文件不存在")
             if self._restore_image_cache_preview_metadata(key, item):
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"private_image_vision_cache"})
         return key, path
 
     @staticmethod
@@ -4061,7 +4042,7 @@ class PrivateCompanionPageApi(
             if not replaced:
                 records.append(asset)
             self.plugin.data["photo_reference_assets"] = records
-            self.plugin._save_data_sync()
+            self.plugin._save_data_sync(sections={"photo_reference_assets"})
             data = deepcopy(self.plugin.data)
         return self._ok({"message": "已更新参考资产" if existing else "已上传参考资产", "asset": self._reference_asset_page_item(asset), "worldbook": self._worldbook_summary(data)})
 
@@ -4085,7 +4066,7 @@ class PrivateCompanionPageApi(
                         path.unlink(missing_ok=True)
                 except (OSError, ValueError):
                     pass
-            self.plugin._save_data_sync()
+            self.plugin._save_data_sync(sections={"photo_reference_assets"})
             data = deepcopy(self.plugin.data)
         return self._ok({"message": "已删除参考资产", "worldbook": self._worldbook_summary(data)})
 
@@ -4409,7 +4390,7 @@ class PrivateCompanionPageApi(
             self._photo_reference_asset_raw_items().append(item)
             saver = getattr(self.plugin, "_save_data_sync", None)
             if callable(saver):
-                saver()
+                saver(sections={"photo_reference_assets"})
             return self._ok({"asset": self._photo_reference_asset_page_item(item)})
 
     async def update_photo_reference_asset(self) -> dict[str, Any]:
@@ -4485,7 +4466,7 @@ class PrivateCompanionPageApi(
                         pass
             saver = getattr(self.plugin, "_save_data_sync", None)
             if callable(saver):
-                saver()
+                saver(sections={"photo_reference_assets"})
             return self._ok({"asset": self._photo_reference_asset_page_item(updated)})
 
     async def delete_photo_reference_asset(self) -> dict[str, Any]:
@@ -4505,7 +4486,7 @@ class PrivateCompanionPageApi(
             removed_path = self._photo_reference_asset_path(existing.get("path")) if existing else None
             saver = getattr(self.plugin, "_save_data_sync", None)
             if callable(saver):
-                saver()
+                saver(sections={"photo_reference_assets"})
             if removed_path is not None:
                 try:
                     removed_path.unlink(missing_ok=True)
@@ -4568,7 +4549,7 @@ class PrivateCompanionPageApi(
                 removed = cache.pop(key, None)
                 if isinstance(removed, dict):
                     preview_path = self._single_line(removed.get("preview_path"), 260)
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"private_image_vision_cache"})
                 remaining = len(cache)
             self._remove_image_cache_preview_file(preview_path, key)
             return self._ok({"key": key, "remaining": remaining})
@@ -4611,7 +4592,7 @@ class PrivateCompanionPageApi(
                         )
                     )
                 if removed_items:
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"private_image_vision_cache"})
                 remaining = len(cache)
             for key, preview_path in removed_items:
                 self._remove_image_cache_preview_file(preview_path, key)
@@ -4710,7 +4691,16 @@ class PrivateCompanionPageApi(
         if not callable(importer):
             return
         if importer():
-            self.plugin._save_data_sync()
+            self.plugin._save_data_sync(
+                sections={
+                    "worldbook_entries",
+                    "worldbook_member_profiles",
+                    "worldbook_group_profiles",
+                    "worldbook_import_state",
+                    "worldbook_deleted_member_ids",
+                    "worldbook_deleted_group_ids",
+                }
+            )
 
 
     async def get_reality_touch(self) -> dict[str, Any]:
@@ -4821,11 +4811,17 @@ class PrivateCompanionPageApi(
             }
             relationship_data_changed = bool(apply_overrides.get("__relationship_data_changed"))
             if expression_scope_keys & set(changed) or relationship_data_changed:
+                save_sections: set[str] = set()
+                if expression_scope_keys & set(changed):
+                    save_sections.add("expression_learning_runtime")
+                if relationship_data_changed:
+                    save_sections.add("users")
                 async with self.plugin._data_lock:
                     expression_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
                     if expression_scope_keys & set(changed) and callable(expression_refresher):
                         expression_refresher()
-                    self.plugin._save_data_sync()
+                        save_sections.add("expression_voice_profile")
+                    self.plugin._save_data_sync(sections=save_sections)
             if storage_changed:
                 rebuild = getattr(self.plugin, "_rebuild_store_manager", None)
                 if callable(rebuild):
@@ -5195,7 +5191,9 @@ class PrivateCompanionPageApi(
                     shrinker = getattr(self.plugin, "_shrink_user_proactive_candidates", None)
                     if callable(shrinker):
                         shrinker(user_id, note="page_delete")
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(
+                    sections={"users", "proactive_candidate_pool"}
+                )
                 data = self._overview_data_snapshot_locked(self.plugin.data)
             message = "已删除主动候选"
             if cleared_current_plan:
@@ -5225,7 +5223,7 @@ class PrivateCompanionPageApi(
                 if not callable(shrinker):
                     return self._error("当前插件缺少主动候选收缩能力")
                 removed = int(shrinker(user_id, pending_cap=keep, note="page_prune") or 0)
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"proactive_candidate_pool"})
                 data = self._overview_data_snapshot_locked(self.plugin.data)
             return self._ok(
                 {
@@ -5449,7 +5447,7 @@ class PrivateCompanionPageApi(
                 changed = records != previous
                 self.plugin.data["troubleshooting_suppressed_warning_types"] = records
                 if changed:
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"troubleshooting_suppressed_warning_types"})
             return self._ok(
                 {
                     "items": records,
@@ -5649,7 +5647,7 @@ class PrivateCompanionPageApi(
                     return self._error("这份巡视指导已经过期，请重新执行巡视")
                 guidance["active"] = active
                 guidance["manual_paused"] = not active
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"daily_review_active_guidance"})
                 status = self.plugin._daily_review_status_payload()
             return self._ok(status)
         except Exception as exc:
@@ -5694,7 +5692,9 @@ class PrivateCompanionPageApi(
                 self._cancel_troubleshooting_proactive_wakeup(str(user_id))
                 recovered += 1
             if recovered:
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(
+                    sections={"users", "troubleshooting_test_results"}
+                )
         return recovered
 
     def _safe_test_diagnostic_text(self, value: Any, limit: int = 1200) -> str:
@@ -5961,7 +5961,7 @@ class PrivateCompanionPageApi(
                 tester.data[state_key] = deepcopy(tester.data[state_key])
         tester._data_lock = asyncio.Lock()
         tester._qweather_location_resolve_lock = asyncio.Lock()
-        tester._save_data_sync = lambda: None
+        tester._save_data_sync = lambda **_kwargs: None
         tester._external_api_test_mode = True
 
         normalized: dict[str, Any] = {}
@@ -8426,7 +8426,7 @@ class PrivateCompanionPageApi(
                 raw = {}
                 self.plugin.data["troubleshooting_test_results"] = raw
             raw["proactive_message"] = self._sanitize_troubleshooting_test_result(result)
-            self.plugin._save_data_sync()
+            self.plugin._save_data_sync(sections={"users", "troubleshooting_test_results"})
         wakeup_task = self._schedule_troubleshooting_proactive_wakeup(target_user_id, scheduled_ts)
         if wakeup_task is None:
             logger.info(
@@ -9452,7 +9452,7 @@ class PrivateCompanionPageApi(
                     )
                     for stale_key, _ in endpoint_results[24:]:
                         raw.pop(stale_key, None)
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"troubleshooting_test_results"})
         except Exception as exc:
             logger.warning("[PrivateCompanionPage] 保存排障测试结果失败: %s", self._single_line(exc, 120))
 
@@ -10725,7 +10725,7 @@ class PrivateCompanionPageApi(
             async with self.plugin._data_lock:
                 self.plugin.data["token_usage"] = {}
                 balance_state = deepcopy(self.plugin.data.get("balance_awareness", {}))
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"token_usage"})
             return self._ok(self._token_stats_payload({}, balance_state))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 重置 Token 统计失败: {exc}", exc_info=True)
@@ -10742,7 +10742,7 @@ class PrivateCompanionPageApi(
                 access_token = self._issue_bookshelf_access_token(persist=True)
                 saver = getattr(self.plugin, "_save_data_sync", None)
                 if callable(saver):
-                    saver()
+                    saver(sections={"bookshelf_secret"})
                 data = deepcopy(self.plugin.data)
             return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
@@ -10828,7 +10828,7 @@ class PrivateCompanionPageApi(
                     fromtimestamp=self.plugin._environment_fromtimestamp,
                 )
                 self.plugin.data["memo_notes"] = notes[-200:]
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"memo_notes"})
                 result = self._memo_notes_payload(self.plugin.data)
             return self._ok({"memo_notes": result})
         except ValueError as exc:
@@ -11485,7 +11485,7 @@ class PrivateCompanionPageApi(
                 if changed:
                     if kind == "jm_album":
                         self._mark_bookshelf_data_changed()
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"bookshelf_items"})
                 data = deepcopy(self.plugin.data)
             return self._ok({"changed": changed, "bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
@@ -11578,7 +11578,7 @@ class PrivateCompanionPageApi(
                 if safe_total > 0 and page >= safe_total:
                     target["reading_completed_at"] = self._float(target.get("reading_completed_at")) or time.time()
                 self._mark_bookshelf_data_changed()
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"bookshelf_items"})
                 data = deepcopy(self.plugin.data)
             return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
@@ -11627,7 +11627,7 @@ class PrivateCompanionPageApi(
                 if callable(updater):
                     updater(target)
                 self._mark_bookshelf_data_changed()
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"bookshelf_items"})
                 data = deepcopy(self.plugin.data)
             return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
@@ -11737,7 +11737,7 @@ class PrivateCompanionPageApi(
                 if callable(updater):
                     updater(target)
                 self._mark_bookshelf_data_changed()
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"bookshelf_items"})
                 data = deepcopy(self.plugin.data)
             return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
@@ -11882,7 +11882,7 @@ class PrivateCompanionPageApi(
                 if callable(updater):
                     updater(target)
                 self._mark_bookshelf_data_changed()
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"bookshelf_items"})
                 data = deepcopy(self.plugin.data)
             return self._ok({"message": "Bot 已重新读过并更新读后感", "bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
         except Exception as exc:
@@ -11893,7 +11893,16 @@ class PrivateCompanionPageApi(
         try:
             async with self.plugin._data_lock:
                 changed = bool(self.plugin._import_worldbook_entries_from_sources())
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(
+                    sections={
+                        "worldbook_entries",
+                        "worldbook_member_profiles",
+                        "worldbook_group_profiles",
+                        "worldbook_import_state",
+                        "worldbook_deleted_member_ids",
+                        "worldbook_deleted_group_ids",
+                    }
+                )
                 data = deepcopy(self.plugin.data)
             return self._ok({"changed": changed, "worldbook": self._worldbook_summary(data)})
         except Exception as exc:
@@ -11930,7 +11939,13 @@ class PrivateCompanionPageApi(
                                 and str(asset.get("owner_id") or "") == user_id
                             )
                         ]
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(
+                        sections={
+                            "worldbook_member_profiles",
+                            "worldbook_deleted_member_ids",
+                            "photo_reference_assets",
+                        }
+                    )
                     data = deepcopy(self.plugin.data)
                     return self._ok({"changed": changed, "message": "已删除关系节点", "worldbook": self._worldbook_summary(data)})
                 if not self._worldbook_member_id_valid(
@@ -12025,7 +12040,12 @@ class PrivateCompanionPageApi(
                 bind_result: dict[str, Any] | None = None
                 if linked_qq_user_id and linked_qq_user_id != user_id:
                     bind_result = self._bind_worldbook_external_member_locked(profiles, user_id, linked_qq_user_id, profile)
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(
+                    sections={
+                        "worldbook_member_profiles",
+                        "worldbook_deleted_member_ids",
+                    }
+                )
                 data = deepcopy(self.plugin.data)
             if payload.keys() <= {"user_id", "enabled"}:
                 message = "已更新关系节点状态"
@@ -12219,7 +12239,7 @@ class PrivateCompanionPageApi(
                 if user_id and not touched:
                     return self._error("没有找到可清理的待确认观察")
                 if touched:
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"worldbook_member_profiles"})
                 data = deepcopy(self.plugin.data)
             message = f"已清理 {cleared} 条待确认观察" if cleared else "没有待确认观察需要清理"
             return self._ok({"message": message, "cleared": cleared, "worldbook": self._worldbook_summary(data)})
@@ -12246,7 +12266,9 @@ class PrivateCompanionPageApi(
                     if group_id not in deleted:
                         deleted.append(group_id)
                     changed = groups.pop(group_id, None) is not None
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(
+                        sections={"worldbook_group_profiles", "worldbook_deleted_group_ids"}
+                    )
                     data = deepcopy(self.plugin.data)
                     return self._ok({"changed": changed, "message": "已删除群资料", "worldbook": self._worldbook_summary(data)})
                 deleted = self.plugin.data.setdefault("worldbook_deleted_group_ids", [])
@@ -12274,7 +12296,7 @@ class PrivateCompanionPageApi(
                 if "priority" in payload:
                     group["priority"] = self._clamp_int(payload.get("priority"), 110, -1000, 10000)
                 group["manual_edit_ts"] = time.time()
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"worldbook_group_profiles"})
                 data = deepcopy(self.plugin.data)
             return self._ok({"message": "已保存群资料", "worldbook": self._worldbook_summary(data)})
         except Exception as exc:
@@ -12352,7 +12374,7 @@ class PrivateCompanionPageApi(
                     if not changed:
                         return self._error("没有找到要删除的技能，请刷新后重试")
                     state["updated_ts"] = time.time()
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"skill_growth"})
                     return self._ok({"changed": changed, "message": "已删除技能", "skill_growth": self._skill_growth_summary(self.plugin.data)})
 
                 if not name:
@@ -12405,7 +12427,7 @@ class PrivateCompanionPageApi(
                 )
                 skills[skill_id] = skill
                 state["updated_ts"] = time.time()
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"skill_growth"})
                 return self._ok({"message": "已保存技能", "skill_growth": self._skill_growth_summary(self.plugin.data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新技能失败: {exc}", exc_info=True)
@@ -12441,7 +12463,7 @@ class PrivateCompanionPageApi(
                     if index < 0:
                         return self._error("没有找到要删除的个人目标，请刷新后重试")
                     goals.pop(index)
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"personal_goals"})
                     return self._ok({"changed": True, "message": "已删除个人目标", "personal_goals": self._personal_goal_summary(self.plugin.data)})
                 if not title:
                     return self._error("缺少目标名称")
@@ -12505,7 +12527,7 @@ class PrivateCompanionPageApi(
                     goals[index] = goal
                 else:
                     goals.append(goal)
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"personal_goals"})
                 return self._ok({"message": "已保存个人目标", "personal_goals": self._personal_goal_summary(self.plugin.data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新个人目标失败: {exc}", exc_info=True)
@@ -12658,7 +12680,7 @@ class PrivateCompanionPageApi(
                     before = len(items)
                     state["items"] = [item for item in items if not (isinstance(item, dict) and self._single_line(item.get("id"), 48) == item_id)]
                     state["updated_ts"] = time.time()
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"food_menu"})
                     return self._ok({
                         "changed": len(state["items"]) != before,
                         "message": "已移出候选",
@@ -12739,7 +12761,7 @@ class PrivateCompanionPageApi(
                 else:
                     items.append(item)
                 state["updated_ts"] = time.time()
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"food_menu"})
                 return self._ok({"message": "已保存候选", "food_menu": self._food_menu_summary(self.plugin.data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新吃什么候选失败: {exc}", exc_info=True)
@@ -12826,7 +12848,7 @@ class PrivateCompanionPageApi(
                         items.append(item)
                         added += 1
                 state["updated_ts"] = time.time()
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"food_menu"})
                 return self._ok(
                     {
                         "message": f"已加入 {added} 个，更新 {updated} 个" + (f"，跳过 {skipped} 个" if skipped else ""),
@@ -12873,7 +12895,7 @@ class PrivateCompanionPageApi(
                 if deleted_ids:
                     state["items"] = remaining
                     state["updated_ts"] = time.time()
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"food_menu"})
                 return self._ok(
                     {
                         "message": f"已删除 {len(deleted_ids)} 个候选",
@@ -12918,7 +12940,7 @@ class PrivateCompanionPageApi(
                     item["config"] = config
                 item["updated_ts"] = time.time()
                 store[name] = item
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"external_proactive_abilities"})
                 data = deepcopy(self.plugin.data)
             return self._ok({"message": "已保存外部主动能力", "external_abilities": self._external_ability_summary(data)})
         except Exception as exc:
@@ -13567,7 +13589,7 @@ class PrivateCompanionPageApi(
             if callable(sync_targets):
                 async with self.plugin._data_lock:
                     sync_targets()
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"users"})
 
             worldbook_saved = False
             if worldbook_should_save:
@@ -13606,13 +13628,17 @@ class PrivateCompanionPageApi(
                         self.plugin.data["worldbook_deleted_member_ids"] = [
                             item for item in deleted if str(item) != worldbook_user_id
                         ]
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(
+                        sections={"worldbook_member_profiles", "worldbook_deleted_member_ids"}
+                    )
                     worldbook_saved = True
 
             async with self.plugin._data_lock:
                 self.plugin.data["setup_guide_completed_at"] = time.time()
                 self.plugin.data["setup_guide_completed_version"] = "5.7.2-first-setup"
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(
+                    sections={"setup_guide_completed_at", "setup_guide_completed_version"}
+                )
 
             config_saved = True
             if changed:
@@ -13680,7 +13706,15 @@ class PrivateCompanionPageApi(
                 self.plugin.data["detail_enhanced_day"] = str((plan or {}).get("date") or today)
                 self.plugin.data["detail_enhanced_segments"] = {}
                 self.plugin.data["daily_story_plan"] = {}
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(
+                    sections={
+                        "daily_plan",
+                        "daily_state",
+                        "detail_enhanced_day",
+                        "detail_enhanced_segments",
+                        "daily_story_plan",
+                    }
+                )
             return plan
 
         if not isinstance(task, asyncio.Task) or task.done():
@@ -13884,7 +13918,16 @@ class PrivateCompanionPageApi(
                     enhanced[key] = cancelled
                     story = self.plugin._rebuild_story_plan_from_detail_snapshots(str(plan.get("date") or _today_key()))
                     self.plugin._remember_detail_enhancement_history(str(plan.get("date") or _today_key()), enhanced, story)
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(
+                        sections={
+                            "daily_plan",
+                            "detail_enhanced_day",
+                            "detail_enhanced_segments",
+                            "detail_enhanced_history",
+                            "daily_story_plan",
+                            "daily_story_plan_history",
+                        }
+                    )
                     data = self._overview_data_snapshot_locked(self.plugin.data)
                     return self._ok({"key": key, "cancelled": True, "daily_timeline": self._daily_timeline_summary(data)})
                 if isinstance(live_item, dict):
@@ -13911,7 +13954,13 @@ class PrivateCompanionPageApi(
                         for field, (existed, value) in previous_item_state.items()
                     },
                 }
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(
+                    sections={
+                        "daily_plan",
+                        "detail_enhanced_day",
+                        "detail_enhanced_segments",
+                    }
+                )
 
             detail = await generate_detail_enhancement(self.plugin, segment, plan, state)
             if not isinstance(detail.get("today_events"), list) or not detail.get("today_events"):
@@ -13925,7 +13974,13 @@ class PrivateCompanionPageApi(
                     stale_item = stale_items[stale_index] if isinstance(stale_items, list) and 0 <= stale_index < len(stale_items) and isinstance(stale_items[stale_index], dict) else None
                     if isinstance(stale_item, dict) and self._single_line(stale_item.get("_detail_generation_id"), 64) == generation_id:
                         stale_item.pop("_detail_generation_id", None)
-                        self.plugin._save_data_sync()
+                        self.plugin._save_data_sync(
+                            sections={
+                                "daily_plan",
+                                "detail_enhanced_day",
+                                "detail_enhanced_segments",
+                            }
+                        )
                     return self._error("该时间段已被取消、替换或由更新的操作接管，本次迟到结果未写入")
                 current = self.plugin.data.setdefault("detail_enhanced_segments", {})
                 current[key] = {
@@ -13960,7 +14015,17 @@ class PrivateCompanionPageApi(
                     detail=detail,
                     segment=segment,
                 )
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(
+                    sections={
+                        "daily_plan",
+                        "daily_state",
+                        "detail_enhanced_day",
+                        "detail_enhanced_segments",
+                        "detail_enhanced_history",
+                        "daily_story_plan",
+                        "daily_story_plan_history",
+                    }
+                )
                 data = self._overview_data_snapshot_locked(self.plugin.data)
             return self._ok({"key": key, "detail": detail, "daily_timeline": self._daily_timeline_summary(data)})
         except Exception as exc:
@@ -13982,7 +14047,13 @@ class PrivateCompanionPageApi(
                                 live_item[field] = value
                             else:
                                 live_item.pop(field, None)
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(
+                        sections={
+                            "daily_plan",
+                            "detail_enhanced_day",
+                            "detail_enhanced_segments",
+                        }
+                    )
             return self._exception_error("局部重生成失败")
 
     def _normalize_roleplay_draft_scopes(self, raw: Any) -> list[str]:
@@ -17154,7 +17225,9 @@ class PrivateCompanionPageApi(
                     scope_revision=scope_revision, preview=preview,
                 )
                 if scope_changed:
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(
+                        sections={"groups" if source_type == "group" else "users"}
+                    )
             return self._ok(preview)
         except ValueError as exc:
             return self._error(str(exc))
@@ -17240,7 +17313,12 @@ class PrivateCompanionPageApi(
                     except Exception:
                         target["expression_profile"] = before
                         raise
-                self.plugin._save_data_sync()
+                save_sections = {
+                    "groups" if source_type == "group" else "users"
+                }
+                if destination == "learned":
+                    save_sections.add("expression_voice_profile")
+                self.plugin._save_data_sync(sections=save_sections)
                 snapshot = deepcopy(self.plugin.data)
             result = self._expression_library_summary(snapshot)
             imported_groups = self._int(preview.get("importable_group_count"))
@@ -17521,12 +17599,14 @@ class PrivateCompanionPageApi(
     async def get_expression_library(self) -> dict[str, Any]:
         try:
             async with self.plugin._data_lock:
-                changed = False
+                # Read endpoints may prepare a disposable view, but must never repair
+                # or persist the live runtime state as a side effect of a GET request.
+                snapshot = deepcopy(self.plugin.data)
                 normalizer = getattr(self.plugin, "_normalize_group_expression_profile", None)
                 pruner = getattr(self.plugin, "_prune_invalid_expression_rules", None)
                 family_backfiller = getattr(self.plugin, "_backfill_expression_rule_families", None)
                 for collection_key in ("users", "groups"):
-                    collection = self.plugin.data.get(collection_key)
+                    collection = snapshot.get(collection_key)
                     if not isinstance(collection, dict):
                         continue
                     source_type = "group" if collection_key == "groups" else "private"
@@ -17534,30 +17614,21 @@ class PrivateCompanionPageApi(
                         profile = item.get("expression_profile") if isinstance(item, dict) else None
                         if not isinstance(profile, dict):
                             continue
-                        if collection_key == "groups" and callable(normalizer) and normalizer(profile):
-                            changed = True
-                        if callable(pruner) and pruner(profile):
-                            changed = True
-                        if callable(family_backfiller) and family_backfiller(profile):
-                            changed = True
+                        if collection_key == "groups" and callable(normalizer):
+                            normalizer(profile)
+                        if callable(pruner):
+                            pruner(profile)
+                        if callable(family_backfiller):
+                            family_backfiller(profile)
                         try:
                             managed, scope_context = self._expression_admin_scope_context(
                                 source_type, self._single_line(source_id, 80), item,
                             )
                             if managed:
-                                before_scope = deepcopy(profile)
                                 self._expression_prepare_admin_profile(item, scope_context)
-                                if before_scope != item.get("expression_profile"):
-                                    changed = True
                         except (ExpressionScopeError, ValueError):
                             # Pending/unresolved legacy sources remain visible but cannot be mutated.
                             pass
-                if changed:
-                    refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
-                    if callable(refresher):
-                        refresher()
-                    self.plugin._save_data_sync()
-                snapshot = deepcopy(self.plugin.data)
             return self._ok(self._expression_library_summary(snapshot))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取统一表达学习库失败: {exc}", exc_info=True)
@@ -17654,7 +17725,12 @@ class PrivateCompanionPageApi(
                         while len(operations) > 128:
                             operations.pop(next(iter(operations)))
                         self.plugin.data["_req041_expression_promotion_operations"] = operations
-                        self.plugin._save_data_sync()
+                        self.plugin._save_data_sync(
+                            sections={
+                                "_req041_persona_expression_profile",
+                                "_req041_expression_promotion_operations",
+                            }
+                        )
                     snapshot = deepcopy(self.plugin.data)
                 result = self._expression_library_summary(snapshot)
                 result["promotion"] = {
@@ -17683,6 +17759,7 @@ class PrivateCompanionPageApi(
                     results: list[dict[str, Any]] = []
                     seen: set[tuple[str, str, str]] = set()
                     changed = False
+                    save_sections: set[str] = set()
                     for raw_item in raw_items:
                         if not isinstance(raw_item, dict):
                             continue
@@ -17702,6 +17779,7 @@ class PrivateCompanionPageApi(
                         if not isinstance(item, dict):
                             results.append({"status": "skipped", "reason": "来源不存在", "source_id": target_id})
                             continue
+                        mutation_before = deepcopy(item.get("expression_profile") or {})
                         if target_type == "group":
                             normalizer = getattr(self.plugin, "_normalize_group_expression_profile", None)
                             profile = item.get("expression_profile")
@@ -17723,7 +17801,7 @@ class PrivateCompanionPageApi(
                                 "rule_family_id": family_id,
                                 },
                             )
-                            profile_changed = before != (item.get("expression_profile") or {})
+                            profile_changed = mutation_before != (item.get("expression_profile") or {})
                             if managed and profile_changed:
                                 try:
                                     self._expression_finalize_admin_profile(item, before, scope_context)
@@ -17738,7 +17816,10 @@ class PrivateCompanionPageApi(
                             })
                             continue
                         succeeded = not result_message.startswith(("没有找到", "缺少", "规则组中没有"))
-                        changed = changed or (succeeded and profile_changed)
+                        if profile_changed:
+                            save_sections.add(collection_key)
+                            if succeeded:
+                                changed = True
                         results.append(
                             {
                                 "status": "success" if succeeded else "skipped",
@@ -17752,7 +17833,9 @@ class PrivateCompanionPageApi(
                         refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
                         if callable(refresher):
                             refresher()
-                    self.plugin._save_data_sync()
+                        save_sections.add("expression_voice_profile")
+                    if save_sections:
+                        self.plugin._save_data_sync(sections=save_sections)
                     snapshot = deepcopy(self.plugin.data)
                 result = self._expression_library_summary(snapshot)
                 success_count = sum(1 for item in results if item.get("status") == "success")
@@ -17773,6 +17856,7 @@ class PrivateCompanionPageApi(
             try:
                 async with self.plugin._data_lock:
                     cleared = 0
+                    save_sections: set[str] = set()
                     for collection_key in ("users", "groups"):
                         collection = self.plugin.data.get(collection_key)
                         if not isinstance(collection, dict):
@@ -17789,6 +17873,7 @@ class PrivateCompanionPageApi(
                             )
                             if item_count:
                                 try:
+                                    mutation_before = deepcopy(item.get("expression_profile") or {})
                                     managed, scope_context = self._expression_admin_scope_context(
                                         source_type, self._single_line(source_id, 80), item,
                                     )
@@ -17802,10 +17887,13 @@ class PrivateCompanionPageApi(
                                         except Exception:
                                             item["expression_profile"] = before
                                             raise
+                                    if mutation_before != (item.get("expression_profile") or {}):
+                                        save_sections.add(collection_key)
                                     cleared += item_count
                                 except (ExpressionScopeError, ValueError):
                                     continue
-                    self.plugin._save_data_sync()
+                    if save_sections:
+                        self.plugin._save_data_sync(sections=save_sections)
                     snapshot = deepcopy(self.plugin.data)
                 result = self._expression_library_summary(snapshot)
                 result["message"] = f"已清空 {cleared} 条待审核表达资料"
@@ -17838,6 +17926,7 @@ class PrivateCompanionPageApi(
                 )
                 if not isinstance(item, dict):
                     return self._error("表达样本来源不存在")
+                mutation_before = deepcopy(item.get("expression_profile") or {})
                 if source_type == "group":
                     normalizer = getattr(self.plugin, "_normalize_group_expression_profile", None)
                     profile = item.get("expression_profile")
@@ -17858,16 +17947,26 @@ class PrivateCompanionPageApi(
                     except Exception:
                         item["expression_profile"] = before
                         raise
+                mutation_changed = mutation_before != (item.get("expression_profile") or {})
                 if persona_target:
                     self.plugin.data["_req041_persona_expression_profile"] = item["expression_profile"]
+                voice_changed = False
                 if action in {
                     "approve", "approve_rule", "approve_rule_group", "delete_sample", "delete_rule", "delete_rule_group",
                     "update_rule_group",
                 }:
+                    voice_before = deepcopy(self.plugin.data.get("expression_voice_profile"))
                     voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
                     if callable(voice_refresher):
                         voice_refresher()
-                self.plugin._save_data_sync()
+                        voice_changed = voice_before != self.plugin.data.get("expression_voice_profile")
+                save_sections = {
+                    "_req041_persona_expression_profile" if persona_target else collection_key
+                } if mutation_changed else set()
+                if voice_changed:
+                    save_sections.add("expression_voice_profile")
+                if save_sections:
+                    self.plugin._save_data_sync(sections=save_sections)
                 snapshot = deepcopy(self.plugin.data)
             result = self._expression_library_summary(snapshot)
             result["message"] = action_message
@@ -19375,6 +19474,13 @@ class PrivateCompanionPageApi(
         return selected or {"basic", "relations", "food_skills"}
 
     async def _apply_migration_normalized(self, normalized: dict[str, Any], *, mode: str, conflict: str) -> dict[str, Any]:
+        data_payload = normalized.get("data") if isinstance(normalized.get("data"), dict) else {}
+        if data_payload:
+            # Validate the normalized section set before changing config or live data.
+            validator = getattr(self.plugin, "_validate_save_request", None)
+            if not callable(validator):
+                raise RuntimeError("migration section validator is unavailable")
+            validator(set(data_payload), (), None)
         before = await self._build_migration_package(include_all=True)
         backup_path = self._write_migration_backup(before)
 
@@ -19413,7 +19519,6 @@ class PrivateCompanionPageApi(
             config_saved = await self._save_config_if_possible()
 
         applied_sections: list[dict[str, Any]] = []
-        data_payload = normalized.get("data") if isinstance(normalized.get("data"), dict) else {}
         if data_payload:
             async with self.plugin._data_lock:
                 for section, imported_value in data_payload.items():
@@ -19431,7 +19536,7 @@ class PrivateCompanionPageApi(
                             "count": self._migration_count_items(imported_value),
                         }
                     )
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections=set(data_payload))
             self._refresh_migration_runtime_caches(data_payload)
 
         overview = await self.get_overview()
@@ -21911,7 +22016,7 @@ class PrivateCompanionPageApi(
                 applied.pop(key, None)
             state["manual_updated_at"] = time.time()
             state["last_manual_changes"] = deepcopy(manual_changes)
-            self.plugin._save_data_sync()
+            self.plugin._save_data_sync(sections={"personality_iteration_auto_tune"})
 
     async def _maybe_apply_personality_iteration_auto_tune(self, users: dict[str, Any], groups: dict[str, Any]) -> dict[str, Any]:
         if not bool(getattr(self.plugin, "enable_personality_iteration_experiment", False)):
@@ -21947,7 +22052,7 @@ class PrivateCompanionPageApi(
                     state["no_suggestion_streak"] = no_suggestion_streak
                     state["last_suggestion_count"] = len(suggestions)
                     state["last_clear_observed_at"] = now
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"personality_iteration_auto_tune"})
                 stable_seconds = max(0.0, now - no_suggestion_since)
                 ready_to_restore = (
                     no_suggestion_streak >= max(1, int(self.PERSONALITY_AUTO_TUNE_RECOVERY_STREAK))
@@ -21976,7 +22081,7 @@ class PrivateCompanionPageApi(
                 ):
                     state["no_suggestion_streak"] = 0
                     state["no_suggestion_since"] = 0
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"personality_iteration_auto_tune"})
             await self._remember_personality_auto_tune_status(
                 {
                     "changed": False,
@@ -22041,7 +22146,7 @@ class PrivateCompanionPageApi(
             state["no_suggestion_since"] = 0
             if changes:
                 state["last_changes"] = deepcopy(changes)
-            self.plugin._save_data_sync()
+            self.plugin._save_data_sync(sections={"personality_iteration_auto_tune"})
 
         for change in changes:
             self._apply_config_value(change["key"], change["to"])
@@ -22098,7 +22203,7 @@ class PrivateCompanionPageApi(
                 state["manual_values"] = deepcopy(manual_values)
                 state["applied"] = deepcopy(applied)
                 state["manual_synced_at"] = time.time()
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"personality_iteration_auto_tune"})
         return manual_values, applied
 
     async def _remember_personality_auto_tune_status(self, status: dict[str, Any]) -> None:
@@ -22109,7 +22214,7 @@ class PrivateCompanionPageApi(
                 self.plugin.data["personality_iteration_auto_tune"] = state
             state["last_status"] = deepcopy(status)
             state["last_status_at"] = time.time()
-            self.plugin._save_data_sync()
+            self.plugin._save_data_sync(sections={"personality_iteration_auto_tune"})
 
     async def _restore_personality_iteration_auto_tune(
         self,
@@ -22169,7 +22274,7 @@ class PrivateCompanionPageApi(
                 "restored_at": time.time(),
                 "config_saved": config_saved,
             }
-            self.plugin._save_data_sync()
+            self.plugin._save_data_sync(sections={"personality_iteration_auto_tune"})
         if changes:
             logger.info(
                 "[PrivateCompanionPage] 角色贴合校准已恢复用户手动参数: %s",
@@ -23262,7 +23367,7 @@ class PrivateCompanionPageApi(
                 if isinstance(overrides, dict) and overrides.get("__defer_relationship_data_save"):
                     overrides["__relationship_data_changed"] = True
                 else:
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"users"})
             return
         if key == "normal_interaction_band_cap":
             previous_runtime_cap = normalize_normal_interaction_band_cap(getattr(self.plugin, key, "warm"))
@@ -23298,7 +23403,7 @@ class PrivateCompanionPageApi(
                 if isinstance(overrides, dict) and overrides.get("__defer_relationship_data_save"):
                     overrides["__relationship_data_changed"] = True
                 else:
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"users"})
             return
         if key in {"owner_group_relationship_projection", "owner_group_interaction_projection"}:
             normalized = self._normalize_bool_value(value)
@@ -23570,7 +23675,9 @@ class PrivateCompanionPageApi(
         if key == "private_user_aliases":
             self.plugin.private_user_aliases = self.plugin._parse_private_user_aliases(value)
             if self.plugin._merge_private_user_alias_records():
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(
+                    sections={"users", "private_user_alias_merge_backups"}
+                )
             return
         if key == "private_user_delivery_aliases":
             self.plugin.private_user_delivery_aliases = self.plugin._parse_private_user_aliases(value)
@@ -23579,7 +23686,7 @@ class PrivateCompanionPageApi(
                 for raw_user_id, user in users.items():
                     if isinstance(user, dict):
                         self.plugin._ensure_private_user_umo(str(raw_user_id), user)
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"users"})
             return
         if key == "worldbook_self_registration_block_words":
             parser = getattr(self.plugin, "_parse_text_list_config", None)
@@ -23677,7 +23784,7 @@ class PrivateCompanionPageApi(
                     data["daily_review_case_audit"] = []
                     scheduler = getattr(self.plugin, "_schedule_data_save", None)
                     if callable(scheduler):
-                        scheduler()
+                        scheduler(sections={"daily_review_case_audit"})
             return
         if key in self._allowed_setting_keys():
             setattr(self.plugin, key, value)
@@ -27645,7 +27752,7 @@ class PrivateCompanionPageApi(
                             keywords or ["作品信息"],
                             importance=5,
                         )
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"creative_projects"})
             return self._ok({"project_id": project_id, "changed": bool(changed_notes), "message": "作品已更新"})
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 更新创作项目失败: %s", exc, exc_info=True)
@@ -27758,7 +27865,7 @@ class PrivateCompanionPageApi(
                     project["quality_reviews"] = reviews
                 reviews.append(review)
                 del reviews[:-20]
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"creative_projects"})
             return self._ok({"project_id": project_id, "review": review})
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 创作项目质量分析失败: %s", exc, exc_info=True)
@@ -27794,7 +27901,7 @@ class PrivateCompanionPageApi(
                     p for p in projects if not (isinstance(p, dict) and p.get("id") == project_id)
                 ]
                 removed = before - len(self.plugin.data["creative_projects"])
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"creative_projects"})
             return self._ok({"project_id": project_id, "removed": removed})
         except Exception as exc:
             logger.error("[PrivateCompanionPage] 删除创作项目失败: %s", exc, exc_info=True)

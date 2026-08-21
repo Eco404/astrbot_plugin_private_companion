@@ -157,7 +157,7 @@ class _AutoProfileHost:
     def _note_private_user_umo(self, _user_id: str, user: dict[str, Any], umo: str) -> None:
         user["umo"] = umo
 
-    def _schedule_data_save(self) -> None:
+    def _schedule_data_save(self, *_args, **_kwargs) -> None:
         self.saved += 1
 
 

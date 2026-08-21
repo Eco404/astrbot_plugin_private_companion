@@ -43,7 +43,7 @@ class EnvironmentChangeHarness(DailyStateMixin):
     def _schedule_data_save(self, **_kwargs) -> None:
         return None
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, **_kwargs) -> None:
         return None
 
 

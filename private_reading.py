@@ -1081,7 +1081,7 @@ class PrivateReadingMixin:
             secret["created_at"] = _now_ts()
             if basis:
                 secret["previous_basis"] = basis
-        self._save_data_sync()
+        self._save_data_sync(sections={"bookshelf_secret"})
         return _single_line(secret.get("password") or candidate, 12)
 
     @staticmethod
@@ -1157,7 +1157,7 @@ class PrivateReadingMixin:
             reason = self._bookshelf_password_fallback_reason(password)
         secret["reason"] = reason
         secret["reason_generated_at"] = _now_ts()
-        self._save_data_sync()
+        self._save_data_sync(sections={"bookshelf_secret"})
         return reason
 
     @staticmethod
@@ -2101,7 +2101,7 @@ class PrivateReadingMixin:
         state["last_probe_at"] = now
         if not result:
             state["last_status"] = "no_candidate"
-            self._save_data_sync()
+            self._save_data_sync(sections={"jm_cosmos_integration"})
             return
         state["last_read_at"] = now
         state["last_status"] = "read"
@@ -2127,7 +2127,7 @@ class PrivateReadingMixin:
                 )
                 if accepted:
                     user["last_jm_cosmos_share_at"] = now
-        self._save_data_sync()
+        self._save_data_sync(sections={"jm_cosmos_integration", "users", "proactive_candidate_pool"})
         logger.info("[PrivateCompanion] 已触发夹层私下阅读")
 
     async def _maybe_schedule_private_reading_recommendation_request(self) -> None:
@@ -2149,7 +2149,7 @@ class PrivateReadingMixin:
             return
         state["last_recommendation_request_probe_at"] = now
         if random.random() > self.private_reading_ask_probability:
-            self._save_data_sync()
+            self._save_data_sync(sections={"jm_cosmos_integration"})
             return
         users = self.data.get("users")
         user_items = [
@@ -2162,7 +2162,7 @@ class PrivateReadingMixin:
             and self._friend_can_receive_proactive_reason(item, "jm_cosmos_recommendation_request", "message")
         ]
         if not user_items:
-            self._save_data_sync()
+            self._save_data_sync(sections={"jm_cosmos_integration"})
             return
         random.shuffle(user_items)
         for user_id, user in user_items:
@@ -2193,7 +2193,7 @@ class PrivateReadingMixin:
                 user["last_private_reading_recommendation_request_at"] = now
                 state["last_recommendation_request_at"] = now
                 state["last_status"] = "asked_recommendation"
-                self._save_data_sync()
+                self._save_data_sync(sections={"jm_cosmos_integration", "users", "proactive_candidate_pool"})
                 logger.info("[PrivateCompanion] 已安排夹层阅读推荐征求")
                 return
-        self._save_data_sync()
+        self._save_data_sync(sections={"jm_cosmos_integration"})

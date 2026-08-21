@@ -96,7 +96,7 @@ class _PhotoActionHarness(ProactiveMessageMixin):
     def _note_photo_generation_scope_attempt(self, **kwargs: Any) -> None:
         self.scope_attempts.append(dict(kwargs))
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, **_kwargs: Any) -> None:
         self.save_calls += 1
 
 

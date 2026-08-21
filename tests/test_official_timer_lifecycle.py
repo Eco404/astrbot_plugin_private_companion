@@ -95,7 +95,7 @@ class _TimerHarness(UserMemoryMixin, DailyStateMixin):
     def _get_user(self, user_id: str):
         return self.data.setdefault("users", {}).setdefault(user_id, {"user_id": user_id})
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, **_kwargs) -> None:
         self.saved += 1
 
     def _user_enabled_for_proactive(self, _user_id, _user) -> bool:

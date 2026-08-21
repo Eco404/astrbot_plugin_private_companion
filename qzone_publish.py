@@ -252,7 +252,7 @@ class QzonePublishMixin:
             except Exception:
                 pass
         try:
-            self._save_data_sync()
+            self._save_data_sync(sections={"qzone_integration"})
         except Exception as exc:
             logger.debug("[PrivateCompanion] QQ 空间发布记录保存失败: %s", _single_line(exc, 120))
 
@@ -702,7 +702,7 @@ class QzonePublishMixin:
         reference_exists = bool(state.get(f"last_{prefix}_generated_image_reference_exists", False))
         if callable(getattr(self, "_save_data_sync", None)):
             try:
-                self._save_data_sync()
+                self._save_data_sync(sections={"qzone_integration"})
             except Exception:
                 pass
         if images:

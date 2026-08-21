@@ -142,7 +142,7 @@ class _SafetyHarness(GroupMemberSafetyMixin):
     def _is_group_admin_event(event: _SafetyEvent) -> bool:
         return bool(event.manager)
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, **_kwargs) -> None:
         self.save_calls += 1
 
 

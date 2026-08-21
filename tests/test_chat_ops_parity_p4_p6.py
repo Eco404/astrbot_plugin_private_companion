@@ -415,7 +415,7 @@ class P4P6ParityTests(unittest.TestCase):
                 self.enable_p4_b_legacy_score_isolation = isolated
                 self.save_calls = 0
 
-            def _schedule_data_save(self) -> None:
+            def _schedule_data_save(self, *_args, **_kwargs) -> None:
                 self.save_calls += 1
 
         isolated_host = Host(True)

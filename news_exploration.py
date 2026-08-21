@@ -1355,7 +1355,7 @@ class NewsExplorationMixin:
         bili = self._find_bilibili_bot_instance()
         if bili is None:
             state["last_boredom_watch_probe_at"] = now
-            self._save_data_sync()
+            self._save_data_sync(sections={"bilibili_integration"})
             return
         task = getattr(bili, "_proactive_task", None)
         if task is not None and not task.done():
@@ -1388,11 +1388,11 @@ class NewsExplorationMixin:
                 bili._proactive_task.add_done_callback(consume)
             state["last_boredom_watch_at"] = now
             state["last_boredom_watch_status"] = "triggered"
-            self._save_data_sync()
+            self._save_data_sync(sections={"bilibili_integration"})
             logger.info("[PrivateCompanion] 已触发 B站 AI Bot 无聊刷视频联动")
         except Exception as e:
             state["last_boredom_watch_status"] = f"failed:{_single_line(str(e), 80)}"
-            self._save_data_sync()
+            self._save_data_sync(sections={"bilibili_integration"})
             logger.debug(f"[PrivateCompanion] 触发 B站 AI Bot 刷视频失败: {e}")
 
     def _maybe_schedule_bilibili_video_share(self) -> bool:
@@ -3105,7 +3105,7 @@ class NewsExplorationMixin:
         items = await self._fetch_news_reading_candidates()
         if not items:
             state["last_status"] = "no_items"
-            self._save_data_sync()
+            self._save_data_sync(sections={"news_integration"})
             return
         read_keys = state.setdefault("read_keys", [])
         if not isinstance(read_keys, list):
@@ -3117,7 +3117,7 @@ class NewsExplorationMixin:
         digest = await self._summarize_news_items(fresh)
         if not digest:
             state["last_status"] = "digest_failed"
-            self._save_data_sync()
+            self._save_data_sync(sections={"news_integration"})
             return
         selected_key = _single_line(digest.get("selected_key"), 32)
         if selected_key and selected_key not in read_keys:
@@ -3179,7 +3179,7 @@ class NewsExplorationMixin:
             digest["share_status"] = "blocked"
             digest["share_skip_reason"] = "本次新闻阅读不允许主动分享，且自我关联未通过"
             _sync_digest_share_status()
-            self._save_data_sync()
+            self._save_data_sync(sections={"news_integration"})
             logger.info("[PrivateCompanion] 已完成一次新闻阅读: %s", reason)
             return
         users = self.data.get("users")
@@ -3341,7 +3341,7 @@ class NewsExplorationMixin:
             digest["share_status"] = "no_target"
             digest["share_skip_reason"] = "没有可用的目标私聊用户"
         _sync_digest_share_status()
-        self._save_data_sync()
+        self._save_data_sync(sections={"news_integration", "users", "proactive_candidate_pool", "external_event_pool", "external_event_self_link_cache"})
         logger.info("[PrivateCompanion] 已完成一次新闻阅读: %s", reason)
 
     def _ai_daily_state(self) -> dict[str, Any]:
@@ -3600,10 +3600,10 @@ class NewsExplorationMixin:
             status = "waiting_schedule" if future_sources else "all_sources_done"
             if ai_state.get("date") != today or ai_state.get("status") != status:
                 ai_state.update({"date": today, "status": status, "last_checked_at": ai_state.get("last_checked_at", 0)})
-                self._save_data_sync()
+                self._save_data_sync(sections={"news_integration"})
             return
         ai_state.update({"date": today, "last_checked_at": now, "status": "checking"})
-        self._save_data_sync()
+        self._save_data_sync(sections={"news_integration"})
         any_read = False
         for source in due_sources:
             key = str(source.get("key") or self._ai_daily_source_key(source))
@@ -3630,7 +3630,7 @@ class NewsExplorationMixin:
             any_read = any_read or read
         if not any_read and ai_state.get("status") == "checking":
             ai_state["status"] = "waiting_today_video"
-        self._save_data_sync()
+        self._save_data_sync(sections={"news_integration"})
 
     async def _maybe_trigger_news_boredom_read(self) -> None:
         if not (self.enable_news_integration and self.enable_news_boredom_read):
@@ -3812,7 +3812,7 @@ class NewsExplorationMixin:
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         try:
-            self._save_data_sync()
+            self._save_data_sync(sections={"web_search_runtime"})
         except Exception:
             pass
         logger.warning(
@@ -4501,7 +4501,7 @@ class NewsExplorationMixin:
         if not (use_custom_search or search_umo):
             state["last_probe_at"] = now
             state["last_status"] = "web_search_disabled_or_unconfigured"
-            self._save_data_sync()
+            self._save_data_sync(sections={"web_exploration"})
             return
         if random.random() > 0.46:
             return
@@ -4529,7 +4529,7 @@ class NewsExplorationMixin:
                 "no_results": not bool(error_text),
                 "search_failed": bool(error_text),
             }
-            self._save_data_sync()
+            self._save_data_sync(sections={"web_exploration"})
             return
         digest = await self._summarize_web_exploration(query_info, results)
         notes = state.setdefault("notes", [])
@@ -4628,5 +4628,5 @@ class NewsExplorationMixin:
                         user["last_external_event_self_link_at"] = now
                     self._remember_external_event(digest, source_type="web_exploration", reason="web_exploration_share")
                     break
-        self._save_data_sync()
+        self._save_data_sync(sections={"web_exploration", "users", "proactive_candidate_pool", "external_event_pool", "external_event_self_link_cache"})
         logger.info("[PrivateCompanion] 已完成一次网页探索: %s", _single_line(digest.get("topic"), 80))

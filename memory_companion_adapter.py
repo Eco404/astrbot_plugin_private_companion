@@ -581,7 +581,10 @@ class MemoryCompanionAdapterMixin:
         try:
             current = BotPersonalOutbox(
                 data,
-                save=lambda: self._schedule_data_save(delay=0.5),
+                save=lambda: self._schedule_data_save(
+                    sections={"bot_personal_outbox"},
+                    delay=0.5,
+                ),
             )
         except Exception as exc:
             logger.debug("[PrivateCompanion] Bot Personal outbox 初始化失败: %s", _single_line(exc, 120))
@@ -3075,7 +3078,7 @@ class MemoryCompanionAdapterMixin:
         if not callable(composer) or not callable(saver):
             return
         data["daily_state"] = composer(data.get("daily_weather", {}))
-        saver()
+        saver(sections={"state_conditions", "daily_state"})
         try:
             await acker(applied_refs, delivery_context=delivery_context)
         except Exception as exc:

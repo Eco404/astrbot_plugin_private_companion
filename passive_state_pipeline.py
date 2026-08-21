@@ -558,7 +558,7 @@ async def inject_humanized_state(
             source="conversation",
         )
     if self._record_recent_private_fact_correction(current_user, inbound_text):
-        self._schedule_data_save()
+        self._schedule_data_save(sections={"users"})
     fact_attribution_guard = self._format_private_fact_attribution_guard(current_user, inbound_text)
     if fact_attribution_guard:
         prompt_surface.add(
@@ -674,7 +674,7 @@ async def inject_humanized_state(
                 priority=28,
                 source="conversation",
             )
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"users"})
     identity_anchor = self._format_private_identity_anchor_for_prompt(user_id, current_user, event)
     if identity_anchor:
         prompt_surface.add("identity.anchor", identity_anchor, priority=10, source="identity")
@@ -1110,7 +1110,7 @@ async def inject_humanized_state(
                                 "intent": intent_line,
                                 "source": "reply_image",
                             }
-                            self._save_data_sync()
+                            self._save_data_sync(sections={"users"})
                     except Exception as exc:
                         logger.debug("[PrivateCompanion] 私聊引用图片视觉反馈目标记录失败: %s", exc)
                 try:

@@ -299,7 +299,7 @@ class DailyReviewMixin:
         audit[:] = [entry for entry in audit if isinstance(entry, dict) and _safe_float(entry.get("ts"), 0.0) >= cutoff][-160:]
         scheduler = getattr(self, "_schedule_data_save", None)
         if callable(scheduler):
-            scheduler()
+            scheduler(sections={"daily_review_case_audit"})
         return str(item["id"])
 
     def _update_daily_review_case(self, case_id: str, **changes: Any) -> None:
@@ -327,7 +327,7 @@ class DailyReviewMixin:
             item["updated_ts"] = time.time()
             scheduler = getattr(self, "_schedule_data_save", None)
             if callable(scheduler):
-                scheduler()
+                scheduler(sections={"daily_review_case_audit"})
             return
 
     def _record_daily_review_outbound_case(self, event: Any, chain: list[Any]) -> str:
@@ -1299,7 +1299,7 @@ class DailyReviewMixin:
                         "attempted_at": time.time(),
                         "error": error,
                     }
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"daily_review_last_attempt"})
                 if force:
                     raise RuntimeError(error)
                 return None
@@ -1312,7 +1312,7 @@ class DailyReviewMixin:
                     "attempted_at": time.time(),
                     "error": "",
                 }
-                self._save_data_sync()
+                self._save_data_sync(sections={"daily_review_last_attempt"})
             try:
                 raw = await self._llm_call(
                     self._daily_review_prompt(snapshot),
@@ -1344,7 +1344,7 @@ class DailyReviewMixin:
                         "attempted_at": time.time(),
                         "error": safe_error,
                     }
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"daily_review_last_attempt"})
                 if force:
                     raise
                 logger.warning("[PrivateCompanion] 每日终盘巡视失败，将在冷却后重试: %s", safe_error)
@@ -1368,7 +1368,7 @@ class DailyReviewMixin:
                     "attempted_at": report["generated_at"],
                     "error": "",
                 }
-                self._save_data_sync()
+                self._save_data_sync(sections={"daily_review_reports", "daily_review_active_guidance", "daily_review_last_attempt", "daily_review_completed_day"})
             logger.info(
                 "[PrivateCompanion] 每日终盘巡视完成: date=%s score=%s findings=%s guidance=%s",
                 date_key,

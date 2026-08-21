@@ -2931,7 +2931,7 @@ class LlmToolActionsMixin:
                 previous_notes = raw_notes
                 self.data["memo_notes"] = updated_notes
                 try:
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"memo_notes"})
                 except Exception:
                     self.data["memo_notes"] = previous_notes
                     raise
@@ -3023,7 +3023,7 @@ class LlmToolActionsMixin:
             if changed:
                 saver = getattr(self, "_save_data_sync", None)
                 if callable(saver):
-                    saver()
+                    saver(sections={"users", "photo_generation_scope_attempts"})
             return changed
 
         data_lock = getattr(self, "_data_lock", None)
@@ -4961,7 +4961,11 @@ class LlmToolActionsMixin:
                         return bool(authorization["authorized"])
                     state = ensure_reaction_expression_state(user)
                     reaction_expression_scope_state(state, scope_key)["last_offer_at"] = now
-                    self._persist_reaction_expression_state()
+                    self._persist_reaction_expression_state(
+                        sections={"reaction_expression_group_states"}
+                        if scope == "group"
+                        else {"users"}
+                    )
             self._note_reaction_expression_runtime(offers=1, last_reason="offered")
         self._note_reaction_expression_runtime(
             trigger_mode=authorization.get("trigger_mode"),
@@ -5107,17 +5111,24 @@ class LlmToolActionsMixin:
             )
         runtime["last_at"] = _now_ts()
 
-    def _persist_reaction_expression_state(self) -> None:
+    def _persist_reaction_expression_state(
+        self,
+        *,
+        sections: set[str] | None = None,
+    ) -> None:
         scheduler = getattr(self, "_schedule_data_save", None)
         if callable(scheduler):
             try:
-                scheduler()
+                scheduler(sections=sections)
                 return
             except Exception:
                 pass
         saver = getattr(self, "_save_data_sync", None)
         if callable(saver):
-            saver()
+            saver(
+                sections=sections
+                or {"users", "reaction_expression_group_states"}
+            )
 
     @staticmethod
     def _is_reaction_embedding_provider(provider: Any) -> bool:
@@ -5763,7 +5774,11 @@ class LlmToolActionsMixin:
                     now=now,
                     candidate_limit=candidate_limit,
                 )
-                self._persist_reaction_expression_state()
+                self._persist_reaction_expression_state(
+                    sections={"reaction_expression_group_states"}
+                    if scope == "group"
+                    else {"users"}
+                )
                 return json.dumps(
                     self._reaction_expression_skip_result(
                         reason,
@@ -5857,7 +5872,11 @@ class LlmToolActionsMixin:
                     cache_hit=lookup_cache_hit,
                     latency_ms=lookup_latency_ms,
                 )
-                self._persist_reaction_expression_state()
+                self._persist_reaction_expression_state(
+                    sections={"reaction_expression_group_states"}
+                    if scope == "group"
+                    else {"users"}
+                )
             return json.dumps(
                 self._reaction_expression_skip_result(
                     reason,
@@ -5939,7 +5958,11 @@ class LlmToolActionsMixin:
                     cache_hit=lookup_cache_hit,
                     latency_ms=lookup_latency_ms,
                 )
-                self._persist_reaction_expression_state()
+                self._persist_reaction_expression_state(
+                    sections={"reaction_expression_group_states"}
+                    if scope == "group"
+                    else {"users"}
+                )
                 return json.dumps(
                     self._reaction_expression_skip_result(
                         final_reason,
@@ -5978,7 +6001,11 @@ class LlmToolActionsMixin:
                     cache_hit=lookup_cache_hit,
                     latency_ms=lookup_latency_ms,
                 )
-                self._persist_reaction_expression_state()
+                self._persist_reaction_expression_state(
+                    sections={"reaction_expression_group_states"}
+                    if scope == "group"
+                    else {"users"}
+                )
                 return json.dumps(
                     self._reaction_expression_skip_result(
                         "duplicate_image",
@@ -6163,7 +6190,11 @@ class LlmToolActionsMixin:
                     cache_hit=lookup_cache_hit,
                     latency_ms=lookup_latency_ms,
                 )
-                self._persist_reaction_expression_state()
+                self._persist_reaction_expression_state(
+                    sections={"reaction_expression_group_states"}
+                    if scope == "group"
+                    else {"users"}
+                )
             return json.dumps(
                 self._reaction_expression_skip_result(
                     delivery_reason,
@@ -6223,7 +6254,11 @@ class LlmToolActionsMixin:
                     reason="reaction_expression_experiment",
                     subject_owner="unknown",
                 )
-            self._persist_reaction_expression_state()
+            self._persist_reaction_expression_state(
+                sections={"reaction_expression_group_states"}
+                if scope == "group"
+                else {"users"}
+            )
 
         self._note_reaction_expression_runtime(sent=1, last_reason="delivered")
         self._mark_reaction_asset_used(image_id, event=event)
@@ -6401,7 +6436,11 @@ class LlmToolActionsMixin:
                     cache_hit=cache_hit,
                     latency_ms=latency_ms,
                 )
-            self._persist_reaction_expression_state()
+            self._persist_reaction_expression_state(
+                sections={"reaction_expression_group_states"}
+                if scope == "group"
+                else {"users"}
+            )
 
         if sent:
             self._note_reaction_expression_runtime(sent=1, last_reason="delivered")
@@ -6845,7 +6884,7 @@ class LlmToolActionsMixin:
                         reason="reaction_library_image",
                         subject_owner="unknown",
                     )
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
 
         if sent:
             self._mark_reaction_asset_used(lookup.get("image_id"), event=event)
@@ -8187,7 +8226,7 @@ class LlmToolActionsMixin:
                 ]
             if self.enable_worldbook_member_recognition:
                 async with self._data_lock:
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"worldbook_member_profiles"})
             return json.dumps({"status": "success", "group_id": target_group, "count": len(formatted), "members": formatted[:80]}, ensure_ascii=False)
         except Exception as exc:
             return json.dumps({"status": "error", "message": f"查询群成员失败: {_single_line(exc, 120)}"}, ensure_ascii=False)
@@ -8623,7 +8662,7 @@ class LlmToolActionsMixin:
             )
             return f"发送失败：{_single_line(error, 180)}"
         self._note_atrelay_send("group", target_group, text, at_qq or at_user, event=event)
-        self._save_data_sync()
+        self._save_data_sync(sections={"recent_atrelay_contexts", "atrelay_send_log"})
         logger.info(
             "[PrivateCompanion] 跨群转述发送完成: group=%s at=%s umo=%s",
             target_group,
@@ -8695,7 +8734,7 @@ class LlmToolActionsMixin:
                 confirm_before_report=confirm_before_report,
                 expire_hours=receipt_expire_hours,
             )
-        self._save_data_sync()
+        self._save_data_sync(sections={"pending_atrelay_receipts", "recent_atrelay_contexts", "atrelay_send_log"})
         logger.info(
             "[PrivateCompanion] 私聊转述发送完成: user=%s umo=%s",
             target_user,
@@ -8826,5 +8865,5 @@ class LlmToolActionsMixin:
                 }
             )
             del tasks[:-30]
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})
         return f"已挂起：等 {target_name} 在群 {target_group} 出现时转述"

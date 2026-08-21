@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import Collection
 from contextlib import asynccontextmanager
 import contextvars
 import functools
@@ -262,7 +263,11 @@ from .chronotype import ChronotypeMixin
 from .memory_companion_adapter import MemoryCompanionAdapterMixin
 from .p5_attestation import P5AttestationError, REASON_CODES as P5_ATTESTATION_REASON_CODES
 from .p5_source_observer import evaluate_source
-from .message_pipeline import handle_group_message, handle_private_message
+from .message_pipeline import (
+    event_data_save_boundary,
+    handle_group_message,
+    handle_private_message,
+)
 from .tool_history_sanitizer import sanitize_history_image_blocks, sanitize_openai_tool_history
 from .forward_message import ForwardMessageMixin
 from .private_image import PrivateImageMixin
@@ -1160,7 +1165,7 @@ class PrivateCompanionExtensionAPI:
             profile["pending_observations"] = ordinary_pending + historical_pending
             if staged:
                 profile["last_pending_observation_at"] = time.time()
-                plugin._save_data_sync()
+                plugin._save_data_sync(sections={"worldbook_member_profiles"})
         return {"staged": staged, "batch_id": normalized_batch_id}
 
     async def rebind_historical_relationship_observations(
@@ -1360,7 +1365,7 @@ class PrivateCompanionExtensionAPI:
             profiles[normalized_old_user_id] = source_profile
             profiles[normalized_user_id] = target_profile
             try:
-                plugin._save_data_sync()
+                plugin._save_data_sync(sections={"worldbook_member_profiles"})
             except Exception:
                 profiles[normalized_old_user_id] = original_source
                 if target_had_entry:
@@ -1419,7 +1424,7 @@ class PrivateCompanionExtensionAPI:
                 removed += len(pending) - len(kept)
                 profile["pending_observations"] = kept
             if removed:
-                plugin._save_data_sync()
+                plugin._save_data_sync(sections={"worldbook_member_profiles"})
         return {"removed": removed, "batch_id": normalized_batch_id}
 
 _LUNAR_MONTH_NAMES = [
@@ -2019,7 +2024,7 @@ class PrivateCompanionPlugin(
             actor_id=actor_id,
         )
         if result.get("ok") and result.get("changed") and schedule_save:
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"unified_person"})
         return result
 
     def _persona_profile_path(self, persona_id: str) -> Path:
@@ -2193,7 +2198,9 @@ class PrivateCompanionPlugin(
                             "state": "confirmed",
                             "created_at": _now_ts(),
                         }
-                        self._req041_persist_archive_saga_locked()
+                        self._req041_persist_archive_saga_locked(
+                            sections={"_req041_persona_reset_saga"},
+                        )
                 scoped_reset = self._req041_erase_scoped_persona_data(
                     pid, operation_id=clean_operation,
                 )
@@ -2237,17 +2244,28 @@ class PrivateCompanionPlugin(
                         sync_targets()
                 try:
                     if multi_enabled:
-                        self._save_persona_profile_sync(pid, self.data)
-                        dirty = getattr(self, "_persona_data_save_dirty", None)
-                        if isinstance(dirty, set):
-                            dirty.discard(pid)
+                        self._write_persona_data_snapshot_sync(
+                            pid,
+                            deepcopy(self.data),
+                        )
+                        clear_dirty = getattr(self, "_clear_scheduled_data_save_dirty", None)
+                        if callable(clear_dirty):
+                            clear_dirty(persona_id=pid)
+                        else:
+                            dirty = getattr(self, "_persona_data_save_dirty", None)
+                            if isinstance(dirty, set):
+                                dirty.discard(pid)
                     else:
                         self._write_data_snapshot_sync(deepcopy(self.data))
-                        self._data_save_dirty = False
+                        clear_dirty = getattr(self, "_clear_scheduled_data_save_dirty", None)
+                        if callable(clear_dirty):
+                            clear_dirty()
+                        else:
+                            self._data_save_dirty = False
                 except Exception:
                     self.data = previous
                     if multi_enabled:
-                        self._save_persona_profile_sync(pid, previous)
+                        self._write_persona_data_snapshot_sync(pid, previous)
                     else:
                         self._write_data_snapshot_sync(previous)
                     raise
@@ -4218,7 +4236,7 @@ class PrivateCompanionPlugin(
         if result.get("ok") and result.get("changed"):
             saver = getattr(self, "_schedule_data_save", None)
             if callable(saver):
-                saver()
+                saver(sections={"unified_person"})
         return result
 
     def resolve_unified_person_for_event(self, event: Any | None = None) -> dict[str, Any]:
@@ -5217,7 +5235,9 @@ class PrivateCompanionPlugin(
                     "created_at": _now_ts(),
                 }
                 sagas[clean_operation] = saga
-                self._req041_persist_archive_saga_locked()
+                self._req041_persist_archive_saga_locked(
+                    sections={"_req041_group_reset_sagas"},
+                )
             else:
                 clean_operation = _single_line(saga.get("operation_id"), 120)
                 if (
@@ -5250,7 +5270,13 @@ class PrivateCompanionPlugin(
                 "namespace_count": int(remote.get("namespace_count") or 0),
             }
             saga["local_result"] = deepcopy(local)
-            self._req041_persist_archive_saga_locked()
+            self._req041_persist_archive_saga_locked(
+                sections={
+                    "groups",
+                    "expression_voice_profile",
+                    "_req041_group_reset_sagas",
+                },
+            )
 
         config_saved = await self._save_config_if_possible()
         if not config_saved:
@@ -5260,9 +5286,14 @@ class PrivateCompanionPlugin(
             }
         async with self._data_lock:
             self._req041_group_reset_sagas_locked().pop(clean_operation, None)
+            deleted_sections: set[str] = set()
             if not self.data.get("_req041_group_reset_sagas"):
                 self.data.pop("_req041_group_reset_sagas", None)
-            self._req041_persist_archive_saga_locked()
+                deleted_sections.add("_req041_group_reset_sagas")
+            self._req041_persist_archive_saga_locked(
+                sections={"_req041_group_reset_sagas"},
+                deleted_sections=deleted_sections,
+            )
         return {
             "ok": True, "state": "completed", "code": "group_reset_completed",
             "operation_id": clean_operation, "config_saved": True,
@@ -5336,13 +5367,70 @@ class PrivateCompanionPlugin(
             "error_codes": sorted(set(errors))[:16],
         }
 
-    def _req041_persist_archive_saga_locked(self) -> None:
+    def _req041_persist_archive_saga_locked(
+        self,
+        *,
+        sections: Collection[str] | None = None,
+        deleted_sections: Collection[str] = (),
+        full_scope: str | None = None,
+    ) -> None:
         """Durably persist a destructive saga before any cross-store write."""
+        normalized_scope = str(full_scope or "").strip() or None
+        normalized_deleted = {
+            str(section).strip()
+            for section in deleted_sections
+            if str(section).strip()
+        }
+        normalized_sections = {
+            str(section).strip()
+            for section in (sections or ())
+            if str(section).strip()
+        }
+        if normalized_scope is None and sections is None:
+            raise ValueError(
+                "archive saga sections must be explicit unless full_scope is provided"
+            )
+        if normalized_scope is not None:
+            if normalized_scope != "admin_import_export":
+                raise ValueError(
+                    "archive saga full_scope must be admin_import_export"
+                )
+            if sections is not None or normalized_deleted:
+                raise ValueError(
+                    "archive saga full_scope cannot be combined with sections"
+                )
+        else:
+            # The live mapping is authoritative when an internal caller names a
+            # section in both sets. Present values are upserts; absent values are
+            # tombstones. Never pass an overlapping request to the writer.
+            for section in normalized_sections & normalized_deleted:
+                if section in self.data:
+                    normalized_deleted.discard(section)
+                else:
+                    normalized_sections.discard(section)
+        if not normalized_sections and not normalized_deleted:
+            if normalized_scope is None:
+                return
+        validator = getattr(self, "_validate_save_request", None)
+        if callable(validator):
+            validator(
+                None if normalized_scope is not None else normalized_sections,
+                normalized_deleted,
+                normalized_scope,
+            )
         active_persona = str(self._active_persona_scope() or "")
         if bool(getattr(self, "enable_multi_persona_mode", False)) and active_persona:
+            # Destructive sagas must be durable before touching another store;
+            # the persona profile backend exposes only an immediate snapshot API.
             self._write_persona_data_snapshot_sync(active_persona, deepcopy(self.data))
             return
-        self._save_data_now_sync()
+        if normalized_scope is not None:
+            self._save_data_now_sync(full_scope="admin_import_export")
+        else:
+            self._save_data_now_sync(
+                sections=normalized_sections,
+                deleted_sections=normalized_deleted,
+            )
 
     async def archive_unified_person(
         self,
@@ -5367,12 +5455,20 @@ class PrivateCompanionPlugin(
             )
             if not prepared.get("ok"):
                 return prepared
-            self._req041_persist_archive_saga_locked()
+            self._req041_persist_archive_saga_locked(
+                sections={"unified_person"},
+            )
             if prepared.get("code") == "person_archived":
                 subjects = registry.archived_identity_subjects(clean_person)
                 removed = self._req041_erase_person_private_auxiliary_locked(clean_person, subjects)
                 if sum(removed.values()) > 0:
-                    self._req041_persist_archive_saga_locked()
+                    self._req041_persist_archive_saga_locked(
+                        sections={
+                            name
+                            for name, count in removed.items()
+                            if int(count or 0) > 0
+                        },
+                    )
                 return prepared
             if dry_run:
                 return prepared
@@ -5387,7 +5483,9 @@ class PrivateCompanionPlugin(
             )
             if not confirmed.get("ok"):
                 return confirmed
-            self._req041_persist_archive_saga_locked()
+            self._req041_persist_archive_saga_locked(
+                sections={"unified_person"},
+            )
             context = self._req041_scoped_private_context_for_person(clean_person)
             synchronizer = getattr(self, "req041_scoped_projection_sync", None)
             relationship_store = getattr(self, "req041_relationship_store", None)
@@ -5462,7 +5560,16 @@ class PrivateCompanionPlugin(
                 rollback = getattr(coordinator, "rollback_identity", None)
                 if callable(rollback):
                     rollback(clean_person, reason_code="person_archived")
-                self._req041_persist_archive_saga_locked()
+                self._req041_persist_archive_saga_locked(
+                    sections={
+                        "unified_person",
+                        *(
+                            name
+                            for name, count in auxiliary_counts.items()
+                            if int(count or 0) > 0
+                        ),
+                    },
+                )
             return result
 
     async def _req041_resume_confirmed_person_archives(self) -> dict[str, Any]:
@@ -5488,7 +5595,11 @@ class PrivateCompanionPlugin(
         }
 
     def _req041_purge_legacy_person_locked(
-        self, person_id: str, subjects: list[str]
+        self,
+        person_id: str,
+        subjects: list[str],
+        *,
+        changed_sections: set[str] | None = None,
     ) -> dict[str, int]:
         """Remove only exact identity-owned legacy nodes; never fuzzy-search text."""
         clean_person = _single_line(person_id, 80)
@@ -5516,7 +5627,7 @@ class PrivateCompanionPlugin(
             if isinstance(value, dict):
                 for key in list(value):
                     item = value[key]
-                    if str(key) in subject_set or owned(item):
+                    if str(key) == clean_person or str(key) in subject_set or owned(item):
                         value.pop(key, None)
                         counts["mapping_entries"] += 1
                         counts["records"] += 1
@@ -5537,7 +5648,11 @@ class PrivateCompanionPlugin(
         for key in list(self.data):
             if key == "unified_person":
                 continue
-            self.data[key] = scrub(self.data[key])
+            before = deepcopy(self.data[key])
+            scrubbed = scrub(self.data[key])
+            self.data[key] = scrubbed
+            if changed_sections is not None and before != scrubbed:
+                changed_sections.add(str(key))
         return counts
 
     async def purge_unified_person(
@@ -5562,7 +5677,9 @@ class PrivateCompanionPlugin(
             )
             if not prepared.get("ok"):
                 return prepared
-            self._req041_persist_archive_saga_locked()
+            self._req041_persist_archive_saga_locked(
+                sections={"unified_person"},
+            )
             if prepared.get("code") == "person_purged":
                 return prepared
             if dry_run:
@@ -5578,7 +5695,9 @@ class PrivateCompanionPlugin(
             )
             if not confirmed.get("ok"):
                 return confirmed
-            self._req041_persist_archive_saga_locked()
+            self._req041_persist_archive_saga_locked(
+                sections={"unified_person"},
+            )
             subjects = registry.archived_identity_subjects(clean_person)
             if int(prepared.get("detached_identity_count") or 0) > 0 and not subjects:
                 return {
@@ -5605,7 +5724,12 @@ class PrivateCompanionPlugin(
                     "person_id": clean_person, "operation_id": clean_operation, "changed": False,
                 }
             auxiliary_counts = self._req041_erase_person_private_auxiliary_locked(clean_person, subjects)
-            legacy_counts = self._req041_purge_legacy_person_locked(clean_person, subjects)
+            legacy_changed_sections: set[str] = set()
+            legacy_counts = self._req041_purge_legacy_person_locked(
+                clean_person,
+                subjects,
+                changed_sections=legacy_changed_sections,
+            )
             result = registry.finalize_person_purge(
                 clean_person, clean_operation, confirmation_token, outbox_receipt,
                 actor_id=actor_id, reason_code=reason_code,
@@ -5613,7 +5737,22 @@ class PrivateCompanionPlugin(
             if result.get("changed"):
                 result["legacy_removed_record_count"] = int(legacy_counts.get("records") or 0)
                 result["auxiliary_removed_record_count"] = sum(auxiliary_counts.values())
-                self._req041_persist_archive_saga_locked()
+                if legacy_changed_sections:
+                    # Legacy identity records may live under unregistered roots.
+                    # This administrator-confirmed purge is therefore an explicit
+                    # full-store repair boundary rather than an implicit fallback.
+                    self._req041_persist_archive_saga_locked(
+                        full_scope="admin_import_export",
+                    )
+                else:
+                    self._req041_persist_archive_saga_locked(
+                        sections={"unified_person"}
+                        | {
+                            name
+                            for name, count in auxiliary_counts.items()
+                            if int(count or 0) > 0
+                        },
+                    )
             return result
 
     async def _req041_resume_confirmed_person_purges(self) -> dict[str, Any]:
@@ -5938,7 +6077,7 @@ class PrivateCompanionPlugin(
             )
             candidate["legacy_result_code"] = str(result.get("code") or "")
             if result.get("changed"):
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"users"})
 
     @filter.after_message_sent(priority=-105000)
     @_multi_persona_event_context
@@ -6491,7 +6630,10 @@ class PrivateCompanionPlugin(
         needs_startup_save = False
         agenda_before = bool(getattr(self, "_agenda_migration_dirty", False))
         self._agenda_prepare_store()
-        if getattr(self, "_agenda_migration_dirty", False) and not agenda_before:
+        agenda_migration_changed = bool(
+            getattr(self, "_agenda_migration_dirty", False) and not agenda_before
+        )
+        if agenda_migration_changed:
             needs_startup_save = True
         async with self._data_lock:
             changed = False
@@ -6520,7 +6662,19 @@ class PrivateCompanionPlugin(
             if changed:
                 needs_startup_save = True
         if needs_startup_save:
-            self._schedule_data_save(delay=0.5)
+            # Initialization may combine an agenda schema migration with legacy
+            # user repair and recovery across several durable roots. Keep this
+            # one-time boundary explicit and distinguish migration from upkeep.
+            if agenda_migration_changed:
+                self._schedule_data_save(
+                    full_scope="startup_migration",
+                    delay=0.5,
+                )
+            else:
+                self._schedule_data_save(
+                    full_scope="startup_maintenance",
+                    delay=0.5,
+                )
         self._create_startup_background_task(
             "req041_automatic_migration",
             self._req041_initialize_automatic_migration,
@@ -6819,7 +6973,9 @@ class PrivateCompanionPlugin(
                 await self._nai_image_maintenance()
             async with self._data_lock:
                 if self._run_startup_data_maintenance_locked():
-                    self._save_data_sync()
+                    # This one-time pass can scrub legacy records across several
+                    # roots, so it intentionally uses the startup maintenance scope.
+                    self._save_data_sync(full_scope="startup_maintenance")
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             if elapsed_ms > 1200:
                 logger.info("[PrivateCompanion] 启动后台维护完成: elapsed=%sms", elapsed_ms)
@@ -6910,11 +7066,19 @@ class PrivateCompanionPlugin(
         try:
             await asyncio.wait_for(self._flush_scheduled_data_save(), timeout=3.0)
         except asyncio.TimeoutError:
-            logger.warning("[PrivateCompanion] 等待后台合并保存超时，将改用最终快照保存")
+            logger.warning(
+                "[PrivateCompanion] Scheduled persistence did not drain before "
+                "shutdown; final persistence will continue in the background"
+            )
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            logger.debug("[PrivateCompanion] 等待后台合并保存时收到异常: %s", _single_line(exc, 160))
+            logger.debug(
+                "[PrivateCompanion] Waiting for scheduled persistence during "
+                "shutdown failed: %s",
+                _single_line(exc, 160),
+            )
+        self._termination_flush_already_attempted = True
         close_image_download_session = getattr(self, "_close_external_image_download_session", None)
         if callable(close_image_download_session):
             try:
@@ -6923,29 +7087,102 @@ class PrivateCompanionPlugin(
                 logger.warning("[PrivateCompanion] 终止时关闭在线图片下载会话超时")
             except Exception as exc:
                 logger.debug("[PrivateCompanion] 终止时关闭在线图片下载会话失败: %s", _single_line(exc, 160))
+        final_save_task = asyncio.create_task(self._save_data_on_terminate())
+        self._termination_save_task = final_save_task
+
+        def observe_final_save(task: asyncio.Task) -> None:
+            if getattr(self, "_termination_save_task", None) is task:
+                self._termination_save_task = None
+            if task.cancelled():
+                return
+            try:
+                error = task.exception()
+            except (asyncio.CancelledError, asyncio.InvalidStateError):
+                return
+            if error is not None:
+                logger.warning(
+                    "[PrivateCompanion] Final shutdown persistence failed: %s",
+                    _single_line(error, 160),
+                )
+
+        final_save_task.add_done_callback(observe_final_save)
         try:
-            await asyncio.wait_for(self._save_data_on_terminate(), timeout=3.0)
+            await asyncio.wait_for(asyncio.shield(final_save_task), timeout=3.0)
         except asyncio.TimeoutError:
-            logger.warning("[PrivateCompanion] 终止时保存数据超时,已跳过最终保存以避免卡死卸载")
+            logger.warning(
+                "[PrivateCompanion] Final shutdown persistence timed out; the "
+                "shielded task will continue in the background"
+            )
         if _private_companion_plugin is self:
             _private_companion_plugin = None
 
     async def _save_data_on_terminate(self) -> None:
-        await self._flush_scheduled_data_save()
-        async with self._data_lock:
-            snapshot = deepcopy(getattr(self, "_data_default", self.data))
-            persona_snapshots = {
-                str(persona_id): deepcopy(profile)
-                for persona_id, profile in (getattr(self, "_persona_data_profiles", {}) or {}).items()
-                if isinstance(profile, dict)
-            }
-        await asyncio.to_thread(self._write_data_snapshot_sync, snapshot)
+        if not bool(getattr(self, "_termination_flush_already_attempted", False)):
+            await self._flush_scheduled_data_save()
+
+        manager = getattr(self, "store_manager", None)
+        manager_backend = str(getattr(manager, "backend_name", "") or "").lower()
+        sqlite_incremental = bool(
+            manager_backend == "sqlite"
+            and callable(getattr(manager, "save_sections", None))
+        )
+        if sqlite_incremental:
+            await self._flush_default_data_save_on_terminate()
+        else:
+            task = getattr(self, "_data_save_task", None)
+            if (
+                isinstance(task, asyncio.Task)
+                and not task.done()
+                and task is not asyncio.current_task()
+            ):
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "[PrivateCompanion] Waiting for the default JSON writer "
+                        "during shutdown failed: %s",
+                        _single_line(exc, 160),
+                    )
+            async with self._data_lock:
+                snapshot = deepcopy(getattr(self, "_data_default", self.data))
+            await asyncio.to_thread(self._write_data_snapshot_sync, snapshot)
+
         if bool(getattr(self, "enable_multi_persona_mode", False)):
-            for persona_id, profile in persona_snapshots.items():
+            profiles = getattr(self, "_persona_data_profiles", {}) or {}
+            persona_ids = (
+                [
+                    str(persona_id)
+                    for persona_id, profile in profiles.items()
+                    if isinstance(profile, dict)
+                ]
+                if isinstance(profiles, dict)
+                else []
+            )
+            for persona_id in persona_ids:
+                task = getattr(self, "_persona_data_save_tasks", {}).get(persona_id)
+                if isinstance(task, asyncio.Task) and not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as exc:
+                        logger.debug(
+                            "[PrivateCompanion] Waiting for a persona writer during "
+                            "shutdown failed: persona=%s error=%s",
+                            persona_id,
+                            _single_line(exc, 160),
+                        )
+                async with self._data_lock:
+                    profile = getattr(self, "_persona_data_profiles", {}).get(persona_id)
+                    if not isinstance(profile, dict):
+                        continue
+                    snapshot = deepcopy(profile)
                 await asyncio.to_thread(
                     self._write_persona_data_snapshot_sync,
                     persona_id,
-                    profile,
+                    snapshot,
                 )
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=11000)
@@ -7875,7 +8112,6 @@ class PrivateCompanionPlugin(
         candidate = getattr(event, "_private_companion_outbound_text_candidate", None)
         if isinstance(candidate, dict):
             self._confirm_outbound_text_candidate(candidate)
-        await self._refresh_group_conversation_after_confirmed_send(event)
 
     @filter.after_message_sent(priority=9000)
     @_multi_persona_event_context
@@ -9277,53 +9513,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @_multi_persona_event_context
     async def remember_group_bot_reply_context_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """记录群聊 Bot 实际候选回复，供下一轮连续对话判断使用。"""
-        if self is None or not self.enabled:
-            return
-        if self._proactive_only_blocks_passive_event(event, "enable_group_companion"):
-            return
-        if not self._feature_enabled_or_temp_unlocked("enable_group_companion"):
-            return
-        group_id = self._extract_group_id_from_event(event)
-        if not group_id:
-            return
-        result = event.get_result()
-        chain = list(getattr(result, "chain", []) or []) if result is not None else []
-        if not chain:
-            return
-        reply_text = self._chain_text_for_forbidden_recall(chain, limit=500)
-        reply_text = _single_line(_strip_internal_message_blocks(reply_text), 260)
-        if not reply_text:
-            return
-        try:
-            sender_id = str(event.get_sender_id())
-        except Exception:
-            sender_id = ""
-        scene = getattr(event, "private_companion_group_scene", None)
-        talking_to_bot = isinstance(scene, dict) and str(scene.get("talking_to") or "") == "bot"
-        async with self._data_lock:
-            group = self._get_group(group_id)
-            active = self._group_active_conversation(group)
-            if not talking_to_bot and str(active.get("sender_id") or "") != str(sender_id or ""):
-                return
-            active["last_bot_reply"] = reply_text
-            active["last_bot_reply_ts"] = _now_ts()
-            recent_bot = group.setdefault("recent_bot_replies", [])
-            if not isinstance(recent_bot, list):
-                recent_bot = []
-                group["recent_bot_replies"] = recent_bot
-            recent_bot.append(
-                {
-                    "ts": _now_ts(),
-                    "sender_id": sender_id,
-                    "text": reply_text,
-                    "talking_to_bot": bool(talking_to_bot),
-                }
-            )
-            del recent_bot[:-20]
-            trimmer = getattr(self, "_group_air_guard_trim_bot_replies", None)
-            if callable(trimmer):
-                trimmer(group)
-            self._save_data_sync()
+        # Group continuity is committed only by the confirmed-delivery
+        # finalizer. This decorating hook must remain a pure read/transform
+        # stage because the adapter can reject the outgoing result afterwards.
+        return
 
     def _plain_result_body_text(self, chain: list[Any]) -> str:
         """Return text when a result contains only an optional quote and plain body."""
@@ -13634,7 +13827,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             },
             "reason": _single_line(reason, 120),
         }
-        self._save_data_sync()
+        self._save_data_sync(sections={"pending_atrelay_requests"})
         logger.info(
             "[PrivateCompanion] 转述请求等待补群: user=%s target=%s text=%s reason=%s",
             uid,
@@ -13743,7 +13936,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         except Exception:
             result = {"status": "error", "message": _single_line(result_raw, 240)}
         pending.pop(uid, None)
-        self._save_data_sync()
+        self._save_data_sync(sections={"pending_atrelay_requests"})
         logger.info(
             "[PrivateCompanion] 已用补充群名续发转述: user=%s group=%s status=%s target=%s",
             uid,
@@ -14266,7 +14459,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         max_items = max(1, _safe_int(getattr(self, "rest_backlog_max_messages", 4), 4, 1))
         user["rest_reply_backlog"] = backlog[-max_items:]
         user["rest_reply_backlog_updated_at"] = now
-        self._schedule_data_save()
+        self._schedule_data_save(sections={"users"})
         logger.info(
             "[PrivateCompanion] 已记录休息中未回复私聊: user=%s count=%s reason=%s text=%s",
             user_id,
@@ -14286,7 +14479,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if not items:
             user["rest_reply_backlog"] = []
             user["rest_reply_backlog_updated_at"] = 0
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"users"})
             return ""
         lines: list[str] = []
         for idx, item in enumerate(items, 1):
@@ -14302,7 +14495,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             lines.append(f"{idx}. {when}｜{text}")
         user["rest_reply_backlog"] = []
         user["rest_reply_backlog_updated_at"] = 0
-        self._schedule_data_save()
+        self._schedule_data_save(sections={"users"})
         if not lines:
             return ""
         return "休息时有几条私聊没来得及回，醒来后补看到：\n" + "\n".join(lines)
@@ -14564,7 +14757,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             _single_line(inbound, 120),
         )
         try:
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"passive_no_reply_records"})
         except Exception:
             pass
         self._schedule_reply_interception_forward(
@@ -14784,7 +14977,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if not self._proactive_only_unlock_store():
             return
         self.data["proactive_only_temp_unlocks"] = []
-        self._schedule_data_save()
+        self._schedule_data_save(sections={"proactive_only_temp_unlocks"})
 
     def _format_proactive_only_temp_unlocks(self) -> str:
         unlocks = self._proactive_only_unlock_store()
@@ -14809,13 +15002,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             removed = keys & target_keys
             keys.difference_update(target_keys)
             self._set_proactive_only_unlock_store(keys)
-            self._save_data_sync()
+            self._save_data_sync(sections={"proactive_only_temp_unlocks"})
             if not removed:
                 return "对应临时放行项本来就没有开启。"
             return "已取消临时放行：\n" + "\n".join(f"- {self._proactive_only_unlock_label(item)}" for item in sorted(removed))
         keys.update(target_keys)
         self._set_proactive_only_unlock_store(keys)
-        self._save_data_sync()
+        self._save_data_sync(sections={"proactive_only_temp_unlocks"})
         return "已临时放行：\n" + "\n".join(f"- {self._proactive_only_unlock_label(item)}" for item in sorted(target_keys))
 
     def _proactive_only_blocks_passive_event(self, event: AstrMessageEvent | None, feature: str = "") -> bool:
@@ -14854,7 +15047,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 logger.info("[PrivateCompanion] 主动专用模式忽略 poke 回流事件: user=%s", user_id)
                 return
             if self._is_duplicate_inbound_message(event, scope=f"private:{user_id}", sender_id=user_id, text=text):
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"inbound_debounce_stats"})
                 return
             self._note_private_user_umo(user_id, user, event.unified_msg_origin)
             self._note_private_display_name_observation(user, user_id, sender_display_name, now=received_ts)
@@ -14911,9 +15104,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             user["ignored_streak"] = 0
             user["friend_unanswered_silenced_since"] = 0
             user["friend_unanswered_silence_note"] = ""
+            meal_care_result: dict[str, Any] = {}
             if self._private_user_role(user, user_id) == "owner" and text:
-                self._handle_meal_care_inbound(user, text, now=received_ts)
-            self._schedule_data_save()
+                meal_care_result = self._handle_meal_care_inbound(user, text, now=received_ts)
+            save_sections = {"users"}
+            if meal_care_result.get("foods"):
+                save_sections.add("food_menu")
+            self._schedule_data_save(sections=save_sections)
         logger.info(
             "[PrivateCompanion] 主动消息专用模式已跳过私聊被动增强: user=%s text=%s",
             user_id,
@@ -16199,29 +16396,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         completion = _single_line(getattr(resp, "completion_text", ""), 500)
         if not completion:
             return
-        group_id = _single_line(
-            getattr(event, "private_companion_semantic_expression_group_id", "")
-            or self._extract_group_id_from_event(event),
-            80,
-        )
-        if not group_id:
-            return
-        context = getattr(event, "private_companion_semantic_expression_context", None)
-        async with self._data_lock:
-            group = self._get_group(group_id)
-            usage = self._record_expression_rule_injection(
-                group,
-                {},
-                completion,
-                semantic_rules=semantic_rules,
-                context=context if isinstance(context, dict) else {"channel": "group"},
-            )
-            if usage:
-                try:
-                    setattr(event, "private_companion_group_semantic_usage_recorded", True)
-                except Exception:
-                    pass
-                self._save_data_sync()
+        # Rule usage is committed by the confirmed-delivery finalizer. Keep this
+        # hook read-only so an LLM response that is later dropped cannot mutate
+        # durable expression-learning state.
+        try:
+            setattr(event, "private_companion_group_semantic_usage_pending", True)
+        except Exception:
+            pass
 
     @filter.on_llm_response()
     @_multi_persona_event_context
@@ -16353,7 +16534,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         current["postprocess_stats"] = stats
                     stats["smart_silence"] = _safe_int(stats.get("smart_silence"), 0, 0) + 1
                     stats["last_smart_silence_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M")
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
                 logger.info(
                     "[PrivateCompanion] 智能沉默已取消本轮私聊回复: user=%s reason=%s inbound=%s reply=%s",
                     user_id,
@@ -16390,7 +16571,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         current["postprocess_stats"] = stats
                     stats["duplicate_dropped"] = _safe_int(stats.get("duplicate_dropped"), 0, 0) + 1
                     stats["last_duplicate_dropped_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M")
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
                 logger.info(
                     "[PrivateCompanion] 回复复核已取消重复私聊回复: user=%s inbound=%s reply=%s",
                     user_id,
@@ -16418,7 +16599,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         current["postprocess_stats"] = stats
                     stats["rewritten"] = _safe_int(stats.get("rewritten"), 0, 0) + 1
                     stats["last_rewritten_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M")
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
 
             async with self._data_lock:
                 live_user_for_duplicate = self._get_user(user_id)
@@ -16437,7 +16618,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         current["postprocess_stats"] = stats
                     stats["duplicate_dropped"] = _safe_int(stats.get("duplicate_dropped"), 0, 0) + 1
                     stats["last_duplicate_dropped_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M")
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
                 logger.info(
                     "[PrivateCompanion] 发送前去重已取消重复私聊回复: user=%s reason=%s inbound=%s reply=%s",
                     user_id,
@@ -16456,52 +16637,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 release_now = True
                 return
 
-            async with self._data_lock:
-                current = self._get_user(user_id)
-                visible_reply_text = _single_line(_strip_internal_message_blocks(working_text), 500)
-                current["last_companion_message"] = visible_reply_text
-                current["last_companion_message_at"] = _now_ts()
-                self._maybe_schedule_goodnight_screen_check(
-                    current,
-                    visible_reply_text,
-                    now=current["last_companion_message_at"],
-                )
-                expression_rule_details = getattr(
-                    event,
-                    "private_companion_expression_rule_details",
-                    None,
-                )
-                semantic_expression_rules = getattr(
-                    event,
-                    "private_companion_semantic_expression_rules",
-                    None,
-                )
-                semantic_expression_context = getattr(
-                    event,
-                    "private_companion_semantic_expression_context",
-                    None,
-                )
-                if isinstance(expression_rule_details, dict) or (
-                    isinstance(semantic_expression_rules, list) and semantic_expression_rules
-                ):
-                    expression_usage = self._record_expression_rule_injection(
-                        current,
-                        expression_rule_details if isinstance(expression_rule_details, dict) else {},
-                        visible_reply_text,
-                        semantic_rules=semantic_expression_rules if isinstance(semantic_expression_rules, list) else [],
-                        context=semantic_expression_context if isinstance(semantic_expression_context, dict) else {},
-                    )
-                    if expression_usage:
-                        logger.info(
-                            "[PrivateCompanion] 表达规则完成本轮注入: user=%s scene=%s evidence=%s visible=%s",
-                            user_id,
-                            _single_line(expression_usage.get("label"), 32) or "-",
-                            _safe_int(expression_usage.get("evidence_count"), 0, 0),
-                            ",".join(expression_usage.get("visible_signals") or [])
-                            or ("semantic" if _safe_int(expression_usage.get("semantic_rule_count"), 0, 0) else "none"),
-                        )
-                self._remember_passive_reply_topic(current, working_text, inbound_text)
-                self._save_data_sync()
             if working_text != original_text:
                 self._schedule_reply_interception_forward(
                     "rewrite",
@@ -16775,7 +16910,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     user=private_user if isinstance(private_user, dict) else None,
                     source="private_command",
                 )
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"users", "unified_person"})
         self._qzone_note_event_bot(event)
         raw_text = str(event.message_str or "")
         normalized_text = raw_text.replace("\u3000", " ").replace("／", "/").strip()
@@ -16980,13 +17115,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if action in private_delivery_bind_actions:
                 changed, response = self._bind_private_delivery_umo(user_id, user, event.unified_msg_origin)
                 if changed:
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
             elif action in private_delivery_view_actions:
                 response = self._format_private_delivery_binding_status(user_id, user)
             elif action in private_delivery_unbind_actions:
                 changed, response = self._unbind_private_delivery_umo(user)
                 if changed:
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
             elif action in wakeup_alarm_actions:
                 camera_command_requested = bool(
                     re.sub(r"\s+", "", str(value or "")).lower().startswith(
@@ -17136,7 +17271,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         operation_id="req041-command-open-loop:" + uuid.uuid4().hex,
                     )
                     if committed:
-                        self._save_data_sync()
+                        save_sections = {"users"}
+                        if memory_managed:
+                            save_sections.add("_req041_private_memory")
+                        self._save_data_sync(sections=save_sections)
                     else:
                         response = "记忆已发生并发变更，请重试。"
             elif action in {"长期记忆", "livingmemory", "lmem", "向量记忆"}:
@@ -17169,7 +17307,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     runtime_access.clear()
                 secret["reset_at"] = _now_ts()
                 await self._ensure_bookshelf_password_async()
-                self._save_data_sync()
+                self._save_data_sync(sections={"bookshelf_secret"})
                 response = "已重新设置书柜夹层密码。需要查看真实密码可用：陪伴 输出夹层密码"
             elif action in {"发说说", "发QQ空间", "发布说说", "空间发布", "发布空间"}:
                 response = "正在发布 QQ 空间说说。"
@@ -17188,10 +17326,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             elif action in {"日期添加", "添加日期", "重要日期添加"}:
                 ok, response = self._add_important_date_entry(value)
                 if ok:
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"important_dates"})
             elif action in {"日期删除", "删除日期", "重要日期删除"}:
                 response = self._remove_important_date_entry(value)
-                self._save_data_sync()
+                self._save_data_sync(sections={"important_dates"})
             elif action in {"可做事项", "能做什么"}:
                 items = self.data.get("can_do", [])
                 if items:
@@ -17203,7 +17341,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     response = "请这样设置：陪伴 昵称 <你喜欢的称呼>"
                 else:
                     user["nickname"] = _single_line(value, 24)
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
                     response = f"记住了,以后我会叫你：{user['nickname']}"
             elif action in {"语气", "风格"}:
                 style_value = _single_line(value, 24)
@@ -17211,11 +17349,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     response = "请这样设置：陪伴 语气 <简短语气描述>"
                 else:
                     user["style"] = style_value
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
                     response = f"语气偏好已记录：{style_value}"
             elif action in {"清空记忆", "忘记我"}:
                 self.data.setdefault("users", {}).pop(user_id, None)
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
                 response = "已清空你的陪伴设置和轻量记忆。"
             else:
                 response = self._help_text()
@@ -17381,7 +17519,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     self.data["detail_enhanced_day"] = str((plan or {}).get("date") or _today_key())
                     self.data["detail_enhanced_segments"] = {}
                     self.data["daily_story_plan"] = {}
-                    self._save_data_sync()
+                    self._save_data_sync(
+                        sections={
+                            "daily_plan",
+                            "daily_story_plan",
+                            "detail_enhanced_day",
+                            "detail_enhanced_segments",
+                        }
+                    )
                 await self._reply(event, self._format_daily_plan(plan or {}))
         if action in daily_schedule_cancel_actions:
             _, message = await self._cancel_daily_plan_segment_by_selector(value)
@@ -17423,7 +17568,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             state = await self._ensure_daily_state(force=True)
             async with self._data_lock:
                 self.data["daily_plan"] = {}
-                self._save_data_sync()
+                self._save_data_sync(sections={"daily_plan"})
             await self._reply(
                 event,
                 self._format_state_detail(state)
@@ -17435,7 +17580,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 async with self._data_lock:
                     self.data["daily_plan"] = {}
                     state = dict(self.data.get("daily_state", {}))
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"daily_plan"})
                 await self._reply(
                     event,
                     message
@@ -17484,6 +17629,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=220000)
     @_multi_persona_event_context
+    @event_data_save_boundary
     async def guard_req036_private_capability_early(self, event: AstrMessageEvent, *args, **kwargs):
         """Reject an unauthorized private event before any normal message plugin runs."""
         if self is None or bool(getattr(event, "private_companion_req036_denied", False)):
@@ -17512,7 +17658,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             migrator = getattr(self, "_req036_migrate_configured_target_capability", None)
             migrated = bool(migrator(user_id, private_user)) if callable(migrator) else False
             if migrated:
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"users"})
         if auto_profile_created:
             logger.info(
                 "[PrivateCompanion] 已建立最小用户档案: user=%s platform=%s",
@@ -17522,6 +17668,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     @_multi_persona_event_context
+    @event_data_save_boundary(flush=True)
     async def on_private_message(self, event: AstrMessageEvent, *args, **kwargs):
         if await self._handle_private_message_preflight(event):
             return
@@ -17560,7 +17707,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         user = users.get(user_id) if isinstance(users, dict) else None
                         if isinstance(user, dict):
                             user.pop("reality_touch_pending_consent", None)
-                            self._save_data_sync()
+                            self._save_data_sync(sections={"users"})
                     confirmation_reply = "主机摄像头只允许 AstrBot 管理员或主要用户本人授权和使用。"
             elif isinstance(user, dict) and isinstance(
                 user.get("reality_touch_pending_consent"), dict
@@ -17680,7 +17827,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 event=event,
             )
             if captured:
-                self._schedule_group_observation_save()
+                    self._schedule_data_save(sections={"groups"})
         activity_recorder = getattr(self, "_record_c3_inbound_activity", None)
         if callable(activity_recorder):
             activity_recorder(
@@ -17713,6 +17860,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=210000)
     @_multi_persona_event_context
+    @event_data_save_boundary
     async def guard_blocked_group_member_early(self, event: AstrMessageEvent, *args, **kwargs):
         """在群聊观察和回复插件之前丢弃已静默成员的消息。"""
         if self is None or self._is_onebot_poke_notice_event(event):
@@ -17740,7 +17888,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             was_blocked = bool(member and (_safe_float(member.get("blocked_at"), 0) > 0 or member.get("manual_blocked")))
             blocked = self._group_member_safety_active(member, expire=True)
             if was_blocked and not blocked:
-                self._save_data_sync()
+                self._save_data_sync(sections={"groups"})
         if blocked:
             logger.info(
                 "[PrivateCompanion] 已静默群成员消息: group=%s sender=%s",
@@ -17751,6 +17899,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=200000)
     @_multi_persona_event_context
+    @event_data_save_boundary
     async def capture_group_observation_early(self, event: AstrMessageEvent, *args, **kwargs):
         """Record allowed group messages before reply plugins can stop propagation."""
         if self is None or self._is_onebot_poke_notice_event(event):
@@ -17804,7 +17953,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 group_id=group_id,
                 source="group_observation",
             )
-            self._schedule_group_observation_save()
+            self._schedule_data_save(sections={"unified_person"})
         if not self._proactive_only_blocks_passive_event(event, "group_repeat_early"):
             original_repeat_state = deepcopy(repeat_group_snapshot.get("repeat_follow_state", {}))
             original_interject_at = _safe_float(repeat_group_snapshot.get("last_interject_at"), 0)
@@ -17826,7 +17975,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         current["interject_day"] = repeat_group_snapshot.get("interject_day", "")
                         current["interject_today"] = repeat_group_snapshot.get("interject_today", 0)
                         current["last_bot_interjection"] = repeat_group_snapshot.get("last_bot_interjection", {})
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"groups"})
         self._start_group_image_understanding(
             event,
             group_id=group_id,
@@ -17836,6 +17985,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=190000)
     @_multi_persona_event_context
+    @event_data_save_boundary
     async def review_group_member_safety_early(self, event: AstrMessageEvent, *args, **kwargs):
         """在回复链路前保守审核当前消息，达到阈值时立即静默。"""
         if self is None or self._is_onebot_poke_notice_event(event):
@@ -17879,6 +18029,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=180000)
     @_multi_persona_event_context
+    @event_data_save_boundary
     async def guard_req036_group_portrait_queries(self, event: AstrMessageEvent, *args, **kwargs):
         """Reject third-party portrait probing before any retrieval or LLM hook."""
         if self is None or bool(getattr(event, "_private_companion_member_safety_blocked", False)):
@@ -17929,12 +18080,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     group_id=group_id,
                     source="group_portrait_query",
                 )
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"users", "unified_person"})
         event.stop_event()
         await self._reply(event, await self._req036_read_group_self_portrait(event))
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     @_multi_persona_event_context
+    @event_data_save_boundary(flush=True)
     async def on_group_message(self, event: AstrMessageEvent, *args, **kwargs):
         return await handle_group_message(self, event, *args, **kwargs)
 

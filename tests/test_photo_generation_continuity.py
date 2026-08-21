@@ -28,7 +28,7 @@ class _ContinuityHarness(ProactiveMessageMixin):
         self.model_reply = model_reply
         self.selection_prompt = ""
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, **_kwargs) -> None:
         return None
 
     def _task_provider(self, *_args) -> str:

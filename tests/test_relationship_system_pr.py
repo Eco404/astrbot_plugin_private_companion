@@ -485,7 +485,7 @@ class _RelationshipLedgerHost:
     _apply_relationship_event = APPLY_RELATIONSHIP_EVENT
 
     @staticmethod
-    def _schedule_data_save() -> None:
+    def _schedule_data_save(*_args, **_kwargs) -> None:
         return None
 
 

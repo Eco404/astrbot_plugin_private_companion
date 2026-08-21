@@ -838,7 +838,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 current["proactive_sending_started_at"] = now
                 current["proactive_chat_bridge_token"] = token
                 current["proactive_chat_bridge_session"] = _single_line(session_id, 180)
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
         return {
             "enabled": True,
             "allowed": True,
@@ -1016,7 +1016,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 topic_recorder = getattr(self, "_remember_proactive_topic", None)
                 if callable(topic_recorder):
                     topic_recorder(current, text=visible or text, topic="Proactive Chat", motive="即时主动触发")
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
         logger.info(
             "[PrivateCompanion] 已同步 Proactive Chat 主动发送: user=%s session=%s text=%s",
             user_id,
@@ -1041,7 +1041,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             current["proactive_sending_started_at"] = 0
             current["proactive_chat_bridge_token"] = ""
             current["proactive_chat_bridge_session"] = ""
-            self._save_data_sync()
+            self._save_data_sync(sections={"users"})
         return True
 
     @staticmethod
@@ -7398,7 +7398,10 @@ Output:
                     user_last = {}
                     user["external_proactive_ability_last"] = user_last
                 user_last[name] = executed_at
-            self._save_data_sync()
+            save_sections = {"external_proactive_abilities"}
+            if isinstance(user, dict):
+                save_sections.add("users")
+            self._save_data_sync(sections=save_sections)
         except Exception:
             pass
 
@@ -7584,7 +7587,7 @@ Output:
         async with self._data_lock:
             current = self._get_user(user_id)
             self._note_screen_peek_attempt(user_id, reason="goodnight_screen_check", count_daily=True)
-            self._save_data_sync()
+            self._save_data_sync(sections={"users"})
 
         event = None
         target = _single_line(user.get("umo"), 240)
@@ -7649,7 +7652,7 @@ Output:
                 if user_id and episode_at > 0:
                     claimed.append((user_id, episode_at, episode_key))
             if changed:
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
 
         for user_id, episode_at, episode_key in claimed:
             async with self._data_lock:
@@ -7663,7 +7666,7 @@ Output:
                 )
                 if block_reason:
                     user["goodnight_screen_check_state"] = block_reason
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
                     continue
                 name = _single_line(user.get("nickname"), 40) or user_id
 
@@ -7672,7 +7675,7 @@ Output:
                 current = self._get_user(user_id)
                 current["goodnight_screen_check_state"] = state
                 current["goodnight_screen_check_result_at"] = _now_ts()
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
             if state != "active":
                 continue
 
@@ -7687,14 +7690,14 @@ Output:
                 )
                 if block_reason:
                     current["goodnight_screen_check_state"] = block_reason
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
                     continue
                 current["proactive_sending"] = True
                 current["proactive_sending_started_at"] = _now_ts()
                 user = current
                 name = _single_line(current.get("nickname"), 40) or user_id
                 umo = _single_line(current.get("umo"), 240)
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
 
             motive = "互道晚安后仍有明确活动迹象，轻声提醒一次早点休息，不要求回复"
             safe_context = "内部状态判断：晚安后仍有明确活动迹象；没有提供任何屏幕内容或应用信息"
@@ -7789,13 +7792,13 @@ Output:
                     current["goodnight_screen_check_reminded_episode_key"] = episode_key
                     current["sent_today"] = _safe_int(current.get("sent_today"), 0) + 1
                     current["proactive_sent_count"] = _safe_int(current.get("proactive_sent_count"), 0) + 1
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
             finally:
                 async with self._data_lock:
                     current = self._get_user(user_id)
                     current["proactive_sending"] = False
                     current["proactive_sending_started_at"] = 0
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
 
     async def _run_screen_peek_action(
         self,
@@ -7819,7 +7822,7 @@ Output:
                 reason=reason,
                 count_daily=not quota_exempt,
             )
-            self._save_data_sync()
+            self._save_data_sync(sections={"users"})
         event = None
         if target and hasattr(plugin, "_create_virtual_event"):
             try:
@@ -7929,7 +7932,7 @@ Output:
                     return f"poke：冷却中，约 {max(1, math.ceil(remaining / 60))} 分钟后可再次执行"
                 current["poke_action_inflight_until"] = now + max(30.0, poke_count * 3.0)
                 current["poke_echo_suppress_until"] = now + max(30.0, poke_count * 3.0)
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
                 reserved = True
             for index in range(poke_count):
                 await self._send_single_poke(client, user_id=user_id, group_id=group_id)
@@ -7939,7 +7942,7 @@ Output:
                 current = self._get_user(user_id)
                 current["last_poke_action_at"] = _now_ts()
                 current["poke_action_inflight_until"] = 0
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
             if poke_count <= 1:
                 return f"poke：已轻轻戳了 {name} 一下\n主动原因：{reason}"
             return f"poke：已轻轻连着戳了 {name} {poke_count} 下\n主动原因：{reason}"
@@ -7949,7 +7952,7 @@ Output:
                     async with self._data_lock:
                         current = self._get_user(user_id)
                         current["poke_action_inflight_until"] = 0
-                        self._save_data_sync()
+                        self._save_data_sync(sections={"users"})
                 except Exception:
                     pass
             logger.warning(f"[PrivateCompanion] poke 主动行为失败: {e}")
@@ -8464,7 +8467,7 @@ Output:
                     "note": _single_line(f"跨日重置：{previous_mode or 'unknown'} -> {note}", 120),
                 }
             )
-            self._save_data_sync()
+            self._save_data_sync(sections={"qq_presence_state"})
 
     def _extract_group_id_from_umo(self, target: str) -> int | None:
         text = str(target or "").strip()
@@ -9058,7 +9061,9 @@ Output:
                             user_id=user_id,
                             scope="proactive",
                         )
-                    self._save_data_sync()
+                    self._save_data_sync(
+                        sections={"users", "photo_generation_scope_attempts"}
+                    )
             return (
                 "photo_text：生图失败,不能假装已经拍照\n"
                 f"画面草稿：{scene['caption']}\n"
@@ -9075,7 +9080,9 @@ Output:
                     user_id=user_id,
                     scope="proactive",
                 )
-            self._save_data_sync()
+            self._save_data_sync(
+                sections={"users", "photo_generation_scope_attempts"}
+            )
         scene_context_line = _single_line(scene.get("scene_context"), 500)
         return (
             f"photo_text：已通过 {backend_name} 生成真实图片\n"
@@ -9257,7 +9264,9 @@ Output:
                 history.insert(0, dict(item))
             self.data["daily_outfit_history"] = history[:30]
             self.data["daily_outfit_photo"] = item
-            self._save_data_sync()
+            self._save_data_sync(
+                sections={"daily_outfit_history", "daily_outfit_photo"}
+            )
         if image_path:
             await self._memory_companion_record_daily_outfit(item)
             logger.info(
@@ -10472,7 +10481,7 @@ Output:
                 self.data["recent_photo_generations"] = raw
             raw.insert(0, item)
             del raw[48:]
-            self._save_data_sync()
+            self._save_data_sync(sections={"recent_photo_generations"})
         except Exception as exc:
             logger.debug("[PrivateCompanion] 记录最近生图提示词失败: %s", _single_line(exc, 120))
 
@@ -10549,7 +10558,9 @@ Output:
             data["photo_reference_feedback"] = records
         records.insert(0, record)
         del records[96:]
-        self._save_data_sync()
+        self._save_data_sync(
+            sections={"recent_photo_generations", "photo_reference_feedback"}
+        )
         return record
 
     def _record_photo_reference_feedback_from_event(self, event: Any) -> dict[str, Any]:
@@ -10947,7 +10958,10 @@ Output:
                 item["annotated_at"] = _now_ts()
                 if sent is True:
                     self._remember_sent_photo_continuity_reference(item)
-                self._save_data_sync()
+                save_sections = {"recent_photo_generations"}
+                if sent is True:
+                    save_sections.add("recent_photo_continuity")
+                self._save_data_sync(sections=save_sections)
                 return
         except Exception as exc:
             logger.debug("[PrivateCompanion] 标注最近生图记录失败: %s", _single_line(exc, 120))
@@ -13926,6 +13940,47 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         if confidence < 0.7:
             return ReferenceIntent(("identity",), (), "ambiguous", confidence, "model_conservative")
         return ReferenceIntent(requested or ("identity",), excluded, mode, confidence, "model")
+
+    async def _select_photo_reference_image_async(
+        self,
+        workflow_kind: str,
+        *,
+        allow_daily_outfit: bool = True,
+        request_text: str = "",
+        ambient_context: str = "",
+        selection_context: str = "",
+        suggested_scene_preset: str = "",
+    ) -> str:
+        """Return the selected reference path for legacy image-only callers."""
+        selected = await self._select_photo_reference_candidate_async(
+            workflow_kind,
+            allow_daily_outfit=allow_daily_outfit,
+            request_text=request_text,
+            ambient_context=ambient_context,
+            selection_context=selection_context,
+            suggested_scene_preset=suggested_scene_preset,
+        )
+        return str(selected.get("path") or "") if isinstance(selected, dict) else ""
+
+    async def _photo_persona_reference_image_for_kind_async(
+        self,
+        workflow_kind: str,
+        *,
+        allow_daily_outfit: bool = True,
+        request_text: str = "",
+        ambient_context: str = "",
+        selection_context: str = "",
+        suggested_scene_preset: str = "",
+    ) -> str:
+        """Compatibility facade used by extension bridges and legacy workflows."""
+        return await self._select_photo_reference_image_async(
+            workflow_kind,
+            allow_daily_outfit=allow_daily_outfit,
+            request_text=request_text,
+            ambient_context=ambient_context,
+            selection_context=selection_context,
+            suggested_scene_preset=suggested_scene_preset,
+        )
 
     async def _select_photo_reference_plan_async(
         self,

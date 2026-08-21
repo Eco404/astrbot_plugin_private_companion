@@ -27,7 +27,7 @@ class _PresenceHarness(DailyStateMixin):
         self.calls += 1
         return False, "unsupported action"
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, **_kwargs) -> None:
         return None
 
 

@@ -382,7 +382,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             async with self.plugin._data_lock:
                 cleaner = getattr(self.plugin, "_cleanup_orphan_reaction_expression_users", None)
                 if callable(cleaner) and cleaner():
-                    self.plugin._save_data_sync()
+                    self.plugin._save_data_sync(sections={"users"})
                 users = self.plugin.data.get("users", {})
                 if not isinstance(users, dict):
                     users = {}
@@ -556,7 +556,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                             operation_id=operation_id,
                             registry=registry,
                         )
-                    self.plugin._schedule_data_save()
+                    self.plugin._schedule_data_save(sections={"unified_person"})
             if not result.get("ok"):
                 return self._error(str(result.get("code") or "统一身份重新关联失败"))
             return self._ok({"result": result})
@@ -626,7 +626,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                             operation_id=operation_id,
                             registry=registry,
                         )
-                    self.plugin._schedule_data_save()
+                    self.plugin._schedule_data_save(sections={"unified_person"})
             if not result.get("ok") and result.get("code") != "split_manual_review_required":
                 return self._error(str(result.get("code") or "统一身份解绑失败"))
             safe_result = self._safe_identity_unlink_result(result)
@@ -775,6 +775,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         try:
             action_message = ""
             async with self.plugin._data_lock:
+                save_sections = {"users"}
                 user = self.plugin._get_user(user_id)
                 private_memory_mutation = any(
                     bool(payload.get(key))
@@ -925,6 +926,8 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                             return self._error(
                                 str(profile_result.get("code") or "统一身份档案更新失败")
                             )
+                        if profile_result.get("ok") and profile_result.get("changed"):
+                            save_sections.add("unified_person")
                 if "relationship_role" in payload:
                     user["relationship_role"] = role
                     expression_voice_needs_refresh = role != previous_role
@@ -1086,6 +1089,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
                     if callable(voice_refresher):
                         voice_refresher()
+                        save_sections.add("expression_voice_profile")
                 if any(
                     key in payload
                     for key in ("relationship_role", "relationship_mode", "relationship_score", "companion_intimacy")
@@ -1106,7 +1110,8 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                         operation_id=f"req041-page-memory:{user_id}:{uuid.uuid4().hex}",
                     ):
                         return self._error("权威私聊记忆已发生并发变更，请刷新后重试")
-                self.plugin._save_data_sync()
+                    save_sections.add("_req041_private_memory")
+                self.plugin._save_data_sync(sections=save_sections)
                 snapshot = deepcopy(user)
             result = self._user_summary(user_id, snapshot)
             result.update(
@@ -1151,10 +1156,12 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                             removed_ids.add(alias_text)
                 removed_ids = {item for item in removed_ids if item}
                 merge_backups = self.plugin.data.get("private_user_alias_merge_backups")
+                merge_backups_changed = False
                 if isinstance(merge_backups, dict):
                     for removed_id in removed_ids:
                         if removed_id in merge_backups:
                             merge_backups.pop(removed_id, None)
+                            merge_backups_changed = True
 
                 def keep_expression_scope_ids(raw_values: Any) -> list[str]:
                     kept: list[str] = []
@@ -1217,10 +1224,18 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 self._apply_config_value("private_user_delivery_aliases", delivery_alias_text, overrides)
                 self._apply_config_value("expression_private_learning_source_ids", expression_learning_ids, overrides)
                 self._apply_config_value("expression_private_application_user_ids", expression_application_ids, overrides)
-                voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
-                if callable(voice_refresher):
-                    voice_refresher()
-                self.plugin._save_data_sync()
+                save_sections: set[str] = set()
+                if removed_user is not None:
+                    save_sections.add("users")
+                if merge_backups_changed:
+                    save_sections.add("private_user_alias_merge_backups")
+                if removed_user is not None or removed_expression_scope:
+                    voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
+                    if callable(voice_refresher):
+                        voice_refresher()
+                        save_sections.add("expression_voice_profile")
+                if save_sections:
+                    self.plugin._save_data_sync(sections=save_sections)
 
             config_saved = await self._save_config_if_possible()
             message_parts = []
@@ -1613,7 +1628,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 if group_id in platform_target_ids:
                     snapshot["last_group_name_lookup_at"] = now
             if changed:
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"groups"})
     async def get_group(self) -> dict[str, Any]:
         group_id = self._normalize_page_group_id(request.args.get("group_id", ""))
         if not group_id:
@@ -1698,7 +1713,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 if not callable(updater) or not callable(getter):
                     return self._error("当前插件版本不支持成员风控")
                 item = updater(group, user_id=user_id, action=action, name=name)
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"groups"})
                 summary = getter(group)
             return self._ok({"item": item, "summary": summary})
         except ValueError as exc:
@@ -1797,7 +1812,12 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
                     if callable(voice_refresher):
                         voice_refresher()
-                self.plugin._save_data_sync()
+                save_sections = {"groups"}
+                if payload.get("clear_observation") and callable(
+                    getattr(self.plugin, "_refresh_expression_voice_profile", None)
+                ):
+                    save_sections.add("expression_voice_profile")
+                self.plugin._save_data_sync(sections=save_sections)
                 snapshot = deepcopy(group)
             return self._ok(self._group_summary(group_id, snapshot))
         except Exception as exc:
@@ -1836,6 +1856,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     })
             async with self.plugin._data_lock:
                 groups = self.plugin.data.get("groups")
+                groups_repaired = not isinstance(groups, dict)
                 if not isinstance(groups, dict):
                     groups = {}
                     self.plugin.data["groups"] = groups
@@ -1882,10 +1903,16 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 }
                 self._apply_config_value("expression_group_learning_source_ids", expression_learning_ids, expression_overrides)
                 self._apply_config_value("expression_group_application_ids", expression_application_ids, expression_overrides)
-                voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
-                if callable(voice_refresher):
-                    voice_refresher()
-                self.plugin._save_data_sync()
+                save_sections: set[str] = set()
+                if removed_group or groups_repaired:
+                    save_sections.add("groups")
+                if removed_group or removed_expression_scope:
+                    voice_refresher = getattr(self.plugin, "_refresh_expression_voice_profile", None)
+                    if callable(voice_refresher):
+                        voice_refresher()
+                        save_sections.add("expression_voice_profile")
+                if save_sections:
+                    self.plugin._save_data_sync(sections=save_sections)
 
             config_saved = await self._save_config_if_possible()
             message_parts = []
@@ -1968,7 +1995,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     }
                     terms.sort(key=lambda item: (_safe_int(item.get("count"), 0) if isinstance(item, dict) else 0), reverse=True)
-                self.plugin._save_data_sync()
+                self.plugin._save_data_sync(sections={"groups"})
                 snapshot = deepcopy(group)
             detail = self._group_summary(group_id, snapshot)
             detail["slang_items"] = self._group_slang_items(snapshot)

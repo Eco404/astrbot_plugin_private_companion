@@ -46,7 +46,7 @@ class PersonalGoalHarness(DailyStateMixin):
         self.events.append((deepcopy(goal), deepcopy(event)))
         return 1
 
-    def _save_data_sync(self):
+    def _save_data_sync(self, **_kwargs):
         return None
 
 

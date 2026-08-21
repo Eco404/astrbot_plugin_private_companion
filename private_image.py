@@ -1038,7 +1038,7 @@ class PrivateImageMixin:
             if evicted:
                 self._record_cache_metric(f"image_vision:{scope}", hit=False, detail=f"evict:{evicted}")
         try:
-            self._save_data_sync()
+            self._save_data_sync(sections={"private_image_vision_cache"})
         except Exception as exc:
             logger.debug("[PrivateCompanion] 私聊图片视觉缓存保存失败: %s", exc)
 
@@ -1064,7 +1064,7 @@ class PrivateImageMixin:
         if removed:
             logger.info("[PrivateCompanion] 私聊图片视觉缓存已因负反馈失效: removed=%s reason=%s", removed, _single_line(reason, 120))
             try:
-                self._save_data_sync()
+                self._save_data_sync(sections={"private_image_vision_cache"})
             except Exception as exc:
                 logger.debug("[PrivateCompanion] 私聊图片视觉缓存失效保存失败: %s", exc)
         return removed
@@ -1281,9 +1281,9 @@ class PrivateImageMixin:
         scheduler = getattr(self, "_schedule_data_save", None)
         try:
             if callable(scheduler):
-                scheduler(delay=2.0)
+                scheduler(sections={"private_image_visual_provider_state"}, delay=2.0)
             else:
-                self._save_data_sync()
+                self._save_data_sync(sections={"private_image_visual_provider_state"})
         except Exception as exc:
             logger.debug("[PrivateCompanion] 私聊图片视觉成功 provider 状态保存失败: %s", exc)
 
@@ -3336,7 +3336,7 @@ class PrivateImageMixin:
                 if updated:
                     scheduler = getattr(self, "_schedule_data_save", None)
                     if callable(scheduler):
-                        scheduler()
+                        scheduler(sections={"groups"})
                 return updated
         return update()
 
@@ -4288,6 +4288,9 @@ class PrivateImageMixin:
                     sender_id,
                     len(learned_messages),
                 )
+            scheduler = getattr(self, "_schedule_data_save", None)
+            if callable(scheduler):
+                scheduler(sections={"smart_message_debounce"})
         lines = []
         for item in messages[:8]:
             if not isinstance(item, dict):
@@ -5416,7 +5419,7 @@ class PrivateImageMixin:
                     "ownership": _single_line(ownership, 120),
                     "intent": _single_line(intent, 160),
                 }
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
         except Exception as exc:
             logger.debug("[PrivateCompanion] 私聊图片视觉反馈目标记录失败: %s", exc)
 

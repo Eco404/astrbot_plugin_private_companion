@@ -577,7 +577,7 @@ class TokenBudgetMixin:
         if now_ts - last_save >= 60:
             self._token_usage_last_save_at = now_ts
             try:
-                self._save_data_sync()
+                self._save_data_sync(sections={"token_usage"})
             except Exception:
                 pass
 
@@ -686,14 +686,14 @@ class TokenBudgetMixin:
         schedule_save = getattr(self, "_schedule_data_save", None)
         if callable(schedule_save):
             try:
-                schedule_save(delay=2.0)
+                schedule_save(sections={"token_usage"}, delay=2.0)
             except Exception:
                 pass
         last_save = _safe_float(getattr(self, "_external_token_usage_last_save_at", 0), 0)
         if now_ts - last_save >= 30:
             self._external_token_usage_last_save_at = now_ts
             try:
-                self._save_data_sync()
+                self._save_data_sync(sections={"token_usage"})
             except Exception:
                 pass
 
@@ -891,7 +891,7 @@ class TokenBudgetMixin:
         if now_ts - last_save >= 60:
             self._token_usage_last_save_at = now_ts
             try:
-                self._save_data_sync()
+                self._save_data_sync(sections={"token_usage"})
             except Exception:
                 pass
 

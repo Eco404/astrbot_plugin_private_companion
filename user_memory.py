@@ -3457,6 +3457,7 @@ class UserMemoryMixin:
         try:
             store = AuthoritativePrivateMemoryStore(self.data)
             result = store.read(person_id)
+            bootstrapped = False
             if result.get("code") == "not_found":
                 seed = (
                     private_memory_content(user)
@@ -3469,6 +3470,7 @@ class UserMemoryMixin:
                     expected_revision=0,
                     operation_id=f"req041-private-memory-bootstrap:{person_id}",
                 )
+                bootstrapped = result.get("ok") is True
             record = result.get("record") if isinstance(result, dict) else None
             if result.get("ok") is not True or not isinstance(record, dict):
                 return None
@@ -3476,6 +3478,10 @@ class UserMemoryMixin:
             if not isinstance(content, dict):
                 return None
             apply_private_memory_content(user, content)
+            if bootstrapped:
+                scheduler = getattr(self, "_schedule_data_save", None)
+                if callable(scheduler):
+                    scheduler(sections={"users", "_req041_private_memory"})
             return int(record.get("revision") or 0) or None
         except (AuthoritativePrivateMemoryError, TypeError, ValueError) as exc:
             logger.warning(
@@ -3594,6 +3600,7 @@ class UserMemoryMixin:
             return {}
         current_channel = _single_line((context or {}).get("channel"), 24).lower()
         source_kind = "group" if current_channel == "group" or user.get("group_id") else "private"
+        updated_sections = {"groups" if source_kind == "group" else "users"}
         scope_managed, scope_context = self._expression_formal_scope_for_owner(
             user, source_kind=source_kind,
         )
@@ -3713,6 +3720,7 @@ class UserMemoryMixin:
                             continue
                         source_owner["expression_profile"] = source_profile
                         source_rules = source_profile.get("learned_rules")
+                        updated_sections.add(collection_key)
                         scoped_changed[id(source_owner)] = (source_owner, source_scope_context)
                     for source_rule in source_rules:
                         if not isinstance(source_rule, dict) or _single_line(source_rule.get("id"), 40) != ref["rule_id"]:
@@ -3722,6 +3730,7 @@ class UserMemoryMixin:
                         binding = source_rule.get("scope_binding") if isinstance(source_rule.get("scope_binding"), dict) else None
                         if binding is not None:
                             binding["revision"] = max(1, _safe_int(binding.get("revision"), 1, 1) + 1)
+                        updated_sections.add(collection_key)
                         break
                 if compact_refs:
                     feedback_rules.append(
@@ -3746,7 +3755,9 @@ class UserMemoryMixin:
                 changed_owner["expression_profile"] = self._expression_bind_profile_scope(
                     changed_profile, changed_context, bump_revision=True,
                 )
-        return last
+        result = dict(last)
+        result["updated_sections"] = sorted(updated_sections)
+        return result
 
     def _record_staged_expression_rule_injection(
         self,
@@ -3860,6 +3871,7 @@ class UserMemoryMixin:
         feedback_field = "positive_feedback" if signal == "positive" else "negative_feedback"
         updated = 0
         demoted = 0
+        updated_sections: set[str] = set()
         processed: set[tuple[str, str, str]] = set()
         for pending_rule in pending.get("rules", []) if isinstance(pending.get("rules"), list) else []:
             if not isinstance(pending_rule, dict):
@@ -3910,6 +3922,7 @@ class UserMemoryMixin:
                     source_rule["last_feedback"] = signal
                     source_rule["last_feedback_ts"] = now
                     updated += 1
+                    updated_sections.add(collection_key)
                     if (
                         signal == "negative"
                         and _safe_int(source_rule.get("negative_feedback"), 0, 0) >= 2
@@ -3963,7 +3976,12 @@ class UserMemoryMixin:
                 )
         if updated:
             self._refresh_expression_voice_profile()
-        return {"signal": signal, "updated_rules": updated, "demoted_rules": demoted}
+        return {
+            "signal": signal,
+            "updated_rules": updated,
+            "demoted_rules": demoted,
+            "updated_sections": sorted(updated_sections),
+        }
 
     def _format_companion_memory_for_prompt(self, user: dict[str, Any], *, style_only: bool = False) -> str:
         memory = user.get("companion_memory")
@@ -6169,7 +6187,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
                 )
             else:
                 user["last_emotion_judgement_error"] = review_outcome
-            self._save_data_sync()
+            self._save_data_sync(sections={"users"})
 
     def _decay_relationship_mood_score(self, state: dict[str, Any], *, now: float | None = None) -> int:
         now = now or _now_ts()
@@ -6522,7 +6540,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
             state["confession_until"] = ts + 30 * 60
             state["last_reason"] = _single_line(intent.get("boundary_feedback_reason") or "表达喜欢或想念", 120)
             state["last_event_id"] = explicit_id
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"users"})
             boundary_logger = getattr(self, "_log_relationship_boundary_event", None)
             if callable(boundary_logger):
                 boundary_logger(
@@ -6576,7 +6594,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
                 stage_refresher = getattr(self, "_refresh_relationship_violation_stage", None)
                 if callable(stage_refresher):
                     stage_refresher(state, now=ts)
-                self._schedule_data_save()
+                self._schedule_data_save(sections={"users"})
                 boundary_logger = getattr(self, "_log_relationship_boundary_event", None)
                 if callable(boundary_logger):
                     boundary_logger(
@@ -6708,7 +6726,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         side_effects = getattr(self, "_record_relationship_boundary_side_effects", None)
         if callable(side_effects) and (applied_penalty or clawed_back):
             side_effects(user, intent, state, now=ts)
-        self._schedule_data_save()
+        self._schedule_data_save(sections={"users", "boundary_feedback_reports"})
         boundary_logger = getattr(self, "_log_relationship_boundary_event", None)
         if callable(boundary_logger):
             boundary_logger(
@@ -7050,7 +7068,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
                         item["status"] = "delivered"
                         item["delivered_at"] = _now_ts()
                         break
-            self._save_data_sync()
+            self._save_data_sync(sections={"boundary_feedback_reports"})
 
     def _register_relationship_boundary_proactive_ability(self) -> bool:
         registrar = getattr(self, "register_external_proactive_ability", None)
@@ -7145,7 +7163,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         candidate["excerpt"] = _single_line(candidate.get("excerpt"), max_chars)
         candidate["status"] = "delivered"
         candidate["delivered_at"] = _now_ts()
-        self._schedule_data_save()
+        self._schedule_data_save(sections={"boundary_feedback_reports"})
         text = self._format_relationship_boundary_owner_report(candidate)
         return {
             "success": True,
@@ -8871,7 +8889,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
                 consume_suspended = True
                 current = self._get_user(user_id)
                 current["suspended_proactive"] = {}
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
 
             last_proactive_text = _single_line(user.get("last_proactive_message"), 500)
             last_proactive_at = _safe_float(user.get("last_proactive_sent_at"), 0)
@@ -8914,7 +8932,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
                     )
                 current = self._get_user(user_id)
                 current["last_proactive_reply_context_consumed_for"] = last_proactive_at
-                self._save_data_sync()
+                self._save_data_sync(sections={"users"})
 
         suspended = user.get("suspended_proactive")
         if isinstance(suspended, dict) and suspended.get("active") and (
@@ -9239,7 +9257,10 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                     operation_id=f"req041-dialogue-episode:{user_id}:{expression_batch_key}",
                 ):
                     return
-            self._save_data_sync()
+            save_sections = {"users"}
+            if memory_managed:
+                save_sections.add("_req041_private_memory")
+            self._save_data_sync(sections=save_sections)
 
     def _build_expression_decision_for_user(
         self,
@@ -9829,7 +9850,10 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                     operation_id=f"req041-memory-profile:{user_id}:{memory_fingerprint}",
                 ):
                     return
-            self._save_data_sync()
+            save_sections = {"users"}
+            if memory_managed:
+                save_sections.add("_req041_private_memory")
+            self._save_data_sync(sections=save_sections)
 
     async def _try_acquire_user_background_task(
         self,
@@ -9852,7 +9876,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             if running_at > 0 and now - running_at < 10 * 60:
                 return False
             current[running_key] = now
-            self._save_data_sync()
+            self._save_data_sync(sections={"users"})
         return True
 
     async def _mark_user_background_retry(self, user_id: str, task: str, now: float, error: Any) -> None:
@@ -9871,7 +9895,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             current[retry_key] = now + delay
             current[error_key] = _single_line(error, 180)
             current[running_key] = 0
-            self._save_data_sync()
+            self._save_data_sync(sections={"users"})
         logger.warning(
             "[PrivateCompanion] 私聊后台整理失败,已进入短冷却避免重复请求: user=%s task=%s retry=%ss error=%s",
             user_id,

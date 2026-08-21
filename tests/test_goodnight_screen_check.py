@@ -153,7 +153,7 @@ class _GoodnightScreenHarness(ProactiveMessageMixin):
             return raw
         return json.loads(str(raw))
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, **_kwargs) -> None:
         self.saved += 1
 
     async def _generate_proactive_message_with_llm(

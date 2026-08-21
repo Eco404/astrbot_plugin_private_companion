@@ -68,7 +68,7 @@ class _StateHarness(DailyStateMixin):
     def _record_body_cycle_episode(self, condition) -> None:
         self.data["body_cycle_state"] = deepcopy(condition)
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, **_kwargs) -> None:
         self.save_count += 1
 
 
@@ -111,7 +111,7 @@ class _DiaryHarness(DailyStateMixin):
     async def _memory_companion_record_dream_fragment(self, **_kwargs) -> None:
         return None
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, **_kwargs) -> None:
         self.save_count += 1
 
 

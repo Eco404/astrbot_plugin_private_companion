@@ -291,7 +291,7 @@ class PlaceCognitiveMapMixin:
             promoted_legacy = True
             saver = getattr(self, "_schedule_data_save", None)
             if callable(saver):
-                saver(delay=0.5)
+                saver(sections={"place_cognitive_maps"}, delay=0.5)
         if not bool(location.get("available")):
             existing = root.get(store_key)
             return self._place_cognitive_map_summary(existing, include_transition=include_transition) if isinstance(existing, dict) else {
@@ -425,7 +425,7 @@ class PlaceCognitiveMapMixin:
         if changed:
             saver = getattr(self, "_schedule_data_save", None)
             if callable(saver) and not promoted_legacy:
-                saver(delay=0.5)
+                saver(sections={"place_cognitive_maps"}, delay=0.5)
             for event in events:
                 try:
                     self._place_cognitive_map_emit_memory_event(event, namespace)

@@ -1154,7 +1154,7 @@ class CreativeMixin:
                 importance=5,
             )
             self.data["creative_projects"] = projects
-            self._save_data_sync()
+            self._save_data_sync(sections={"creative_projects"})
             return {"success": True, "project_id": project_id, "edit_type": normalized_type}
 
     async def _rebuild_creative_memory_from_project(self, project_id: str) -> dict[str, Any]:
@@ -1215,7 +1215,7 @@ class CreativeMixin:
                     ["人工修订"], importance=5,
                 )
             self.data["creative_projects"] = projects
-            self._save_data_sync()
+            self._save_data_sync(sections={"creative_projects"})
             return {"success": True, "project_id": project_id, "memory_count": len(pool)}
 
     # ============================================================
@@ -1424,7 +1424,7 @@ class CreativeMixin:
             projects.append(project)
             del projects[:-20]
             self.data["creative_projects"] = projects
-            self._save_data_sync()
+            self._save_data_sync(sections={"creative_projects"})
         logger.info("[PrivateCompanion] 新增创作项目: %s / %s", project.get("work_type"), project.get("title"))
         return True
 
@@ -1804,7 +1804,7 @@ class CreativeMixin:
                         project["cover_generation_status"] = "unavailable"
                         project["cover_generation_error"] = "当前没有可用的生图后端"
                         project["cover_generation_next_retry_at"] = _now_ts() + 3600
-                        self._save_data_sync()
+                        self._save_data_sync(sections={"creative_projects"})
                         return dict(project)
                 return None
 
@@ -1838,7 +1838,7 @@ class CreativeMixin:
                         project["cover_generation_status"] = "ready"
                         project["cover_generation_error"] = "旧封面等待人物参考图可用后再升级"
                         project["cover_generation_next_retry_at"] = _now_ts() + 3 * 3600
-                        self._save_data_sync()
+                        self._save_data_sync(sections={"creative_projects"})
                         return dict(project)
                 return None
             prompt_text = self._creative_cover_prompt(
@@ -1859,7 +1859,7 @@ class CreativeMixin:
                 project["cover_generation_attempts"] = attempt_number
                 project["cover_generation_attempted_at"] = _now_ts()
                 project["cover_generation_error"] = ""
-                self._save_data_sync()
+                self._save_data_sync(sections={"creative_projects"})
 
             backend, generated_path, note = await generator(
                 workflow_kind="portrait" if reference_image_path else "text2img",
@@ -1900,7 +1900,7 @@ class CreativeMixin:
                     project["cover_generation_error"] = _single_line(note, 220) or "生图失败"
                     project["cover_generation_next_retry_at"] = now + min(24, max(3, attempt_number * 3)) * 3600
                     logger.info("[PrivateCompanion] 创作封面未生成: project=%s attempt=%s error=%s", project_id, attempt_number, _single_line(note, 180))
-                self._save_data_sync()
+                self._save_data_sync(sections={"creative_projects"})
                 return dict(project)
 
     async def _maybe_advance_creative_projects(self) -> None:
@@ -2000,7 +2000,7 @@ class CreativeMixin:
             if self._maybe_schedule_creative_share():
                 changed = True
             if changed:
-                self._save_data_sync()
+                self._save_data_sync(sections={"creative_projects"})
         if creative_record_payload is not None:
             recorder = getattr(self, "_memory_companion_record_creative_progress", None)
             if callable(recorder):

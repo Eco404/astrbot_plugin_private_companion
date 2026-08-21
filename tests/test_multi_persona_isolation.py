@@ -19,6 +19,7 @@ from astrbot_plugin_private_companion.main import (
 )
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
 from astrbot_plugin_private_companion.plugin_identity import PLUGIN_ID
+from astrbot_plugin_private_companion.storage.store_manager import StoreManager
 
 
 def _plugin_harness(root: str) -> PrivateCompanionPlugin:
@@ -1067,15 +1068,15 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
 
             main_token = plugin._activate_persona_id("main")
             try:
-                plugin.data["save_marker"] = "main"
-                plugin._save_data_sync()
+                plugin.data["users"]["save_marker"] = "main"
+                plugin._save_data_sync(sections={"users"})
             finally:
                 plugin._deactivate_persona_for_event(main_token)
 
             alt_token = plugin._activate_persona_id("alt")
             try:
-                plugin.data["save_marker"] = "alt"
-                plugin._save_data_sync()
+                plugin.data["users"]["save_marker"] = "alt"
+                plugin._save_data_sync(sections={"users"})
             finally:
                 plugin._deactivate_persona_for_event(alt_token)
 
@@ -1092,10 +1093,10 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(plugin._persona_data_save_dirty)
             self.assertEqual({}, plugin._persona_data_save_tasks)
 
-    async def test_terminate_waits_for_inflight_persona_writer_before_final_snapshot(self):
+    async def test_terminate_queues_final_snapshot_after_timed_out_persona_writer(self):
         with tempfile.TemporaryDirectory() as root:
             plugin = _plugin_harness(root)
-            original_writer = plugin._write_persona_data_snapshot_sync
+            original_saver = plugin._save_persona_profile_sync
             writer_started = threading.Event()
             writer_release = threading.Event()
             first_write = True
@@ -1106,14 +1107,14 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
                     first_write = False
                     writer_started.set()
                     writer_release.wait(timeout=3)
-                return original_writer(persona_id, snapshot)
+                return original_saver(persona_id, snapshot)
 
-            plugin._write_persona_data_snapshot_sync = blocking_writer
+            plugin._save_persona_profile_sync = blocking_writer
             plugin._write_data_snapshot_sync = lambda _snapshot: 0
             token = plugin._activate_persona_id("main")
             try:
-                plugin.data["final_marker"] = "old"
-                plugin._schedule_data_save(delay=0.0)
+                plugin.data["users"]["final_marker"] = "old"
+                plugin._schedule_data_save(sections={"users"}, delay=0.0)
             finally:
                 plugin._deactivate_persona_for_event(token)
             started = await asyncio.to_thread(writer_started.wait, 1.0)
@@ -1121,10 +1122,11 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
 
             token = plugin._activate_persona_id("main")
             try:
-                plugin.data["final_marker"] = "latest"
+                plugin.data["users"]["final_marker"] = "latest"
             finally:
                 plugin._deactivate_persona_for_event(token)
             plugin._stop_event.set()
+            plugin._termination_flush_already_attempted = True
             final_save = asyncio.create_task(plugin._save_data_on_terminate())
             await asyncio.sleep(0.05)
             self.assertFalse(final_save.done())
@@ -1150,6 +1152,77 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
                     Path(root) / "persona_profiles" / f"{persona_id}.json"
                 ).read_text(encoding="utf-8")
                 self.assertIn(f'"final_marker": "{persona_id}"', stored)
+
+    async def test_sqlite_terminate_preserves_bookshelf_tombstone_on_restart(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            data_file = root_path / "companion.json"
+            sqlite_path = root_path / "companion.sqlite3"
+
+            def new_store() -> dict:
+                return {
+                    "users": {},
+                    "bookshelf_items": [],
+                    "bookshelf_secret": {},
+                    "bookshelf_store_revision": 0,
+                    "jm_cosmos_integration": {},
+                }
+
+            def ensure_defaults(data: dict) -> dict:
+                result = dict(data)
+                for section, value in new_store().items():
+                    result.setdefault(section, value)
+                return result
+
+            manager = StoreManager(
+                backend_name="sqlite",
+                data_file=data_file,
+                sqlite_path=sqlite_path,
+                ensure_defaults=ensure_defaults,
+                new_store=new_store,
+            )
+            stale = new_store()
+            stale["bookshelf_items"] = [
+                {
+                    "key": "jm_album:deleted",
+                    "type": "jm_album",
+                    "album_id": "deleted",
+                }
+            ]
+            stale["bookshelf_store_revision"] = 1
+            manager.save_store(stale)
+            data_file.write_text(json.dumps(stale, ensure_ascii=False), encoding="utf-8")
+            manager.save_sections({}, {"bookshelf_items": 2})
+
+            plugin = _plugin_harness(root)
+            plugin.enable_multi_persona_mode = False
+            plugin.storage_backend = "sqlite"
+            plugin.store_manager = manager
+            plugin._data_default = manager.backend.load_store()
+            plugin._data_save_task = None
+            plugin._data_save_dirty = {}
+            plugin._data_save_deleted = {}
+            plugin._data_save_dirty_since = {}
+            plugin._data_save_section_revisions = {}
+            plugin._data_save_full_revision = 0
+            plugin._data_save_revision = manager.next_revision() - 1
+            plugin._termination_flush_already_attempted = True
+            plugin._stop_event.set()
+
+            await plugin._save_data_on_terminate()
+
+            self.assertEqual(
+                {"bookshelf_items": 2},
+                manager.backend.deleted_section_revisions(["bookshelf_items"]),
+            )
+            restarted = StoreManager(
+                backend_name="sqlite",
+                data_file=data_file,
+                sqlite_path=sqlite_path,
+                ensure_defaults=ensure_defaults,
+                new_store=new_store,
+            )
+            self.assertNotIn("bookshelf_items", restarted.load_initial_store())
 
     async def test_force_state_results_do_not_cross_persona_scopes(self):
         with tempfile.TemporaryDirectory() as root:

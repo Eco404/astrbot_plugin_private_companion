@@ -122,7 +122,7 @@ class _Host:
     async def _flush_scheduled_data_save() -> None:
         return None
 
-    def _save_data_now_sync(self) -> None:
+    def _save_data_now_sync(self, **_kwargs: Any) -> None:
         self.persisted = deepcopy(self.data)
 
     def _write_persona_reset_backup_sync(self, persona_id: str, snapshot: dict[str, Any]) -> Path:

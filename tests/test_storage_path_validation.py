@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 from astrbot_plugin_private_companion.core_store import CoreStoreMixin
+from astrbot_plugin_private_companion.storage.json_backend import JsonStoreBackend
+from astrbot_plugin_private_companion.storage.sqlite_backend import SqliteStoreBackend
+from astrbot_plugin_private_companion.storage.store_manager import StoreManager
 
 
 class _StorePathHost(CoreStoreMixin):
@@ -14,6 +20,8 @@ class _StorePathHost(CoreStoreMixin):
         self.data_file = str(root / "companions.json")
         self.storage_backend = "sqlite"
         self.storage_sqlite_path = configured_path
+        self.storage_sqlite_effective_path = ""
+        self.data = {"users": {}, "groups": {}}
 
     @staticmethod
     def _ensure_store_defaults(data: dict) -> dict:
@@ -22,6 +30,34 @@ class _StorePathHost(CoreStoreMixin):
     @staticmethod
     def _new_store() -> dict:
         return {"users": {}, "groups": {}}
+
+    def manager(self, backend: str, sqlite_path: Path) -> StoreManager:
+        return StoreManager(
+            backend_name=backend,
+            data_file=self.data_file,
+            sqlite_path=sqlite_path,
+            ensure_defaults=self._ensure_store_defaults,
+            new_store=self._new_store,
+        )
+
+    def install_manager(
+        self,
+        backend: str,
+        sqlite_path: Path,
+        data: dict,
+    ) -> StoreManager:
+        manager = self.manager(backend, sqlite_path)
+        manager.backend.save_store(deepcopy(data))
+        self.store_manager = manager
+        self.storage_backend = backend
+        self.storage_sqlite_path = str(sqlite_path) if backend == "sqlite" else ""
+        self.storage_sqlite_effective_path = str(
+            sqlite_path if backend == "sqlite" else self.data_file
+        )
+        self._storage_backend_applied = backend
+        self._storage_sqlite_path_applied = self.storage_sqlite_path
+        self.data = deepcopy(data)
+        return manager
 
 
 class StoragePathValidationTests(unittest.TestCase):
@@ -34,10 +70,16 @@ class StoragePathValidationTests(unittest.TestCase):
 
             host._rebuild_store_manager()
 
-            self.assertEqual(str(root / "companions.db"), host.storage_sqlite_effective_path)
-            self.assertEqual(root / "companions.db", host.store_manager.sqlite_backend.db_path)
+            self.assertEqual(
+                str(root / "companions.db"), host.storage_sqlite_effective_path
+            )
+            self.assertEqual(
+                root / "companions.db", host.store_manager.sqlite_backend.db_path
+            )
 
-    def test_uncreatable_parent_falls_back_without_opening_directory_as_database(self) -> None:
+    def test_uncreatable_parent_falls_back_without_opening_directory_as_database(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             parent_file = root / "parent-file"
@@ -46,7 +88,160 @@ class StoragePathValidationTests(unittest.TestCase):
 
             host._rebuild_store_manager()
 
-            self.assertEqual(str(root / "companions.db"), host.storage_sqlite_effective_path)
+            self.assertEqual(
+                str(root / "companions.db"), host.storage_sqlite_effective_path
+            )
+
+    def test_switch_from_sqlite_authority_overwrites_stale_json_and_backs_it_up(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            sqlite_path = root / "authority.db"
+            stale = {"users": {"owner": {"name": "stale-json"}}, "groups": {}}
+            authoritative = {
+                "users": {"owner": {"name": "sqlite-authority"}},
+                "groups": {"room": {"name": "kept"}},
+            }
+            json_path = root / "companions.json"
+            json_path.write_text(
+                json.dumps(stale, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            stale_bytes = json_path.read_bytes()
+            host = _StorePathHost(root, str(sqlite_path))
+            old_manager = host.install_manager("sqlite", sqlite_path, authoritative)
+
+            host.storage_backend = "json"
+            host.storage_sqlite_path = ""
+            host._rebuild_store_manager(reload_data=True)
+
+            self.assertIsNot(old_manager, host.store_manager)
+            self.assertEqual(authoritative, host.data)
+            self.assertEqual(
+                authoritative, json.loads(json_path.read_text(encoding="utf-8"))
+            )
+            backups = sorted(root.glob("companions.json.before-switch-*.bak"))
+            self.assertEqual(1, len(backups))
+            self.assertEqual(stale_bytes, backups[0].read_bytes())
+
+    def test_switch_between_sqlite_files_copies_authority_and_backs_up_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_path = root / "source.db"
+            target_path = root / "target.db"
+            source_data = {"users": {"owner": {"name": "source"}}, "groups": {}}
+            target_data = {"users": {"owner": {"name": "target-old"}}, "groups": {}}
+            host = _StorePathHost(root, str(source_path))
+            host.install_manager("sqlite", source_path, source_data)
+            target_manager = host.manager("sqlite", target_path)
+            target_manager.backend.save_store(target_data)
+            target_before = SqliteStoreBackend(
+                target_path, host._ensure_store_defaults, host._new_store
+            ).load_store()
+
+            host.storage_backend = "sqlite"
+            host.storage_sqlite_path = str(target_path)
+            host._rebuild_store_manager(reload_data=True)
+
+            self.assertEqual(source_data, host.data)
+            self.assertEqual(source_data, host.store_manager.backend.load_store())
+            self.assertEqual(1, len(list(root.glob("target.db.before-switch-*.bak"))))
+            backup_path = next(root.glob("target.db.before-switch-*.bak"))
+            self.assertEqual(
+                target_before,
+                SqliteStoreBackend(
+                    backup_path, host._ensure_store_defaults, host._new_store
+                ).load_store(),
+            )
+
+    def test_failed_target_write_restores_target_and_runtime_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_path = root / "source.db"
+            target_path = root / "companions.json"
+            source_data = {"users": {"owner": {"name": "source"}}, "groups": {}}
+            target_path.write_text(
+                '{"users":{"owner":{"name":"old"}}}', encoding="utf-8"
+            )
+            original_target = target_path.read_bytes()
+            host = _StorePathHost(root, str(source_path))
+            old_manager = host.install_manager("sqlite", source_path, source_data)
+            host.storage_backend = "json"
+            host.storage_sqlite_path = str(root / "attempted.db")
+
+            with (
+                patch.object(
+                    JsonStoreBackend, "save_store", side_effect=OSError("write failed")
+                ),
+                self.assertRaises(OSError),
+            ):
+                host._rebuild_store_manager(reload_data=True)
+
+            self.assertIs(old_manager, host.store_manager)
+            self.assertEqual(source_data, host.data)
+            self.assertEqual("sqlite", host.storage_backend)
+            self.assertEqual(str(source_path), host.storage_sqlite_path)
+            self.assertEqual(str(source_path), host.storage_sqlite_effective_path)
+            self.assertEqual(original_target, target_path.read_bytes())
+
+    def test_failed_target_readback_restores_target_and_runtime_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_path = root / "source.db"
+            target_path = root / "companions.json"
+            source_data = {"users": {"owner": {"name": "source"}}, "groups": {}}
+            target_path.write_text(
+                '{"users":{"owner":{"name":"old"}}}', encoding="utf-8"
+            )
+            original_target = target_path.read_bytes()
+            host = _StorePathHost(root, str(source_path))
+            old_manager = host.install_manager("sqlite", source_path, source_data)
+            host.storage_backend = "json"
+            host.storage_sqlite_path = str(root / "attempted.db")
+
+            with (
+                patch.object(
+                    JsonStoreBackend, "load_store", side_effect=OSError("read failed")
+                ),
+                self.assertRaises(OSError),
+            ):
+                host._rebuild_store_manager(reload_data=True)
+
+            self.assertIs(old_manager, host.store_manager)
+            self.assertEqual(source_data, host.data)
+            self.assertEqual("sqlite", host.storage_backend)
+            self.assertEqual(str(source_path), host.storage_sqlite_path)
+            self.assertEqual(str(source_path), host.storage_sqlite_effective_path)
+            self.assertEqual(original_target, target_path.read_bytes())
+
+    def test_non_object_target_readback_is_rejected_and_rolled_back(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_path = root / "source.db"
+            target_path = root / "companions.json"
+            source_data = {"users": {"owner": {"name": "source"}}, "groups": {}}
+            target_path.write_text(
+                '{"users":{"owner":{"name":"old"}}}', encoding="utf-8"
+            )
+            original_target = target_path.read_bytes()
+            host = _StorePathHost(root, str(source_path))
+            old_manager = host.install_manager("sqlite", source_path, source_data)
+            host.storage_backend = "json"
+            host.storage_sqlite_path = str(root / "attempted.db")
+
+            with (
+                patch.object(JsonStoreBackend, "load_store", return_value=[]),
+                self.assertRaisesRegex(RuntimeError, "non-object store"),
+            ):
+                host._rebuild_store_manager(reload_data=True)
+
+            self.assertIs(old_manager, host.store_manager)
+            self.assertEqual(source_data, host.data)
+            self.assertEqual("sqlite", host.storage_backend)
+            self.assertEqual(str(source_path), host.storage_sqlite_path)
+            self.assertEqual(original_target, target_path.read_bytes())
 
 
 if __name__ == "__main__":

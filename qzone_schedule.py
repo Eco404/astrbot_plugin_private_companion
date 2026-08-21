@@ -787,7 +787,7 @@ class QzoneScheduleMixin:
             if plan_is_new:
                 state["last_life_publish_status"] = f"skipped:{_single_line(plan.get('skip_reason'), 40)}"
                 state["last_life_publish_checked_at"] = now
-                self._save_data_sync()
+                self._save_data_sync(sections={"qzone_integration"})
             return
         plan_item = self._qzone_life_publish_due_item(plan, now=now)
         if plan_item is None:
@@ -800,21 +800,21 @@ class QzoneScheduleMixin:
                     else "ready:planned"
                 )
                 state["last_life_publish_checked_at"] = now
-                self._save_data_sync()
+                self._save_data_sync(sections={"qzone_integration"})
             return
         if plan_item.get("night") and not self._qzone_night_publish_allowed():
             self._qzone_plan_item_finish(plan, plan_item, "cancelled", now=now)
             plan_item["failed_reason"] = "night_state_inactive"
             state["last_life_publish_status"] = "cancelled:night_state_inactive"
             state["last_life_publish_checked_at"] = now
-            self._save_data_sync()
+            self._save_data_sync(sections={"qzone_integration"})
             return
         reusable_text = self._qzone_reusable_draft(state, "life_publish", now=now)
         block_reason = self._qzone_auto_publish_block_reason(state, now=now)
         if block_reason:
             state["last_life_publish_status"] = f"paused:auth:{_single_line(block_reason, 80)}"
             state["last_life_publish_checked_at"] = now
-            self._save_data_sync()
+            self._save_data_sync(sections={"qzone_integration"})
             return
         if now - _safe_float(state.get("last_life_publish_failed_at"), 0) < 15 * 60:
             return
@@ -843,14 +843,14 @@ class QzoneScheduleMixin:
                 self._qzone_clear_pending_publish_assets(state, "life_publish")
                 state["last_life_publish_status"] = "cancelled:max_attempts"
                 state["last_life_publish_checked_at"] = now
-                self._save_data_sync()
+                self._save_data_sync(sections={"qzone_integration"})
                 return
         preflight_error = await self._qzone_preflight_auto_publish(None, state=state, source="life_publish")
         if preflight_error:
             state["last_life_publish_failed_at"] = now
             state["last_life_publish_status"] = f"paused:auth:{_single_line(preflight_error, 80)}"
             state["last_life_publish_checked_at"] = now
-            self._save_data_sync()
+            self._save_data_sync(sections={"qzone_integration"})
             return
         daily_state = self.data.get("daily_state", {})
         current_item = self._qzone_current_agenda_item()
@@ -950,7 +950,7 @@ class QzoneScheduleMixin:
                 state["last_life_publish_status"] = "cancelled:empty_or_unsafe_draft"
                 state["last_life_publish_checked_at"] = now
                 self._qzone_plan_item_finish(plan, plan_item, "cancelled", now=now)
-                self._save_data_sync()
+                self._save_data_sync(sections={"qzone_integration"})
                 logger.warning("[PrivateCompanion] QQ 空间生活动态草稿为空或不安全,已跳过发布")
                 return
             if not self._qzone_text_length_ok(text, length_profile):
@@ -966,7 +966,7 @@ class QzoneScheduleMixin:
                     state["last_life_publish_status"] = "cancelled:length"
                     state["last_life_publish_checked_at"] = now
                     self._qzone_plan_item_finish(plan, plan_item, "cancelled", now=now)
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"qzone_integration"})
                     logger.info(
                         "[PrivateCompanion] QQ 空间说说字数不合要求且重写失败,已取消: profile=%s len=%s",
                         length_profile,
@@ -983,7 +983,7 @@ class QzoneScheduleMixin:
                 state["last_life_publish_checked_at"] = now
                 self._qzone_clear_pending_publish_assets(state, "life_publish")
                 self._qzone_plan_item_finish(plan, plan_item, "cancelled", now=now)
-                self._save_data_sync()
+                self._save_data_sync(sections={"qzone_integration"})
                 logger.info("[PrivateCompanion] QQ 空间复用草稿与近期说说重复,已取消发布")
                 return
             rewritten = await self._qzone_life_publish_rewrite_deduplicated(
@@ -1005,7 +1005,7 @@ class QzoneScheduleMixin:
                 state["last_life_publish_status"] = "cancelled:duplicate_after_retry"
                 state["last_life_publish_checked_at"] = now
                 self._qzone_plan_item_finish(plan, plan_item, "cancelled", now=now)
-                self._save_data_sync()
+                self._save_data_sync(sections={"qzone_integration"})
                 logger.info("[PrivateCompanion] QQ 空间草稿重写后仍与近期说说重复,已取消发布")
                 return
         if reusable_text:
@@ -1059,7 +1059,7 @@ class QzoneScheduleMixin:
         state["last_life_publish_checked_at"] = now
         state["last_life_publish_text"] = _single_line(result.get("text") or text, 180)
         state["last_life_publish_images"] = _safe_int(result.get("image_count"), len(result.get("images") or []), 0, 99) if result.get("success") else 0
-        self._save_data_sync()
+        self._save_data_sync(sections={"qzone_integration"})
 
     async def _maybe_publish_qzone_emotional_vent(
         self,
@@ -1113,7 +1113,7 @@ class QzoneScheduleMixin:
         if block_reason:
             state["last_emotional_vent_status"] = f"paused:auth:{_single_line(block_reason, 80)}"
             state["last_emotional_vent_checked_at"] = now
-            self._save_data_sync()
+            self._save_data_sync(sections={"qzone_integration"})
             return
         if now - _safe_float(state.get("last_emotional_vent_failed_at"), 0) < 15 * 60:
             return
@@ -1122,14 +1122,14 @@ class QzoneScheduleMixin:
         if not reusable_text and random.random() > probability:
             state["last_emotional_vent_status"] = "skipped:probability_miss"
             state["last_emotional_vent_checked_at"] = now
-            self._save_data_sync()
+            self._save_data_sync(sections={"qzone_integration"})
             return
         preflight_error = await self._qzone_preflight_auto_publish(None, state=state, source="emotional_vent")
         if preflight_error:
             state["last_emotional_vent_failed_at"] = now
             state["last_emotional_vent_status"] = f"paused:auth:{_single_line(preflight_error, 80)}"
             state["last_emotional_vent_checked_at"] = now
-            self._save_data_sync()
+            self._save_data_sync(sections={"qzone_integration"})
             return
         daily_state = self.data.get("daily_state", {})
         current_item = self._qzone_current_agenda_item()
@@ -1196,7 +1196,7 @@ class QzoneScheduleMixin:
                     state["last_emotional_vent_failed_at"] = now
                     state["last_emotional_vent_status"] = "cancelled:empty_or_unsafe_draft"
                     state["last_emotional_vent_checked_at"] = now
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"qzone_integration"})
                     logger.warning("[PrivateCompanion] 公开心情动态草稿为空或不安全,已跳过发布")
                     return
                 state["last_emotional_vent_draft"] = _single_line(text, 240)
@@ -1240,10 +1240,10 @@ class QzoneScheduleMixin:
             state["last_emotional_vent_checked_at"] = now
             state["last_emotional_vent_text"] = _single_line(result.get("text") or text, 180)
             state["last_emotional_vent_images"] = _safe_int(result.get("image_count"), len(result.get("images") or []), 0, 99) if result.get("success") else 0
-            self._save_data_sync()
+            self._save_data_sync(sections={"qzone_integration"})
         except Exception as exc:
             state["last_emotional_vent_failed_at"] = now
             state["last_emotional_vent_status"] = f"failed:{_single_line(exc, 80)}"
             state["last_emotional_vent_checked_at"] = now
-            self._save_data_sync()
+            self._save_data_sync(sections={"qzone_integration"})
             logger.warning("[PrivateCompanion] 公开心情动态异常: %s", _single_line(exc, 160), exc_info=True)

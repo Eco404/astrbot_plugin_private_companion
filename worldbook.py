@@ -1290,7 +1290,7 @@ class WorldbookMixin:
                 )
             profile["auto_registration_pending"] = False
             profile["auto_impression_ts"] = _now_ts()
-            self._save_data_sync()
+            self._save_data_sync(sections={"worldbook_member_profiles"})
         logger.info("[PrivateCompanion] 群聊关系网自登记印象已生成: user=%s name=%s", user_id, name)
 
     def _group_member_identity_label_for_token(self, group: dict[str, Any], token: str) -> str:

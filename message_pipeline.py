@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from copy import deepcopy
+from functools import wraps
 from typing import Any
 
 from astrbot.api import logger
@@ -18,6 +19,59 @@ from .helpers import (
     _single_line,
 )
 
+
+def _coalesce_event_data_saves(handler: Any) -> Any:
+    """Submit all durable mutations from one message handler as one request."""
+
+    @wraps(handler)
+    async def wrapped(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
+        starter = getattr(self, "_begin_event_data_save_batch", None)
+        finisher = getattr(self, "_finish_event_data_save_batch", None)
+        handle = starter(event) if callable(starter) else None
+        try:
+            return await handler(self, event, *args, **kwargs)
+        finally:
+            if callable(finisher):
+                finisher(handle)
+
+    return wrapped
+
+
+def event_data_save_boundary(handler: Any = None, *, flush: bool = False) -> Any:
+    """Share an event-owned save batch across early and final message hooks."""
+
+    if handler is None:
+        return lambda actual: event_data_save_boundary(actual, flush=flush)
+
+    @wraps(handler)
+    async def wrapped(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
+        starter = getattr(self, "_begin_event_data_save_batch", None)
+        finisher = getattr(self, "_finish_event_data_save_batch", None)
+        suspender = getattr(self, "_suspend_event_data_save_batch", None)
+        handle = starter(event) if callable(starter) else None
+        completed = False
+        try:
+            result = await handler(self, event, *args, **kwargs)
+            completed = True
+            return result
+        finally:
+            if handle and callable(finisher):
+                stopped = False
+                is_stopped = getattr(event, "is_stopped", None)
+                if callable(is_stopped):
+                    try:
+                        stopped = bool(is_stopped())
+                    except Exception:
+                        stopped = False
+                if flush or stopped or not completed:
+                    finisher(handle)
+                elif callable(suspender):
+                    suspender(handle)
+
+    return wrapped
+
+
+@_coalesce_event_data_saves
 async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
     """记录私聊互动、图片防抖、用户画像和主动陪伴反馈。"""
     if self is None:
@@ -51,7 +105,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             user=private_user if isinstance(private_user, dict) else None,
             source="private_auto",
         )
-        self._schedule_data_save()
+        self._schedule_data_save(sections={"users", "unified_person"})
     if auto_profile_created:
         logger.info(
             "[PrivateCompanion] 已建立最小用户档案: user=%s platform=%s",
@@ -387,13 +441,19 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         fast_user["friend_unanswered_silenced_since"] = 0
         fast_user["friend_unanswered_silence_note"] = ""
         fast_user_is_owner = self._private_user_role(fast_user, user_id) == "owner"
+        fast_meal_care_result: dict[str, Any] = {}
         if fast_user_is_owner:
-            self._handle_meal_care_inbound(fast_user, safe_text or text, now=received_ts)
-        if (
+            fast_meal_care_result = self._handle_meal_care_inbound(
+                fast_user,
+                safe_text or text,
+                now=received_ts,
+            )
+        fast_interaction_warmth_applied = (
             bool(getattr(self, "enable_custom_relationship_stage_policy", False))
             and fast_user_is_owner
             and self._apply_interaction_warmth_to_state(text, fast_user)
-        ):
+        )
+        if fast_interaction_warmth_applied:
             self._apply_relationship_event(
                 fast_user,
                 1,
@@ -401,7 +461,12 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 event_id=self._event_message_id(event),
                 now=received_ts,
             )
-        self._schedule_data_save()
+        fast_save_sections = {"users"}
+        if fast_meal_care_result.get("foods"):
+            fast_save_sections.add("food_menu")
+        if fast_interaction_warmth_applied:
+            fast_save_sections.update({"state_conditions", "daily_state"})
+        self._schedule_data_save(sections=fast_save_sections)
         if (
             rest_silence_applied
             and _safe_float(fast_user.get("user_rest_until"), 0) > received_ts
@@ -432,7 +497,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             logger.info("[PrivateCompanion] 忽略 poke 回流事件,不计入用户新消息: %s", user_id)
             return
         if self._is_duplicate_inbound_message(event, scope=f"private:{user_id}", sender_id=user_id, text=text):
-            self._schedule_data_save()
+            self._schedule_data_save(sections={"inbound_debounce_stats"})
             self._record_passive_no_reply(
                 event,
                 source="私聊去重",
@@ -442,13 +507,14 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             )
             event.stop_event()
             return
+        smart_debounce_state_changed = False
         if is_target_user and text and not forward_only_prompt and not reference_media_with_text:
-            self._maybe_record_smart_message_debounce_followup(
+            smart_debounce_state_changed = bool(self._maybe_record_smart_message_debounce_followup(
                 scope=f"private:{user_id}",
                 sender_id=user_id,
                 text=text,
                 now=received_ts,
-            )
+            ))
         private_image_enhancement_enabled = (
             self._feature_enabled_or_temp_unlocked("enable_private_image_self_recognition")
             and bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True)))
@@ -560,7 +626,8 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 wait_seconds=self._message_debounce_seconds("forward"),
                 kind="forward",
             ):
-                self._schedule_data_save()
+                if smart_debounce_state_changed:
+                    self._schedule_data_save(sections={"smart_message_debounce"})
                 event.stop_event()
                 return
         if private_image_only:
@@ -586,7 +653,8 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                         user_id,
                         len(persisted_images),
                     )
-                    self._schedule_data_save()
+                    if smart_debounce_state_changed:
+                        self._schedule_data_save(sections={"smart_message_debounce"})
                     return
                 if not has_model_usable_image:
                     logger.info(
@@ -627,7 +695,8 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     self._finalize_private_image_buffer_after_wait(key, user_id, received_ts),
                     label="private_image_debounce_finalize",
                 )
-            self._schedule_data_save()
+                if smart_debounce_state_changed:
+                    self._schedule_data_save(sections={"smart_message_debounce"})
             event.stop_event()
             return
         elif is_target_user and not forward_only_prompt and not reference_media_with_text:
@@ -696,6 +765,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 smart_result = getattr(event, "private_companion_smart_message_debounce_result", None)
                 smart_decision = str(smart_result.get("decision") or "") if isinstance(smart_result, dict) else ""
                 smart_handled = smart_decision in {"complete", "incomplete"}
+                smart_debounce_state_changed = smart_debounce_state_changed or smart_handled
                 wait_seconds = smart_wait if smart_handled else self._message_debounce_seconds("text")
                 if self._note_semantic_message_buffer(
                     key,
@@ -704,11 +774,10 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     smart_debounce={"enabled": smart_handled, "decision": smart_decision or "fixed"},
                     kind="text",
                 ):
-                    self._schedule_data_save()
+                    if smart_debounce_state_changed:
+                        self._schedule_data_save(sections={"smart_message_debounce"})
                     event.stop_event()
                     return
-                if smart_handled:
-                    self._schedule_data_save()
         user["umo"] = event.unified_msg_origin
         self._note_private_display_name_observation(user, user_id, sender_display_name, now=received_ts)
         if not is_target_user:
@@ -719,6 +788,8 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         self._note_private_inbound_activity(user, received_ts or _now_ts(), text=text)
         self._mark_greetings_satisfied_by_recent_activity(user, activity_ts=received_ts or _now_ts())
         self._note_morning_greeting_reply(user, now=received_ts or _now_ts())
+        private_memory_managed = False
+        private_memory_revision = None
         if text:
             user["inbound_count"] = _safe_int(user.get("inbound_count"), 0) + 1
         self._apply_relationship_event(
@@ -905,7 +976,12 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     self._schedule_next_proactive(user, now=_now_ts())
         user_is_owner = self._private_user_role(user, user_id) == "owner"
         food_feedback = self._detect_food_feedback(text) if text else {"is_food": False}
-        food_feedback_applied = bool(text) and user_is_owner and self._apply_food_feedback_to_state(text)
+        food_feedback_detected = bool(text) and user_is_owner and bool(
+            food_feedback.get("is_food") and food_feedback.get("actionable")
+        )
+        food_feedback_applied = food_feedback_detected and self._apply_food_feedback_to_state(text)
+        used_food_items: list[str] = []
+        meal_care_result: dict[str, Any] = {}
         food_feedback_actionable = bool(
             food_feedback.get("actionable")
             or food_feedback.get("feeding")
@@ -932,7 +1008,9 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     "text": _single_line(text, 120),
                     "source": "meal_care_reply",
                 }
-        care_feedback_applied = bool(text) and user_is_owner and self._apply_care_feedback_to_state(text)
+        care_feedback = self._detect_care_feedback(text) if text else {"is_care": False}
+        care_feedback_detected = bool(text) and user_is_owner and bool(care_feedback.get("is_care"))
+        care_feedback_applied = care_feedback_detected and self._apply_care_feedback_to_state(text)
         if care_feedback_applied:
             self._apply_relationship_event(
                 user,
@@ -1006,7 +1084,55 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     missing,
                     _single_line(exc, 160),
                 )
-        self._schedule_data_save()
+        save_sections = {"users"}
+        if private_memory_managed and private_memory_revision is not None:
+            save_sections.add("_req041_private_memory")
+        if expression_feedback:
+            save_sections.update(expression_feedback.get("updated_sections") or ())
+            if _safe_int(expression_feedback.get("updated_rules"), 0, 0) > 0:
+                save_sections.add("expression_voice_profile")
+        if self._expression_private_learning_source_enabled(user, user_id):
+            save_sections.add("expression_voice_profile")
+        if smart_debounce_state_changed:
+            save_sections.add("smart_message_debounce")
+        if food_feedback_detected:
+            save_sections.update(
+                {
+                    "last_food_state_feedback_at",
+                    "last_food_state_feedback_text",
+                }
+            )
+        if food_feedback_applied:
+            save_sections.update(
+                {
+                    "state_conditions",
+                    "daily_state",
+                }
+            )
+        if care_feedback_detected:
+            save_sections.add("state_conditions")
+        if interaction_warmth_applied:
+            save_sections.update({"state_conditions", "daily_state"})
+        if used_food_items:
+            save_sections.add("food_menu")
+        if meal_care_result.get("foods"):
+            save_sections.add("food_menu")
+        if schedule_adjustment_applied:
+            save_sections.update(
+                {
+                    "schedule_adjustments",
+                    "dialogue_outfit_override",
+                    "detail_enhanced_segments",
+                    "daily_plan",
+                    "daily_story_plan",
+                    "daily_state",
+                }
+            )
+            if isinstance(self.data.get("daily_state"), dict) and isinstance(
+                self.data["daily_state"].get("sleep_runtime"), dict
+            ):
+                save_sections.add("daily_state")
+        self._schedule_data_save(sections=save_sections)
         user_snapshot = dict(user)
 
     if not is_target_user:
@@ -1039,6 +1165,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             label="refresh_dialogue_episode_inbound",
         )
 
+@_coalesce_event_data_saves
 async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
     """观察群聊消息，维护群上下文并判断是否自然唤醒 Bot。"""
     if self is None:
@@ -1096,7 +1223,9 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                     scope_key=self._reaction_expression_scope_key(event, sender_id),
                 )
                 if reaction_expression_feedback:
-                    self._persist_reaction_expression_state()
+                    self._persist_reaction_expression_state(
+                        sections={"reaction_expression_group_states"}
+                    )
     if reaction_expression_feedback:
         self._log_reaction_expression_event(
             event,
@@ -1128,7 +1257,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
     if existing_reply_preview:
         async with self._data_lock:
             if self._is_duplicate_inbound_message(event, scope=f"group:{group_id}", sender_id=sender_id, text=text):
-                self._save_data_sync()
+                self._save_data_sync(sections={"inbound_debounce_stats"})
                 return
             group = self._get_group(group_id)
             group["umo"] = _single_line(getattr(event, "unified_msg_origin", ""), 160)
@@ -1143,7 +1272,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                 message_id=self._event_message_id(event),
                 event=event,
             )
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})
             group_snapshot = deepcopy(group)
         logger.info(
             "[PrivateCompanion] 已有其他链路回复,仅记录群聊观察: group=%s sender=%s text=%s result=%s",
@@ -1217,7 +1346,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
     group_snapshot_high_intensity: dict[str, Any] = {}
     async with self._data_lock:
         if self._is_duplicate_inbound_message(event, scope=f"group:{group_id}", sender_id=sender_id, text=text):
-            self._save_data_sync()
+            self._save_data_sync(sections={"inbound_debounce_stats"})
             event.stop_event()
             return
         group = self._get_group(group_id)
@@ -1314,7 +1443,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             now=received_ts,
         )
         if resting_mention_notice:
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})
         scene = self._infer_group_scene(event, group, sender_id=sender_id, sender_name=sender_name, text=text)
         if quoted_link_payload:
             scene["quoted_link_payload"] = True
@@ -1674,7 +1803,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                     message_id=self._event_message_id(event),
                     event=event,
                 )
-                self._save_data_sync()
+                self._save_data_sync(sections={"groups"})
                 logger.info(
                     "[PrivateCompanion] 群聊高强度消息已合并等待: group=%s sender=%s scope=%s recent_wakeups=%s floor=%s reason=%s wait=%ss text=%s",
                     group_id,
@@ -1718,7 +1847,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                     "recent_bot_replies": _safe_int(air_guard.get("recent_bot_replies"), 0, 0, 99),
                     "recent_polite_replies": _safe_int(air_guard.get("recent_polite_replies"), 0, 0, 99),
                 }
-                self._save_data_sync()
+                self._save_data_sync(sections={"groups"})
                 logger.info(
                     "[PrivateCompanion] 群聊读空气拦截回复: group=%s sender=%s reason=%s text=%s",
                     group_id,
@@ -1780,7 +1909,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                 kind="group_short_wakeup" if short_wait > 0 else "group_text",
             )
         ):
-            self._save_data_sync()
+            self._save_data_sync(sections={"smart_message_debounce"})
             event.stop_event()
             return
         self._capture_group_observation_once(
@@ -1821,7 +1950,20 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                 forwarded=group_reference_media_with_text,
             )
         share_scheduled = self._maybe_schedule_group_private_share(group_id, group, trigger_sender_id=sender_id)
-        self._save_data_sync()
+        save_sections = {"groups", "users", "proactive_candidate_pool"}
+        if self._expression_group_learning_source_enabled(group.get("group_id") or group_id):
+            save_sections.add("expression_voice_profile")
+        if isinstance(registration_payload, dict):
+            if registration_payload.get("updated_observation_profile"):
+                save_sections.add("worldbook_member_profiles")
+            if registration_payload.get("user_id"):
+                save_sections.update(
+                    {
+                        "worldbook_member_profiles",
+                        "worldbook_deleted_member_ids",
+                    }
+                )
+        self._save_data_sync(sections=save_sections)
         group_snapshot = deepcopy(group)
         group_snapshot_high_intensity = dict(high_intensity_state)
     await self._dispatch_due_atrelay_tasks(event, group_id, sender_id)
@@ -1886,4 +2028,4 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             current["interject_today"] = group_snapshot.get("interject_today", current.get("interject_today", 0))
             current["last_bot_interjection"] = group_snapshot.get("last_bot_interjection", current.get("last_bot_interjection", {}))
             current["repeat_follow_state"] = group_snapshot.get("repeat_follow_state", current.get("repeat_follow_state", {}))
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})

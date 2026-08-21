@@ -54,7 +54,7 @@ class _Host:
         return str(user.get("relationship_role") or "friend")
 
     @staticmethod
-    def _schedule_data_save() -> None:
+    def _schedule_data_save(*_args, **_kwargs) -> None:
         return None
 
     @staticmethod

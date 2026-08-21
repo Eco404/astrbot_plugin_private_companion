@@ -151,7 +151,9 @@ class GroupObservationIngressTests(unittest.IsolatedAsyncioTestCase):
             event.message_str,
             scope_key=scope_key,
         )
-        plugin._persist_reaction_expression_state.assert_called_once_with()
+        plugin._persist_reaction_expression_state.assert_called_once_with(
+            sections={"reaction_expression_group_states"}
+        )
         plugin._capture_group_observation_event.assert_awaited_once()
 
     async def test_high_priority_observer_only_records_and_does_not_stop_event(self) -> None:

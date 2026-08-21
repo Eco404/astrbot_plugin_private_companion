@@ -147,7 +147,9 @@ class _PageHost:
     def _error(message: str) -> dict[str, Any]:
         return {"ok": False, "error": message}
 
-    def _schedule_data_save(self) -> None:
+    def _schedule_data_save(self, *, sections=(), **_kwargs) -> None:
+        self.assert_saved_sections = getattr(self, "assert_saved_sections", [])
+        self.assert_saved_sections.append(set(sections or ()))
         self.saved += 1
 
     def _req041_emit_identity_dual_write(self, result, *, action, operation_id, registry):

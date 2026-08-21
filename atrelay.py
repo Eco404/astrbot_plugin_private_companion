@@ -1298,7 +1298,7 @@ class AtRelayMixin:
                 target = self._atrelay_receipt_label_for_user(target_user, sender_display_name)
                 await self._send_atrelay_receipt_to_source(task, f"{target}回复了，但说不方便转回来。")
                 await self.context.send_message(event.unified_msg_origin, MessageChain([Plain("好，那我不转回去。")]))
-            self._save_data_sync()
+            self._save_data_sync(sections={"pending_atrelay_receipts"})
             try:
                 event.stop_event()
             except Exception:
@@ -1310,7 +1310,7 @@ class AtRelayMixin:
             task["status"] = "waiting_confirm"
             task["pending_reply_text"] = cleaned
             task["target_name"] = self._atrelay_receipt_label_for_user(target_user, sender_display_name)
-            self._save_data_sync()
+            self._save_data_sync(sections={"pending_atrelay_receipts"})
             source_name = _single_line(task.get("source_name"), 30) or "对方"
             await self.context.send_message(
                 event.unified_msg_origin,
@@ -1325,7 +1325,7 @@ class AtRelayMixin:
         task["target_name"] = self._atrelay_receipt_label_for_user(target_user, sender_display_name)
         report = self._format_atrelay_receipt_report(task, cleaned)
         await self._send_atrelay_receipt_to_source(task, report)
-        self._save_data_sync()
+        self._save_data_sync(sections={"pending_atrelay_receipts"})
         try:
             event.stop_event()
         except Exception:
@@ -1374,7 +1374,7 @@ class AtRelayMixin:
         async with self._data_lock:
             due = self._pop_due_atrelay_tasks_for_sender(group_id, sender_id)
             if due:
-                self._save_data_sync()
+                self._save_data_sync(sections={"groups"})
         if not due:
             return
         platform = str(getattr(event, "unified_msg_origin", "") or "").split(":")[0] or self.target_platform or "aiocqhttp"
@@ -1397,7 +1397,7 @@ class AtRelayMixin:
                     source_user=_single_line(task.get("source_user"), 40),
                     source_name=_single_line(task.get("source_name"), 80),
                 )
-                self._save_data_sync()
+                self._save_data_sync(sections={"groups", "recent_atrelay_contexts", "atrelay_send_log"})
             except Exception as exc:
                 logger.warning("[PrivateCompanion] 延迟转述发送失败: group=%s user=%s err=%s", group_id, sender_id, _single_line(exc, 160))
 
