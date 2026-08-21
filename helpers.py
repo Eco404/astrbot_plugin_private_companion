@@ -611,13 +611,19 @@ _ESCAPED_HISTORY_MEDIA_MARKER_PATTERN = re.compile(
 )
 
 
-def _strip_history_media_markers(text: Any) -> str:
-    """Remove internal media metadata and legacy chat-like attachment notes."""
+def _has_history_media_marker(text: Any) -> bool:
+    """Return whether text contains raw, escaped, or mutated media metadata."""
     normalized = str(text or "")
-    had_marker = bool(
+    return bool(
         _HISTORY_MEDIA_MARKER_PATTERN.search(normalized)
         or _ESCAPED_HISTORY_MEDIA_MARKER_PATTERN.search(normalized)
     )
+
+
+def _strip_history_media_markers(text: Any) -> str:
+    """Remove internal media metadata and legacy chat-like attachment notes."""
+    normalized = str(text or "")
+    had_marker = _has_history_media_marker(normalized)
     normalized = _HISTORY_MEDIA_MARKER_PATTERN.sub("", normalized)
     normalized = _ESCAPED_HISTORY_MEDIA_MARKER_PATTERN.sub("", normalized)
     normalized = re.sub(
