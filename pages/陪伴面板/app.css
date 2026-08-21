@@ -21161,7 +21161,7 @@ textarea {
 
 .multi-persona-binding-list > span:not(.empty) {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
@@ -21177,6 +21177,13 @@ textarea {
 .multi-persona-binding-list em {
   color: var(--muted);
   font-style: normal;
+  white-space: nowrap;
+}
+
+.multi-persona-binding-list .danger-outline {
+  min-height: 30px;
+  border-radius: 7px;
+  padding: 0 10px;
   white-space: nowrap;
 }
 
@@ -23364,12 +23371,18 @@ textarea {
   }
 
   .multi-persona-binding-list > span:not(.empty) {
-    grid-template-columns: 1fr;
-    gap: 4px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px 10px;
   }
 
   .multi-persona-binding-list em {
+    grid-column: 1;
     white-space: normal;
+  }
+
+  .multi-persona-binding-list .danger-outline {
+    grid-column: 2;
+    grid-row: 1 / span 2;
   }
 
   .proactive-mode-card {

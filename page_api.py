@@ -874,6 +874,7 @@ class PrivateCompanionPageApi(
             ("/daily/detail/regenerate", self.regenerate_daily_detail_segment, ["POST"], "Private Companion Page regenerate one daily detail segment"),
             ("/roleplay/personas", self.list_roleplay_personas, ["GET"], "Private Companion Page roleplay personas"),
             ("/persona/switch", self.switch_persona, ["POST"], "Private Companion Page switch persona"),
+            ("/persona/unbind", self.unbind_persona, ["POST"], "Private Companion Page unbind persona window"),
             ("/persona/migrate", self.migrate_persona_profile, ["POST"], "Private Companion Page migrate persona profile"),
             ("/persona/reset-current", self.reset_current_persona, ["POST"], "Private Companion Page reset current persona"),
             ("/roleplay/draft_from_persona", self.generate_roleplay_draft_from_persona, ["POST"], "Private Companion Page roleplay draft from persona"),
@@ -895,6 +896,7 @@ class PrivateCompanionPageApi(
             "/extension-migration-notice/update",
             "/roleplay/personas",
             "/persona/switch",
+            "/persona/unbind",
             "/persona/migrate",
             "/persona/reset-current",
         }
@@ -13021,6 +13023,15 @@ class PrivateCompanionPageApi(
             else self.plugin._migrate_persona_profile(source_id, target_id, keys)
         )
         return self._ok(result) if result.get("ok") else self._error(result.get("message") or "人格资料迁移失败")
+
+    async def unbind_persona(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        window_key = str(payload.get("window_key") or payload.get("umo") or "").strip()
+        unbinder = getattr(self.plugin, "_unbind_persona_for_window_async", None)
+        if not callable(unbinder):
+            return self._error("当前运行态缺少安全窗口解绑事务，请重载插件后重试")
+        result = await unbinder(window_key)
+        return self._ok(result) if result.get("ok") else self._error(result.get("message") or "解除窗口绑定失败")
 
     async def reset_current_persona(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}

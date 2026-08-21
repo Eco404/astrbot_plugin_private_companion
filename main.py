@@ -2319,22 +2319,33 @@ class PrivateCompanionPlugin(
     def _persona_window_bindings(self) -> dict[str, str]:
         raw = self._cfg_raw(getattr(self, "config", {}), "multi_persona_window_bindings", {})
         result: dict[str, str] = {}
-        if isinstance(raw, dict):
-            for window, persona in raw.items():
-                window_key = str(window or "").strip()
-                pid = self._sanitize_persona_id(persona)
-                if window_key and pid:
-                    result[window_key] = pid
         persisted = getattr(self, "_persona_window_bindings_persisted", None)
         if not isinstance(persisted, dict):
             persisted = self._load_persona_window_bindings_store_sync()
             self._persona_window_bindings_persisted = persisted
+        suppressed = self._persona_window_binding_suppressions()
+        if isinstance(raw, dict):
+            for window, persona in raw.items():
+                window_key = str(window or "").strip()
+                pid = self._sanitize_persona_id(persona)
+                if window_key and pid and window_key not in suppressed:
+                    result[window_key] = pid
         for window, persona in persisted.items():
             window_key = str(window or "").strip()
             pid = self._sanitize_persona_id(persona)
-            if window_key and pid:
+            if window_key and pid and window_key not in suppressed:
                 result[window_key] = pid
         return result
+
+    def _persona_window_binding_suppressions(self) -> set[str]:
+        raw = getattr(self, "_persona_window_bindings_suppressed", set())
+        if not isinstance(raw, (set, list, tuple)):
+            return set()
+        return {
+            window
+            for value in raw
+            if (window := _single_line(value, 240))
+        }
 
     def _persona_window_bindings_store_path(self) -> Path:
         configured = str(getattr(self, "_persona_window_bindings_file", "") or "").strip()
@@ -2349,9 +2360,16 @@ class PrivateCompanionPlugin(
     def _load_persona_window_bindings_store_sync(self) -> dict[str, str]:
         path = self._persona_window_bindings_store_path()
         if not path.exists():
+            self._persona_window_bindings_suppressed = set()
             return {}
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
+            suppressed_raw = payload.get("suppressed_windows", []) if isinstance(payload, dict) else []
+            self._persona_window_bindings_suppressed = {
+                window
+                for value in (suppressed_raw if isinstance(suppressed_raw, list) else [])
+                if (window := _single_line(value, 240))
+            }
             raw = payload.get("bindings") if isinstance(payload, dict) and "bindings" in payload else payload
             if not isinstance(raw, dict):
                 return {}
@@ -2363,6 +2381,7 @@ class PrivateCompanionPlugin(
                     result[window_key] = pid
             return result
         except Exception as exc:
+            self._persona_window_bindings_suppressed = set()
             logger.warning(
                 "[PrivateCompanion] 多人格窗口绑定持久化文件读取失败，回退到插件配置: %s",
                 _single_line(exc, 160),
@@ -2381,9 +2400,10 @@ class PrivateCompanionPlugin(
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         payload = {
-            "version": 1,
+            "version": 2,
             "updated_at": _now_ts(),
             "bindings": normalized,
+            "suppressed_windows": sorted(self._persona_window_binding_suppressions()),
         }
         try:
             temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2444,6 +2464,7 @@ class PrivateCompanionPlugin(
             return None, active
         umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
         bindings = self._persona_window_bindings()
+        binding_suppressed = umo in self._persona_window_binding_suppressions()
         configured = set(self._configured_multi_persona_ids())
         event_persona = self._sanitize_persona_id(
             getattr(event, "private_companion_persona_id", "")
@@ -2452,7 +2473,7 @@ class PrivateCompanionPlugin(
         pid = bound_persona if bound_persona in configured else ""
         if not pid and event_persona in configured:
             pid = event_persona
-        if not pid:
+        if not pid and not binding_suppressed:
             conversation_persona = await self._conversation_persona_id_for_event(event)
             if conversation_persona and conversation_persona in configured:
                 pid = conversation_persona
@@ -2711,6 +2732,7 @@ class PrivateCompanionPlugin(
             "persisted_bindings": deepcopy(
                 getattr(self, "_persona_window_bindings_persisted", {})
             ),
+            "suppressed_windows": sorted(self._persona_window_binding_suppressions()),
             "claims": deepcopy(getattr(self, "_persona_window_claims", {})),
             "conflicts": deepcopy(getattr(self, "_persona_window_conflicts", {})),
             "page_current_persona_id": str(
@@ -2744,6 +2766,9 @@ class PrivateCompanionPlugin(
         persisted_bindings = snapshot.get("persisted_bindings")
         self._persona_window_bindings_persisted = deepcopy(
             persisted_bindings if isinstance(persisted_bindings, dict) else {}
+        )
+        self._persona_window_bindings_suppressed = set(
+            snapshot.get("suppressed_windows") or []
         )
 
         for attr, key in (
@@ -2863,6 +2888,9 @@ class PrivateCompanionPlugin(
         if window and previous and previous != pid:
             self._clear_persona_window_runtime_cache(window)
         if window:
+            suppressions = self._persona_window_binding_suppressions()
+            suppressions.discard(window)
+            self._persona_window_bindings_suppressed = suppressions
             bindings[window] = pid
             _set_into_config(self.config, "multi_persona_window_bindings", bindings)
             self._persona_window_bindings_persisted = dict(bindings)
@@ -2990,6 +3018,90 @@ class PrivateCompanionPlugin(
                     "previous_persona_id": previous,
                 }
         return self._switch_persona_for_window(*args, **kwargs)
+
+    async def _unbind_persona_for_window_async(self, window_key: Any) -> dict[str, Any]:
+        """Remove one explicit binding without deleting persona data or history."""
+        window = _single_line(window_key, 240)
+        if not window:
+            return {"ok": False, "message": "会话窗口 UMO 不能为空"}
+        await self._flush_scheduled_data_save()
+        async with self._data_lock:
+            bindings = self._persona_window_bindings()
+            previous = bindings.get(window) or self._persona_window_claims.get(window, "")
+            if not previous:
+                return {
+                    "ok": True,
+                    "unbound": False,
+                    "window_key": window,
+                    "message": "该窗口当前没有固定绑定",
+                }
+
+            snapshot = self._persona_window_switch_snapshot(window)
+            bindings.pop(window, None)
+            suppressions = self._persona_window_binding_suppressions()
+            suppressions.add(window)
+            self._persona_window_bindings_suppressed = suppressions
+            _set_into_config(self.config, "multi_persona_window_bindings", bindings)
+            self._persona_window_bindings_persisted = dict(bindings)
+            self._persona_window_claims.pop(window, None)
+            self._persona_window_conflicts.pop(window, None)
+            self._clear_persona_window_runtime_cache(window)
+
+            binding_store_saved = False
+            try:
+                binding_store_saved = bool(
+                    self._save_persona_window_bindings_store_sync(bindings)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanion] 人格窗口解绑独立落盘失败: %s",
+                    _single_line(exc, 120),
+                )
+            saver = getattr(self, "_save_config_if_possible", None)
+            config_saved = False
+            if binding_store_saved and callable(saver):
+                try:
+                    config_saved = bool(await saver())
+                except Exception as exc:
+                    logger.warning(
+                        "[PrivateCompanion] 人格窗口解绑配置保存失败: %s",
+                        _single_line(exc, 120),
+                    )
+            if binding_store_saved and config_saved:
+                return {
+                    "ok": True,
+                    "unbound": True,
+                    "window_key": window,
+                    "previous_persona_id": previous,
+                    "binding_store_saved": True,
+                    "config_saved": True,
+                }
+
+            rollback = self._restore_persona_window_switch_snapshot(snapshot)
+            try:
+                self._save_persona_window_bindings_store_sync(
+                    self._persona_window_bindings()
+                )
+            except Exception:
+                pass
+            if callable(saver):
+                try:
+                    await saver()
+                except Exception:
+                    pass
+            return {
+                "ok": False,
+                "message": (
+                    "窗口解绑未完整落盘，已恢复原绑定"
+                    if rollback.get("ok")
+                    else "窗口解绑失败，且原绑定未完整恢复，请检查日志"
+                ),
+                "window_key": window,
+                "previous_persona_id": previous,
+                "config_saved": False,
+                "binding_store_saved": binding_store_saved,
+                "rolled_back": bool(rollback.get("ok")),
+            }
 
     def _multi_persona_status(self) -> dict[str, Any]:
         enabled = bool(getattr(self, "enable_multi_persona_mode", False))

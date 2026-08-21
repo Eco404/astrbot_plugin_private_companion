@@ -89,3 +89,11 @@ def test_conflicting_window_binding_migrates_and_clears_cache_before_switch():
         assert 'if (result.conflict) {' in script
         assert "窗口绑定已变化，请重新确认后再切换" in script
         assert "该窗口已绑定其他人格，确认改为当前选择？" not in script
+
+
+def test_window_binding_rows_offer_persistent_unbind_action():
+    for script in _panel_scripts():
+        assert 'data-persona-window-unbind="${escapeHtml(windowKey)}"' in script
+        assert 'postJson("/persona/unbind", { window_key: windowKey })' in script
+        assert "现有人格资料和聊天记录不会删除" in script
+        assert "delete nextBindings[windowKey]" in script

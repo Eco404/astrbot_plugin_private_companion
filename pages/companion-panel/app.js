@@ -25822,7 +25822,13 @@ function multiPersonaMigrationDetailCard() {
     : '<option value="">暂无可用人格</option>';
   const bindingRows = Object.entries(bindings)
     .sort(([left], [right]) => left.localeCompare(right, "zh-CN"))
-    .map(([windowKey, personaId]) => `<span><code>${escapeHtml(windowKey)}</code><em>${escapeHtml(personaDisplayLabel(personaId))}</em></span>`)
+    .map(([windowKey, personaId]) => `
+      <span class="multi-persona-binding-row">
+        <code>${escapeHtml(windowKey)}</code>
+        <em>${escapeHtml(personaDisplayLabel(personaId))}</em>
+        <button type="button" class="danger-outline" data-persona-window-unbind="${escapeHtml(windowKey)}" title="解除该窗口的人格绑定">解除</button>
+      </span>
+    `)
     .join("");
   const bindingCard = `
     <article class="feature-detail-card multi-persona-binding-card">
@@ -29382,6 +29388,27 @@ function bindFeatureDetailActions() {
     } finally {
       event.currentTarget.disabled = false;
     }
+  });
+  detailPage?.querySelectorAll("[data-persona-window-unbind]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const windowKey = String(event.currentTarget.dataset.personaWindowUnbind || "").trim();
+      if (!windowKey) return;
+      if (!window.confirm(`解除“${windowKey}”的人格绑定吗？该窗口之后会回退到主人格，现有人格资料和聊天记录不会删除。`)) return;
+      event.currentTarget.disabled = true;
+      try {
+        const result = await postJson("/persona/unbind", { window_key: windowKey });
+        if (!result.unbound) throw new Error(result.message || "该窗口当前没有固定绑定");
+        const nextBindings = { ...(state.multiPersona.window_bindings || {}) };
+        delete nextBindings[windowKey];
+        state.multiPersona.window_bindings = nextBindings;
+        showToast("已解除会话窗口绑定");
+        await loadRoleplayPersonas(true);
+        renderFeatureSwitches();
+      } catch (error) {
+        showToast(error.message || "解除窗口绑定失败", "error");
+        event.currentTarget.disabled = false;
+      }
+    });
   });
   const trackFeatureDetailChange = (event) => {
     if (

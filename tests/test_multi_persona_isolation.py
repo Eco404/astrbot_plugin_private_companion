@@ -677,6 +677,76 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
             reloaded.config["multi_persona_window_bindings"] = {}
             self.assertEqual("main", reloaded._persona_window_bindings()[window])
 
+    async def test_manual_unbind_survives_reload_and_blocks_auto_rebinding(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            window = "default:FriendMessage:wrong-persona"
+            plugin.config["multi_persona_window_bindings"] = {window: "alt"}
+            plugin._persona_window_claims[window] = "alt"
+            plugin._passive_state_session_cache[window] = {"fingerprint": "alt-state"}
+
+            result = await plugin._unbind_persona_for_window_async(window)
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["unbound"])
+            self.assertNotIn(window, plugin._persona_window_bindings())
+            self.assertNotIn(window, plugin._persona_window_claims)
+            self.assertNotIn(window, plugin._passive_state_session_cache)
+            stored = json.loads(
+                (Path(root) / "persona_window_bindings.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(2, stored["version"])
+            self.assertIn(window, stored["suppressed_windows"])
+
+            reloaded = _plugin_harness(root)
+            # AstrBot may retain a stale dynamic config key; the manual unbind
+            # marker must still win after restart.
+            reloaded.config["multi_persona_window_bindings"] = {window: "alt"}
+            reloaded.context = SimpleNamespace(
+                conversation_manager=_ConversationManager("alt")
+            )
+            self.assertNotIn(window, reloaded._persona_window_bindings())
+            event = SimpleNamespace(unified_msg_origin=window)
+            token, persona_id = await reloaded._activate_persona_for_event_context(event)
+            try:
+                self.assertEqual("main", persona_id)
+                self.assertNotIn(window, reloaded._persona_window_bindings())
+            finally:
+                reloaded._deactivate_persona_for_event(token)
+
+    async def test_explicit_rebind_clears_manual_unbind_marker(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            window = "default:GroupMessage:rebind-after-unbind"
+            plugin.config["multi_persona_window_bindings"] = {window: "main"}
+            await plugin._unbind_persona_for_window_async(window)
+
+            result = await plugin._switch_persona_for_window_async(
+                "alt",
+                window_key=window,
+                persist=True,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual("alt", plugin._persona_window_bindings()[window])
+            self.assertNotIn(window, plugin._persona_window_binding_suppressions())
+
+    async def test_window_unbind_rolls_back_when_config_save_fails(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            window = "default:FriendMessage:unbind-rollback"
+            plugin.config["multi_persona_window_bindings"] = {window: "alt"}
+            plugin._persona_window_claims[window] = "alt"
+            plugin._save_config_if_possible = AsyncMock(side_effect=[False, True])
+
+            result = await plugin._unbind_persona_for_window_async(window)
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["rolled_back"])
+            self.assertEqual("alt", plugin._persona_window_bindings()[window])
+            self.assertEqual("alt", plugin._persona_window_claims[window])
+            self.assertNotIn(window, plugin._persona_window_binding_suppressions())
+
     async def test_page_route_reads_selected_persona_users_and_schedule(self):
         with tempfile.TemporaryDirectory() as root:
             plugin = _plugin_harness(root)
