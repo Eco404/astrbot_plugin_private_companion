@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from astrbot.api.message_components import At, Plain, Record, Reply
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
@@ -525,6 +525,35 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(1, len(chain))
         self.assertEqual(spoken, chain[0].text)
+
+    async def test_tts_synthesis_failure_strips_history_media_marker_from_fallback(self):
+        harness = _TtsHarness()
+        harness.tts_generation_mode = "postprocess"
+        harness.tts_voice_language = "ja"
+        harness.tts_delivery_mode = "voice_and_text"
+        harness.tts_foreign_text_mode = "translation"
+        harness.tts_frequency_control_mode = "legacy"
+        harness._resolve_tts_synthesis_provider = lambda _event, provider: provider
+        harness._tts_provider_kind = lambda *_args, **_kwargs: "generic"
+        harness._tts_record_component = AsyncMock(return_value=None)
+        harness._tts_text_needs_language_conversion = lambda *_args, **_kwargs: False
+        spoken = "……あんたまで面白がらないでよ。"
+        visible = "……怎么你也跟着起哄。"
+        marker = '<pc_history_media records="1" />'
+
+        chain = await harness._process_tts_tags(
+            f"<tts>{spoken}</tts>\n{visible} {marker}",
+            object(),
+            provider_settings={},
+            config={},
+            fallback_plain=f"{visible} {marker}",
+        )
+
+        self.assertFalse(any(isinstance(component, Record) for component in chain))
+        self.assertEqual(
+            [visible],
+            [component.text for component in chain if isinstance(component, Plain)],
+        )
 
     async def test_provider_safety_refusal_plain_text_never_enters_auto_tts(self):
         harness = _TtsHarness()
@@ -1411,12 +1440,42 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("对应正文", cleaned[1].text)
         self.assertNotIn("tts", cleaned[1].text.lower())
 
+    async def test_outbound_tts_chain_removes_history_marker_and_preserves_record(self):
+        harness = _TtsHarness()
+        record = Record(file="voice.wav")
+        marker = '<pc_history_media records="1" />'
+
+        cleaned = await harness._sanitize_outbound_tts_chain_without_event(
+            [record, Plain(f"可见正文 {marker}"), Plain(marker)],
+            umo="test-session",
+        )
+
+        self.assertEqual(2, len(cleaned))
+        self.assertIs(record, cleaned[0])
+        self.assertEqual("可见正文", cleaned[1].text)
+
     def test_visible_text_removes_known_emotion_cues_but_keeps_normal_brackets(self):
         harness = _TtsHarness()
 
         cleaned = harness._sanitize_tts_visible_text("[happy][affectionate][shy]今天很开心。[公告]明天见。")
 
         self.assertEqual("今天很开心。[公告]明天见。", cleaned)
+
+    def test_visible_text_removes_internal_history_media_marker(self):
+        harness = _TtsHarness()
+        markers = (
+            '<pc_history_media records="1" />',
+            '&lt;pc_history_media records="1" /&gt;',
+            '<pc_history_media_records="1" />',
+        )
+
+        for marker in markers:
+            with self.subTest(marker=marker):
+                self.assertEqual(
+                    "可见正文",
+                    harness._sanitize_tts_visible_text(f"可见正文 {marker}"),
+                )
+                self.assertEqual("", harness._sanitize_tts_visible_text(marker))
 
     async def test_global_probability_100_converts_plain_fast_tag_reply_without_legacy_auto_voice(self):
         harness = _TtsHarness()
@@ -1542,6 +1601,152 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
             ["普通第一段。", "普通第二段。"],
             [chunk[0].text for chunk in sent],
         )
+
+    async def test_tts_reply_remainder_drops_history_media_marker_before_direct_send(self):
+        harness = _TtsHarness()
+        harness._event_scope_key = lambda _event: "group:10001"
+        harness._scope_has_new_inbound_activity = lambda *_args, **_kwargs: True
+        marker = '<pc_history_media records="1" />'
+        sent: list[list[object]] = []
+
+        class Event:
+            unified_msg_origin = "default:GroupMessage:10001"
+
+            @staticmethod
+            def chain_result(chain):
+                return chain
+
+            async def send(self, chain):
+                sent.append(chain)
+
+        with patch(
+            "astrbot_plugin_private_companion.tts_enhancement.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            await harness._send_tts_chain_chunks_after_first(
+                Event(),
+                [
+                    [Plain(f"……不可爱，少在这学他们复读。 {marker}")],
+                    [Plain(marker)],
+                ],
+                started_at=1.0,
+            )
+
+        self.assertEqual(
+            ["……不可爱，少在这学他们复读。"],
+            [
+                "".join(
+                    component.text
+                    for component in chunk
+                    if isinstance(component, Plain)
+                )
+                for chunk in sent
+            ],
+        )
+        self.assertNotIn(
+            "pc_history_media",
+            "".join(
+                component.text
+                for chunk in sent
+                for component in chunk
+                if isinstance(component, Plain)
+            ),
+        )
+
+    async def test_tts_reply_remainder_drops_orphan_at_and_completes_review_case(self):
+        harness = _TtsHarness()
+        harness._update_daily_review_case = Mock()
+        at = At(qq="10001")
+        sent: list[list[object]] = []
+
+        class Event:
+            unified_msg_origin = "default:GroupMessage:10001"
+            _private_companion_daily_review_case_id = "case-1"
+
+            @staticmethod
+            def chain_result(chain):
+                return chain
+
+            async def send(self, chain):
+                sent.append(chain)
+
+        with patch(
+            "astrbot_plugin_private_companion.tts_enhancement.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            await harness._send_tts_chain_chunks_after_first(
+                Event(),
+                [[at, Plain('&lt;pc_history_media records="1" /&gt;')]],
+                started_at=1.0,
+            )
+
+        self.assertEqual([], sent)
+        harness._update_daily_review_case.assert_called_once_with(
+            "case-1",
+            outcome="delivered",
+            signals={
+                "segments_expected": 1,
+                "segments_sent": 1,
+                "visible_text_complete": True,
+            },
+        )
+
+    async def test_tts_reply_remainder_preserves_mixed_component_spacing(self):
+        harness = _TtsHarness()
+        at = At(qq="10001")
+        marker = '<pc_history_media records="1" />'
+        sent: list[list[object]] = []
+
+        class Event:
+            unified_msg_origin = "default:GroupMessage:10001"
+
+            @staticmethod
+            def chain_result(chain):
+                return chain
+
+            async def send(self, chain):
+                sent.append(chain)
+
+        with patch(
+            "astrbot_plugin_private_companion.tts_enhancement.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            await harness._send_tts_chain_chunks_after_first(
+                Event(),
+                [[at, Plain(f" 正文 {marker}")]],
+                started_at=1.0,
+            )
+
+        self.assertEqual(1, len(sent))
+        self.assertIs(at, sent[0][0])
+        self.assertEqual(" 正文", sent[0][1].text)
+
+    async def test_proactive_tts_remainder_drops_mutated_history_marker(self):
+        harness = _TtsHarness()
+        harness._send_chain_components = AsyncMock()
+
+        class Event:
+            unified_msg_origin = "default:FriendMessage:10001"
+            _private_companion_proactive_delivery_umo = "default:FriendMessage:10001"
+
+            @staticmethod
+            def chain_result(chain):
+                return chain
+
+            send = AsyncMock()
+
+        with patch(
+            "astrbot_plugin_private_companion.tts_enhancement.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            await harness._send_tts_chain_chunks_after_first(
+                Event(),
+                [[Plain('<pc_history_media_records="1" />')]],
+                started_at=1.0,
+            )
+
+        harness._send_chain_components.assert_not_awaited()
+        Event.send.assert_not_awaited()
 
     def test_segmented_tts_visible_text_keeps_transcript_marker(self):
         harness = _TtsHarness()

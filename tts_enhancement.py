@@ -28,7 +28,14 @@ from astrbot.core import file_token_service
 from astrbot.core.message.message_event_result import ResultContentType
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .helpers import _normalize_outbound_punctuation_flow, _safe_int, _single_line, _strip_nonstandard_chat_control_tags
+from .helpers import (
+    _has_history_media_marker,
+    _normalize_outbound_punctuation_flow,
+    _safe_int,
+    _single_line,
+    _strip_history_media_markers,
+    _strip_nonstandard_chat_control_tags,
+)
 from .segmented_message import (
     component_kind,
     component_order_from_owner,
@@ -1117,7 +1124,8 @@ class TtsEnhancementMixin:
         return source
 
     def _sanitize_tts_visible_text(self, text: Any, *, max_chars: int = 800) -> str:
-        cleaned = self._strip_any_tts_markup(str(text or ""))
+        cleaned = _strip_history_media_markers(str(text or ""))
+        cleaned = self._strip_any_tts_markup(cleaned)
         cleaned = self._strip_visible_tts_emotion_cues(cleaned)
         cleaned = re.sub(TTS_TAG_PATTERN, "", cleaned).strip()
         cleaned = re.sub(r"(?m)^\s*[>＞]\s*", "", cleaned).strip()
@@ -3278,7 +3286,17 @@ TTS 朗读文本：
                 cleaned_chain.append(comp)
                 continue
             original = str(getattr(comp, "text", "") or "")
-            cleaned_control = _strip_nonstandard_chat_control_tags(original)
+            if _has_history_media_marker(original):
+                cleaned_history = _strip_history_media_markers(original)
+                if cleaned_history:
+                    leading_whitespace = original[: len(original) - len(original.lstrip())]
+                    trailing_whitespace = original[len(original.rstrip()) :]
+                    cleaned_control = f"{leading_whitespace}{cleaned_history}{trailing_whitespace}"
+                else:
+                    cleaned_control = ""
+            else:
+                cleaned_control = original
+            cleaned_control = _strip_nonstandard_chat_control_tags(cleaned_control)
             cleaned_control = self._strip_visible_tts_emotion_cues(cleaned_control)
             has_tts_markup = re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", cleaned_control, flags=re.IGNORECASE)
             if not has_tts_markup:
@@ -3295,7 +3313,7 @@ TTS 朗读文本：
                 cleaned_chain.append(Plain(fallback_text))
         if changed:
             logger.warning(
-                "[PrivateCompanion] 外发兜底清理残留 TTS 标签: umo=%s preview=%s",
+                "[PrivateCompanion] 外发兜底清理残留内部控制标记: umo=%s preview=%s",
                 _single_line(umo, 120) or "unknown",
                 _single_line(self._tts_chain_log_text(cleaned_chain), 160),
             )
@@ -3576,8 +3594,55 @@ TTS 朗读文本：
         expanded_chunks: list[list[Any]] = []
         for chunk in chunks:
             expanded_chunks.extend(self._tts_segment_plain_chunk_for_ordered_send(event, chunk))
+        outbound_umo = _single_line(
+            getattr(event, "unified_msg_origin", ""),
+            160,
+        ) or "unknown"
+        sanitized_chunks: list[list[Any]] = []
+        for chunk in expanded_chunks:
+            cleaned_chunk = await self._sanitize_outbound_tts_chain_without_event(
+                chunk,
+                umo=outbound_umo,
+            )
+            if not cleaned_chunk:
+                continue
+            has_visible_plain = any(
+                isinstance(component, Plain)
+                and bool(str(getattr(component, "text", "") or "").strip())
+                for component in cleaned_chunk
+            )
+            has_delivery_component = any(
+                not isinstance(component, Plain)
+                and component_kind(component) not in {"at", "reply"}
+                for component in cleaned_chunk
+            )
+            source_had_plain = any(isinstance(component, Plain) for component in chunk)
+            if source_had_plain and not has_visible_plain and not has_delivery_component:
+                logger.warning(
+                    "[PrivateCompanion] TTS 尾段清理后仅剩孤立上下文组件,已跳过: session=%s",
+                    outbound_umo,
+                )
+                continue
+            sanitized_chunks.append(cleaned_chunk)
+        expanded_chunks = sanitized_chunks
         case_id = _single_line(getattr(event, "_private_companion_daily_review_case_id", ""), 20)
         case_updater = getattr(self, "_update_daily_review_case", None)
+        if not expanded_chunks:
+            logger.info(
+                "[PrivateCompanion] TTS 尾段清理后无可发送内容: session=%s",
+                outbound_umo,
+            )
+            if case_id and callable(case_updater):
+                case_updater(
+                    case_id,
+                    outcome="delivered",
+                    signals={
+                        "segments_expected": 1,
+                        "segments_sent": 1,
+                        "visible_text_complete": True,
+                    },
+                )
+            return
         total_chunks = len(expanded_chunks) + 1
         sent_chunks = 1
         scope_getter = getattr(self, "_event_scope_key", None)
