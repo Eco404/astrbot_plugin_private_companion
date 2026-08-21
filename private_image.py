@@ -3801,6 +3801,20 @@ class PrivateImageMixin:
                     add(source)
         return sources
 
+    def _context_image_source_is_resolvable(self, source: Any) -> bool:
+        """Return whether a context image source is directly resolvable."""
+
+        text = str(source or "").strip()
+        if not text:
+            return False
+        if re.match(r"^https?://", text, flags=re.I) or text.startswith(("data:", "base64://")):
+            return True
+        path = self._private_image_local_path_from_source(text)
+        try:
+            return path is not None and path.exists() and path.is_file()
+        except (OSError, ValueError):
+            return False
+
     def _replace_context_image_placeholder(self, value: Any, replacement: str, *, depth: int = 0) -> tuple[Any, bool]:
         if value is None or depth > 5:
             return value, False
@@ -3928,19 +3942,22 @@ class PrivateImageMixin:
                 items = getter(row)
             except Exception:
                 items = []
+        normalized_items = items if isinstance(items, list) else []
         sources: list[str] = []
-        for item in items if isinstance(items, list) else []:
+        for item in normalized_items:
             if not isinstance(item, dict):
                 continue
             source = str(item.get("source") or "").strip()
             tier = _single_line(item.get("tier"), 40)
             if source and tier not in {"placeholder", "platform_file"} and source not in sources:
                 sources.append(source)
-        if sources:
+        # Structured snapshots are authoritative. Falling back after filtering
+        # would reintroduce platform file IDs from the legacy ``images`` field.
+        if normalized_items:
             return sources[:5]
         for source in row.get("images") if isinstance(row.get("images"), list) else []:
             text = str(source or "").strip()
-            if text and text not in sources:
+            if text and self._context_image_source_is_resolvable(text) and text not in sources:
                 sources.append(text)
         return sources[:5]
 
@@ -4032,16 +4049,21 @@ class PrivateImageMixin:
         used_rows: set[str] = set()
         caption_cache: dict[tuple[str, ...], str] = {}
         changed = False
+        attempted = 0
         replaced = 0
         missed = 0
         updated_contexts = list(contexts)
         umo = str(getattr(event, "unified_msg_origin", "") or "")
 
         for index, item in enumerate(contexts):
-            if replaced >= max_items:
+            if attempted >= max_items:
                 break
             text = self._context_image_plain_text(item)
-            inline_sources = self._context_image_inline_sources(item)
+            inline_sources = [
+                source
+                for source in self._context_image_inline_sources(item)
+                if self._context_image_source_is_resolvable(source)
+            ]
             has_placeholder = self._context_image_has_placeholder(text)
             if not has_placeholder and not inline_sources:
                 continue
@@ -4054,10 +4076,14 @@ class PrivateImageMixin:
                 row = self._match_context_image_recall_row(text, rows, used_rows)
                 if row:
                     sources = self._context_image_sources_from_recall_row(row)
+                    unique = _single_line(row.get("message_id"), 120)
+                    if unique:
+                        used_rows.add(unique)
             if not sources:
                 missed += 1
                 continue
 
+            attempted += 1
             cache_key = tuple(sources)
             if cache_key not in caption_cache:
                 caption = await self._caption_context_image_sources(sources, umo=umo)
@@ -4076,10 +4102,6 @@ class PrivateImageMixin:
             updated_contexts[index] = updated_item
             changed = True
             replaced += 1
-            if row:
-                unique = _single_line(row.get("message_id"), 120)
-                if unique:
-                    used_rows.add(unique)
 
         if changed:
             try:
