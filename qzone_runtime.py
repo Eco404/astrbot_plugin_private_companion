@@ -584,7 +584,7 @@ class QzoneRuntimeMixin:
             elif status == "ok":
                 state.pop("last_cookie_fetch_reason", None)
             if callable(getattr(self, "_save_data_sync", None)):
-                self._save_data_sync()
+                self._save_data_sync(sections={"qzone_integration"})
         except Exception:
             logger.debug("[PrivateCompanion] QQ 空间 Cookie 状态记录失败", exc_info=True)
 

@@ -113,7 +113,9 @@ class _ReplyContextHarness(UserMemoryMixin):
     def _get_user(self, user_id: str):
         return self.data["users"][str(user_id)]
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, *, sections=(), **_kwargs) -> None:
+        self.saved_sections = getattr(self, "saved_sections", [])
+        self.saved_sections.append(set(sections or ()))
         return None
 
 

@@ -3456,6 +3456,7 @@ class UserMemoryMixin:
         try:
             store = AuthoritativePrivateMemoryStore(self.data)
             result = store.read(person_id)
+            bootstrapped = False
             if result.get("code") == "not_found":
                 seed = (
                     private_memory_content(user)
@@ -3468,6 +3469,7 @@ class UserMemoryMixin:
                     expected_revision=0,
                     operation_id=f"req041-private-memory-bootstrap:{person_id}",
                 )
+                bootstrapped = result.get("ok") is True
             record = result.get("record") if isinstance(result, dict) else None
             if result.get("ok") is not True or not isinstance(record, dict):
                 return None
@@ -3475,6 +3477,10 @@ class UserMemoryMixin:
             if not isinstance(content, dict):
                 return None
             apply_private_memory_content(user, content)
+            if bootstrapped:
+                scheduler = getattr(self, "_schedule_data_save", None)
+                if callable(scheduler):
+                    scheduler(sections={"users", "_req041_private_memory"})
             return int(record.get("revision") or 0) or None
         except (AuthoritativePrivateMemoryError, TypeError, ValueError) as exc:
             logger.warning(
@@ -3593,6 +3599,7 @@ class UserMemoryMixin:
             return {}
         current_channel = _single_line((context or {}).get("channel"), 24).lower()
         source_kind = "group" if current_channel == "group" or user.get("group_id") else "private"
+        updated_sections = {"groups" if source_kind == "group" else "users"}
         scope_managed, scope_context = self._expression_formal_scope_for_owner(
             user, source_kind=source_kind,
         )
@@ -3712,6 +3719,7 @@ class UserMemoryMixin:
                             continue
                         source_owner["expression_profile"] = source_profile
                         source_rules = source_profile.get("learned_rules")
+                        updated_sections.add(collection_key)
                         scoped_changed[id(source_owner)] = (source_owner, source_scope_context)
                     for source_rule in source_rules:
                         if not isinstance(source_rule, dict) or _single_line(source_rule.get("id"), 40) != ref["rule_id"]:
@@ -3721,6 +3729,7 @@ class UserMemoryMixin:
                         binding = source_rule.get("scope_binding") if isinstance(source_rule.get("scope_binding"), dict) else None
                         if binding is not None:
                             binding["revision"] = max(1, _safe_int(binding.get("revision"), 1, 1) + 1)
+                        updated_sections.add(collection_key)
                         break
                 if compact_refs:
                     feedback_rules.append(
@@ -3745,7 +3754,9 @@ class UserMemoryMixin:
                 changed_owner["expression_profile"] = self._expression_bind_profile_scope(
                     changed_profile, changed_context, bump_revision=True,
                 )
-        return last
+        result = dict(last)
+        result["updated_sections"] = sorted(updated_sections)
+        return result
 
     def _record_staged_expression_rule_injection(
         self,
@@ -9245,7 +9256,10 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                     operation_id=f"req041-dialogue-episode:{user_id}:{expression_batch_key}",
                 ):
                     return
-            self._save_data_sync(sections={"users"})
+            save_sections = {"users"}
+            if memory_managed:
+                save_sections.add("_req041_private_memory")
+            self._save_data_sync(sections=save_sections)
 
     def _build_expression_decision_for_user(
         self,
@@ -9686,7 +9700,10 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                     operation_id=f"req041-memory-profile:{user_id}:{memory_fingerprint}",
                 ):
                     return
-            self._save_data_sync(sections={"users"})
+            save_sections = {"users"}
+            if memory_managed:
+                save_sections.add("_req041_private_memory")
+            self._save_data_sync(sections=save_sections)
 
     async def _try_acquire_user_background_task(
         self,

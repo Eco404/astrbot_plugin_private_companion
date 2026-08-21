@@ -1039,7 +1039,7 @@ class GameIntegrationMixin:
                     user["game_afterglow"] = deepcopy(previous)
                     persisted = True
                     try:
-                        self._save_data_sync()
+                        self._save_data_sync(sections={"users"})
                     except Exception as exc:
                         persisted = False
                         logger.warning("[PrivateCompanion] 游戏旧事件回执保存失败: %s", self._game_clean_text(exc, 120))
@@ -1073,7 +1073,7 @@ class GameIntegrationMixin:
                     user["game_afterglow"] = deepcopy(current)
                     persisted = True
                     try:
-                        self._save_data_sync()
+                        self._save_data_sync(sections={"users"})
                     except Exception:
                         persisted = False
                     return self._game_public_result(current, stale=True, persisted=persisted)
@@ -1174,7 +1174,7 @@ class GameIntegrationMixin:
                 user["game_afterglow"] = deepcopy(updated)
                 persisted = True
                 try:
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"users"})
                 except Exception as exc:
                     persisted = False
                     logger.warning("[PrivateCompanion] 游戏余韵保存失败: %s", self._game_clean_text(exc, 120))

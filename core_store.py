@@ -25,6 +25,7 @@ import unicodedata
 import uuid
 import zoneinfo
 from collections.abc import Collection
+from contextvars import ContextVar
 from copy import deepcopy
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -275,11 +276,303 @@ _PLATFORM_DISPLAY_NAMES = {
     "discord": "Discord",
 }
 
+# Durable top-level sections are intentionally explicit.  Save requests may
+# only name sections registered here; legacy roots that exist only in a live
+# snapshot are handled by explicit full-scope migration/reset paths.
+_DURABLE_SECTION_NAMES = frozenset(
+    {
+        "version",
+        "users",
+        "private_user_alias_merge_backups",
+        "groups",
+        "daily_plan",
+        "daily_plan_history",
+        "agenda_version",
+        "agenda_contract_version",
+        "observed_activities",
+        "place_cognitive_maps",
+        "reality_touch_outputs",
+        "window_snapshots",
+        "agenda_reconciliation_history",
+        "daily_state",
+        "daily_weather",
+        "state_conditions",
+        "state_generated_day",
+        "body_cycle_state",
+        "body_cycle_strategy_mode",
+        "bot_diaries",
+        "dream_fragments",
+        "daily_dream",
+        "diary_generated_day",
+        "daily_diary_deleted_days",
+        "daily_diary_delete_revision",
+        "daily_diary_failed_day",
+        "daily_diary_failed_at",
+        "daily_diary_last_error",
+        "daily_diary_postprocess_error",
+        "daily_outfit_photo",
+        "daily_outfit_history",
+        "dialogue_outfit_override",
+        "recent_photo_generations",
+        "recent_photo_continuity",
+        "daily_story_plan",
+        "daily_story_plan_history",
+        "bot_personal_outbox",
+        "skill_growth",
+        "detail_enhanced_day",
+        "detail_enhanced_segments",
+        "detail_enhanced_history",
+        "schedule_adjustments",
+        "yesterday_conversation_summary",
+        "can_do",
+        "important_dates",
+        "qq_presence_state",
+        "token_usage",
+        "bilibili_integration",
+        "news_integration",
+        "web_exploration",
+        "qzone_integration",
+        "jm_cosmos_integration",
+        "bookshelf_items",
+        "bookshelf_secret",
+        "bookshelf_store_revision",
+        "memo_notes",
+        "creative_projects",
+        "creative_memory_pool",
+        "proactive_candidate_pool",
+        "proactive_runtime",
+        "proactive_review_runtime",
+        "proactive_audit_log",
+        "passive_no_reply_records",
+        "external_proactive_abilities",
+        "external_event_pool",
+        "external_event_self_link_cache",
+        "expression_learning_runtime",
+        "expression_voice_profile",
+        "extension_migration_notice_preferences",
+        "boundary_feedback_reports",
+        "boundary_feedback_vent_history",
+        "worldbook_entries",
+        "worldbook_member_profiles",
+        "worldbook_group_profiles",
+        "worldbook_deleted_member_ids",
+        "worldbook_deleted_group_ids",
+        "photo_reference_assets",
+        "worldbook_import_state",
+        "runtime_settings",
+        "manual_diagnosis_pending_config",
+        "manual_diagnosis_recent_context",
+        "atrelay_send_log",
+        "inbound_debounce_stats",
+        "smart_message_debounce",
+        "group_llm_reply_blocks",
+        "reaction_expression_group_states",
+        "cache_metrics",
+        "persona_lifecycle",
+        "balance_awareness",
+        "qweather_location",
+        "weather_alerts",
+        "weather_alert_awareness",
+        "body_monitor_integration",
+        "environment_change_awareness",
+        "personal_goal_state",
+        "personal_goals",
+        "food_menu",
+        "hunger_window_attempts",
+        "last_food_state_feedback_at",
+        "last_food_state_feedback_text",
+        "live_stream_companion",
+        "pending_atrelay_receipts",
+        "pending_atrelay_requests",
+        "personality_iteration_auto_tune",
+        "private_image_vision_cache",
+        "private_image_visual_provider_state",
+        "proactive_only_temp_unlocks",
+        "photo_generation_scope_attempts",
+        "photo_reference_feedback",
+        "reality_touch",
+        "recent_atrelay_contexts",
+        "recent_prompt_injection_events",
+        "recent_prompt_injections",
+        "social_fact_sanitized_at",
+        "screen_diary_context",
+        "self_meal_log",
+        "setup_guide_completed_at",
+        "setup_guide_completed_version",
+        "troubleshooting_suppressed_warning_types",
+        "web_search_runtime",
+        "daily_review_reports",
+        "daily_review_active_guidance",
+        "daily_review_last_attempt",
+        "daily_review_completed_day",
+        "daily_review_case_audit",
+        "troubleshooting_test_results",
+        "req036_capability_migration",
+        "unified_person",
+        # Derived maintenance markers are persisted with their source section.
+        "proactive_candidate_repeat_sanitized_at",
+        "_req041_expression_promotion_operations",
+        "_req041_group_reset_sagas",
+        "_req041_private_memory",
+        "_req041_persona_expression_profile",
+        "_req041_persona_reset_saga",
+    }
+)
+
+_FULL_SAVE_SCOPES = frozenset(
+    {
+        "startup_migration",
+        "startup_maintenance",
+        "explicit_reset",
+        "shutdown_flush",
+        "admin_import_export",
+    }
+)
+
+_EVENT_DATA_SAVE_BATCH: ContextVar[dict[str, Any] | None] = ContextVar(
+    "private_companion_event_data_save_batch",
+    default=None,
+)
+_EVENT_DATA_SAVE_BATCH_ATTR = "_private_companion_event_data_save_batch"
+
 
 
 
 class CoreStoreMixin:
     """配置、数据存储、用户/群组基础访问"""
+
+    def _begin_event_data_save_batch(self, event: Any) -> tuple[Any, dict[str, Any]] | None:
+        """Begin or resume one persistence batch for a managed message event."""
+        current = _EVENT_DATA_SAVE_BATCH.get()
+        if (
+            isinstance(current, dict)
+            and current.get("owner") is self
+            and not bool(current.get("closed"))
+        ):
+            return None
+
+        # Message filters run in separate persona contexts. Keep the batch on
+        # the event so an early guard and the final handler can share it.
+        event_batch = getattr(event, _EVENT_DATA_SAVE_BATCH_ATTR, None)
+        if (
+            isinstance(event_batch, dict)
+            and event_batch.get("owner") is self
+            and not bool(event_batch.get("closed"))
+        ):
+            token = _EVENT_DATA_SAVE_BATCH.set(event_batch)
+            return token, event_batch
+
+        sections: set[str] = set()
+        deleted_sections: set[str] = set()
+        batch = {
+            "owner": self,
+            "event": event,
+            "sections": sections,
+            "deleted_sections": deleted_sections,
+            "delay": 1.5,
+            "closed": False,
+        }
+        try:
+            setattr(event, _EVENT_DATA_SAVE_BATCH_ATTR, batch)
+            setattr(event, "_private_companion_pending_save_sections", sections)
+        except Exception:
+            pass
+        token = _EVENT_DATA_SAVE_BATCH.set(batch)
+        return token, batch
+
+    def _suspend_event_data_save_batch(
+        self,
+        handle: tuple[Any, dict[str, Any]] | None,
+    ) -> None:
+        """Detach the current task from an open event batch without flushing it."""
+        if handle is None:
+            return
+        token, batch = handle
+        if bool(batch.get("closed")):
+            return
+        try:
+            _EVENT_DATA_SAVE_BATCH.reset(token)
+        except (LookupError, RuntimeError, ValueError):
+            # A defensive fallback for handlers that changed the context
+            # before returning; the event-owned batch remains authoritative.
+            if _EVENT_DATA_SAVE_BATCH.get() is batch:
+                _EVENT_DATA_SAVE_BATCH.set(None)
+
+    def _collect_event_data_save_request(
+        self,
+        *,
+        sections: set[str] | None,
+        deleted_sections: set[str],
+        full_scope: str | None,
+        delay: float,
+    ) -> bool:
+        """Merge an incremental request into the active message-event batch."""
+        batch = _EVENT_DATA_SAVE_BATCH.get()
+        if (
+            not isinstance(batch, dict)
+            or batch.get("owner") is not self
+            or bool(batch.get("closed"))
+            or full_scope is not None
+            or sections is None
+        ):
+            return False
+        changed = batch["sections"]
+        deleted = batch["deleted_sections"]
+        for section in sections:
+            deleted.discard(section)
+            changed.add(section)
+        for section in deleted_sections:
+            changed.discard(section)
+            deleted.add(section)
+        batch["delay"] = min(float(batch.get("delay", 1.5)), max(0.0, float(delay)))
+        return True
+
+    def _finish_event_data_save_batch(
+        self,
+        handle: tuple[Any, dict[str, Any]] | None,
+    ) -> None:
+        """Close an event batch and submit its final section union once."""
+        if handle is None:
+            return
+        token, batch = handle
+        if bool(batch.get("closed")):
+            return
+        # Child tasks inherit ContextVar values. Mark this shared batch closed
+        # before resetting the parent context so later child writes cannot be
+        # absorbed into a request that has already been submitted.
+        batch["closed"] = True
+        if _EVENT_DATA_SAVE_BATCH.get() is batch:
+            try:
+                _EVENT_DATA_SAVE_BATCH.reset(token)
+            except (LookupError, RuntimeError, ValueError):
+                _EVENT_DATA_SAVE_BATCH.set(None)
+            if _EVENT_DATA_SAVE_BATCH.get() is batch:
+                _EVENT_DATA_SAVE_BATCH.set(None)
+        else:
+            try:
+                _EVENT_DATA_SAVE_BATCH.reset(token)
+            except (LookupError, RuntimeError, ValueError):
+                pass
+        self._close_event_data_save_batch(batch)
+
+    def _close_event_data_save_batch(self, batch: dict[str, Any]) -> None:
+        """Remove event markers and submit the captured section union."""
+        event = batch.get("event")
+        try:
+            if getattr(event, _EVENT_DATA_SAVE_BATCH_ATTR, None) is batch:
+                delattr(event, _EVENT_DATA_SAVE_BATCH_ATTR)
+            delattr(event, "_private_companion_pending_save_sections")
+        except Exception:
+            pass
+        sections = set(batch.get("sections") or ())
+        deleted_sections = set(batch.get("deleted_sections") or ())
+        if not sections and not deleted_sections:
+            return
+        self._schedule_data_save(
+            sections=sections,
+            deleted_sections=deleted_sections,
+            delay=float(batch.get("delay", 1.5)),
+        )
 
     @staticmethod
     def _backup_store_switch_target(backend: str, path: Path) -> Path | None:
@@ -544,15 +837,18 @@ class CoreStoreMixin:
             "daily_plan": {},
             "daily_plan_history": [],
             "agenda_version": 1,
+            "agenda_contract_version": 0,
             "observed_activities": [],
             "place_cognitive_maps": {},
             "reality_touch_outputs": {},
             "window_snapshots": [],
             "agenda_reconciliation_history": [],
             "daily_state": {},
+            "daily_weather": {},
             "state_conditions": [],
             "state_generated_day": "",
             "body_cycle_state": {},
+            "body_cycle_strategy_mode": "",
             "bot_diaries": [],
             "dream_fragments": [],
             "daily_dream": {},
@@ -565,6 +861,7 @@ class CoreStoreMixin:
             "daily_diary_postprocess_error": "",
             "daily_outfit_photo": {},
             "daily_outfit_history": [],
+            "dialogue_outfit_override": {},
             "recent_photo_generations": [],
             "recent_photo_continuity": {},
             "daily_story_plan": {},
@@ -592,6 +889,12 @@ class CoreStoreMixin:
             "creative_projects": [],
             "creative_memory_pool": [],
             "proactive_candidate_pool": [],
+            "proactive_runtime": {},
+            "proactive_review_runtime": {},
+            "proactive_audit_log": [],
+            "passive_no_reply_records": {},
+            "external_event_pool": [],
+            "external_event_self_link_cache": {},
             "external_proactive_abilities": {},
             "boundary_feedback_reports": [],
             "boundary_feedback_vent_history": [],
@@ -602,7 +905,10 @@ class CoreStoreMixin:
             "photo_reference_assets": [],
             "worldbook_import_state": {},
             "runtime_settings": {},
+            "manual_diagnosis_pending_config": {},
+            "manual_diagnosis_recent_context": {},
             "inbound_debounce_stats": {},
+            "smart_message_debounce": {},
             "group_llm_reply_blocks": {},
             "reaction_expression_group_states": {},
             "cache_metrics": {},
@@ -625,7 +931,47 @@ class CoreStoreMixin:
             "daily_review_last_attempt": {},
             "daily_review_completed_day": "",
             "daily_review_case_audit": [],
+            "troubleshooting_test_results": {},
+            "troubleshooting_suppressed_warning_types": [],
+            "expression_learning_runtime": {},
+            "expression_voice_profile": {},
+            "extension_migration_notice_preferences": {},
+            "hunger_window_attempts": {},
+            "last_food_state_feedback_at": 0,
+            "last_food_state_feedback_text": "",
+            "live_stream_companion": {},
+            "pending_atrelay_receipts": [],
+            "pending_atrelay_requests": {},
+            "personality_iteration_auto_tune": {},
+            "private_image_vision_cache": {},
+            "private_image_visual_provider_state": {},
+            "proactive_only_temp_unlocks": {},
+            "photo_generation_scope_attempts": {},
+            "photo_reference_feedback": [],
+            "reality_touch": {},
+            "recent_atrelay_contexts": [],
+            "recent_prompt_injection_events": [],
+            "recent_prompt_injections": {},
+            "social_fact_sanitized_at": "",
+            "screen_diary_context": {},
+            "self_meal_log": [],
+            "setup_guide_completed_at": "",
+            "setup_guide_completed_version": "",
+            "web_search_runtime": {},
             "unified_person": empty_person_store(),
+            "req036_capability_migration": {},
+            "_req041_expression_promotion_operations": {},
+            "_req041_group_reset_sagas": {},
+            "_req041_private_memory": {
+                "schema": "req041.person_private_memory.v1",
+                "records": {},
+            },
+            "_req041_persona_expression_profile": {},
+            "_req041_persona_reset_saga": {},
+            "atrelay_send_log": [],
+            "worldbook_deleted_member_ids": [],
+            "worldbook_deleted_group_ids": [],
+            "proactive_candidate_repeat_sanitized_at": "",
         }
 
     @staticmethod
@@ -637,15 +983,18 @@ class CoreStoreMixin:
         data.setdefault("daily_plan", {})
         data.setdefault("daily_plan_history", [])
         data.setdefault("agenda_version", 1)
+        data.setdefault("agenda_contract_version", 0)
         data.setdefault("observed_activities", [])
         data.setdefault("place_cognitive_maps", {})
         data.setdefault("reality_touch_outputs", {})
         data.setdefault("window_snapshots", [])
         data.setdefault("agenda_reconciliation_history", [])
         data.setdefault("daily_state", {})
+        data.setdefault("daily_weather", {})
         data.setdefault("state_conditions", [])
         data.setdefault("state_generated_day", "")
         data.setdefault("body_cycle_state", {})
+        data.setdefault("body_cycle_strategy_mode", "")
         data.setdefault("bot_diaries", [])
         data.setdefault("dream_fragments", [])
         data.setdefault("daily_dream", {})
@@ -658,6 +1007,7 @@ class CoreStoreMixin:
         data.setdefault("daily_diary_postprocess_error", "")
         data.setdefault("daily_outfit_photo", {})
         data.setdefault("daily_outfit_history", [])
+        data.setdefault("dialogue_outfit_override", {})
         data.setdefault("recent_photo_generations", [])
         data.setdefault("recent_photo_continuity", {})
         data.setdefault("daily_story_plan", {})
@@ -685,6 +1035,12 @@ class CoreStoreMixin:
         data.setdefault("creative_projects", [])
         data.setdefault("creative_memory_pool", [])
         data.setdefault("proactive_candidate_pool", [])
+        data.setdefault("proactive_runtime", {})
+        data.setdefault("proactive_review_runtime", {})
+        data.setdefault("proactive_audit_log", [])
+        data.setdefault("passive_no_reply_records", {})
+        data.setdefault("external_event_pool", [])
+        data.setdefault("external_event_self_link_cache", {})
         data.setdefault("external_proactive_abilities", {})
         data.setdefault("boundary_feedback_reports", [])
         data.setdefault("boundary_feedback_vent_history", [])
@@ -696,8 +1052,11 @@ class CoreStoreMixin:
         data.setdefault("worldbook_deleted_group_ids", [])
         data.setdefault("worldbook_import_state", {})
         data.setdefault("runtime_settings", {})
+        data.setdefault("manual_diagnosis_pending_config", {})
+        data.setdefault("manual_diagnosis_recent_context", {})
         data.setdefault("atrelay_send_log", [])
         data.setdefault("inbound_debounce_stats", {})
+        data.setdefault("smart_message_debounce", {})
         data.setdefault("group_llm_reply_blocks", {})
         data.setdefault("reaction_expression_group_states", {})
         data.setdefault("cache_metrics", {})
@@ -722,6 +1081,43 @@ class CoreStoreMixin:
         data.setdefault("daily_review_last_attempt", {})
         data.setdefault("daily_review_completed_day", "")
         data.setdefault("daily_review_case_audit", [])
+        data.setdefault("troubleshooting_test_results", {})
+        data.setdefault("troubleshooting_suppressed_warning_types", [])
+        data.setdefault("expression_learning_runtime", {})
+        data.setdefault("expression_voice_profile", {})
+        data.setdefault("extension_migration_notice_preferences", {})
+        data.setdefault("hunger_window_attempts", {})
+        data.setdefault("last_food_state_feedback_at", 0)
+        data.setdefault("last_food_state_feedback_text", "")
+        data.setdefault("live_stream_companion", {})
+        data.setdefault("pending_atrelay_receipts", [])
+        data.setdefault("pending_atrelay_requests", {})
+        data.setdefault("personality_iteration_auto_tune", {})
+        data.setdefault("private_image_vision_cache", {})
+        data.setdefault("private_image_visual_provider_state", {})
+        data.setdefault("proactive_only_temp_unlocks", {})
+        data.setdefault("photo_generation_scope_attempts", {})
+        data.setdefault("photo_reference_feedback", [])
+        data.setdefault("reality_touch", {})
+        data.setdefault("recent_atrelay_contexts", [])
+        data.setdefault("recent_prompt_injection_events", [])
+        data.setdefault("recent_prompt_injections", {})
+        data.setdefault("social_fact_sanitized_at", "")
+        data.setdefault("screen_diary_context", {})
+        data.setdefault("self_meal_log", [])
+        data.setdefault("setup_guide_completed_at", "")
+        data.setdefault("setup_guide_completed_version", "")
+        data.setdefault("web_search_runtime", {})
+        data.setdefault("req036_capability_migration", {})
+        data.setdefault("_req041_expression_promotion_operations", {})
+        data.setdefault("_req041_group_reset_sagas", {})
+        data.setdefault(
+            "_req041_private_memory",
+            {"schema": "req041.person_private_memory.v1", "records": {}},
+        )
+        data.setdefault("_req041_persona_expression_profile", {})
+        data.setdefault("_req041_persona_reset_saga", {})
+        data.setdefault("proactive_candidate_repeat_sanitized_at", "")
         ensure_person_store(data)
         # Legacy profiles retain their effective durable permissions once.
         # Creation paths below install a separate default-closed state for new
@@ -1209,7 +1605,18 @@ class CoreStoreMixin:
         *,
         sections: Collection[str] | None = None,
         deleted_sections: Collection[str] = (),
+        full_scope: str | None = None,
     ):
+        sections, deleted_sections, full_scope = self._validate_save_request(
+            sections, deleted_sections, full_scope
+        )
+        if self._collect_event_data_save_request(
+            sections=sections,
+            deleted_sections=deleted_sections,
+            full_scope=full_scope,
+            delay=0.35,
+        ):
+            return
         scoped_scheduler = getattr(self, "_req041_schedule_scoped_sync", None)
         if callable(scoped_scheduler):
             scoped_scheduler()
@@ -1228,10 +1635,14 @@ class CoreStoreMixin:
                 pending_full = bool(
                     self._persona_data_save_full_revision.get(active_persona, 0)
                 )
+                pending_full_scope = str(
+                    self._persona_data_save_full_scope.get(active_persona, "") or ""
+                )
                 if self._mark_persona_data_dirty(
                     active_persona,
                     sections=sections,
                     deleted_sections=deleted_sections,
+                    full_scope=full_scope,
                 ):
                     batch = self._capture_persona_data_save_batch(active_persona)
                     result = self._write_persona_data_save_batch_sync(
@@ -1251,11 +1662,13 @@ class CoreStoreMixin:
                             active_persona,
                             sections=None if pending_full else set(pending_dirty),
                             deleted_sections=set(pending_deleted),
+                            full_scope=pending_full_scope if pending_full else None,
                         )
                 return
             self._schedule_data_save(
                 sections=sections,
                 deleted_sections=deleted_sections,
+                full_scope=full_scope,
                 delay=0.35,
             )
             return
@@ -1265,11 +1678,13 @@ class CoreStoreMixin:
             self._save_data_now_sync(
                 sections=sections,
                 deleted_sections=deleted_sections,
+                full_scope=full_scope,
             )
             return
         self._schedule_data_save(
             sections=sections,
             deleted_sections=deleted_sections,
+            full_scope=full_scope,
             delay=0.35,
         )
 
@@ -1278,14 +1693,20 @@ class CoreStoreMixin:
         *,
         sections: Collection[str] | None = None,
         deleted_sections: Collection[str] = (),
+        full_scope: str | None = None,
     ) -> None:
+        sections, deleted_sections, full_scope = self._validate_save_request(
+            sections, deleted_sections, full_scope
+        )
         self._ensure_default_save_state()
         pending_dirty = dict(self._data_save_dirty)
         pending_deleted = dict(self._data_save_deleted)
         pending_full = bool(self._data_save_full_revision)
+        pending_full_scope = str(getattr(self, "_data_save_full_scope", "") or "")
         if not self._mark_default_data_dirty(
             sections=sections,
             deleted_sections=deleted_sections,
+            full_scope=full_scope,
         ):
             return
         batch = self._capture_default_data_save_batch()
@@ -1300,6 +1721,7 @@ class CoreStoreMixin:
             self._mark_default_data_dirty(
                 sections=None if pending_full else set(pending_dirty),
                 deleted_sections=set(pending_deleted),
+                full_scope=pending_full_scope if pending_full else None,
             )
 
     def _write_data_snapshot_sync(
@@ -1426,6 +1848,43 @@ class CoreStoreMixin:
             values = (values,)
         return {str(value).strip() for value in values if str(value).strip()}
 
+    @classmethod
+    def _validate_save_request(
+        cls,
+        sections: Collection[str] | None,
+        deleted_sections: Collection[str],
+        full_scope: str | None,
+    ) -> tuple[set[str] | None, set[str], str | None]:
+        """Validate the explicit section or full-save contract."""
+        normalized_sections = cls._save_section_names(sections)
+        normalized_deleted = cls._save_section_names(deleted_sections) or set()
+        normalized_scope = str(full_scope or "").strip() or None
+        if normalized_scope is not None and normalized_scope not in _FULL_SAVE_SCOPES:
+            raise ValueError(f"unknown full save scope: {normalized_scope}")
+        if normalized_sections is None:
+            if normalized_scope is None:
+                raise ValueError(
+                    "sections must be explicit unless an allowlisted full_scope is provided"
+                )
+            if normalized_deleted:
+                raise ValueError("full_scope cannot be combined with deleted_sections")
+        elif normalized_scope is not None:
+            raise ValueError("sections and full_scope are mutually exclusive")
+        unknown = (
+            (normalized_sections or set()) | normalized_deleted
+        ) - _DURABLE_SECTION_NAMES
+        if unknown:
+            raise ValueError(
+                "unknown durable sections: " + ", ".join(sorted(unknown))
+            )
+        overlap = (normalized_sections or set()) & normalized_deleted
+        if overlap:
+            raise ValueError(
+                "changed and deleted sections must be disjoint: "
+                + ", ".join(sorted(overlap))
+            )
+        return normalized_sections, normalized_deleted, normalized_scope
+
     def _save_is_stopping(self) -> bool:
         stop_event = getattr(self, "_stop_event", None)
         return bool(
@@ -1484,6 +1943,8 @@ class CoreStoreMixin:
             self._data_save_section_revisions = {}
         if not isinstance(getattr(self, "_data_save_full_revision", None), int):
             self._data_save_full_revision = 0
+        if not isinstance(getattr(self, "_data_save_full_scope", None), str):
+            self._data_save_full_scope = ""
         if not isinstance(getattr(self, "_data_save_revision", None), int):
             seed = 1
             manager = getattr(self, "store_manager", None)
@@ -1506,6 +1967,7 @@ class CoreStoreMixin:
                 self._data_save_section_revisions[str(section)] = revision
             self._data_save_full_revision = revision
             self._data_save_full_since = now
+            self._data_save_full_scope = "startup_maintenance"
 
     def _refresh_data_save_revision_from_manager(self) -> int:
         manager = getattr(self, "store_manager", None)
@@ -1528,6 +1990,7 @@ class CoreStoreMixin:
             "_persona_data_save_deleted",
             "_persona_data_save_dirty_since",
             "_persona_data_save_full_revision",
+            "_persona_data_save_full_scope",
             "_persona_data_save_revision",
             "_persona_data_save_section_revisions",
         ):
@@ -1539,6 +2002,8 @@ class CoreStoreMixin:
             self._persona_data_save_write_generation = {}
         if not isinstance(getattr(self, "_persona_data_save_tasks", None), dict):
             self._persona_data_save_tasks = {}
+        if not isinstance(getattr(self, "_persona_data_save_full_scope", None), dict):
+            self._persona_data_save_full_scope = {}
         for persona_id in legacy_personas:
             if persona_id in self._persona_data_save_dirty or persona_id in self._persona_data_save_deleted:
                 continue
@@ -1554,6 +2019,7 @@ class CoreStoreMixin:
                 since[str(section)] = now
                 section_revisions[str(section)] = revision
             self._persona_data_save_full_revision[str(persona_id)] = revision
+            self._persona_data_save_full_scope[str(persona_id)] = "startup_maintenance"
 
     def _next_data_save_revision(self, persona_id: str = "") -> int:
         if persona_id:
@@ -1591,10 +2057,12 @@ class CoreStoreMixin:
         *,
         sections: Collection[str] | None,
         deleted_sections: Collection[str],
+        full_scope: str | None = None,
     ) -> bool:
         self._ensure_default_save_state()
-        changed = self._save_section_names(sections)
-        deleted = self._save_section_names(deleted_sections) or set()
+        changed, deleted, full_scope = self._validate_save_request(
+            sections, deleted_sections, full_scope
+        )
         full = changed is None
         if changed is None:
             changed = {str(name) for name in self.data}
@@ -1618,6 +2086,7 @@ class CoreStoreMixin:
         if full:
             self._data_save_full_revision = revision
             self._data_save_full_since = now
+            self._data_save_full_scope = str(full_scope)
         return True
 
     def _mark_persona_data_dirty(
@@ -1626,11 +2095,13 @@ class CoreStoreMixin:
         *,
         sections: Collection[str] | None,
         deleted_sections: Collection[str],
+        full_scope: str | None = None,
     ) -> bool:
         self._ensure_persona_save_state()
         live_data = self._persona_data_for_save(persona_id)
-        changed = self._save_section_names(sections)
-        deleted = self._save_section_names(deleted_sections) or set()
+        changed, deleted, full_scope = self._validate_save_request(
+            sections, deleted_sections, full_scope
+        )
         full = changed is None
         if changed is None:
             changed = {str(name) for name in live_data}
@@ -1657,6 +2128,7 @@ class CoreStoreMixin:
             section_revisions[section] = revision
         if full:
             self._persona_data_save_full_revision[persona_id] = revision
+            self._persona_data_save_full_scope[persona_id] = str(full_scope)
         return True
 
     def _default_data_save_is_dirty(self) -> bool:
@@ -1744,7 +2216,17 @@ class CoreStoreMixin:
         manager = getattr(self, "store_manager", None)
         manager_backend = str(getattr(manager, "backend_name", "") or "").lower()
         full_compatibility_save = bool(self._data_save_full_revision)
-        full_replacement = bool(force_full and full_compatibility_save)
+        full_scope = str(getattr(self, "_data_save_full_scope", "") or "").strip()
+        # A full-scope request marks every live section dirty, but SQLite can
+        # still persist that capture incrementally.  Shutdown is the only
+        # general path that forces a compatibility full snapshot so removed
+        # roots are reconciled without inferring deletes during ordinary
+        # writes.  An explicit reset is also a complete replacement by
+        # definition and must become durable before returning.
+        full_replacement = bool(
+            full_compatibility_save
+            and (force_full or full_scope == "explicit_reset")
+        )
         incremental = bool(
             manager_backend == "sqlite"
             and callable(getattr(manager, "save_sections", None))
@@ -2134,6 +2616,7 @@ class CoreStoreMixin:
         if complete and self._data_save_full_revision == batch["full_revision"]:
             self._data_save_full_revision = 0
             self._data_save_full_since = 0.0
+            self._data_save_full_scope = ""
         if not batch["incremental"]:
             self._refresh_data_save_revision_from_manager()
             self._rebase_default_pending_revisions()
@@ -2187,6 +2670,7 @@ class CoreStoreMixin:
         )
         if complete and self._persona_data_save_full_revision.get(persona_id, 0) == batch["full_revision"]:
             self._persona_data_save_full_revision.pop(persona_id, None)
+            self._persona_data_save_full_scope.pop(persona_id, None)
         if result["control_changed"]:
             self._log_store_control_cleanup("delayed_persona_save", result["control_changed"])
         if not self._persona_data_save_dirty.get(persona_id):
@@ -2305,11 +2789,13 @@ class CoreStoreMixin:
         *,
         sections: Collection[str] | None = None,
         deleted_sections: Collection[str] = (),
+        full_scope: str | None = None,
     ) -> None:
         if not self._mark_persona_data_dirty(
             persona_id,
             sections=sections,
             deleted_sections=deleted_sections,
+            full_scope=full_scope,
         ):
             return
         self._start_persona_data_save_writer(persona_id, delay)
@@ -2320,10 +2806,12 @@ class CoreStoreMixin:
         *,
         sections: Collection[str] | None = None,
         deleted_sections: Collection[str] = (),
+        full_scope: str | None = None,
     ) -> None:
         if not self._mark_default_data_dirty(
             sections=sections,
             deleted_sections=deleted_sections,
+            full_scope=full_scope,
         ):
             return
         self._start_default_data_save_writer(delay)
@@ -2333,8 +2821,19 @@ class CoreStoreMixin:
         *,
         sections: Collection[str] | None = None,
         deleted_sections: Collection[str] = (),
+        full_scope: str | None = None,
         delay: float = 1.5,
     ) -> None:
+        sections, deleted_sections, full_scope = self._validate_save_request(
+            sections, deleted_sections, full_scope
+        )
+        if self._collect_event_data_save_request(
+            sections=sections,
+            deleted_sections=deleted_sections,
+            full_scope=full_scope,
+            delay=delay,
+        ):
+            return
         scoped_scheduler = getattr(self, "_req041_schedule_scoped_sync", None)
         if callable(scoped_scheduler):
             scoped_scheduler()
@@ -2346,12 +2845,14 @@ class CoreStoreMixin:
                 delay,
                 sections=sections,
                 deleted_sections=deleted_sections,
+                full_scope=full_scope,
             )
             return
         self._schedule_default_data_save(
             delay,
             sections=sections,
             deleted_sections=deleted_sections,
+            full_scope=full_scope,
         )
 
     def _clear_default_data_save_dirty(self, through_revision: int | None = None) -> None:
@@ -2364,6 +2865,7 @@ class CoreStoreMixin:
         if through_revision is None or self._data_save_full_revision <= through_revision:
             self._data_save_full_revision = 0
             self._data_save_full_since = 0.0
+            self._data_save_full_scope = ""
 
     def _clear_persona_data_save_dirty(
         self,
@@ -2382,6 +2884,7 @@ class CoreStoreMixin:
         full_revision = int(self._persona_data_save_full_revision.get(persona_id, 0) or 0)
         if through_revision is None or full_revision <= through_revision:
             self._persona_data_save_full_revision.pop(persona_id, None)
+            self._persona_data_save_full_scope.pop(persona_id, None)
         if not self._persona_data_save_dirty_since.get(persona_id):
             self._persona_data_save_dirty_since.pop(persona_id, None)
 
@@ -2429,8 +2932,8 @@ class CoreStoreMixin:
                 self._sync_configured_targets()
             self._clear_default_data_save_dirty()
             await asyncio.to_thread(
-                self._write_data_snapshot_sync,
-                deepcopy(self.data),
+                self._save_data_now_sync,
+                full_scope="explicit_reset",
             )
 
     async def _rebuild_today_after_reset(
@@ -2440,7 +2943,9 @@ class CoreStoreMixin:
         plan = await self._generate_daily_plan()
         async with self._data_lock:
             self.data["daily_plan"] = plan
-            self._save_data_sync()
+            self._save_data_sync(
+                sections={"daily_state", "daily_plan"},
+            )
 
         diary = None
         if self.enable_daily_diary:
@@ -2467,7 +2972,15 @@ class CoreStoreMixin:
                 story_plan = diary.get("story_plan") if isinstance(diary, dict) else None
                 if isinstance(story_plan, dict):
                     self.data["daily_story_plan"] = story_plan
-                self._save_data_sync()
+                self._save_data_sync(
+                    sections={
+                        "bot_diaries",
+                        "diary_generated_day",
+                        "dream_fragments",
+                        "daily_diary_postprocess_error",
+                        "daily_story_plan",
+                    },
+                )
             outfit_generator = getattr(self, "_ensure_daily_outfit_photo", None)
             if callable(outfit_generator):
                 try:

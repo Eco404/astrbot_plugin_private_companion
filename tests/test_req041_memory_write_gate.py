@@ -133,6 +133,12 @@ class ScopedMemoryWriteGateTests(unittest.TestCase):
             command_source.index("_req041_commit_authoritative_private_memory", command_branch),
             command_branch,
         )
+        self.assertGreater(
+            command_source.index(
+                'save_sections.add("_req041_private_memory")', command_branch
+            ),
+            command_branch,
+        )
 
     def test_two_explicit_identities_converge_on_one_authoritative_private_memory(self) -> None:
         data: dict = {}

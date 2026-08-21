@@ -1364,6 +1364,7 @@ class GroupEpisodeExpressionHarness(GroupObservationMixin, ExpressionLearningHar
             "recent_messages": recent,
         }
         self.last_prompt = ""
+        self.last_system_prompt = ""
 
     def _get_group(self, group_id: str) -> dict:
         return self.data["groups"][group_id]
@@ -1379,6 +1380,7 @@ class GroupEpisodeExpressionHarness(GroupObservationMixin, ExpressionLearningHar
 
     async def _llm_call(self, prompt: str, **_kwargs) -> str:
         self.last_prompt = prompt
+        self.last_system_prompt = str(_kwargs.get("system_prompt") or "")
         return json.dumps(
             {
                 "summary": "群友在轻松地延续话题",
@@ -1468,12 +1470,13 @@ class EpisodeExpressionLearningTests(unittest.IsolatedAsyncioTestCase):
         style_rule = next(item for item in profile["pending_rules"] if item["kind"] == "style")
         self.assertEqual("好呀，那就____", style_rule["pattern"])
         self.assertEqual(["好呀~", "行啦~"], style_rule["evidence_examples"])
-        self.assertIn("可直接借鉴的短表达", harness.last_prompt)
-        self.assertIn("【已有表达规则】", harness.last_prompt)
-        self.assertIn("merge_into_id", harness.last_prompt)
-        self.assertIn("只做中性、安全的概括", harness.last_prompt)
-        self.assertIn("不重现敏感原话", harness.last_prompt)
-        self.assertNotIn("严禁复制成员原句", harness.last_prompt)
+        prompt = f"{harness.last_system_prompt}\n{harness.last_prompt}"
+        self.assertIn("可直接借鉴的短表达", prompt)
+        self.assertIn("【已有表达规则】", prompt)
+        self.assertIn("merge_into_id", prompt)
+        self.assertIn("只做中性、安全的概括", prompt)
+        self.assertIn("不得重现敏感原话", prompt)
+        self.assertNotIn("严禁复制成员原句", prompt)
         self.assertTrue(harness._get_group("group-1").get("last_expression_rule_source_ts"))
 
     async def test_group_episode_reports_missing_model_result_without_mislabeling_json(self):
@@ -1810,8 +1813,10 @@ class ExpressionScopeLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["success"])
         self.assertEqual(1, result["data"]["rule_group_count"])
-        self.assertEqual(1, len({item.get("family_id") for item in profile["learned_rules"]}))
-        self.assertTrue(profile["learned_rules"][0]["family_id"].startswith("xf-"))
+        summary_rules = result["data"]["rules"]
+        self.assertEqual(1, len({item.get("family_id") for item in summary_rules}))
+        self.assertTrue(summary_rules[0]["family_id"].startswith("xf-"))
+        self.assertNotIn("family_id", profile["learned_rules"][0])
 
     async def test_rule_family_is_reviewed_and_deleted_as_one_group(self):
         profile = self.plugin.data["users"]["owner-1"]["expression_profile"]

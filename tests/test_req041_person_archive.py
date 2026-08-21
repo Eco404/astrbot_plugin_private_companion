@@ -195,6 +195,7 @@ class _Host:
         self._data_lock = _AsyncLock()
         self.enable_multi_persona_mode = False
         self.persisted = 0
+        self.persistence_calls: list[dict[str, Any]] = []
         self.req041_migration_coordinator = _Coordinator()
         self.req041_migration_outbox = MigrationOutbox(
             relationship_path.with_name("outbox.sqlite3"), clock=lambda: 100.0,
@@ -236,8 +237,9 @@ class _Host:
     def _active_persona_scope() -> str:
         return ""
 
-    def _save_data_now_sync(self, **_kwargs: Any) -> None:
+    def _save_data_now_sync(self, **kwargs: Any) -> None:
         self.persisted += 1
+        self.persistence_calls.append(deepcopy(kwargs))
 
 
 class PersonArchiveSagaTests(unittest.TestCase):
@@ -348,6 +350,17 @@ class PersonArchiveSagaTests(unittest.TestCase):
                 "10001": {"user_id": "10001", "content": "remove-profile"},
                 "20002": {"user_id": "20002", "content": "keep-profile"},
             },
+            "legacy_private_cache": {
+                "10001": {"user_id": "10001", "content": "remove-legacy"},
+                "20002": {"user_id": "20002", "content": "keep-legacy"},
+            },
+            "_req041_private_memory": {
+                "schema": "req041.person_private_memory.v1",
+                "records": {
+                    self.host.person_id: {"content": {"open_loops": ["private"]}},
+                    "person-other": {"content": {"open_loops": ["keep"]}},
+                },
+            },
         })
         purge_preview = asyncio.run(self.host.purge_unified_person(
             self.host.person_id, operation_id="purge-1", dry_run=True,
@@ -363,8 +376,17 @@ class PersonArchiveSagaTests(unittest.TestCase):
         self.assertNotIn("10001", self.host.data["groups"]["group-a"]["members"])
         self.assertEqual(["keep-me"], [item["text"] for item in self.host.data["groups"]["group-a"]["recent_messages"]])
         self.assertNotIn("10001", self.host.data["worldbook_member_profiles"])
+        self.assertNotIn("10001", self.host.data["legacy_private_cache"])
+        self.assertIn("20002", self.host.data["legacy_private_cache"])
+        private_records = self.host.data["_req041_private_memory"]["records"]
+        self.assertNotIn(self.host.person_id, private_records)
+        self.assertIn("person-other", private_records)
         self.assertIsNone(self.host.registry.read_projection(self.host.person_id))
         self.assertIn(self.host.person_id, root["person_tombstones"])
+        self.assertEqual(
+            {"full_scope": "admin_import_export"},
+            self.host.persistence_calls[-1],
+        )
 
     def test_confirmed_purge_resumes_without_page_reconfirmation(self) -> None:
         preview = asyncio.run(self.host.archive_unified_person(

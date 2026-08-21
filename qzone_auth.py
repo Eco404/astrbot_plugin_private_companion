@@ -129,7 +129,7 @@ class QzoneAuthMixin:
             saver = getattr(self, "_save_data_sync", None)
             if callable(saver):
                 try:
-                    saver()
+                    saver(sections={"qzone_integration"})
                 except Exception:
                     pass
 
@@ -157,7 +157,7 @@ class QzoneAuthMixin:
             saver = getattr(self, "_save_data_sync", None)
             if callable(saver):
                 try:
-                    saver()
+                    saver(sections={"qzone_integration"})
                 except Exception:
                     pass
 

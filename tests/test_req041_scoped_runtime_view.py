@@ -328,7 +328,8 @@ class ConsumerWiringTests(unittest.TestCase):
 
     def test_sync_save_invalidates_scoped_projection_before_persisting(self) -> None:
         source = (ROOT / "core_store.py").read_text(encoding="utf-8")
-        method = source[source.index("    def _save_data_sync(self):"):source.index("    def _save_data_now_sync", source.index("    def _save_data_sync(self):"))]
+        start = source.index("    def _save_data_sync(")
+        method = source[start:source.index("    def _save_data_now_sync", start)]
         self.assertLess(method.index("_req041_schedule_scoped_sync"), method.index("_active_persona_scope"))
 
 

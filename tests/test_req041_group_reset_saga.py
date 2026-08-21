@@ -146,6 +146,7 @@ class _Host:
         self.req041_migration_status = {"required": True}
         self.req041_scoped_projection_sync = _Remote()
         self.persisted = 0
+        self.persistence_calls: list[dict[str, Any]] = []
         self.config_save_ok = True
         self.voice_refreshes = 0
 
@@ -157,17 +158,75 @@ class _Host:
     def _normalize_group_identity_id(value: Any) -> str:
         return str(value or "").strip()
 
-    def _save_data_now_sync(self, **_kwargs: Any) -> None:
+    def _save_data_now_sync(self, **kwargs: Any) -> None:
         self.persisted += 1
+        self.persistence_calls.append(deepcopy(kwargs))
 
     async def _save_config_if_possible(self) -> bool:
         return self.config_save_ok
 
     def _refresh_expression_voice_profile(self) -> None:
         self.voice_refreshes += 1
+        self.data["expression_voice_profile"] = {
+            "refresh_count": self.voice_refreshes,
+        }
 
 
 class GroupResetSagaTests(unittest.TestCase):
+    def test_archive_saga_persistence_requires_an_explicit_contract(self) -> None:
+        host = _Host()
+
+        with self.assertRaisesRegex(ValueError, "sections must be explicit"):
+            host._req041_persist_archive_saga_locked()
+
+    def test_completed_reset_persists_each_mutation_with_disjoint_sections(self) -> None:
+        host = _Host()
+
+        result = asyncio.run(host.reset_group_scoped_data("group-a"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(3, len(host.persistence_calls))
+        self.assertEqual(
+            {"_req041_group_reset_sagas"},
+            host.persistence_calls[0]["sections"],
+        )
+        self.assertEqual(
+            {
+                "groups",
+                "expression_voice_profile",
+                "_req041_group_reset_sagas",
+            },
+            host.persistence_calls[1]["sections"],
+        )
+        self.assertEqual(set(), host.persistence_calls[2]["sections"])
+        self.assertEqual(
+            {"_req041_group_reset_sagas"},
+            host.persistence_calls[2]["deleted_sections"],
+        )
+        for call in host.persistence_calls:
+            self.assertFalse(
+                set(call.get("sections") or ())
+                & set(call.get("deleted_sections") or ())
+            )
+
+    def test_overlapping_saga_request_keeps_a_concurrently_present_saga(self) -> None:
+        host = _Host()
+        host.data["_req041_group_reset_sagas"] = {
+            "new-operation": {"state": "confirmed"},
+        }
+
+        host._req041_persist_archive_saga_locked(
+            sections={"_req041_group_reset_sagas"},
+            deleted_sections={"_req041_group_reset_sagas"},
+        )
+
+        self.assertEqual(1, len(host.persistence_calls))
+        self.assertEqual(
+            {"_req041_group_reset_sagas"},
+            host.persistence_calls[0]["sections"],
+        )
+        self.assertEqual(set(), host.persistence_calls[0]["deleted_sections"])
+
     def test_remote_failure_persists_saga_without_mutating_local_then_restart_resumes(self) -> None:
         host = _Host()
         host.req041_scoped_projection_sync.ok = False

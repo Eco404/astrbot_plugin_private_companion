@@ -130,7 +130,7 @@ class Harness:
     def _expression_rule_definition_is_valid(rule):
         return bool(rule.get("kind") in {"style", "grammar"} and rule.get("situation") and rule.get("pattern") and rule.get("instruction"))
 
-    def _save_data_sync(self):
+    def _save_data_sync(self, **_kwargs):
         self.saved += 1
 
     @staticmethod

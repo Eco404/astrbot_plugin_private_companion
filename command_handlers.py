@@ -133,7 +133,7 @@ class CommandHandlersMixin:
             data["weather_alert_awareness"] = {}
             saver = getattr(self, "_save_data_sync", None)
             if callable(saver):
-                saver(sections=None, deleted_sections={"daily_weather"})
+                saver(sections=set(), deleted_sections={"daily_weather"})
 
         data_lock = getattr(self, "_data_lock", None)
         if isinstance(data_lock, asyncio.Lock):
@@ -2086,7 +2086,7 @@ class CommandHandlersMixin:
         if not proposals:
             if key in store:
                 store.pop(key, None)
-                self._save_data_sync()
+                self._save_data_sync(sections={"manual_diagnosis_pending_config"})
             return ""
         token = uuid.uuid4().hex[:6]
         store[key] = {
@@ -2095,7 +2095,7 @@ class CommandHandlersMixin:
             "question": _single_line(question, 260),
             "changes": proposals,
         }
-        self._save_data_sync()
+        self._save_data_sync(sections={"manual_diagnosis_pending_config"})
         return token
 
     def _companion_manual_recent_context_store(self) -> dict[str, Any]:
@@ -2238,7 +2238,7 @@ class CommandHandlersMixin:
             self._schedule_data_save(sections={"manual_diagnosis_recent_context"})
         except Exception:
             try:
-                self._save_data_sync()
+                self._save_data_sync(sections={"manual_diagnosis_recent_context"})
             except Exception:
                 pass
 
@@ -2474,7 +2474,7 @@ class CommandHandlersMixin:
             return None
         if _now_ts() - _safe_float(pending.get("ts"), 0.0, 0.0) > 1800:
             store.pop(key, None)
-            self._save_data_sync()
+            self._save_data_sync(sections={"manual_diagnosis_pending_config"})
             return None
         return pending
 
@@ -2559,7 +2559,7 @@ class CommandHandlersMixin:
                 f"；{_single_line(item.get('reason'), 120) or '按答疑建议调整'}"
             )
         self._companion_manual_pending_store().pop(self._companion_manual_pending_key(event), None)
-        self._save_data_sync()
+        self._save_data_sync(sections={"runtime_settings", "manual_diagnosis_pending_config"})
         if applied <= 0:
             return "没有成功应用的配置项。"
         lines.append("已保存到插件配置；如果 AstrBot 配置对象不支持同步保存，日志里会提示。")
@@ -2570,7 +2570,7 @@ class CommandHandlersMixin:
         key = self._companion_manual_pending_key(event)
         existed = key in store
         store.pop(key, None)
-        self._save_data_sync()
+        self._save_data_sync(sections={"manual_diagnosis_pending_config"})
         return "已取消刚才的答疑配置建议。" if existed else "当前没有待确认的答疑配置建议。"
 
     def _companion_manual_parse_setting_text(self, text: str) -> tuple[str, str]:
@@ -2616,7 +2616,7 @@ class CommandHandlersMixin:
         if not ok:
             return error
         self._companion_manual_pending_store().pop(self._companion_manual_pending_key(event), None)
-        self._save_data_sync()
+        self._save_data_sync(sections={"runtime_settings", "manual_diagnosis_pending_config"})
         if self._companion_manual_values_equal(old, new):
             return (
                 "配置没有变化：\n"
@@ -5371,7 +5371,7 @@ class CommandHandlersMixin:
                         user_id=user_id,
                         scope=photo_scope,
                     )
-                self._save_data_sync()
+                self._save_data_sync(sections={"users", "photo_generation_scope_attempts"})
         if not image_path:
             await self._reply(
                 event,
@@ -5684,7 +5684,7 @@ class CommandHandlersMixin:
                         user_id=user_id,
                         scope=photo_scope,
                     )
-                self._save_data_sync()
+                self._save_data_sync(sections={"users", "photo_generation_scope_attempts"})
         if not image_path:
             await self._reply(
                 event,
@@ -5812,7 +5812,7 @@ class CommandHandlersMixin:
                         operator_id=operator_id,
                         reason="group_command",
                     )
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"group_llm_reply_blocks"})
                     ts_text = self._format_timestamp_elapsed(_safe_float(item.get("updated_at"), 0.0, 0.0)) if item else "刚刚"
                     response = (
                         "已关闭本群所有 LLM 回复。\n"
@@ -5827,7 +5827,7 @@ class CommandHandlersMixin:
                         operator_id=operator_id,
                         reason="group_command",
                     )
-                    self._save_data_sync()
+                    self._save_data_sync(sections={"group_llm_reply_blocks"})
                     response = "已恢复本群 LLM 回复。"
                 else:
                     item = self._group_llm_reply_block_item(group_id)
@@ -5861,11 +5861,11 @@ class CommandHandlersMixin:
             group = self._get_group(group_id)
             if action in {"开启", "启用", "打开"}:
                 group["enabled"] = True
-                self._save_data_sync()
+                self._save_data_sync(sections={"groups"})
                 response = "群聊陪伴观察已开启。"
             elif action in {"关闭", "停用", "关掉"}:
                 group["enabled"] = False
-                self._save_data_sync()
+                self._save_data_sync(sections={"groups"})
                 response = "群聊陪伴观察已关闭。"
             elif action in {"黑话", "梗", "词"}:
                 slang = group.get("slang_terms") if isinstance(group.get("slang_terms"), list) else []

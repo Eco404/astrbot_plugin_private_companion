@@ -5858,7 +5858,7 @@ class DailyStateMixin(DailyStateTickMixin):
             saver = getattr(self, "_save_data_sync", None)
             if callable(saver):
                 try:
-                    saver()
+                    saver(sections={"qweather_location"})
                 except Exception as exc:
                     logger.debug("[PrivateCompanion] 保存和风天气地点缓存失败: %s", _single_line(exc, 160))
 
@@ -6496,7 +6496,7 @@ class DailyStateMixin(DailyStateTickMixin):
             saver = getattr(self, "_save_data_sync", None)
             if callable(saver):
                 try:
-                    saver()
+                    saver(sections={"weather_alerts"})
                 except Exception as exc:
                     logger.debug("[PrivateCompanion] 保存天气预警缓存失败: %s", _single_line(exc, 160))
         return result
@@ -7019,7 +7019,13 @@ class DailyStateMixin(DailyStateTickMixin):
             state["last_offered_count"] = offered
             saver = getattr(self, "_save_data_sync", None)
             if callable(saver):
-                saver()
+                saver(
+                    sections={
+                        "weather_alert_awareness",
+                        "users",
+                        "proactive_candidate_pool",
+                    }
+                )
             return deepcopy(result)
 
     @classmethod

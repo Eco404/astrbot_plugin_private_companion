@@ -83,7 +83,7 @@ class SchedulePluginHarness(DailyStateMixin):
             int(match.group(3)) * 60 + int(match.group(4)),
         )
 
-    def _save_data_sync(self) -> None:
+    def _save_data_sync(self, **_kwargs) -> None:
         self.saved += 1
 
     async def _ensure_daily_state(self, force: bool = False):

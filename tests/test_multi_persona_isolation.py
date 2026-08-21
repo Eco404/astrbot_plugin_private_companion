@@ -998,15 +998,15 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
 
             main_token = plugin._activate_persona_id("main")
             try:
-                plugin.data["save_marker"] = "main"
-                plugin._save_data_sync()
+                plugin.data["users"]["save_marker"] = "main"
+                plugin._save_data_sync(sections={"users"})
             finally:
                 plugin._deactivate_persona_for_event(main_token)
 
             alt_token = plugin._activate_persona_id("alt")
             try:
-                plugin.data["save_marker"] = "alt"
-                plugin._save_data_sync()
+                plugin.data["users"]["save_marker"] = "alt"
+                plugin._save_data_sync(sections={"users"})
             finally:
                 plugin._deactivate_persona_for_event(alt_token)
 
@@ -1043,8 +1043,8 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
             plugin._write_data_snapshot_sync = lambda _snapshot: 0
             token = plugin._activate_persona_id("main")
             try:
-                plugin.data["final_marker"] = "old"
-                plugin._schedule_data_save(delay=0.0)
+                plugin.data["users"]["final_marker"] = "old"
+                plugin._schedule_data_save(sections={"users"}, delay=0.0)
             finally:
                 plugin._deactivate_persona_for_event(token)
             started = await asyncio.to_thread(writer_started.wait, 1.0)
@@ -1052,7 +1052,7 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
 
             token = plugin._activate_persona_id("main")
             try:
-                plugin.data["final_marker"] = "latest"
+                plugin.data["users"]["final_marker"] = "latest"
             finally:
                 plugin._deactivate_persona_for_event(token)
             plugin._stop_event.set()

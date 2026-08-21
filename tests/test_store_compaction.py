@@ -91,7 +91,7 @@ class StoreCompactionTests(unittest.IsolatedAsyncioTestCase):
     async def test_snapshot_cleanup_updates_live_data_without_full_followup_write(self) -> None:
         harness = _CanonicalSanitizeHarness({"memory": {"text": "残留 <bubble/> 内容"}})
 
-        harness._save_data_sync()
+        harness._save_data_sync(full_scope="admin_import_export")
         await harness._flush_scheduled_data_save()
 
         self.assertEqual(harness.data["memory"]["text"], "残留 内容")
@@ -187,9 +187,9 @@ class StoreCompactionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_repeated_sync_save_calls_are_coalesced_off_loop(self) -> None:
         harness = _StoreHarness({"users": {}})
-        harness._save_data_sync()
-        harness._save_data_sync()
-        harness._save_data_sync()
+        harness._save_data_sync(full_scope="admin_import_export")
+        harness._save_data_sync(full_scope="admin_import_export")
+        harness._save_data_sync(full_scope="admin_import_export")
 
         self.assertEqual(harness.writes, [])
         await asyncio.sleep(0.55)
@@ -197,7 +197,7 @@ class StoreCompactionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_flush_waits_for_pending_coalesced_save(self) -> None:
         harness = _StoreHarness({"users": {"10001": {"nickname": "before switch"}}})
-        harness._save_data_sync()
+        harness._save_data_sync(full_scope="admin_import_export")
 
         await harness._flush_scheduled_data_save()
 

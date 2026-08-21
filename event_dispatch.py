@@ -4654,7 +4654,7 @@ Bot 近期回复：
             if refreshed:
                 active = self._group_active_conversation(group)
                 expires_in = max(0.0, _safe_float(active.get("expires_at"), 0) - _now_ts())
-                self._save_data_sync()
+                self._save_data_sync(sections={"groups"})
         if refreshed:
             logger.info(
                 "[PrivateCompanion] Bot 回复已确认发送，群聊续接窗口从实际回复时间重新计时: group=%s sender=%s window=%.1fs",
@@ -4702,7 +4702,7 @@ Bot 近期回复：
                 text=text,
                 contextual_followup=bool(getattr(event, "private_companion_group_contextual_followup", False)),
             )
-            self._save_data_sync()
+            self._save_data_sync(sections={"groups"})
 
     def _extract_group_id_from_event(self, event: AstrMessageEvent) -> str:
         umo = str(getattr(event, "unified_msg_origin", "") or "")

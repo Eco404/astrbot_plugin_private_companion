@@ -5,9 +5,11 @@ import asyncio
 import threading
 import unittest
 from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any
 
 from astrbot_plugin_private_companion.core_store import CoreStoreMixin
+from astrbot_plugin_private_companion.message_pipeline import event_data_save_boundary
 
 
 class _RecordingManager:
@@ -242,7 +244,152 @@ class _PersonaWriterHarness(_WriterHarness):
         self.persona_writes.append((persona_id, deepcopy(data or {})))
 
 
+class _BatchEvent:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop_event(self) -> None:
+        self.stopped = True
+
+    def is_stopped(self) -> bool:
+        return self.stopped
+
+
+class _BoundaryHarness(_WriterHarness):
+    @event_data_save_boundary
+    async def early_mutation(self, event: _BatchEvent) -> None:
+        self._schedule_data_save(sections={"users"})
+
+    @event_data_save_boundary
+    async def stopped_early_mutation(self, event: _BatchEvent) -> None:
+        self._schedule_data_save(sections={"users"})
+        event.stop_event()
+
+    @event_data_save_boundary(flush=True)
+    async def final_mutation(self, event: _BatchEvent) -> None:
+        self._schedule_data_save(sections={"groups"})
+
+    @event_data_save_boundary
+    async def failed_mutation(self, event: _BatchEvent) -> None:
+        self._schedule_data_save(sections={"users"})
+        raise RuntimeError("injected event hook failure")
+
+
 class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_event_owned_batch_resumes_across_filter_tasks(self) -> None:
+        harness = _BoundaryHarness({"users": {}, "groups": {}})
+        harness._stop_event.set()
+        event = _BatchEvent()
+
+        await harness.early_mutation(event)
+        self.assertTrue(hasattr(event, "_private_companion_event_data_save_batch"))
+        await harness.final_mutation(event)
+
+        self.assertFalse(hasattr(event, "_private_companion_event_data_save_batch"))
+        self.assertEqual({"users", "groups"}, set(harness._data_save_dirty))
+        self.assertEqual(1, len(set(harness._data_save_dirty.values())))
+        self.assertEqual(1, harness._data_save_revision)
+
+    async def test_stopped_early_filter_flushes_pending_sections(self) -> None:
+        harness = _BoundaryHarness({"users": {}})
+        harness._stop_event.set()
+        event = _BatchEvent()
+
+        await harness.stopped_early_mutation(event)
+
+        self.assertTrue(event.is_stopped())
+        self.assertFalse(hasattr(event, "_private_companion_event_data_save_batch"))
+        self.assertEqual({"users"}, set(harness._data_save_dirty))
+        self.assertEqual(1, harness._data_save_revision)
+
+    async def test_failed_filter_flushes_pending_sections(self) -> None:
+        harness = _BoundaryHarness({"users": {}})
+        harness._stop_event.set()
+        event = _BatchEvent()
+
+        with self.assertRaisesRegex(RuntimeError, "injected event hook failure"):
+            await harness.failed_mutation(event)
+
+        self.assertFalse(hasattr(event, "_private_companion_event_data_save_batch"))
+        self.assertEqual({"users"}, set(harness._data_save_dirty))
+        self.assertEqual(1, harness._data_save_revision)
+
+    async def test_event_batch_submits_one_union_revision(self) -> None:
+        harness = _WriterHarness({"users": {}, "groups": {}})
+        harness._stop_event.set()
+        event = SimpleNamespace()
+        handle = harness._begin_event_data_save_batch(event)
+
+        harness._schedule_data_save(sections={"users"}, delay=0.8)
+        harness._save_data_sync(sections={"groups"})
+
+        self.assertEqual(0, harness._data_save_revision)
+        self.assertEqual(
+            {"users", "groups"},
+            event._private_companion_pending_save_sections,
+        )
+
+        harness._finish_event_data_save_batch(handle)
+
+        self.assertFalse(
+            hasattr(event, "_private_companion_pending_save_sections")
+        )
+        self.assertEqual({"users", "groups"}, set(harness._data_save_dirty))
+        self.assertEqual(1, len(set(harness._data_save_dirty.values())))
+        self.assertEqual(1, harness._data_save_revision)
+
+    async def test_empty_event_batch_does_not_allocate_revision(self) -> None:
+        harness = _WriterHarness({"users": {}})
+        event = SimpleNamespace()
+
+        handle = harness._begin_event_data_save_batch(event)
+        harness._finish_event_data_save_batch(handle)
+
+        self.assertEqual(0, harness._data_save_revision)
+        self.assertFalse(harness._default_data_save_is_dirty())
+
+    async def test_child_task_does_not_write_into_closed_event_batch(self) -> None:
+        harness = _WriterHarness({"users": {}})
+        harness._stop_event.set()
+        event = SimpleNamespace()
+        release = asyncio.Event()
+        handle = harness._begin_event_data_save_batch(event)
+
+        async def save_after_event() -> None:
+            await release.wait()
+            harness._schedule_data_save(sections={"users"})
+
+        task = asyncio.create_task(save_after_event())
+        harness._finish_event_data_save_batch(handle)
+        release.set()
+        await task
+
+        self.assertEqual({"users"}, set(harness._data_save_dirty))
+        self.assertEqual(1, harness._data_save_revision)
+
+    async def test_save_contract_requires_explicit_sections_or_allowlisted_scope(self) -> None:
+        harness = _WriterHarness({"users": {}})
+
+        with self.assertRaisesRegex(ValueError, "sections must be explicit"):
+            harness._schedule_data_save()
+        with self.assertRaisesRegex(ValueError, "unknown full save scope"):
+            harness._schedule_data_save(full_scope="not-allowed")
+        with self.assertRaisesRegex(ValueError, "unknown durable sections"):
+            harness._schedule_data_save(sections={"not-a-section"})
+        with self.assertRaisesRegex(ValueError, "disjoint"):
+            harness._schedule_data_save(
+                sections={"users"},
+                deleted_sections={"users"},
+            )
+
+    def test_runtime_sections_are_initialized_in_new_store(self) -> None:
+        store = CoreStoreMixin._new_store(object())
+
+        self.assertEqual({}, store["proactive_review_runtime"])
+        self.assertEqual({}, store["proactive_runtime"])
+        self.assertEqual([], store["proactive_audit_log"])
+        self.assertEqual({}, store["passive_no_reply_records"])
+
     async def test_section_marks_share_revision_and_empty_mark_is_noop(self) -> None:
         harness = _WriterHarness({"users": {}, "groups": {}})
         harness._stop_event.set()
@@ -261,7 +408,7 @@ class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
         harness = _WriterHarness({"users": {}, "groups": {}, "daily_state": {}})
         harness._stop_event.set()
 
-        harness._schedule_data_save(sections=None)
+        harness._schedule_data_save(full_scope="admin_import_export")
 
         self.assertEqual(
             {"users", "groups", "daily_state"}, set(harness._data_save_dirty)
@@ -299,7 +446,7 @@ class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(deleted)
         self.assertFalse(harness._default_data_save_is_dirty())
 
-    async def test_sync_save_without_sections_keeps_full_compatibility_scope(self) -> None:
+    async def test_sync_save_requires_an_explicit_full_compatibility_scope(self) -> None:
         harness = _WriterHarness(
             {
                 "users": {},
@@ -308,7 +455,13 @@ class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        await asyncio.to_thread(harness._save_data_sync)
+        with self.assertRaisesRegex(ValueError, "sections must be explicit"):
+            await asyncio.to_thread(harness._save_data_sync)
+
+        await asyncio.to_thread(
+            harness._save_data_sync,
+            full_scope="admin_import_export",
+        )
 
         self.assertEqual(1, len(harness.store_manager.section_writes))
         changed, deleted = harness.store_manager.section_writes[0]
@@ -389,24 +542,24 @@ class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
 
         harness._schedule_data_save(
             sections={"users"},
-            deleted_sections={"obsolete"},
+            deleted_sections={"memo_notes"},
             delay=0.0,
         )
         await asyncio.wait_for(harness._flush_scheduled_data_save(), timeout=1.0)
 
         changed, deleted = harness.store_manager.section_writes[0]
         self.assertEqual({"users"}, set(changed))
-        self.assertEqual({"obsolete"}, set(deleted))
+        self.assertEqual({"memo_notes"}, set(deleted))
         with self.assertRaises(ValueError):
             harness._schedule_data_save(
                 sections={"users"},
                 deleted_sections={"users"},
             )
-        harness._schedule_data_save(
-            sections=None,
-            deleted_sections={"obsolete"},
-        )
-        self.assertEqual({"obsolete"}, set(harness._data_save_deleted))
+        with self.assertRaisesRegex(ValueError, "full_scope cannot be combined"):
+            harness._schedule_data_save(
+                full_scope="admin_import_export",
+                deleted_sections={"memo_notes"},
+            )
 
     async def test_bookshelf_group_is_captured_with_one_revision(self) -> None:
         harness = _WriterHarness(
@@ -454,7 +607,7 @@ class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         harness = _WriterHarness({"users": {"owner": {"name": "full"}}}, seed=20)
 
-        harness._schedule_data_save(sections=None, delay=0.0)
+        harness._schedule_data_save(full_scope="admin_import_export", delay=0.0)
         await asyncio.wait_for(harness._flush_scheduled_data_save(), timeout=1.0)
         harness.data["users"]["owner"]["name"] = "partial"
         harness._schedule_data_save(sections={"users"}, delay=0.0)
@@ -472,7 +625,7 @@ class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
         )
         started, release = harness.store_manager.block_section_attempt(1)
 
-        harness._schedule_data_save(sections=None, delay=0.0)
+        harness._schedule_data_save(full_scope="admin_import_export", delay=0.0)
         await asyncio.wait_for(started.wait(), timeout=0.5)
         harness.data["users"]["owner"]["name"] = "latest"
         harness._schedule_data_save(sections={"users"}, delay=0.0)
@@ -495,7 +648,7 @@ class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
             {"users": {"owner": {"name": "old"}}, "groups": {}}, seed=20
         )
 
-        harness._schedule_data_save(sections=None, delay=0.05)
+        harness._schedule_data_save(full_scope="admin_import_export", delay=0.05)
         harness.data["users"]["owner"]["name"] = "latest"
         harness._schedule_data_save(sections={"users"}, delay=0.0)
         await asyncio.wait_for(harness._flush_scheduled_data_save(), timeout=1.0)
@@ -510,14 +663,14 @@ class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_full_compatibility_upsert_preserves_explicit_tombstone(self) -> None:
         harness = _WriterHarness(
-            {"users": {}, "obsolete": {"value": "legacy"}}, seed=20
+            {"users": {}, "memo_notes": {"value": "legacy"}}, seed=20
         )
         harness._stop_event.set()
-        harness._schedule_data_save(sections=None, delay=0.0)
-        harness.data.pop("obsolete")
+        harness._schedule_data_save(full_scope="admin_import_export", delay=0.0)
+        harness.data.pop("memo_notes")
         harness._schedule_data_save(
             sections=set(),
-            deleted_sections={"obsolete"},
+            deleted_sections={"memo_notes"},
             delay=0.0,
         )
         harness._stop_event.clear()
@@ -528,17 +681,17 @@ class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(harness.store_manager.snapshot_writes)
         changed, deleted = harness.store_manager.section_writes[0]
         self.assertEqual({"users"}, set(changed))
-        self.assertEqual({"obsolete": 21}, deleted)
+        self.assertEqual({"memo_notes": 21}, deleted)
 
     async def test_terminate_full_dirty_uses_snapshot_for_missing_section(
         self,
     ) -> None:
         harness = _WriterHarness(
-            {"users": {}, "obsolete": {"value": "legacy"}}, seed=20
+            {"users": {}, "memo_notes": {"value": "legacy"}}, seed=20
         )
         harness._stop_event.set()
-        harness._schedule_data_save(sections=None, delay=0.0)
-        harness.data.pop("obsolete")
+        harness._schedule_data_save(full_scope="admin_import_export", delay=0.0)
+        harness.data.pop("memo_notes")
 
         await harness._flush_default_data_save_on_terminate()
 
@@ -553,11 +706,11 @@ class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         harness = _WriterHarness(
-            {"users": {}, "obsolete": {"value": "legacy"}}, seed=20
+            {"users": {}, "memo_notes": {"value": "legacy"}}, seed=20
         )
         harness._stop_event.set()
         harness._schedule_data_save(sections={"users"}, delay=0.0)
-        harness.data.pop("obsolete")
+        harness.data.pop("memo_notes")
 
         await harness._flush_default_data_save_on_terminate()
 
@@ -570,18 +723,18 @@ class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_partial_dirty_missing_section_requires_explicit_tombstone(self) -> None:
         harness = _WriterHarness(
-            {"users": {}, "obsolete": {"value": "legacy"}}, seed=20
+            {"users": {}, "memo_notes": {"value": "legacy"}}, seed=20
         )
         harness._stop_event.set()
-        harness._schedule_data_save(sections={"obsolete"}, delay=0.0)
-        revision = harness._data_save_dirty["obsolete"]
-        harness.data.pop("obsolete")
+        harness._schedule_data_save(sections={"memo_notes"}, delay=0.0)
+        revision = harness._data_save_dirty["memo_notes"]
+        harness.data.pop("memo_notes")
 
         with self.assertRaisesRegex(RuntimeError, "explicit tombstones"):
             await harness._flush_default_data_save_on_terminate()
 
         self.assertFalse(harness.store_manager.section_writes)
-        self.assertEqual(revision, harness._data_save_dirty["obsolete"])
+        self.assertEqual(revision, harness._data_save_dirty["memo_notes"])
         self.assertTrue(harness._default_data_save_is_dirty())
 
     async def test_reset_remains_an_explicit_full_snapshot(self) -> None:
@@ -732,7 +885,7 @@ class IncrementalPersistenceWriterTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             # Re-entering the lock is intentional: the event-loop thread owns
             # it while the captured writer is queued behind it.
-            harness._save_data_now_sync()
+            harness._save_data_now_sync(full_scope="admin_import_export")
         finally:
             lock.release()
         result = await asyncio.wait_for(stale_writer, timeout=1.0)

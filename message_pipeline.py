@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from copy import deepcopy
+from functools import wraps
 from typing import Any
 
 from astrbot.api import logger
@@ -18,6 +19,59 @@ from .helpers import (
     _single_line,
 )
 
+
+def _coalesce_event_data_saves(handler: Any) -> Any:
+    """Submit all durable mutations from one message handler as one request."""
+
+    @wraps(handler)
+    async def wrapped(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
+        starter = getattr(self, "_begin_event_data_save_batch", None)
+        finisher = getattr(self, "_finish_event_data_save_batch", None)
+        handle = starter(event) if callable(starter) else None
+        try:
+            return await handler(self, event, *args, **kwargs)
+        finally:
+            if callable(finisher):
+                finisher(handle)
+
+    return wrapped
+
+
+def event_data_save_boundary(handler: Any = None, *, flush: bool = False) -> Any:
+    """Share an event-owned save batch across early and final message hooks."""
+
+    if handler is None:
+        return lambda actual: event_data_save_boundary(actual, flush=flush)
+
+    @wraps(handler)
+    async def wrapped(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
+        starter = getattr(self, "_begin_event_data_save_batch", None)
+        finisher = getattr(self, "_finish_event_data_save_batch", None)
+        suspender = getattr(self, "_suspend_event_data_save_batch", None)
+        handle = starter(event) if callable(starter) else None
+        completed = False
+        try:
+            result = await handler(self, event, *args, **kwargs)
+            completed = True
+            return result
+        finally:
+            if handle and callable(finisher):
+                stopped = False
+                is_stopped = getattr(event, "is_stopped", None)
+                if callable(is_stopped):
+                    try:
+                        stopped = bool(is_stopped())
+                    except Exception:
+                        stopped = False
+                if flush or stopped or not completed:
+                    finisher(handle)
+                elif callable(suspender):
+                    suspender(handle)
+
+    return wrapped
+
+
+@_coalesce_event_data_saves
 async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
     """记录私聊互动、图片防抖、用户画像和主动陪伴反馈。"""
     if self is None:
@@ -734,6 +788,8 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         self._note_private_inbound_activity(user, received_ts or _now_ts(), text=text)
         self._mark_greetings_satisfied_by_recent_activity(user, activity_ts=received_ts or _now_ts())
         self._note_morning_greeting_reply(user, now=received_ts or _now_ts())
+        private_memory_managed = False
+        private_memory_revision = None
         if text:
             user["inbound_count"] = _safe_int(user.get("inbound_count"), 0) + 1
         self._apply_relationship_event(
@@ -1029,6 +1085,8 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     _single_line(exc, 160),
                 )
         save_sections = {"users"}
+        if private_memory_managed and private_memory_revision is not None:
+            save_sections.add("_req041_private_memory")
         if expression_feedback:
             save_sections.update(expression_feedback.get("updated_sections") or ())
             if _safe_int(expression_feedback.get("updated_rules"), 0, 0) > 0:
@@ -1107,6 +1165,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             label="refresh_dialogue_episode_inbound",
         )
 
+@_coalesce_event_data_saves
 async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
     """观察群聊消息，维护群上下文并判断是否自然唤醒 Bot。"""
     if self is None:
@@ -1892,6 +1951,8 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             )
         share_scheduled = self._maybe_schedule_group_private_share(group_id, group, trigger_sender_id=sender_id)
         save_sections = {"groups", "users", "proactive_candidate_pool"}
+        if self._expression_group_learning_source_enabled(group.get("group_id") or group_id):
+            save_sections.add("expression_voice_profile")
         if isinstance(registration_payload, dict):
             if registration_payload.get("updated_observation_profile"):
                 save_sections.add("worldbook_member_profiles")

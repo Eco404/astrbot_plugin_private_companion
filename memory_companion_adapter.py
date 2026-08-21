@@ -3078,7 +3078,7 @@ class MemoryCompanionAdapterMixin:
         if not callable(composer) or not callable(saver):
             return
         data["daily_state"] = composer(data.get("daily_weather", {}))
-        saver()
+        saver(sections={"state_conditions", "daily_state"})
         try:
             await acker(applied_refs, delivery_context=delivery_context)
         except Exception as exc:

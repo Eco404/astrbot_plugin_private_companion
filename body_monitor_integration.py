@@ -150,10 +150,15 @@ class BodyMonitorIntegration:
         state.setdefault("generation", 0)
         return state
 
-    def _save(self) -> None:
+    def _save(self, *, include_candidates: bool = False) -> None:
         save = getattr(self._host, "_save_data_sync", None)
         if callable(save):
-            save()
+            sections = {STATE_KEY}
+            if include_candidates:
+                # Offering a candidate mutates both the owner profile and the
+                # shared review pool in addition to this integration cursor.
+                sections.update({"users", "proactive_candidate_pool"})
+            save(sections=sections)
 
     @asynccontextmanager
     async def _host_data_locked(self):
@@ -213,7 +218,7 @@ class BodyMonitorIntegration:
                     state["status"] = "initializing" if enabled else "disabled"
                     state["last_error"] = ""
                 if changed:
-                    self._save()
+                    self._save(include_candidates=not enabled)
         else:
             state = self._state()
             previous = bool(state.get("enabled_last"))
@@ -228,7 +233,7 @@ class BodyMonitorIntegration:
                 state["status"] = "initializing" if enabled else "disabled"
                 state["last_error"] = ""
             if changed:
-                self._save()
+                self._save(include_candidates=not enabled)
         return self.status_view()
 
     async def poll(self) -> dict[str, Any]:
@@ -334,7 +339,7 @@ class BodyMonitorIntegration:
                     state["last_error"] = ""
                     state["has_more"] = bool(feed.get("has_more"))
                     state["last_batch"] = batch
-                    self._save()
+                    self._save(include_candidates=True)
             except Exception as exc:
                 if int(self._state().get("generation") or 0) != request_generation:
                     return self.status_view()

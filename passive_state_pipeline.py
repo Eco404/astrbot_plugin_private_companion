@@ -1089,7 +1089,7 @@ async def inject_humanized_state(
                                 "intent": intent_line,
                                 "source": "reply_image",
                             }
-                            self._save_data_sync()
+                            self._save_data_sync(sections={"users"})
                     except Exception as exc:
                         logger.debug("[PrivateCompanion] 私聊引用图片视觉反馈目标记录失败: %s", exc)
                 try:

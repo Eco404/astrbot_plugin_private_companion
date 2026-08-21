@@ -906,7 +906,7 @@ class IncrementalPersistenceStorageTests(unittest.TestCase):
         harness = _SqliteWriterHarness(manager, data)
 
         async def flush() -> None:
-            harness._schedule_data_save(sections=None, delay=0.0)
+            harness._schedule_data_save(full_scope="admin_import_export", delay=0.0)
             await harness._flush_scheduled_data_save()
 
         asyncio.run(flush())
@@ -930,7 +930,7 @@ class IncrementalPersistenceStorageTests(unittest.TestCase):
         harness._stop_event.set()
 
         async def flush() -> None:
-            harness._schedule_data_save(sections=None, delay=0.0)
+            harness._schedule_data_save(full_scope="admin_import_export", delay=0.0)
             harness.data.pop("obsolete")
             await harness._flush_default_data_save_on_terminate()
 
