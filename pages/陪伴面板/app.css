@@ -31592,6 +31592,70 @@ pre {
   font-size: 10px;
 }
 
+.owner-exclusive-relationship-editor {
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--line));
+  background: color-mix(in srgb, var(--accent) 3%, var(--surface));
+}
+
+.owner-exclusive-relationship-editor .detail-block-head p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.owner-exclusive-relationship-editor form {
+  display: grid;
+  gap: 8px;
+}
+
+.owner-exclusive-relationship-editor form > label {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.owner-exclusive-relationship-editor textarea {
+  width: 100%;
+  min-height: 150px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 11px 12px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.65;
+  transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease), background 160ms var(--ease);
+}
+
+.owner-exclusive-relationship-editor textarea:focus-visible {
+  border-color: var(--accent);
+  outline: 0;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.owner-exclusive-relationship-editor textarea:disabled {
+  cursor: not-allowed;
+  background: color-mix(in srgb, var(--surface) 72%, var(--line-soft));
+  color: var(--muted);
+}
+
+.owner-exclusive-relationship-editor footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.owner-exclusive-relationship-editor footer span {
+  color: var(--muted);
+  font: 600 11px ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.owner-exclusive-relationship-editor footer b {
+  color: var(--accent-strong);
+}
+
 .feature-param-row-policy {
   grid-template-columns: 1fr;
 }

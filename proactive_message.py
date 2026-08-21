@@ -2273,7 +2273,19 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             parts.append(f"统一表达决策不可用：角色={label}，使用低压日常表达")
         if note:
             parts.append(f"用户级备注：{note}")
-        return "；".join(parts)
+        relationship_fact = "；".join(parts)
+        exclusive_formatter = getattr(self, "_format_owner_exclusive_relationship_prompt", None)
+        exclusive_context = ""
+        if callable(exclusive_formatter) and isinstance(user, dict):
+            try:
+                exclusive_context = exclusive_formatter(
+                    user,
+                    stable_user_id=_single_line(user.get("user_id"), 160),
+                    channel_scope="private",
+                )
+            except Exception:
+                exclusive_context = ""
+        return "\n\n".join(part for part in (relationship_fact, exclusive_context) if part)
 
     def _format_proactive_relationship_initiative_hint(
         self,

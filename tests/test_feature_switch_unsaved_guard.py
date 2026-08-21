@@ -66,6 +66,18 @@ class FeatureSwitchUnsavedGuardTests(unittest.TestCase):
         self.assertIn("Object.assign(features, detailPayload.features", self.script)
         self.assertIn("return saveFeatureSwitchChanges(control, successMessage)", self.script)
 
+    def test_proactive_intensity_preset_uses_unified_persistent_save(self) -> None:
+        bind_block = self.script.split(
+            "function bindProactiveIntensityCommonSetting() {",
+            1,
+        )[1].split("\n}\n\nfunction syncFeatureFooterAction", 1)[0]
+
+        self.assertIn("proactive_intensity_preset: select?.value || \"off\"", bind_block)
+        self.assertIn("state.featureAuxiliaryDirty = true;", bind_block)
+        self.assertIn("await saveFeatureSwitchChanges(", bind_block)
+        self.assertNotIn('postJson("/settings/update"', bind_block)
+        self.assertIn("preset-save=v1", self.page)
+
     def test_unchanged_detail_never_starts_a_save_request(self) -> None:
         save_block = self.script.split(
             'async function saveFeatureSwitchChanges(control = null, successMessage = "已保存功能开关") {',

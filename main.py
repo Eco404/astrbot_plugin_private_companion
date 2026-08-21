@@ -12206,6 +12206,18 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             add_spec("skill.growth.match", "skill", 66, lambda: self._format_skill_growth_for_user_text(inbound_text))
         if not self._memory_companion_should_defer_prompt_section("self_timeline", event, req):
             add_spec("self.timeline", "self_timeline", 67, lambda: self._format_self_timeline_context_for_reply(inbound_text, current_user, limit=8))
+        if is_private_chat:
+            add_spec(
+                "relationship.owner_exclusive",
+                "relationship",
+                18,
+                lambda: self._format_owner_exclusive_relationship_prompt(
+                    current_user,
+                    stable_user_id=current_user_id,
+                    channel_scope="private",
+                ),
+                metadata={"范围": "当前人格与精确私聊用户", "模式": "owner_exclusive"},
+            )
         private_context_deferred = self._memory_companion_should_defer_prompt_section("private_context", event, req)
         if not private_context_deferred:
             add_spec("private.context", "companion", 70, lambda: self._format_private_chat_context_injection(current_user))

@@ -77,6 +77,44 @@ class ConfigGroupAuthorityTests(unittest.TestCase):
 
         self.assertEqual(plugin.config["basic_config"]["bot_name"], "新名字")
 
+    def test_proactive_intensity_preset_updates_group_flat_and_runtime_projection(self):
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as folder:
+            config_path = Path(folder) / "private_companion_config.json"
+            config = AstrBotConfig(str(config_path), schema=schema)
+            plugin = SimpleNamespace(
+                config=config,
+                proactive_intensity_preset="off",
+                _normalize_proactive_intensity_preset=lambda value: (
+                    str(value or "off").strip().lower()
+                    if str(value or "off").strip().lower()
+                    in {"off", "balanced", "high_private", "high_group", "live"}
+                    else "off"
+                ),
+            )
+            api = PrivateCompanionPageApi.__new__(PrivateCompanionPageApi)
+            api.plugin = plugin
+            api._schema_key_index_cache = None
+
+            normalized = api._normalize_setting_value("proactive_intensity_preset", "live")
+            api._apply_config_value("proactive_intensity_preset", normalized)
+
+            self.assertEqual("live", config["proactive_intensity_preset"])
+            self.assertEqual(
+                "live",
+                config["proactive_reach_config"]["proactive_intensity_preset"],
+            )
+            self.assertEqual("live", plugin.proactive_intensity_preset)
+            self.assertEqual("live", api._runtime_settings()["proactive_intensity_preset"])
+            self.assertTrue(asyncio.run(api._save_config_if_possible()))
+            reloaded = AstrBotConfig(str(config_path), schema=schema)
+
+        self.assertEqual("live", reloaded["proactive_intensity_preset"])
+        self.assertEqual(
+            "live",
+            reloaded["proactive_reach_config"]["proactive_intensity_preset"],
+        )
+
     def test_owner_group_projection_switches_are_page_writable_and_group_persistent(self):
         plugin = SimpleNamespace(
             config={},

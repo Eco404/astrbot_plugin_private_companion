@@ -755,6 +755,10 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         requested_mode = str(payload.get("relationship_mode") or "").strip().lower() if "relationship_mode" in payload else None
         if requested_mode is not None and requested_mode not in {"normal", "owner_exclusive"}:
             return self._error("relationship_mode must be normal or owner_exclusive")
+        relationship_prompt_requested = "owner_exclusive_relationship_prompt" in payload
+        relationship_prompt_value = payload.get("owner_exclusive_relationship_prompt")
+        if relationship_prompt_requested and relationship_prompt_value is not None and not isinstance(relationship_prompt_value, str):
+            return self._error("owner_exclusive_relationship_prompt 必须是文本")
         requested_interaction_band = (
             str(payload.get("current_interaction_band") or "").strip().lower()
             if "current_interaction_band" in payload
@@ -805,6 +809,22 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                         return self._error("relationship_role must be owner or friend")
                     role = normalized_role
                 next_mode = normalize_relationship_mode(requested_mode if requested_mode is not None else previous_mode, role)
+                if relationship_prompt_requested:
+                    stable_user_id = self._single_line(user.get("user_id"), 160)
+                    if stable_user_id != user_id:
+                        return self._error("稳定用户身份不匹配，请刷新用户详情后重试")
+                    prompt_normalizer = getattr(
+                        self.plugin,
+                        "_normalize_owner_exclusive_relationship_prompt",
+                        None,
+                    )
+                    normalized_relationship_prompt = (
+                        prompt_normalizer(relationship_prompt_value)
+                        if callable(prompt_normalizer)
+                        else str(relationship_prompt_value or "").strip()
+                    )
+                    if normalized_relationship_prompt and role != "owner":
+                        return self._error("专属关系文本只允许绑定主要用户")
                 if requested_mode == "owner_exclusive" and role != "owner":
                     return self._error("owner_exclusive relationship requires an owner user")
                 if previous_mode == "owner_exclusive" and role != "owner" and requested_mode != "normal":
@@ -911,6 +931,21 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 if requested_mode is not None:
                     user["relationship_mode"] = next_mode
                     expression_voice_needs_refresh = expression_voice_needs_refresh or next_mode != previous_mode
+                if relationship_prompt_requested:
+                    prompt_setter = getattr(
+                        self.plugin,
+                        "_set_owner_exclusive_relationship_prompt",
+                        None,
+                    )
+                    if not callable(prompt_setter):
+                        return self._error("当前版本不支持按人格保存专属关系文本")
+                    prompt_result = prompt_setter(
+                        user,
+                        stable_user_id=user_id,
+                        text=normalized_relationship_prompt,
+                    )
+                    if not prompt_result.get("ok"):
+                        return self._error(prompt_result.get("message") or "专属关系文本保存失败")
                 if relationship_score is not None:
                     previous_score = _safe_int(user.get("relationship_score"), 0, -1200, 1200)
                     effective_score = relationship_score

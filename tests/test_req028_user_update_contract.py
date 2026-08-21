@@ -151,6 +151,33 @@ class _Plugin:
         role = str(value or "").strip().lower()
         return role if role in {"owner", "friend"} else ""
 
+    @staticmethod
+    def _normalize_owner_exclusive_relationship_prompt(value: Any) -> str:
+        return str(value or "").strip()[:2400]
+
+    def _set_owner_exclusive_relationship_prompt(
+        self,
+        user: dict[str, Any],
+        *,
+        stable_user_id: str,
+        text: Any,
+    ) -> dict[str, Any]:
+        if str(user.get("user_id") or "") != stable_user_id:
+            return {"ok": False, "message": "稳定用户身份不匹配"}
+        normalized = self._normalize_owner_exclusive_relationship_prompt(text)
+        if normalized:
+            user["persona_relationship_prompts"] = {
+                "persona-main": {
+                    "persona_id": "persona-main",
+                    "stable_user_id": stable_user_id,
+                    "relationship_mode": "owner_exclusive",
+                    "text": normalized,
+                }
+            }
+        else:
+            user.pop("persona_relationship_prompts", None)
+        return {"ok": True}
+
     def _save_data_sync(self) -> None:
         self.saved += 1
 
@@ -224,6 +251,54 @@ class Req028UserUpdateContractTests(unittest.TestCase):
         self.assertEqual("affectionate", interaction["expression_band"])
         self.assertTrue(interaction["manual_override"])
         self.assertEqual("page_administrator", interaction["operator"])
+
+    def test_owner_exclusive_relationship_prompt_can_be_saved_and_cleared(self) -> None:
+        owner = {
+            "user_id": "10001",
+            "relationship_role": "owner",
+            "relationship_mode": "owner_exclusive",
+            "relationship_score": 600,
+        }
+        accepted, host = self._run(
+            owner,
+            {"owner_exclusive_relationship_prompt": "一起长大的青梅竹马，平时可以自然互损。"},
+        )
+        self.assertTrue(accepted["ok"])
+        entry = host.plugin.data["users"]["10001"]["persona_relationship_prompts"]["persona-main"]
+        self.assertEqual("10001", entry["stable_user_id"])
+        self.assertEqual("owner_exclusive", entry["relationship_mode"])
+
+        cleared, cleared_host = self._run(
+            host.plugin.data["users"]["10001"],
+            {"owner_exclusive_relationship_prompt": ""},
+        )
+        self.assertTrue(cleared["ok"])
+        self.assertNotIn("persona_relationship_prompts", cleared_host.plugin.data["users"]["10001"])
+
+    def test_owner_exclusive_relationship_prompt_rejects_non_owner_and_wrong_identity(self) -> None:
+        friend = {
+            "user_id": "10001",
+            "relationship_role": "friend",
+            "relationship_mode": "normal",
+            "relationship_score": 0,
+        }
+        rejected, _ = self._run(
+            friend,
+            {"owner_exclusive_relationship_prompt": "不应保存"},
+        )
+        self.assertFalse(rejected["ok"])
+
+        wrong_identity = {
+            "user_id": "another-user",
+            "relationship_role": "owner",
+            "relationship_mode": "owner_exclusive",
+            "relationship_score": 600,
+        }
+        rejected, _ = self._run(
+            wrong_identity,
+            {"owner_exclusive_relationship_prompt": "也不应保存"},
+        )
+        self.assertFalse(rejected["ok"])
 
     def test_manual_interaction_correction_clears_stale_automatic_contact_boundary(self) -> None:
         contact_values = (

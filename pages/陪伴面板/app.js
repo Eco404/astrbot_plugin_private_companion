@@ -15381,6 +15381,35 @@ function renderRelationshipStatus(detail) {
   `;
 }
 
+function renderOwnerExclusiveRelationshipPrompt(detail) {
+  const status = detail?.owner_exclusive_relationship_prompt && typeof detail.owner_exclusive_relationship_prompt === "object"
+    ? detail.owner_exclusive_relationship_prompt
+    : {};
+  const eligible = detail?.relationship_role === "owner" && status.eligible !== false;
+  const active = Boolean(status.active);
+  const configured = Boolean(status.configured);
+  const maxChars = Math.max(200, Math.min(4000, Number(status.max_chars || 2400)));
+  const text = String(status.text || "");
+  const personaLabel = String(status.persona_label || status.persona_id || "当前人格");
+  const stateLabel = active ? "已生效" : configured ? "等待专属联结" : eligible ? "尚未填写" : "仅主要用户";
+  return `
+    <section class="detail-block owner-exclusive-relationship-editor">
+      <header class="detail-block-head">
+        <div><span class="relationship-kicker">PERSONA RELATIONSHIP</span><h2>当前人格的专属关系</h2><p>${escapeHtml(personaLabel)} · ${escapeHtml(detail.display_name || detail.nickname || detail.user_id || "当前用户")}</p></div>
+        <span class="badge ${active ? "ok" : "off"}">${escapeHtml(stateLabel)}</span>
+      </header>
+      <form id="ownerExclusiveRelationshipPromptForm">
+        <label for="ownerExclusiveRelationshipPrompt">关系事实与相处分寸</label>
+        <textarea id="ownerExclusiveRelationshipPrompt" name="owner_exclusive_relationship_prompt" rows="7" maxlength="${maxChars}" placeholder="描述这一个人格与当前主要用户之间独有的关系、共同定位和相处分寸。" ${eligible ? "" : "disabled"}>${escapeHtml(text)}</textarea>
+        <footer>
+          <span><b data-owner-exclusive-prompt-count>${text.length}</b> / ${maxChars}</span>
+          <button type="submit" ${eligible ? "" : "disabled"}>${configured ? "保存修改" : "保存关系文本"}</button>
+        </footer>
+      </form>
+    </section>
+  `;
+}
+
 async function renderUserDetail(forceFetch = false) {
   const box = $("#userDetail");
   if (!state.selectedUserId) {
@@ -15450,6 +15479,7 @@ async function renderUserDetail(forceFetch = false) {
     <section class="user-detail-view ${state.userDetailView === "relationship" ? "is-active" : "is-hidden"}" data-user-detail-panel="relationship">
       ${renderUserViewOverview("关系与互动", "分别管理长期关系阶段和当前互动语气，避免把短期情绪误当成长期关系。", [["长期阶段", relationshipLabel], ["当前互动", currentInteractionLabel], ["关系节点", detail.worldbook_member ? "已登记" : "未登记"]])}
       ${renderRelationshipStatus(detail)}
+      ${renderOwnerExclusiveRelationshipPrompt(detail)}
       ${renderRelationshipPanel(detail.relationship_panel)}
       ${userWorldbookBlock(detail.worldbook_member)}
     </section>
@@ -17514,6 +17544,33 @@ function bindUserActions(detail) {
     const saved = await runAction(
       () => postJson("/user/update", { user_id: detail.user_id, current_interaction_band: band }),
       "已保存互动状态",
+      event.submitter,
+      { reload: false },
+    );
+    if (saved) await refreshSelectedUserDetail();
+  });
+  const exclusivePromptForm = $("#ownerExclusiveRelationshipPromptForm");
+  const exclusivePromptInput = $("#ownerExclusiveRelationshipPrompt");
+  const exclusivePromptCount = document.querySelector("[data-owner-exclusive-prompt-count]");
+  exclusivePromptInput?.addEventListener("input", () => {
+    if (exclusivePromptCount) exclusivePromptCount.textContent = String(exclusivePromptInput.value.length);
+  });
+  exclusivePromptForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (detail.relationship_role !== "owner") {
+      showToast("专属关系文本只允许主要用户使用", "error");
+      return;
+    }
+    const text = String(new FormData(event.currentTarget).get("owner_exclusive_relationship_prompt") || "").trim();
+    if (!text && detail.owner_exclusive_relationship_prompt?.configured && !requireSecondClick(
+      event.submitter,
+      `exclusive-relationship-clear:${detail.user_id}:${detail.owner_exclusive_relationship_prompt?.persona_id || "single"}`,
+      "再次点击清除当前人格与该用户的专属关系文本",
+      "再次点击清除",
+    )) return;
+    const saved = await runAction(
+      () => postJson("/user/update", { user_id: detail.user_id, owner_exclusive_relationship_prompt: text }),
+      text ? "已保存当前人格的专属关系" : "已清除当前人格的专属关系文本",
       event.submitter,
       { reload: false },
     );
@@ -25538,18 +25595,22 @@ function proactiveIntensityCommonSettingCard(settings = {}, intensity = {}) {
 
 function bindProactiveIntensityCommonSetting() {
   document.querySelectorAll("[data-proactive-intensity-form]").forEach((form) => {
-    form.querySelector('[name="proactive_intensity_preset"]')?.addEventListener("change", () => {
-      state.featureAuxiliaryDraft.proactive_intensity_preset = form.querySelector('[name="proactive_intensity_preset"]')?.value || "off";
+    const select = form.querySelector('[name="proactive_intensity_preset"]');
+    const syncDraft = () => {
+      state.featureAuxiliaryDraft = {
+        ...(state.featureAuxiliaryDraft || {}),
+        proactive_intensity_preset: select?.value || "off",
+      };
       state.featureAuxiliaryDirty = true;
       syncFeatureFooterAction();
-    });
+    };
+    select?.addEventListener("change", syncDraft);
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const value = form.querySelector('[name="proactive_intensity_preset"]')?.value || "off";
-      await runAction(
-        () => postJson("/settings/update", { settings: { proactive_intensity_preset: value } }),
-        "已保存主动强度预设",
+      syncDraft();
+      await saveFeatureSwitchChanges(
         form.querySelector("button[type='submit']"),
+        "已保存主动强度预设",
       );
     });
   });

@@ -15860,6 +15860,26 @@ class PrivateCompanionPageApi(
             }
         else:
             relationship_stage = self._single_line((relationship_intimacy.get("phase") or {}).get("label"), 20) or relationship_stage
+        exclusive_prompt_status_getter = getattr(
+            self.plugin,
+            "_owner_exclusive_relationship_prompt_status",
+            None,
+        )
+        owner_exclusive_relationship_prompt = (
+            exclusive_prompt_status_getter(user, stable_user_id=user_id_text)
+            if callable(exclusive_prompt_status_getter)
+            else {
+                "persona_id": "",
+                "persona_label": "当前人格",
+                "stable_user_id": user_id_text,
+                "text": "",
+                "configured": False,
+                "eligible": role == "owner",
+                "active": False,
+                "relationship_mode": relationship_mode,
+                "max_chars": 2400,
+            }
+        )
         slowdown_count_getter = getattr(self.plugin, "_unanswered_slowdown_count", None)
         multiplier_getter = getattr(self.plugin, "_unanswered_interval_multiplier", None)
         unanswered_slowdown_count = 0
@@ -15995,6 +16015,7 @@ class PrivateCompanionPageApi(
             "relationship_stage": relationship_stage,
             "relationship_mode": relationship_mode,
             "relationship_mode_label": "专属关系" if relationship_mode == "owner_exclusive" else "普通阶段",
+            "owner_exclusive_relationship_prompt": owner_exclusive_relationship_prompt,
             "relationship_intimacy": relationship_intimacy,
             "relationship_ledger": relationship_panel["relationship_changes"],
             "current_interaction": current_interaction,
@@ -23941,7 +23962,22 @@ class PrivateCompanionPageApi(
 
     def _set_schema_compat_value(self, config: Any, key: str, value: Any) -> None:
         self._set_schema_group_config_value(config, key, value, create_group=True)
-        _set_into_config(config, key, value)
+        # Write the hidden legacy key explicitly at the top level.  A recursive
+        # setter would find the grouped key created above and leave an existing
+        # top-level compatibility value stale.
+        if isinstance(config, dict):
+            config[key] = value
+            return
+        try:
+            config[key] = value
+            return
+        except (AttributeError, KeyError, TypeError):
+            pass
+        for attr in ("data", "config"):
+            target = getattr(config, attr, None)
+            if isinstance(target, dict):
+                target[key] = value
+                return
 
     def _set_schema_group_config_value(self, config: Any, key: str, value: Any, *, create_group: bool = False) -> bool:
         group_key = self._schema_group_for_key(key)
