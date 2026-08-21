@@ -409,6 +409,7 @@ _DURABLE_SECTION_NAMES = frozenset(
         "troubleshooting_test_results",
         "req036_capability_migration",
         "unified_person",
+        "_req041_memory_scope_state",
         # Derived maintenance markers are persisted with their source section.
         "proactive_candidate_repeat_sanitized_at",
         "_req041_expression_promotion_operations",
@@ -2962,7 +2963,10 @@ class CoreStoreMixin:
 
     def _schedule_group_observation_save(self, delay: float = 15.0) -> None:
         """Coalesce high-frequency group observations into a bounded save window."""
-        self._schedule_data_save(delay=max(5.0, float(delay)))
+        self._schedule_data_save(
+            sections={"groups"},
+            delay=max(5.0, float(delay)),
+        )
 
     async def _flush_scheduled_data_save(self) -> None:
         """Wait until default and persona writers drain all revisions visible while flushing."""

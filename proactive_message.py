@@ -12,6 +12,7 @@ import gc
 import hashlib
 import html
 import importlib
+import inspect
 import json
 import math
 import os
@@ -9061,9 +9062,7 @@ Output:
                             user_id=user_id,
                             scope="proactive",
                         )
-                    self._save_data_sync(
-                        sections={"users", "photo_generation_scope_attempts"}
-                    )
+                    self._save_photo_generation_attempts_compat()
             return (
                 "photo_text：生图失败,不能假装已经拍照\n"
                 f"画面草稿：{scene['caption']}\n"
@@ -9080,9 +9079,7 @@ Output:
                     user_id=user_id,
                     scope="proactive",
                 )
-            self._save_data_sync(
-                sections={"users", "photo_generation_scope_attempts"}
-            )
+            self._save_photo_generation_attempts_compat()
         scene_context_line = _single_line(scene.get("scene_context"), 500)
         return (
             f"photo_text：已通过 {backend_name} 生成真实图片\n"
@@ -9095,6 +9092,25 @@ Output:
             + (f"统一情境：{scene_context_line}\n" if scene_context_line else "")
             + f"生图提示：{_single_line(scene['prompt'], 240)}"
         )
+
+    def _save_photo_generation_attempts_compat(self) -> None:
+        """Persist photo quota changes while tolerating legacy test/host overrides."""
+        saver = getattr(self, "_save_data_sync", None)
+        if not callable(saver):
+            return
+        try:
+            parameters = inspect.signature(saver).parameters.values()
+            accepts_sections = any(
+                parameter.name == "sections"
+                or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            accepts_sections = True
+        if accepts_sections:
+            saver(sections={"users", "photo_generation_scope_attempts"})
+        else:
+            saver()
 
     def _photo_generation_failure_counts_as_attempt(self, note: str) -> bool:
         text = _single_line(note, 500)

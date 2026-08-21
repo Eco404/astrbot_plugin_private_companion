@@ -8264,7 +8264,11 @@ class PrivateCompanionPlugin(
         chunks = pending.get("chunks")
         if not isinstance(chunks, list) or not chunks:
             return
-        scope = self._event_scope_key(event)
+        scope_getter = getattr(self, "_event_scope_key", None)
+        if callable(scope_getter):
+            scope = scope_getter(event)
+        else:
+            scope = _single_line(getattr(event, "unified_msg_origin", ""), 160) or "unknown"
         generation_checker = getattr(self, "_reply_turn_is_current", None)
         if callable(generation_checker) and not generation_checker(
             scope,
