@@ -533,8 +533,10 @@ class _RuntimeHarness(LlmToolActionsMixin):
 class _EmbeddingProvider:
     def __init__(self, provider_id: str) -> None:
         self.provider_id = provider_id
+        self.last_texts: list[str] = []
 
     async def get_embeddings(self, texts: list[str]):
+        self.last_texts = list(texts)
         return {
             "data": [
                 {"embedding": [float(index + 1), 1.0]}
@@ -689,6 +691,16 @@ class ReactionAssetRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, len(vectors))
         self.assertAlmostEqual(1.0, sum(value * value for value in vectors[0]))
         self.assertAlmostEqual(1.0, sum(value * value for value in vectors[1]))
+
+    async def test_embedding_input_is_bounded_for_small_context_servers(self) -> None:
+        provider = _EmbeddingProvider("embedding-shared")
+        harness = _RuntimeHarness("")
+        long_text = "标签；" * 600
+
+        vector = await harness._reaction_embedding_vector(provider, long_text)
+
+        self.assertTrue(vector)
+        self.assertLessEqual(len(provider.last_texts[0]), 480)
 
 
 if __name__ == "__main__":

@@ -5231,6 +5231,23 @@ class LlmToolActionsMixin:
         )
         return await self._embedding_provider_for_configured_id(configured)
 
+    @staticmethod
+    def _reaction_embedding_input_text(value: Any) -> str:
+        """Keep BGE-style embedding requests below common 512-token limits.
+
+        Providers expose different tokenizers and many local BGE servers reject
+        an oversized request before they can truncate it.  A conservative
+        character budget keeps the semantic labels at both ends of a catalog
+        entry while avoiding a provider-specific dependency in the plugin.
+        """
+        text = _single_line(value, 1800)
+        limit = 480
+        if len(text) <= limit:
+            return text
+        head = 360
+        tail = limit - head - 3
+        return f"{text[:head]}...{text[-tail:]}"
+
     async def _reaction_embedding_vector(self, provider: Any, text: str) -> list[float]:
         if not self._is_reaction_embedding_provider(provider):
             return []
@@ -5242,24 +5259,29 @@ class LlmToolActionsMixin:
                 return await value
             return await asyncio.wait_for(value, timeout=limit / 1000.0)
         get_embedding = getattr(provider, "get_embedding", None)
+        input_text = self._reaction_embedding_input_text(text)
         if callable(get_embedding):
-            payload = await wait_result(get_embedding(_single_line(text, 1800)))
+            payload = await wait_result(get_embedding(input_text))
         else:
             get_embeddings = getattr(provider, "get_embeddings", None)
             if callable(get_embeddings):
-                payload = await wait_result(get_embeddings([_single_line(text, 1800)]))
+                payload = await wait_result(get_embeddings([input_text]))
             else:
                 get_batch = getattr(provider, "get_embeddings_batch", None)
                 if not callable(get_batch):
                     return []
                 try:
-                    payload = await wait_result(get_batch([_single_line(text, 1800)], batch_size=1, tasks_limit=1, max_retries=1))
+                    payload = await wait_result(get_batch([input_text], batch_size=1, tasks_limit=1, max_retries=1))
                 except TypeError:
-                    payload = await wait_result(get_batch([_single_line(text, 1800)]))
+                    payload = await wait_result(get_batch([input_text]))
         return ReactionAssetLibrary.normalize_embedding_vector(payload)
 
     async def _reaction_embedding_vectors(self, provider: Any, texts: list[str]) -> list[list[float]]:
-        cleaned = [_single_line(item, 1800) for item in texts if _single_line(item, 1800)]
+        cleaned = [
+            self._reaction_embedding_input_text(item)
+            for item in texts
+            if self._reaction_embedding_input_text(item)
+        ]
         if not cleaned or not self._is_reaction_embedding_provider(provider):
             return []
         if len(cleaned) == 1:
@@ -5279,14 +5301,40 @@ class LlmToolActionsMixin:
         get_embeddings = getattr(provider, "get_embeddings", None)
         get_batch = getattr(provider, "get_embeddings_batch", None)
         if callable(get_embeddings):
-            payload = await wait_result(get_embeddings(cleaned))
+            try:
+                payload = await wait_result(get_embeddings(cleaned))
+            except Exception as exc:
+                logger.debug(
+                    "[PrivateCompanion] 批量表情向量请求失败，回退逐条生成: error_type=%s",
+                    type(exc).__name__,
+                )
+                return await asyncio.gather(
+                    *(self._reaction_embedding_vector(provider, item) for item in cleaned)
+                )
         elif callable(get_batch):
             try:
                 payload = await wait_result(
                     get_batch(cleaned, batch_size=min(32, len(cleaned)), tasks_limit=2, max_retries=1)
                 )
             except TypeError:
-                payload = await wait_result(get_batch(cleaned))
+                try:
+                    payload = await wait_result(get_batch(cleaned))
+                except Exception as exc:
+                    logger.debug(
+                        "[PrivateCompanion] 批量表情向量请求失败，回退逐条生成: error_type=%s",
+                        type(exc).__name__,
+                    )
+                    return await asyncio.gather(
+                        *(self._reaction_embedding_vector(provider, item) for item in cleaned)
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "[PrivateCompanion] 批量表情向量请求失败，回退逐条生成: error_type=%s",
+                    type(exc).__name__,
+                )
+                return await asyncio.gather(
+                    *(self._reaction_embedding_vector(provider, item) for item in cleaned)
+                )
         else:
             return await asyncio.gather(
                 *(self._reaction_embedding_vector(provider, item) for item in cleaned)
