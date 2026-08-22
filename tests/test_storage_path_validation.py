@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from copy import deepcopy
@@ -61,6 +62,52 @@ class _StorePathHost(CoreStoreMixin):
 
 
 class StoragePathValidationTests(unittest.TestCase):
+    def test_startup_imports_newer_legacy_json_into_existing_sqlite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            sqlite_path = root / "companions.db"
+            old_sqlite = {"users": {"owner": {"name": "august-4"}}, "groups": {}}
+            new_json = {
+                "users": {"owner": {"name": "august-22"}},
+                "groups": {"room": {"name": "new"}},
+            }
+            JsonStoreBackend(root / "companions.json", lambda data: data, lambda: {}).save_store(new_json)
+            StoreManager(
+                backend_name="sqlite",
+                data_file=root / "companions.json",
+                sqlite_path=sqlite_path,
+                ensure_defaults=lambda data: data,
+                new_store=lambda: {},
+            ).backend.save_store(old_sqlite)
+            os.utime(root / "companions.json", (sqlite_path.stat().st_mtime + 2,)*2)
+
+            host = _StorePathHost(root, str(sqlite_path))
+            host._rebuild_store_manager()
+
+            self.assertEqual(new_json, host.store_manager.backend.load_store())
+
+    def test_startup_honors_persisted_json_backend_switch_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            sqlite_path = root / "companions.db"
+            old_sqlite = {"users": {"owner": {"name": "old"}}, "groups": {}}
+            new_json = {"users": {"owner": {"name": "json"}}, "groups": {}}
+            manager = StoreManager(
+                backend_name="sqlite",
+                data_file=root / "companions.json",
+                sqlite_path=sqlite_path,
+                ensure_defaults=lambda data: data,
+                new_store=lambda: {},
+            )
+            manager.backend.save_store(old_sqlite)
+            (root / "companions.json").write_text(json.dumps(new_json), encoding="utf-8")
+            host = _StorePathHost(root, str(sqlite_path))
+            host._write_storage_backend_state("json", "")
+
+            host._rebuild_store_manager()
+
+            self.assertEqual(new_json, host.store_manager.backend.load_store())
+
     def test_directory_configuration_falls_back_to_default_database_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
