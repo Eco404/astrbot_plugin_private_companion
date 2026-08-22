@@ -7145,6 +7145,7 @@ class ProactiveEngineMixin:
             "context": {
                 "text": text,
                 "created_ts": created_at,
+                "created_at": datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M:%S"),
                 "source": selected.get("source"),
                 "after_anonymous_area_departure": anonymous_linked,
             },

@@ -4199,6 +4199,47 @@ class UserMemoryMixin:
                     score += 3.0
         return score
 
+    @staticmethod
+    def _open_loop_created_ts(item: dict[str, Any], fallback: float = 0.0) -> float:
+        """Read both numeric and legacy readable timestamps for an open loop."""
+        if not isinstance(item, dict):
+            return fallback
+        created_ts = _safe_float(item.get("created_ts"), 0.0)
+        if created_ts > 0:
+            return created_ts
+        created_at = _single_line(item.get("created_at"), 40)
+        if created_at:
+            for value in (created_at, created_at.replace("Z", "+00:00")):
+                try:
+                    parsed = datetime.fromisoformat(value)
+                    created_ts = parsed.timestamp()
+                    if created_ts > 0:
+                        return created_ts
+                except (TypeError, ValueError, OverflowError):
+                    continue
+            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    created_ts = datetime.strptime(created_at, fmt).timestamp()
+                    if created_ts > 0:
+                        return created_ts
+                except (TypeError, ValueError, OverflowError):
+                    continue
+        return fallback
+
+    @staticmethod
+    def _format_open_loop_timestamp(created_ts: float, now: float | None = None) -> str:
+        if created_ts <= 0:
+            return ""
+        current = _now_ts() if now is None else now
+        age_seconds = max(0.0, current - created_ts)
+        if age_seconds < 3600:
+            age_text = "不到 1 小时"
+        elif age_seconds < 86400:
+            age_text = f"约 {max(1, int(age_seconds / 3600))} 小时"
+        else:
+            age_text = f"约 {max(1, int(age_seconds / 86400))} 天"
+        return f"记录于 {datetime.fromtimestamp(created_ts).strftime('%Y-%m-%d %H:%M')}，距今{age_text}"
+
     def _open_loop_hint_allows_topic_return(self, hint: str) -> bool:
         cleaned = _single_line(hint, 260)
         if not cleaned:
@@ -4221,7 +4262,6 @@ class UserMemoryMixin:
         hint_text = _single_line(hint, 260)
         if require_relevant is None:
             require_relevant = bool(hint_text)
-        allows_topic_return = self._open_loop_hint_allows_topic_return(hint_text)
         for index, item in enumerate(loops):
             if not isinstance(item, dict):
                 continue
@@ -4231,7 +4271,9 @@ class UserMemoryMixin:
             if not loop_text:
                 continue
             topic_score = self._open_loop_match_score(loop_text, hint_text) if hint_text else 0.0
-            if require_relevant and topic_score < 0.22 and not allows_topic_return:
+            # Generic callback words such as “之前/那个/继续” are not enough
+            # to revive an old topic; the current message needs real topic overlap.
+            if require_relevant and topic_score < 0.22:
                 continue
             score = self._open_loop_relevance_score(item, hint=hint)
             if index >= max(0, total - 1):
@@ -4256,8 +4298,13 @@ class UserMemoryMixin:
         for item in loops:
             if not isinstance(item, dict):
                 continue
-            if now - _safe_float(item.get("created_ts"), now) > 14 * 86400:
+            created_ts = self._open_loop_created_ts(item, now)
+            if created_ts > 0 and now - created_ts > 14 * 86400:
                 continue
+            if not _safe_float(item.get("created_ts"), 0):
+                item["created_ts"] = created_ts
+            if not _single_line(item.get("created_at"), 40) and created_ts > 0:
+                item["created_at"] = datetime.fromtimestamp(created_ts).strftime("%Y-%m-%d %H:%M:%S")
             signature = self._memory_fact_signature(item.get("text"))
             if signature and signature in seen:
                 continue
@@ -4271,10 +4318,13 @@ class UserMemoryMixin:
             if not text:
                 continue
             status = _single_line(item.get("status"), 30) or "待自然延续"
+            created_ts = self._open_loop_created_ts(item, now)
+            timestamp = self._format_open_loop_timestamp(created_ts, now)
+            suffix = f"（{timestamp}）" if timestamp else ""
             if status == "待自然延续":
-                lines.append(f"- 之前还留着：{text}")
+                lines.append(f"- 之前还留着{suffix}：{text}")
             else:
-                lines.append(f"- {status}：{text}")
+                lines.append(f"- {status}{suffix}：{text}")
         return "\n".join(lines)
 
     def _naturalize_open_loop_text(self, raw: Any) -> str:
@@ -4323,12 +4373,30 @@ class UserMemoryMixin:
             return 1.0
         if len(inbound) >= 4 and inbound in loop:
             return 0.9
-        loop_tokens = set(re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9_]{3,24}", loop_text))
-        inbound_tokens = set(re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9_]{3,24}", inbound_text))
+        stopwords = {
+            "之前", "以前", "上次", "上回", "那个", "这个", "继续", "接着", "后来", "怎么样",
+            "还有", "一下", "之后", "提醒", "记得", "帮我", "事情", "话题",
+        }
+
+        def _topic_tokens(value: str) -> set[str]:
+            tokens = set(re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9_]{3,24}", value))
+            for sequence in re.findall(r"[\u4e00-\u9fff]{2,}", value):
+                tokens.update(sequence[index:index + 2] for index in range(len(sequence) - 1))
+                if len(sequence) >= 4:
+                    tokens.update(sequence[index:index + 3] for index in range(len(sequence) - 2))
+            return {token for token in tokens if token not in stopwords}
+
+        loop_tokens = _topic_tokens(loop_text)
+        inbound_tokens = _topic_tokens(inbound_text)
         if not loop_tokens or not inbound_tokens:
             return 0.0
         overlap = len(loop_tokens & inbound_tokens)
-        return overlap / max(1, min(len(loop_tokens), len(inbound_tokens)))
+        score = overlap / max(1, min(len(loop_tokens), len(inbound_tokens)))
+        # Chinese conversational follow-ups often mention only one concrete
+        # subject word; preserve that signal without allowing generic words.
+        if overlap and any(len(token) >= 2 for token in loop_tokens & inbound_tokens):
+            score = max(score, 0.25)
+        return score
 
     def _resolve_matching_open_loop(self, loops: list[Any], text: str) -> dict[str, Any] | None:
         candidates: list[tuple[float, int, dict[str, Any]]] = []
@@ -4347,7 +4415,9 @@ class UserMemoryMixin:
         score, _, item = max(candidates, key=lambda part: (part[0], part[1]))
         if score >= 0.34:
             return item
-        return max(candidates, key=lambda part: part[1])[2]
+        # Short acknowledgements such as “好了/没事了” must not resolve an
+        # unrelated historical loop merely because it happens to be newest.
+        return None
 
     def _update_open_loops_from_message(self, user: dict[str, Any], text: str) -> None:
         if not self.enable_open_loop_tracking:
@@ -4360,6 +4430,8 @@ class UserMemoryMixin:
             loops = []
             user["open_loops"] = loops
 
+        now = _now_ts()
+        created_at = datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")
         completion_markers = ("好了", "搞定", "解决了", "完成了", "不用了", "取消", "算了", "没事了", "不用提醒")
         if loops and any(marker in cleaned for marker in completion_markers):
             item = self._resolve_matching_open_loop(loops, cleaned)
@@ -4375,7 +4447,8 @@ class UserMemoryMixin:
                     {
                         "text": loop_text,
                         "status": "待自然延续",
-                        "created_ts": _now_ts(),
+                        "created_ts": now,
+                        "created_at": created_at,
                         "source": "user_message",
                     }
                 )
@@ -9119,6 +9192,8 @@ avoid 写清楚哪些严肃、排障、工具失败、低落或边界场景不�
 普通问答、日志、报错、临时调试、一次性闲聊如果没有情绪余味,不要硬整理成重要经历。
 玩笑、反讽、口嗨和临时抱怨不要写成长期事实；不确定就写得轻一点。
 open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“以后还能聊”的内容放进 reusable_topic。
+当前最近一条用户消息是这段对话的主线。普通肯定、敷衍回复、换话题或与旧内容没有明确词义对应的短句，不能重新接起旧的 open_loops；只有用户明确回问且主题有实际语义对应时，才可写入或延续 open_loops。
+未完话头只是背景线索，不能覆盖当前对话，也不能成为回复第一句，除非用户本轮明确回到该主题。
 严格区分说话人：用户行才可以写入 user_events；Bot/助手行里的第一人称动作、身体状态、日程和生活片段多半是拟人化表达，只能当作当时回复风格或轻微情绪余味。
 bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或之后处理的事；不要把“我刚在吃饭/整理/路上/犯困/继续做某事”这类模拟状态当承诺或共同经历。
 {expression_rule_task}
@@ -9212,6 +9287,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
                             "text": loop,
                             "status": "待自然延续",
                             "created_ts": now,
+                            "created_at": datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S"),
                             "source": "dialogue_episode",
                         }
                     )

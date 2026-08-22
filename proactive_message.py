@@ -2838,12 +2838,32 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         if not content_preview:
                             continue
                         age = loop.get("age_days")
-                        age_str = f"（{age:.0f}天前）" if age is not None else ""
+                        created_ts = _safe_float(loop.get("created_ts"), 0.0)
+                        created_at = _single_line(loop.get("created_at"), 40)
+                        if created_ts <= 0 and created_at:
+                            try:
+                                created_ts = datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+                            except (TypeError, ValueError, OverflowError):
+                                created_ts = 0.0
+                        if created_ts > 0:
+                            age_hours = max(0.0, (_now_ts() - created_ts) / 3600)
+                            if age_hours < 1:
+                                age_text = "不到1小时"
+                            elif age_hours < 24:
+                                age_text = f"约{max(1, int(age_hours))}小时"
+                            else:
+                                age_text = f"约{max(1, int(age_hours / 24))}天"
+                            age_str = f"（记录于 {datetime.fromtimestamp(created_ts).strftime('%Y-%m-%d %H:%M')}，距今{age_text}）"
+                        elif age is not None:
+                            age_str = f"（约{age:.0f}天前）"
+                        else:
+                            age_str = ""
                         loop_texts.append(f"- {content_preview}{age_str}")
                     open_loops_hint = (
                         "【未完成话题候选】\n"
-                        "这些只是可选候选，不是必须提起的任务。只有当本轮主动动机、当前话题或最近私聊比较贴合，"
-                        "或者你本来就是想兑现这件事时，才轻轻带一句；如果不贴，就先放着，不必为了它改变本轮话题。\n"
+                        "这些只是可选候选，不是必须提起的任务。本轮主动动机、当前用户消息和最近私聊实况优先级更高；"
+                        "只有候选与它们有明确语义贴合，或你本来就是想兑现这件事时，才轻轻带一句。"
+                        "如果不贴，就先放着，不得把旧话题变成本轮开场、主线或回复第一句，也不要为了连续性改变当前动机。\n"
                         + "\n".join(loop_texts)
                     )
         except Exception:
