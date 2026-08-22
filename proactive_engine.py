@@ -1188,8 +1188,18 @@ class ProactiveEngineMixin:
             for existing in reversed(pool):
                 if _single_line(existing.get("origin_event_id"), 80) != origin_event_id:
                     continue
-                if str(existing.get("state") or "queued") in {"sent", "blocked", "cancelled", "dropped"}:
+                existing_state = str(existing.get("state") or "queued")
+                # 位置转场可能在发送前被用户活跃、休息或复核闸门拦下；
+                # 只有真实发送成功才消耗这次转场，其他来源沿用原有去重契约。
+                terminal_states = {"sent"} if _single_line(impulse.get("source"), 40) == "mobile_location" else {
+                    "sent", "blocked", "cancelled", "dropped"
+                }
+                if existing_state in terminal_states:
                     return {}
+                if _single_line(impulse.get("source"), 40) == "mobile_location":
+                    for key in ("_mobile_location_transition_key", "_mobile_location_priority", "mobile_location_event_type"):
+                        if key in impulse:
+                            existing[key] = impulse.get(key)
         signature = self._proactive_impulse_signature(impulse)
         reason = _single_line(impulse.get("reason"), 40)
         source = _single_line(impulse.get("source"), 40)
@@ -1377,6 +1387,9 @@ class ProactiveEngineMixin:
             ),
             origin_event_id=_single_line(prepared.get("origin_event_id"), 80),
         )
+        for key in ("_mobile_location_transition_key", "_mobile_location_priority", "mobile_location_event_type"):
+            if key in prepared:
+                impulse[key] = prepared.get(key)
         for key in (
             "kind",
             "kind_label",
@@ -1701,6 +1714,7 @@ class ProactiveEngineMixin:
         elif normalized_reason in {
             "quiet_care", "state_share", "post_goodnight_group_activity",
             "memory_echo", "mood_checkin", "absence_miss",
+            "anonymous_area_dwell", "anonymous_area_familiarity",
         }:
             kind = "care"
         elif normalized_reason in {"activity_share", "diary_share", "background_schedule", "creative_share", "personal_goal_progress"}:
@@ -1738,6 +1752,8 @@ class ProactiveEngineMixin:
             anchor_type, anchor_score = "important_date", 0.78
         elif normalized_reason in {"environment_change", "weather_alert"}:
             anchor_type, anchor_score = "environment", 0.82
+        elif normalized_reason in {"anonymous_area_dwell", "anonymous_area_familiarity"}:
+            anchor_type, anchor_score = "environment", 0.68
         elif normalized_reason in {"news_share", "web_exploration_share", "bili_video_share"}:
             anchor_type, anchor_score = "external_info", 0.66
         elif normalized_reason in {"morning_greeting", "noon_greeting", "evening_greeting", "insomnia_night"}:
@@ -2296,6 +2312,23 @@ class ProactiveEngineMixin:
                     "rewrite 后要把它改成一个具体可聊的小需求，比如吃什么、要不要垫一口、想不想来点甜的；不要写成状态播报。",
                     "语气要自然，不要像健康汇报、撒娇表演或硬找人陪。",
                 ]
+            )
+        if source == "mobile_location" or _single_line(user.get("planned_mobile_location_event_type"), 32):
+            event_type = _single_line(user.get("planned_mobile_location_event_type"), 32)
+            if event_type == "home_arrival":
+                return "\n".join(
+                    [
+                        "【来源专项改写：回家后的自然开口】",
+                        "用户刚进入已标记的家，允许自然提到“刚到家/回来了/先歇一会儿”这类生活片段。",
+                        "不要提定位、坐标、手机、设备、监听或内部判断，也不要写成系统通知；像你自己顺手想到后说一句。",
+                        "优先一句短而具体的话，避免连续追问“到家了吗/在家吗”。",
+                    ]
+                )
+            return "\n".join(
+                (
+                    "【来源专项改写：位置转场】",
+                    "只能把已确认的地点变化当作轻量生活背景，不暴露定位或设备细节。",
+                )
             )
         return ""
 
@@ -3155,6 +3188,9 @@ class ProactiveEngineMixin:
             "best_until_at": _safe_float(selected.get("best_until_at"), 0),
             "expire_at": _safe_float(selected.get("expire_at"), 0),
         }
+        for key in ("_mobile_location_transition_key", "_mobile_location_priority", "mobile_location_event_type"):
+            if key in selected:
+                candidate[key] = selected.get(key)
         item = self._record_proactive_candidate(
             user_id,
             candidate,
@@ -3174,6 +3210,12 @@ class ProactiveEngineMixin:
         if user["planned_proactive_reason"] == "birthday_curiosity":
             user["birthday_curiosity_asked_at"] = check_now
         user["planned_proactive_impulse_id"] = _single_line(selected.get("id"), 20)
+        user["planned_mobile_location_transition_key"] = _single_line(
+            selected.get("_mobile_location_transition_key"), 80
+        )
+        user["planned_mobile_location_event_type"] = _single_line(
+            selected.get("mobile_location_event_type"), 32
+        )
         user["planned_proactive_window_start_at"] = _safe_float(selected.get("window_start_at"), 0)
         user["planned_proactive_best_until_at"] = _safe_float(selected.get("best_until_at"), 0)
         user["planned_proactive_expire_at"] = _safe_float(selected.get("expire_at"), 0)
@@ -3678,6 +3720,12 @@ class ProactiveEngineMixin:
             _single_line(candidate.get("motive"), 180)
         )
         user["planned_proactive_topic"] = _single_line(candidate.get("topic"), 80)
+        user["planned_mobile_location_transition_key"] = _single_line(
+            candidate.get("_mobile_location_transition_key"), 80
+        )
+        user["planned_mobile_location_event_type"] = _single_line(
+            candidate.get("mobile_location_event_type"), 32
+        )
         user["planned_proactive_impulse_id"] = _single_line(impulse.get("id"), 20) if isinstance(impulse, dict) else ""
         user["planned_proactive_window_start_at"] = _safe_float(
             impulse.get("window_start_at"),
@@ -3833,6 +3881,8 @@ class ProactiveEngineMixin:
         user["planned_proactive_motive"] = self._normalize_internal_motive_text(_single_line(event.get("motive"), 140))
         user["planned_proactive_topic"] = _single_line(event.get("topic"), 60)
         user["planned_proactive_impulse_id"] = ""
+        user["planned_mobile_location_transition_key"] = ""
+        user["planned_mobile_location_event_type"] = ""
         user["planned_proactive_window_start_at"] = scheduled_ts
         active_span, grace_span = self._proactive_impulse_default_window_seconds(
             user["planned_proactive_reason"],
@@ -3863,6 +3913,18 @@ class ProactiveEngineMixin:
         self._store_planned_proactive_route_fields(user, {**event, "source": "timer"})
         return True
 
+    def _commit_mobile_location_arrival_after_send(self, user: dict[str, Any]) -> None:
+        """Consume a location transition only after a real delivery has started."""
+        transition_key = _single_line(user.get("planned_mobile_location_transition_key"), 80)
+        if not transition_key:
+            return
+        user["last_mobile_location_arrival_key"] = transition_key
+        if _single_line(user.get("mobile_location_priority_key"), 80) == transition_key:
+            user["mobile_location_priority_key"] = ""
+            user["mobile_location_priority_until"] = 0
+        user["planned_mobile_location_transition_key"] = ""
+        user["planned_mobile_location_event_type"] = ""
+
     def _promote_upcoming_llm_timer_plan(self, user: dict[str, Any], *, now: float | None = None) -> bool:
         event = self._get_active_llm_timer(user)
         if not isinstance(event, dict):
@@ -3882,6 +3944,8 @@ class ProactiveEngineMixin:
         user["planned_proactive_motive"] = self._normalize_internal_motive_text(_single_line(event.get("motive"), 140))
         user["planned_proactive_topic"] = _single_line(event.get("topic"), 60)
         user["planned_proactive_impulse_id"] = ""
+        user["planned_mobile_location_transition_key"] = ""
+        user["planned_mobile_location_event_type"] = ""
         user["planned_proactive_window_start_at"] = scheduled_ts
         active_span, grace_span = self._proactive_impulse_default_window_seconds(
             user["planned_proactive_reason"],
@@ -4644,6 +4708,8 @@ class ProactiveEngineMixin:
             "planned_proactive_need_layer",
             "planned_proactive_need_drive",
             "planned_proactive_need_note",
+            "planned_mobile_location_transition_key",
+            "planned_mobile_location_event_type",
         )
         return {key: user.get(key) for key in keys}
 
@@ -6303,6 +6369,9 @@ class ProactiveEngineMixin:
         if not callable(scene_getter):
             return None
         check_now = _now_ts() if now is None else now
+        budget_available = getattr(self, "_mobile_location_humanization_budget_available", None)
+        if callable(budget_available) and not budget_available(user, now=check_now):
+            return None
         try:
             scene = scene_getter(user, now=check_now)
         except TypeError:
@@ -6370,6 +6439,9 @@ class ProactiveEngineMixin:
             "_scheduled_ts": check_now + delay_seconds,
             "_mobile_location_transition_key": transition_key,
             "_mobile_location_priority": bool(is_priority_arrival),
+            "mobile_location_event_type": (
+                "home_arrival" if transition_kind != "departure" and place_kind == "home" else "place_transition"
+            ),
             "weather_linked": bool(weather_risk and transition_kind == "departure"),
         }
 
@@ -7047,6 +7119,15 @@ class ProactiveEngineMixin:
             else check_now + random.uniform(15 * 60, 2 * 3600)
         )
         selected["proactive_candidate_at"] = check_now
+        anonymous_pending = user.get("mobile_anonymous_area_pending")
+        anonymous_linked = (
+            isinstance(anonymous_pending, dict)
+            and _safe_float(anonymous_pending.get("expires_at"), 0.0) > check_now
+            and _safe_float(anonymous_pending.get("candidate_at"), 0.0) <= 0
+        )
+        if anonymous_linked:
+            anonymous_pending["candidate_at"] = check_now
+        open_loop_motive_prefix = "刚离开外面后，" if anonymous_linked else ""
         return {
             "date": _today_key(),
             "window": self._window_from_delay_minutes(max(15, int((scheduled - check_now) / 60)), width_minutes=75),
@@ -7054,14 +7135,19 @@ class ProactiveEngineMixin:
             "action": "message",
             "why": "用户之前提过一件还没有下文的事，隔了一段时间后自然想起",
             "topic": text,
-            "motive": self._normalize_internal_motive_text(f"想自然问问之前提到的这件事后来怎么样了：{text}"),
-            "scene": "日常聊天间隙忽然想起对方之前说过的事",
+            "motive": self._normalize_internal_motive_text(f"{open_loop_motive_prefix}想自然问问之前提到的这件事后来怎么样了：{text}"),
+            "scene": "离开外出区域后的聊天间隙，忽然想起对方之前说过的事" if anonymous_linked else "日常聊天间隙忽然想起对方之前说过的事",
             "tone": "像朋友随口问起，不像提醒或查岗",
             "impulse": "想知道那件事后来有没有新进展",
             "_scheduled_ts": scheduled,
             "origin_event_id": "open-loop:" + hashlib.sha1(f"{created_at}:{text}".encode("utf-8")).hexdigest()[:16],
             "context_key": "open_loop_followup_context",
-            "context": {"text": text, "created_ts": created_at, "source": selected.get("source")},
+            "context": {
+                "text": text,
+                "created_ts": created_at,
+                "source": selected.get("source"),
+                "after_anonymous_area_departure": anonymous_linked,
+            },
             "followup_kind": "open_loop",
         }
 

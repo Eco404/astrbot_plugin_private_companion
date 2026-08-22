@@ -2792,6 +2792,28 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             location_context = location_formatter(user) if callable(location_formatter) else ""
         except Exception:
             location_context = ""
+        anonymous_area_hint = ""
+        if reason in {"anonymous_area_dwell", "anonymous_area_familiarity"}:
+            anonymous_area_hint = (
+                "【离开后的模糊熟悉感】\n"
+                "这是一条位置相关但延迟表达的生活念头：用户已经离开一个没有命名的区域。"
+                "不要提城市、城区、地图、高德、定位、停留时长或‘我知道你在哪里’，也不要追问具体地点。"
+                "只把它写成后来想起的一点生活关心；如果觉得不自然，可以只分享一句轻松的近况，不必提问。"
+                if reason == "anonymous_area_dwell"
+                else (
+                    "【重复到访后的模糊熟悉感】\n"
+                    "这是一条从多次匿名区域到访形成的轻微熟悉感。不要声称知道用户有固定去处，"
+                    "不要提城市、城区、地图、高德、定位、次数或地点名称；用‘最近好像有个常去的地方’这类开放表达，"
+                    "把是否解释留给用户，也可以完全不点破这份观察。"
+                )
+            )
+        mobile_arrival_hint = ""
+        if _single_line(user.get("planned_mobile_location_event_type"), 32) == "home_arrival":
+            mobile_arrival_hint = (
+                "【回家后的自然开口】\n"
+                "用户刚进入已标记的家，可以自然提到刚到家、回来了或先歇一会儿。"
+                "不要提定位、坐标、手机、设备或监听，也不要写成系统通知；像顺手想到后说一句。"
+            )
         timer_hint = self._format_llm_timer_context(user)
         time_guard = self._proactive_time_guard_hint(reason, current_item)
         deferred_share_tense_hint = self._deferred_immediate_share_tense_hint(user, action)
@@ -2932,6 +2954,10 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 prompt = f"{prompt.rstrip()}\n\n{optional_hint}"
         if location_context and "主动场景位置线索" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{location_context}"
+        if anonymous_area_hint and "离开后的模糊熟悉感" not in prompt and "重复到访后的模糊熟悉感" not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{anonymous_area_hint}"
+        if mobile_arrival_hint and "【回家后的自然开口】" not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{mobile_arrival_hint}"
         if future_schedule_hint and "【接下来可参考的日程】" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{future_schedule_hint}"
         if reason == "creative_share":
@@ -6161,6 +6187,20 @@ Output:
             reference = (
                 f"互道晚安后，如果{name or '对方'}还没睡，就轻声提醒忙完早点休息；"
                 "不提看见了什么，不追问，不要求回复，也不表现成在监控。"
+            )
+        elif reason == "anonymous_area_dwell":
+            reference = (
+                f"{reference}\n" if reference else ""
+            ) + (
+                "这是用户离开一个未命名区域后的延迟关心。不要提位置、地图、城市、城区、定位或停留时长；"
+                "只写成后来想起用户刚才在外面待了挺久，轻轻关心是否顺利，不追问具体去了哪里。"
+            )
+        elif reason == "anonymous_area_familiarity":
+            reference = (
+                f"{reference}\n" if reference else ""
+            ) + (
+                "这是多次匿名区域到访留下的模糊熟悉感。不要提位置来源、地图、次数或具体地点；"
+                "可以说‘最近好像有个常去的地方’，但必须给用户留出否认或不解释的空间。"
             )
         relationship_initiative_hint = self._format_proactive_relationship_initiative_hint(
             user,

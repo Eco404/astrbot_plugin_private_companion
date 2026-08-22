@@ -394,6 +394,17 @@ _PLATFORM_DISPLAY_NAMES = {
 class DailyStateMixin(DailyStateTickMixin):
     """日程、状态、天气、日记、技能成长和计时器"""
 
+    def _save_daily_state_sections(self, sections: set[str]) -> None:
+        saver = getattr(self, "_save_data_sync", None)
+        if not callable(saver):
+            return
+        try:
+            saver(sections=sections)
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc) or "sections" not in str(exc):
+                raise
+            saver()
+
     def _daily_generation_lock(self, attribute: str) -> asyncio.Lock:
         scope = self._daily_generation_scope()
         if scope:
@@ -582,20 +593,38 @@ class DailyStateMixin(DailyStateTickMixin):
                     return current_plan
                 return None
 
-        plan = await self._generate_daily_plan()
-        async with self._data_lock:
-            self.data["daily_plan"] = plan
-            self._sync_detail_enhancement_day_locked(plan.get("date"), reset=True)
-            self._refresh_daily_state_location_from_plan(plan=plan)
-            self._save_data_sync(
-                sections={
-                    "daily_plan",
-                    "daily_state",
-                    "detail_enhanced_day",
-                    "detail_enhanced_segments",
-                    "daily_story_plan",
-                }
-            )
+        generation_lock = self._daily_generation_lock("_daily_plan_generation_lock")
+        async with generation_lock:
+            # The initial eligibility check intentionally happens before the
+            # model call, but another caller may have generated the plan while
+            # we were waiting. Re-check the shared plan inside the generation
+            # lock so one day/persona only consumes one model request.
+            if not force:
+                async with self._data_lock:
+                    current_plan = self.data.get("daily_plan")
+                    if isinstance(current_plan, dict) and _single_line(current_plan.get("date"), 16) == today:
+                        source = _single_line(current_plan.get("source"), 40).lower()
+                        retry_after = _safe_float(current_plan.get("retry_after"), 0.0)
+                        fallback_retry_due = source.startswith("fallback") and (
+                            retry_after <= 0 or _now_ts() >= retry_after
+                        )
+                        if not fallback_retry_due:
+                            return current_plan
+
+            plan = await self._generate_daily_plan()
+            async with self._data_lock:
+                self.data["daily_plan"] = plan
+                self._sync_detail_enhancement_day_locked(plan.get("date"), reset=True)
+                self._refresh_daily_state_location_from_plan(plan=plan)
+                self._save_data_sync(
+                    sections={
+                        "daily_plan",
+                        "daily_state",
+                        "detail_enhanced_day",
+                        "detail_enhanced_segments",
+                        "daily_story_plan",
+                    }
+                )
         outfit_generator = getattr(self, "_ensure_daily_outfit_photo", None)
         if callable(outfit_generator):
             try:
@@ -2030,7 +2059,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 state["detail_key"] = key
                 state["date"] = _today_key()
                 state["plan_date"] = str(self.data.get("detail_enhanced_day") or "")
-                self._save_data_sync(sections={"qq_presence_state"})
+                self._save_daily_state_sections({"qq_presence_state"})
                 return
             ok, note = await self._set_qq_online_presence("online")
             state["detail_key"] = key
@@ -2043,7 +2072,7 @@ class DailyStateMixin(DailyStateTickMixin):
             state["ok"] = bool(ok)
             state["note"] = _single_line(note, 120)
             state["managed_by_plugin"] = True
-            self._save_data_sync(sections={"qq_presence_state"})
+            self._save_daily_state_sections({"qq_presence_state"})
             return
         if mode in {"custom", "自定义", "自定义状态"}:
             ok, note = await self._set_qq_custom_presence(custom_text)
@@ -2064,7 +2093,7 @@ class DailyStateMixin(DailyStateTickMixin):
         state["ok"] = bool(ok)
         state["note"] = _single_line(note, 120)
         state["managed_by_plugin"] = True
-        self._save_data_sync(sections={"qq_presence_state"})
+        self._save_daily_state_sections({"qq_presence_state"})
 
     async def _ensure_current_detail_presence_status(self) -> None:
         plan = self.data.get("daily_plan", {})
@@ -2079,7 +2108,7 @@ class DailyStateMixin(DailyStateTickMixin):
         snapshot = enhanced.get(str(segment.get("key") or ""))
         if not isinstance(snapshot, dict) or snapshot.get("status") != "done":
             if self._refresh_daily_state_location_from_plan(plan=plan, segment=segment):
-                self._save_data_sync(sections={"daily_state"})
+                self._save_daily_state_sections({"daily_state"})
             if self.enable_qq_presence_sync:
                 # Clear a previous plugin-managed segment status while the
                 # new segment is still being generated. The completed detail
@@ -2087,7 +2116,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 await self._apply_detail_presence_status(segment, {})
             return
         if self._refresh_daily_state_location_from_plan(plan=plan, detail=snapshot, segment=segment):
-            self._save_data_sync(sections={"daily_state"})
+            self._save_daily_state_sections({"daily_state"})
         if not self.enable_qq_presence_sync:
             return
         await self._apply_detail_presence_status(segment, snapshot)
@@ -13348,12 +13377,26 @@ class DailyStateMixin(DailyStateTickMixin):
                 for index, item in enumerate(items):
                     if not isinstance(item, dict):
                         continue
-                    if self._plan_item_runtime_status(plan, item, index) != "completed":
-                        continue
                     time_text = _single_line(item.get("time"), 8)
                     start = starts[index] if index < len(starts) else None
                     next_start = next((value for value in starts[index + 1 :] if value is not None), None)
                     end = self._plan_item_end_minutes(int(start), item, next_start=next_start) if start is not None else None
+                    runtime_status = self._plan_item_runtime_status(plan, item, index)
+                    # Personal-goal auto progress is based on a completed
+                    # self-authored schedule window. Canonical agenda status
+                    # intentionally stays conservative when no execution
+                    # evidence exists, so use the clock window as the local
+                    # completion signal only for this internal settlement.
+                    if runtime_status != "completed" and start is not None and end is not None:
+                        if self._normalize_schedule_lifecycle_status(item.get("lifecycle_status")) != "cancelled":
+                            runtime_status = self._schedule_window_runtime_status(
+                                int(start),
+                                int(end),
+                                plan_date=day_key,
+                                explicit_status=item.get("lifecycle_status"),
+                            )
+                    if runtime_status != "completed":
+                        continue
                     if start is None or end is None or now_minutes is None or end > now_minutes:
                         continue
                     activity = " ".join(
@@ -17817,8 +17860,8 @@ class DailyStateMixin(DailyStateTickMixin):
                     runtime["generation_disabled_reason"] = "max_daily_messages=0"
                     runtime["last_tick_finished_at"] = _now_ts()
                 if changed:
-                    self._save_data_sync(
-                        sections={"users", "proactive_candidate_pool", "proactive_runtime"}
+                    self._save_proactive_tick_state(
+                        {"users", "proactive_candidate_pool", "proactive_runtime"}
                     )
                 return
             if isinstance(runtime, dict):

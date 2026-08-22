@@ -283,6 +283,8 @@ _REASON_TEXT = {
     "check_in": "关心一下{name}的状态",
     "activity_followup": "在{name}忙完后问一句",
     "open_loop_followup": "自然接起和{name}之前没聊完的那件事",
+    "anonymous_area_dwell": "离开后想起{name}刚才在外面待了挺久",
+    "anonymous_area_familiarity": "模糊地觉得{name}最近似乎有个常去的地方",
     "quiet_care": "安静地问候一下",
     "memory_echo": "想起和{name}上次聊过的一件小事",
     "mood_checkin": "惦记{name}昨天提过的情绪状态",

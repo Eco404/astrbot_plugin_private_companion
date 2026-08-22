@@ -14649,9 +14649,11 @@ function renderTokenMemoryPluginSummary(scope, plugin) {
   const totals = scope?.totals || {};
   const displayName = scope?.displayName || plugin?.display_name || "我会牢牢记住你";
   const totalTokens = Number(totals.total_tokens || 0);
+  const reportedTokens = Number(totals.reported_tokens ?? Math.max(0, totalTokens - Number(totals.estimated_tokens || 0)));
+  const estimatedTokens = Number(totals.estimated_tokens || 0);
   const calls = Number(totals.calls || 0);
   const errors = Number(totals.errors || 0);
-  const avgTokens = Math.round(Number(totals.avg_tokens || 0));
+  const avgReportedTokens = Math.round(Number(totals.avg_reported_tokens ?? totals.avg_tokens ?? 0));
   const estimatedRatio = Math.round(Number(totals.estimated_ratio || 0) * 100);
   const updatedAt = plugin?.updated_at ? `最近更新：${plugin.updated_at}` : "还没有统计更新时间";
   box.innerHTML = `
@@ -14660,10 +14662,12 @@ function renderTokenMemoryPluginSummary(scope, plugin) {
       <span>${escapeHtml(plugin?.note || "仅展示记忆插件自身模型消耗，不计入陪伴插件每日 Token 限额。")}</span>
     </div>
     <div class="token-plugin-stats">
-      ${tokenMetricCard("Token", formatNumber(totalTokens))}
+      ${tokenMetricCard("已确认 Token", formatNumber(reportedTokens))}
+      ${tokenMetricCard("估算 Token", formatNumber(estimatedTokens))}
+      ${tokenMetricCard("合计记账", formatNumber(totalTokens))}
       ${tokenMetricCard("调用次数", formatNumber(calls))}
-      ${tokenMetricCard("平均 Token", formatNumber(avgTokens))}
-      ${tokenMetricCard("估算 / 失败", `${estimatedRatio}% · ${formatNumber(errors)}`)}
+      ${tokenMetricCard("平均已确认", formatNumber(avgReportedTokens))}
+      ${tokenMetricCard("估算占比 / 失败", `${estimatedRatio}% · ${formatNumber(errors)}`)}
     </div>
     <p class="muted small">${escapeHtml(updatedAt)}</p>
   `;
@@ -14677,10 +14681,12 @@ function renderTokenMemoryPluginTaskTable(rows, available, displayName = "记忆
     return;
   }
   box.innerHTML = tokenTable(
-    [`${displayName}任务`, "总 Token", "输入", "输出", "调用", "失败"],
+    [`${displayName}任务`, "已确认", "估算", "合计", "输入", "输出", "调用", "失败"],
     rows,
     (item) => [
       tokenTaskLabel(item.key),
+      formatNumber(item.reported_tokens),
+      formatNumber(item.estimated_tokens),
       formatNumber(item.total_tokens),
       formatNumber(item.prompt_tokens),
       formatNumber(item.completion_tokens),
@@ -14699,10 +14705,12 @@ function renderTokenMemoryPluginProviderTable(rows, available) {
     return;
   }
   box.innerHTML = tokenTable(
-    ["Provider", "总 Token", "缓存", "调用", "估算", "平均延迟"],
+    ["Provider", "已确认", "估算", "合计", "缓存", "调用", "估算占比", "平均延迟"],
     rows,
     (item) => [
       item.key || "default",
+      formatNumber(item.reported_tokens),
+      formatNumber(item.estimated_tokens),
       formatNumber(item.total_tokens),
       tokenCacheText(item),
       formatNumber(item.calls),
@@ -14721,13 +14729,14 @@ function renderTokenMemoryPluginRecentTable(rows, available, displayName = "记�
     return;
   }
   box.innerHTML = tokenTable(
-    ["时间", `${displayName}任务`, "Provider", "Token", "缓存", "延迟", "状态"],
+    ["时间", `${displayName}任务`, "Provider", "已确认 / 估算", "合计", "缓存", "延迟", "状态"],
     rows,
     (item) => [
       formatRecentTime(item.ts, item.time),
       tokenTaskLabel(item.task),
       item.provider || "default",
-      `${formatNumber(item.total_tokens)}${item.estimated ? " 估" : ""}`,
+      `${formatNumber(item.reported_tokens)} / ${formatNumber(item.estimated_tokens)}`,
+      formatNumber(item.total_tokens),
       tokenCacheText(item),
       `${formatNumber(Math.round(Number(item.elapsed_ms || item.latency_ms || 0)))} ms`,
       item.success ? "成功" : `失败 ${item.error || ""}`.trim(),
@@ -32767,6 +32776,15 @@ function renderRealityTouchMobilePanel() {
         <label><span>允许配对的用户 ID</span><input name="mobile_allowed_user_id" value="${escapeHtml(mobile.allowed_user_id || "")}" placeholder="主要用户 ID"></label>
         <label><span>会话有效期（小时）</span><input name="mobile_session_ttl_hours" type="number" min="1" max="720" value="${Number(mobile.session_ttl_hours || 168)}"></label>
         <label><span>位置上下文有效期（秒）</span><input name="mobile_location_ttl_seconds" type="number" min="60" max="86400" value="${Number(mobile.location_ttl_seconds || 900)}"></label>
+        <label class="reality-enable-field">
+          <input type="checkbox" name="mobile_amap_reverse_geocode_enabled" ${mobile.amap_reverse_geocode_enabled ? "checked" : ""}>
+          <span><b>启用高德区域识别</b><small>将手机位置转换为城市/城区背景，用于通勤、天气和生活场景；不把精确地址交给陪伴模型。</small></span>
+        </label>
+        <label><span>高德 Web 服务 Key</span><input name="mobile_amap_api_key" type="password" autocomplete="new-password" placeholder="${mobile.amap_api_key_configured ? "已配置，留空保持原值" : "粘贴高德控制台生成的 Key"}"></label>
+        <div class="reality-mobile-inline-fields">
+          <label><span>区域缓存（秒）</span><input name="mobile_amap_cache_ttl_seconds" type="number" min="60" max="604800" step="60" value="${Number(mobile.amap_cache_ttl_seconds || 1800)}"></label>
+          <label><span>请求超时（秒）</span><input name="mobile_amap_request_timeout_seconds" type="number" min="1" max="20" step="1" value="${Number(mobile.amap_request_timeout_seconds || 5)}"></label>
+        </div>
         <label class="reality-enable-field reality-mobile-proxy-field">
           <input type="checkbox" name="mobile_proxy_rooms" ${mobile.proxy_rooms !== false ? "checked" : ""}>
           <span><b>统一代理一起 / 游戏 / 协同房间</b><small>手机只访问移动网关，由网关转发页面、接口、媒体和 WebSocket；推荐保持开启。</small></span>
@@ -32881,6 +32899,10 @@ function realityGlobalConfigPayload(root, enabledOverride) {
       allowed_user_id: form?.elements.mobile_allowed_user_id?.value || mobile.allowed_user_id || "",
       session_ttl_hours: Number(form?.elements.mobile_session_ttl_hours?.value || mobile.session_ttl_hours || 168),
       location_ttl_seconds: Number(form?.elements.mobile_location_ttl_seconds?.value || mobile.location_ttl_seconds || 900),
+      amap_reverse_geocode_enabled: form ? Boolean(form.elements.mobile_amap_reverse_geocode_enabled?.checked) : mobile.amap_reverse_geocode_enabled === true,
+      amap_api_key: form?.elements.mobile_amap_api_key?.value || "",
+      amap_cache_ttl_seconds: Number(form?.elements.mobile_amap_cache_ttl_seconds?.value || mobile.amap_cache_ttl_seconds || 1800),
+      amap_request_timeout_seconds: Number(form?.elements.mobile_amap_request_timeout_seconds?.value || mobile.amap_request_timeout_seconds || 5),
       telemetry_enabled: form?.elements.mobile_telemetry_enabled
         ? Boolean(form.elements.mobile_telemetry_enabled.checked)
         : mobile.telemetry_enabled === true,

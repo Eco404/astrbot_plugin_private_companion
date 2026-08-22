@@ -22,6 +22,21 @@ from .helpers import (
 
 
 class DailyStateTickMixin:
+    def _save_proactive_tick_state(self, sections: set[str]) -> None:
+        """Persist tick state while tolerating legacy test/extension adapters."""
+        saver = getattr(self, "_save_data_sync", None)
+        if not callable(saver):
+            return
+        try:
+            saver(sections=sections)
+        except TypeError as exc:
+            # Older integrations exposed _save_data_sync() without the
+            # incremental sections argument. Keep the active loop usable for
+            # those adapters, but do not hide unrelated TypeErrors.
+            if "unexpected keyword argument" not in str(exc) or "sections" not in str(exc):
+                raise
+            saver()
+
     @staticmethod
     def _proactive_similarity_guard_enabled(
         user: dict[str, Any],
@@ -616,10 +631,27 @@ class DailyStateTickMixin:
                         )
                         self._restore_troubleshooting_proactive_plan(current_after_render_failure)
                     else:
-                        current_after_render_failure["next_proactive_at"] = 0
-                        self._schedule_next_proactive(current_after_render_failure, now=_now_ts(), delay_hours=(1, 3))
+                        failure_note = f"生成失败: {_single_line(e, 140)}"
+                        # Keep the failed candidate observable, but defer its
+                        # impulse as a retry instead of immediately
+                        # re-materializing the same thought on every tick.
+                        deferred = self._defer_or_replace_planned_impulse(
+                            current_after_render_failure,
+                            now=_now_ts(),
+                            note=failure_note,
+                            delay_minutes=(60.0, 180.0),
+                            block_current=False,
+                        )
+                        if not deferred and _safe_float(current_after_render_failure.get("next_proactive_at"), 0) <= _now_ts():
+                            self._schedule_next_proactive(
+                                current_after_render_failure,
+                                now=_now_ts(),
+                                delay_hours=(1, 3),
+                            )
                     self._update_proactive_audit(audit_id, status="failed", note=f"生成失败: {_single_line(e, 140)}")
-                    self._save_data_sync(sections={"users", "proactive_audit_log", "troubleshooting_test_results"})
+                    self._save_proactive_tick_state(
+                        {"users", "proactive_candidate_pool", "proactive_audit_log", "troubleshooting_test_results"}
+                    )
                 return
         render_failure_stage = _single_line(user.pop("_proactive_render_failure_stage", ""), 240)
         if is_troubleshooting_for_send:
@@ -1639,6 +1671,20 @@ class DailyStateTickMixin:
                     0,
                 )
                 current_after_send["last_proactive_reply_context_consumed_for"] = 0
+                location_reason = _single_line(reason, 40)
+                location_event_type = _single_line(
+                    current_after_send.get("planned_mobile_location_event_type"),
+                    32,
+                )
+                if (
+                    location_reason in {"anonymous_area_dwell", "anonymous_area_familiarity"}
+                    or location_event_type
+                    or _single_line(current_after_send.get("planned_mobile_location_transition_key"), 80)
+                ) and not self._simulation_active(current_after_send):
+                    current_after_send["last_mobile_location_humanization_at"] = sent_at
+                    current_after_send["last_mobile_location_humanization_kind"] = location_reason or location_event_type
+                if not self._simulation_active(current_after_send):
+                    self._commit_mobile_location_arrival_after_send(current_after_send)
                 if reason == "group_share":
                     remember_group_share = getattr(self, "_remember_recent_group_share_snapshot", None)
                     if callable(remember_group_share):
@@ -1809,6 +1855,17 @@ class DailyStateTickMixin:
             current["last_proactive_sent_at"] = current["last_sent"]
             current["last_companion_message_at"] = current["last_sent"]
             current["last_proactive_reason"] = reason
+            location_reason = _single_line(reason, 40)
+            location_event_type = _single_line(current.get("planned_mobile_location_event_type"), 32)
+            if (
+                location_reason in {"anonymous_area_dwell", "anonymous_area_familiarity"}
+                or location_event_type
+                or _single_line(current.get("planned_mobile_location_transition_key"), 80)
+            ) and not simulation_active:
+                current["last_mobile_location_humanization_at"] = current["last_sent"]
+                current["last_mobile_location_humanization_kind"] = location_reason or location_event_type
+            if not simulation_active:
+                self._commit_mobile_location_arrival_after_send(current)
             if reason in {"bili_video_share", "news_share", "web_exploration_share"}:
                 current["last_external_link_share_at"] = current["last_sent"]
             if reason == "memory_echo":

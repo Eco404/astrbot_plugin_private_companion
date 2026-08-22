@@ -286,6 +286,18 @@ class PrivateCompanionPageApi(
 ):
     """AstrBot 官方插件拓展页面 API。"""
 
+    @staticmethod
+    def _save_plugin_sections(plugin: Any, sections: set[str]) -> None:
+        saver = getattr(plugin, "_save_data_sync", None)
+        if not callable(saver):
+            return
+        try:
+            saver(sections=sections)
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc) or "sections" not in str(exc):
+                raise
+            saver()
+
     IMAGE_API_RUNTIME_SETTING_KEYS = {
         "external_image_api_platform",
         "EXTERNAL_IMAGE_API_BASE_URL",
@@ -8426,7 +8438,7 @@ class PrivateCompanionPageApi(
                 raw = {}
                 self.plugin.data["troubleshooting_test_results"] = raw
             raw["proactive_message"] = self._sanitize_troubleshooting_test_result(result)
-            self.plugin._save_data_sync(sections={"users", "troubleshooting_test_results"})
+            self._save_plugin_sections(self.plugin, {"users", "troubleshooting_test_results"})
         wakeup_task = self._schedule_troubleshooting_proactive_wakeup(target_user_id, scheduled_ts)
         if wakeup_task is None:
             logger.info(
@@ -22016,7 +22028,7 @@ class PrivateCompanionPageApi(
                 applied.pop(key, None)
             state["manual_updated_at"] = time.time()
             state["last_manual_changes"] = deepcopy(manual_changes)
-            self.plugin._save_data_sync(sections={"personality_iteration_auto_tune"})
+            self._save_plugin_sections(self.plugin, {"personality_iteration_auto_tune"})
 
     async def _maybe_apply_personality_iteration_auto_tune(self, users: dict[str, Any], groups: dict[str, Any]) -> dict[str, Any]:
         if not bool(getattr(self.plugin, "enable_personality_iteration_experiment", False)):
@@ -22052,7 +22064,7 @@ class PrivateCompanionPageApi(
                     state["no_suggestion_streak"] = no_suggestion_streak
                     state["last_suggestion_count"] = len(suggestions)
                     state["last_clear_observed_at"] = now
-                    self.plugin._save_data_sync(sections={"personality_iteration_auto_tune"})
+                    self._save_plugin_sections(self.plugin, {"personality_iteration_auto_tune"})
                 stable_seconds = max(0.0, now - no_suggestion_since)
                 ready_to_restore = (
                     no_suggestion_streak >= max(1, int(self.PERSONALITY_AUTO_TUNE_RECOVERY_STREAK))
@@ -22146,7 +22158,7 @@ class PrivateCompanionPageApi(
             state["no_suggestion_since"] = 0
             if changes:
                 state["last_changes"] = deepcopy(changes)
-            self.plugin._save_data_sync(sections={"personality_iteration_auto_tune"})
+            self._save_plugin_sections(self.plugin, {"personality_iteration_auto_tune"})
 
         for change in changes:
             self._apply_config_value(change["key"], change["to"])
@@ -22214,7 +22226,7 @@ class PrivateCompanionPageApi(
                 self.plugin.data["personality_iteration_auto_tune"] = state
             state["last_status"] = deepcopy(status)
             state["last_status_at"] = time.time()
-            self.plugin._save_data_sync(sections={"personality_iteration_auto_tune"})
+            self._save_plugin_sections(self.plugin, {"personality_iteration_auto_tune"})
 
     async def _restore_personality_iteration_auto_tune(
         self,
@@ -22274,7 +22286,7 @@ class PrivateCompanionPageApi(
                 "restored_at": time.time(),
                 "config_saved": config_saved,
             }
-            self.plugin._save_data_sync(sections={"personality_iteration_auto_tune"})
+            self._save_plugin_sections(self.plugin, {"personality_iteration_auto_tune"})
         if changes:
             logger.info(
                 "[PrivateCompanionPage] 角色贴合校准已恢复用户手动参数: %s",
@@ -27053,6 +27065,49 @@ class PrivateCompanionPageApi(
         audit_status_counts: dict[str, int] = {}
         user_states: list[dict[str, Any]] = []
 
+        def should_show_user_state(
+            user_id: str,
+            user: dict[str, Any],
+            summary: dict[str, Any],
+            *,
+            next_ts: float,
+            effective_limit: Any,
+        ) -> bool:
+            """Keep empty transient sessions out of the proactive dashboard."""
+            display_name = self._single_line(summary.get("display_name"), 80)
+            if not display_name.startswith("临时会话"):
+                return True
+            proactive_gate = getattr(self.plugin, "_user_enabled_for_proactive", None)
+            if callable(proactive_gate):
+                try:
+                    if self._int(effective_limit) > 0 and proactive_gate(user_id, user):
+                        return True
+                except Exception:
+                    pass
+            timer_event = user.get("llm_timer_event") if isinstance(user.get("llm_timer_event"), dict) else {}
+            timer_ts = self._float(timer_event.get("scheduled_ts"))
+            if next_ts > now or timer_ts > now:
+                return True
+            recent_cutoff = now - 7 * 24 * 3600
+            # Group traffic can refresh a temporary identity. Only private
+            # activity should keep it visible in the proactive dashboard.
+            recent_private_activity = max(
+                self._float(user.get("last_private_seen")),
+                self._float(user.get("last_private_activity_at")),
+                self._float(user.get("last_private_reply_at")),
+            )
+            if recent_private_activity >= recent_cutoff:
+                return True
+            recent_proactive_activity = max(
+                self._float(user.get("last_proactive_sent_at")),
+                self._float(user.get("last_proactive_skip_at")),
+                self._float(user.get("last_proactive_message_at")),
+            )
+            if recent_proactive_activity >= recent_cutoff:
+                return True
+            afterglow = user.get("proactive_afterglow")
+            return isinstance(afterglow, dict) and self._float(afterglow.get("ts")) >= recent_cutoff
+
         def readiness_snapshot(user: dict[str, Any]) -> dict[str, Any]:
             getter = getattr(self.plugin, "_proactive_inner_readiness", None)
             if not callable(getter):
@@ -27195,46 +27250,53 @@ class PrivateCompanionPageApi(
             readiness = readiness_snapshot(user)
             afterglow = afterglow_snapshot(user)
             hesitation = hesitation_snapshot(user)
+            user_summary_for_state = self._user_summary(str(user_id), user)
+            effective_limit = (
+                self.plugin._effective_user_daily_limit(user)
+                if hasattr(self.plugin, "_effective_user_daily_limit")
+                else getattr(self.plugin, "max_daily_messages", 0)
+            )
+            next_for_state = self._float(user.get("next_proactive_at"))
             if bool(user.get("enabled", True)):
-                user_summary_for_state = self._user_summary(str(user_id), user)
-                effective_limit = (
-                    self.plugin._effective_user_daily_limit(user)
-                    if hasattr(self.plugin, "_effective_user_daily_limit")
-                    else getattr(self.plugin, "max_daily_messages", 0)
-                )
-                next_for_state = self._float(user.get("next_proactive_at"))
-                user_states.append(
-                    {
-                        "user_id": str(user_id),
-                        "user_label": user_summary_for_state.get("display_name") or str(user_id),
-                        "user_role": user_summary_for_state.get("relationship_role") or "",
-                        "user_role_label": user_summary_for_state.get("relationship_role_label") or "",
-                        "sent_today": self._int(user.get("sent_today")),
-                        "effective_daily_limit": effective_limit,
-                        "effective_daily_limit_text": (
-                            self.plugin._format_proactive_daily_limit(effective_limit)
-                            if hasattr(self.plugin, "_format_proactive_daily_limit")
-                            else str(effective_limit)
-                        ),
-                        "effective_daily_limit_unlimited": (
-                            self.plugin._proactive_daily_limit_is_unlimited(effective_limit)
-                            if hasattr(self.plugin, "_proactive_daily_limit_is_unlimited")
-                            else False
-                        ),
-                        "next_proactive_ts": next_for_state,
-                        "next_proactive": self.plugin._format_timestamp_elapsed(next_for_state),
-                        "proactive_sending": bool(user.get("proactive_sending")),
-                        "last_skip_ts": self._float(user.get("last_proactive_skip_at")),
-                        "last_skip": self.plugin._format_timestamp_elapsed(user.get("last_proactive_skip_at", 0)),
-                        "last_skip_reason": self._single_line(user.get("last_proactive_skip_reason"), 160),
-                        "last_skip_prefix": self._single_line(user.get("last_proactive_skip_prefix"), 20),
-                        "last_sent_ts": self._float(user.get("last_sent")),
-                        "last_sent": self.plugin._format_timestamp_elapsed(user.get("last_sent", 0)),
-                        "inner_readiness": readiness,
-                        "afterglow": afterglow,
-                        "hesitation": hesitation,
-                    }
-                )
+                if should_show_user_state(
+                    str(user_id),
+                    user,
+                    user_summary_for_state,
+                    next_ts=next_for_state,
+                    effective_limit=effective_limit,
+                ):
+                    user_states.append(
+                        {
+                            "user_id": str(user_id),
+                            "user_label": user_summary_for_state.get("display_name") or str(user_id),
+                            "user_role": user_summary_for_state.get("relationship_role") or "",
+                            "user_role_label": user_summary_for_state.get("relationship_role_label") or "",
+                            "sent_today": self._int(user.get("sent_today")),
+                            "effective_daily_limit": effective_limit,
+                            "effective_daily_limit_text": (
+                                self.plugin._format_proactive_daily_limit(effective_limit)
+                                if hasattr(self.plugin, "_format_proactive_daily_limit")
+                                else str(effective_limit)
+                            ),
+                            "effective_daily_limit_unlimited": (
+                                self.plugin._proactive_daily_limit_is_unlimited(effective_limit)
+                                if hasattr(self.plugin, "_proactive_daily_limit_is_unlimited")
+                                else False
+                            ),
+                            "next_proactive_ts": next_for_state,
+                            "next_proactive": self.plugin._format_timestamp_elapsed(next_for_state),
+                            "proactive_sending": bool(user.get("proactive_sending")),
+                            "last_skip_ts": self._float(user.get("last_proactive_skip_at")),
+                            "last_skip": self.plugin._format_timestamp_elapsed(user.get("last_proactive_skip_at", 0)),
+                            "last_skip_reason": self._single_line(user.get("last_proactive_skip_reason"), 160),
+                            "last_skip_prefix": self._single_line(user.get("last_proactive_skip_prefix"), 20),
+                            "last_sent_ts": self._float(user.get("last_sent")),
+                            "last_sent": self.plugin._format_timestamp_elapsed(user.get("last_sent", 0)),
+                            "inner_readiness": readiness,
+                            "afterglow": afterglow,
+                            "hesitation": hesitation,
+                        }
+                    )
             scheduled_ts = self._float(user.get("next_proactive_at"))
             timer_event = user.get("llm_timer_event") if isinstance(user.get("llm_timer_event"), dict) else {}
             if scheduled_ts <= 0 and timer_event:
@@ -28499,6 +28561,13 @@ class PrivateCompanionPageApi(
             for item in recent_raw[-80:][::-1]:
                 if not isinstance(item, dict):
                     continue
+                recent_total_tokens = self._int(item.get("total_tokens"))
+                recent_estimated_tokens = self._int(item.get("estimated_tokens"))
+                recent_reported_tokens = self._int(item.get("reported_tokens"), -1)
+                if recent_reported_tokens < 0:
+                    if recent_estimated_tokens <= 0 and bool(item.get("estimated", False)):
+                        recent_estimated_tokens = recent_total_tokens
+                    recent_reported_tokens = max(0, recent_total_tokens - recent_estimated_tokens)
                 recent.append(
                     {
                         "time": self._single_line(item.get("time"), 24),
@@ -28509,7 +28578,10 @@ class PrivateCompanionPageApi(
                         "prompt_tokens": self._int(item.get("prompt_tokens")),
                         "completion_tokens": self._int(item.get("completion_tokens")),
                         "reasoning_tokens": self._int(item.get("reasoning_tokens")),
-                        "total_tokens": self._int(item.get("total_tokens")),
+                        "total_tokens": recent_total_tokens,
+                        "reported_tokens": recent_reported_tokens,
+                        "estimated_tokens": recent_estimated_tokens,
+                        "usage_source": self._single_line(item.get("usage_source"), 20),
                         "cached_tokens": self._int(item.get("cached_tokens")),
                         "cache_read_tokens": self._int(item.get("cache_read_tokens")),
                         "cache_write_tokens": self._int(item.get("cache_write_tokens")),
@@ -28575,6 +28647,9 @@ class PrivateCompanionPageApi(
                         "completion_tokens": self._int(item.get("completion_tokens")),
                         "reasoning_tokens": self._int(item.get("reasoning_tokens")),
                         "total_tokens": self._int(item.get("total_tokens")),
+                        "reported_tokens": self._int(item.get("reported_tokens")),
+                        "estimated_tokens": self._int(item.get("estimated_tokens")),
+                        "usage_source": self._single_line(item.get("usage_source"), 20),
                         "cached_tokens": self._int(item.get("cached_tokens")),
                         "cache_read_tokens": self._int(item.get("cache_read_tokens")),
                         "cache_write_tokens": self._int(item.get("cache_write_tokens")),
@@ -28621,6 +28696,13 @@ class PrivateCompanionPageApi(
             for item in recent_raw[-80:][::-1]:
                 if not isinstance(item, dict):
                     continue
+                recent_total_tokens = self._int(item.get("total_tokens"))
+                recent_estimated_tokens = self._int(item.get("estimated_tokens"))
+                recent_reported_tokens = self._int(item.get("reported_tokens"), -1)
+                if recent_reported_tokens < 0:
+                    if recent_estimated_tokens <= 0 and bool(item.get("estimated", False)):
+                        recent_estimated_tokens = recent_total_tokens
+                    recent_reported_tokens = max(0, recent_total_tokens - recent_estimated_tokens)
                 recent.append(
                     {
                         "time": self._single_line(item.get("time"), 24),
@@ -28631,7 +28713,10 @@ class PrivateCompanionPageApi(
                         "prompt_tokens": self._int(item.get("prompt_tokens")),
                         "completion_tokens": self._int(item.get("completion_tokens")),
                         "reasoning_tokens": self._int(item.get("reasoning_tokens")),
-                        "total_tokens": self._int(item.get("total_tokens")),
+                        "total_tokens": recent_total_tokens,
+                        "reported_tokens": recent_reported_tokens,
+                        "estimated_tokens": recent_estimated_tokens,
+                        "usage_source": self._single_line(item.get("usage_source"), 20),
                         "cached_tokens": self._int(item.get("cached_tokens")),
                         "cache_read_tokens": self._int(item.get("cache_read_tokens")),
                         "cache_write_tokens": self._int(item.get("cache_write_tokens")),
@@ -28649,8 +28734,8 @@ class PrivateCompanionPageApi(
             "plugin_name": self._single_line(usage.get("plugin_name") or "astrbot_plugin_memory_companion", 80),
             "reason": self._single_line(usage.get("reason"), 160),
             "note": self._single_line(
-                usage.get("note") or "仅展示记忆插件自身模型消耗，不计入陪伴插件每日 Token 限额。",
-                220,
+                usage.get("note") or "仅展示记忆插件自身模型调用；已确认 Token 来自 Provider 用量，估算 Token 只用于标记无用量返回或失败请求，不计入陪伴插件每日 Token 限额。",
+                300,
             ),
             "counted_in_private_companion_budget": bool(usage.get("counted_in_private_companion_budget", False)),
             "updated_at": self._single_line(usage.get("updated_at"), 24),
@@ -28670,6 +28755,9 @@ class PrivateCompanionPageApi(
         elapsed = cls._int(bucket.get("elapsed_ms"))
         total_tokens = cls._int(bucket.get("total_tokens"))
         estimated_tokens = cls._int(bucket.get("estimated_tokens"))
+        reported_tokens = cls._int(bucket.get("reported_tokens"), -1)
+        if reported_tokens < 0:
+            reported_tokens = max(0, total_tokens - estimated_tokens)
         cached_tokens = cls._int(bucket.get("cached_tokens"))
         cache_read_tokens = cls._int(bucket.get("cache_read_tokens"))
         cache_write_tokens = cls._int(bucket.get("cache_write_tokens"))
@@ -28682,13 +28770,17 @@ class PrivateCompanionPageApi(
             "completion_tokens": cls._int(bucket.get("completion_tokens")),
             "reasoning_tokens": reasoning_tokens,
             "total_tokens": total_tokens,
+            "reported_tokens": reported_tokens,
             "cached_tokens": cached_tokens,
             "cache_read_tokens": cache_read_tokens,
             "cache_write_tokens": cache_write_tokens,
             "cached_ratio": round(cached_tokens / total_tokens, 4) if total_tokens > 0 else 0,
             "estimated_tokens": estimated_tokens,
             "estimated_ratio": round(estimated_tokens / total_tokens, 4) if total_tokens > 0 else 0,
+            "reported_ratio": round(reported_tokens / total_tokens, 4) if total_tokens > 0 else 0,
+            "estimated_calls": cls._int(bucket.get("estimated_calls")),
             "avg_tokens": round(total_tokens / calls, 1) if calls > 0 else 0,
+            "avg_reported_tokens": round(reported_tokens / calls, 1) if calls > 0 else 0,
             "avg_latency_ms": round(elapsed / calls, 1) if calls > 0 else 0,
             "last_ts": cls._float(bucket.get("last_ts")),
         }

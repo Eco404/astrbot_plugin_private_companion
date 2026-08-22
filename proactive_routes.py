@@ -477,7 +477,16 @@ class RelationalRoute(ProactiveRoute):
     label = "关系关怀"
     source_names = frozenset({"habit", "balance", "random"})
     reason_names = frozenset(
-        {"quiet_care", "check_in", "low_balance", "memory_echo", "mood_checkin", "absence_miss"}
+        {
+            "quiet_care",
+            "check_in",
+            "low_balance",
+            "memory_echo",
+            "mood_checkin",
+            "absence_miss",
+            "anonymous_area_dwell",
+            "anonymous_area_familiarity",
+        }
     )
     response_expectation = "expected"
 

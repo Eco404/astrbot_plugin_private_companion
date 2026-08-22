@@ -32879,6 +32879,8 @@ pre {
 }
 
 .reality-mobile-config .reality-enable-field { grid-column: span 3; }
+.reality-mobile-inline-fields { grid-column: span 3; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.reality-mobile-inline-fields label > span { display: block; margin-bottom: 6px; font-size: 12px; color: var(--muted, #667078); }
 .reality-mobile-config > button { justify-self: start; }
 .reality-mobile-guide {
   display: grid;
@@ -32931,6 +32933,7 @@ pre {
   .reality-mobile-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .reality-mobile-config { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .reality-mobile-config .reality-enable-field { grid-column: span 2; }
+  .reality-mobile-inline-fields { grid-column: span 2; }
   .reality-mobile-proxy-field { grid-column: span 2; }
   .reality-mobile-methods { grid-template-columns: minmax(0, 1fr); }
 }
@@ -32945,6 +32948,7 @@ pre {
   .reality-mobile-summary,
   .reality-mobile-config { grid-template-columns: minmax(0, 1fr); }
   .reality-mobile-config .reality-enable-field { grid-column: auto; }
+  .reality-mobile-inline-fields { grid-column: auto; grid-template-columns: minmax(0, 1fr); }
   .reality-mobile-proxy-field { grid-column: auto; }
 }
 

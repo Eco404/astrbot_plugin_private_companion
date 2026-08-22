@@ -163,6 +163,28 @@ class ProactiveTransitionHarness(ProactiveLocationHarness):
         self.kick_count += 1
 
 
+class AnonymousAreaHarness(ProactiveTransitionHarness):
+    def __init__(self) -> None:
+        super().__init__()
+        self.area_label = "上海市·徐汇区"
+
+    def _mobile_user_proactive_scene(self, _user, now=None):
+        return {
+            "available": True,
+            "area_label": self.area_label,
+            "presence_state": "away",
+            "in_motion": False,
+        }
+
+    @staticmethod
+    def _proactive_quota_policy(_user):
+        return {"tier": 4, "label": "L4"}
+
+    @staticmethod
+    def _environment_fromtimestamp(timestamp):
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+
+
 def test_authorized_mobile_location_is_prompt_context_not_primary_location() -> None:
     harness = MobileSceneHarness()
     snapshot = harness._build_companion_scene_snapshot({"user_id": "owner-1"})
@@ -276,9 +298,26 @@ def test_recent_arrival_at_home_becomes_a_natural_proactive_anchor() -> None:
     assert event is not None
     assert event["reason"] == "check_in"
     assert event["topic"] == "刚到家后的这一小段"
+    assert event["mobile_location_event_type"] == "home_arrival"
+    assert "last_mobile_location_arrival_key" not in user
+
+    # Selecting/queuing an event is not delivery. A later scheduler pass must
+    # still be able to offer the same transition when a send gate deferred it.
+    retry = harness._pick_mobile_location_arrival_event(user)
+    assert retry is not None
 
     user["last_mobile_location_arrival_key"] = event["_mobile_location_transition_key"]
     assert harness._pick_mobile_location_arrival_event(user) is None
+
+
+def test_mobile_location_transition_is_committed_only_after_real_send() -> None:
+    harness = ProactiveTransitionHarness()
+    user = {"user_id": "owner-route", "planned_mobile_location_transition_key": "transition-1"}
+
+    harness._commit_mobile_location_arrival_after_send(user)
+
+    assert user["last_mobile_location_arrival_key"] == "transition-1"
+    assert user["planned_mobile_location_transition_key"] == ""
 
 
 def test_mobile_location_watch_wakes_once_for_a_new_transition() -> None:
@@ -385,3 +424,63 @@ def test_low_battery_adjusts_location_event_tone_without_becoming_the_topic() ->
     assert event["tone"] == "轻一点，短一点，不邀请长通话"
     assert "电量" not in event["topic"]
     assert "电量" not in event["motive"]
+
+
+def test_anonymous_area_dwell_waits_until_departure_then_delays_followup() -> None:
+    harness = AnonymousAreaHarness()
+    user = harness.data["users"]["owner-route"]
+    started = 1_000.0
+
+    assert harness._observe_mobile_anonymous_area(user, harness._mobile_user_proactive_scene(user), now=started) is True
+    assert harness._pick_mobile_anonymous_area_event(user, now=started + 2_000) is None
+
+    # L4 needs a stable 90-minute dwell; the candidate is created only when
+    # the anonymous area is left, then scheduled with a human-like delay.
+    harness._observe_mobile_anonymous_area(user, harness._mobile_user_proactive_scene(user), now=started + 5_400)
+    harness.area_label = ""
+    assert harness._observe_mobile_anonymous_area(user, harness._mobile_user_proactive_scene(user), now=started + 5_401) is True
+    event = harness._pick_mobile_anonymous_area_event(user, now=started + 6_000)
+
+    assert event is not None
+    assert event["reason"] == "anonymous_area_dwell"
+    assert event["_scheduled_ts"] > started + 6_000
+    assert "上海市" not in str(event)
+    assert len(user["mobile_anonymous_area_visits"][0]["token"]) == 20
+
+
+def test_anonymous_area_repeat_visits_create_familiarity_without_location_name() -> None:
+    harness = AnonymousAreaHarness()
+    user = harness.data["users"]["owner-route"]
+    base = 10_000.0
+
+    for index in range(3):
+        visit_start = base + index * 10_000
+        harness.area_label = "上海市·徐汇区"
+        harness._observe_mobile_anonymous_area(user, harness._mobile_user_proactive_scene(user), now=visit_start)
+        harness._observe_mobile_anonymous_area(user, harness._mobile_user_proactive_scene(user), now=visit_start + 5_400)
+        harness.area_label = ""
+        harness._observe_mobile_anonymous_area(user, harness._mobile_user_proactive_scene(user), now=visit_start + 5_401)
+        if index < 2:
+            user["mobile_anonymous_area_pending"] = {}
+
+    event = harness._pick_mobile_anonymous_area_event(user, now=base + 2 * 10_000 + 6_000)
+
+    assert event is not None
+    assert event["reason"] == "anonymous_area_familiarity"
+    assert event["context"]["visit_count"] >= 3
+    assert "徐汇" not in str(event)
+
+
+def test_location_humanization_budget_keeps_cues_from_piling_up() -> None:
+    harness = AnonymousAreaHarness()
+    user = harness.data["users"]["owner-route"]
+    now = 100_000.0
+
+    assert harness._mobile_location_humanization_budget_available(user, now=now)
+    user["last_mobile_location_humanization_at"] = now - 3_599
+    assert not harness._mobile_location_humanization_budget_available(user, now=now)
+    assert harness._mobile_location_humanization_budget_available(user, now=now + 3_600)
+
+    harness.area_label = "上海市·徐汇区"
+    user["last_mobile_location_humanization_at"] = now
+    assert harness._pick_mobile_anonymous_area_event(user, now=now + 60) is None

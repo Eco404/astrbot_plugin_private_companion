@@ -32767,6 +32767,15 @@ function renderRealityTouchMobilePanel() {
         <label><span>允许配对的用户 ID</span><input name="mobile_allowed_user_id" value="${escapeHtml(mobile.allowed_user_id || "")}" placeholder="主要用户 ID"></label>
         <label><span>会话有效期（小时）</span><input name="mobile_session_ttl_hours" type="number" min="1" max="720" value="${Number(mobile.session_ttl_hours || 168)}"></label>
         <label><span>位置上下文有效期（秒）</span><input name="mobile_location_ttl_seconds" type="number" min="60" max="86400" value="${Number(mobile.location_ttl_seconds || 900)}"></label>
+        <label class="reality-enable-field">
+          <input type="checkbox" name="mobile_amap_reverse_geocode_enabled" ${mobile.amap_reverse_geocode_enabled ? "checked" : ""}>
+          <span><b>启用高德区域识别</b><small>将手机位置转换为城市/城区背景，用于通勤、天气和生活场景；不把精确地址交给陪伴模型。</small></span>
+        </label>
+        <label><span>高德 Web 服务 Key</span><input name="mobile_amap_api_key" type="password" autocomplete="new-password" placeholder="${mobile.amap_api_key_configured ? "已配置，留空保持原值" : "粘贴高德控制台生成的 Key"}"></label>
+        <div class="reality-mobile-inline-fields">
+          <label><span>区域缓存（秒）</span><input name="mobile_amap_cache_ttl_seconds" type="number" min="60" max="604800" step="60" value="${Number(mobile.amap_cache_ttl_seconds || 1800)}"></label>
+          <label><span>请求超时（秒）</span><input name="mobile_amap_request_timeout_seconds" type="number" min="1" max="20" step="1" value="${Number(mobile.amap_request_timeout_seconds || 5)}"></label>
+        </div>
         <label class="reality-enable-field reality-mobile-proxy-field">
           <input type="checkbox" name="mobile_proxy_rooms" ${mobile.proxy_rooms !== false ? "checked" : ""}>
           <span><b>统一代理一起 / 游戏 / 协同房间</b><small>手机只访问移动网关，由网关转发页面、接口、媒体和 WebSocket；推荐保持开启。</small></span>
@@ -32881,6 +32890,10 @@ function realityGlobalConfigPayload(root, enabledOverride) {
       allowed_user_id: form?.elements.mobile_allowed_user_id?.value || mobile.allowed_user_id || "",
       session_ttl_hours: Number(form?.elements.mobile_session_ttl_hours?.value || mobile.session_ttl_hours || 168),
       location_ttl_seconds: Number(form?.elements.mobile_location_ttl_seconds?.value || mobile.location_ttl_seconds || 900),
+      amap_reverse_geocode_enabled: form ? Boolean(form.elements.mobile_amap_reverse_geocode_enabled?.checked) : mobile.amap_reverse_geocode_enabled === true,
+      amap_api_key: form?.elements.mobile_amap_api_key?.value || "",
+      amap_cache_ttl_seconds: Number(form?.elements.mobile_amap_cache_ttl_seconds?.value || mobile.amap_cache_ttl_seconds || 1800),
+      amap_request_timeout_seconds: Number(form?.elements.mobile_amap_request_timeout_seconds?.value || mobile.amap_request_timeout_seconds || 5),
       telemetry_enabled: form?.elements.mobile_telemetry_enabled
         ? Boolean(form.elements.mobile_telemetry_enabled.checked)
         : mobile.telemetry_enabled === true,

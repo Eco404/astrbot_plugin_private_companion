@@ -1019,6 +1019,7 @@ class SceneContextMixin:
         place = location.get("place") if isinstance(location.get("place"), dict) else {}
         place_name = _single_line(place.get("name"), 40)
         place_kind = _single_line(place.get("kind"), 24)
+        area_label = _single_line(place.get("area_label"), 100)
         confidence = _single_line(place.get("confidence"), 32)
         try:
             speed_mps = max(0.0, float(location.get("speed_mps") or 0.0))
@@ -1100,6 +1101,7 @@ class SceneContextMixin:
             "matched": presence_state == "at_place",
             "place_name": place_name,
             "place_kind": place_kind,
+            "area_label": area_label,
             "transition_kind": transition_kind,
             "transition_key": transition_key,
             "recent_transition": bool(recent_arrival or recent_departure),
@@ -1182,6 +1184,9 @@ class SceneContextMixin:
         if not scene:
             return ""
         facts: list[str] = []
+        area_label = _single_line(scene.get("area_label"), 100)
+        if area_label:
+            facts.append(f"城市/城区背景：{area_label}（仅作粗粒度环境线索，不代表精确地址）")
         presence_state = _single_line(scene.get("presence_state"), 32)
         if presence_state == "at_place":
             place_name = _single_line(scene.get("place_name"), 40)
@@ -1206,7 +1211,7 @@ class SceneContextMixin:
             else:
                 facts.append("用户当前处于已标记地点范围外且位置仍在变化，只可理解为在路上，目的地未知")
         elif presence_state == "away":
-            facts.append("用户当前处于已标记地点范围外，不能继续沿用在家或在公司的描述")
+            facts.append("未命中已标记地点，用户当前处于已标记地点范围外，不能继续沿用在家或在公司的描述")
         elif presence_state == "unknown":
             facts.append("用户已授权位置感知，但当前没有足够地点信息判断是在固定地点还是路上")
         else:
@@ -1254,5 +1259,5 @@ class SceneContextMixin:
             "【主动场景位置线索】\n"
             + "；".join(facts)
             + "\n这是用户授权的弱场景证据，只用于调整主动话题、时机和语气（如通勤、到家或工作间隙）。"
-            "不要主动复述地点、坐标、轨迹或设备状态，不要从这些信号推断用户正在做的具体动作，也不要把感知本身硬写成主动话题。"
+            "不要主动复述地点、坐标、轨迹或设备状态，不要从这些信号推断用户正在做的具体动作，也不要把位置本身硬写成主动话题，不要把感知本身硬写成主动话题。"
         )

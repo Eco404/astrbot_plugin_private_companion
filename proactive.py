@@ -104,6 +104,13 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+
+
+_ANONYMOUS_AREA_STABLE_GAP_SECONDS = 90 * 60
+_ANONYMOUS_AREA_PENDING_TTL_SECONDS = 24 * 60 * 60
+_ANONYMOUS_AREA_VISIT_GAP_SECONDS = 2 * 60 * 60
+_ANONYMOUS_AREA_DWELL_THRESHOLDS_SECONDS = {2: 6 * 3600, 3: 3 * 3600, 4: 90 * 60, 5: 45 * 60}
+_MOBILE_LOCATION_HUMANIZATION_BUDGET_SECONDS = 60 * 60
 from .relationship_policy import relationship_stage_for_score
 from .companion_interaction_expression import current_interaction_projection
 from .user_rest_gate import UserRestGateMixin
@@ -3071,6 +3078,7 @@ class ProactiveMixin(UserRestGateMixin):
             ("meal_care", self._pick_meal_care_event(user, now=now)),
             ("daily_greeting", self._pick_daily_greeting_event(user, now)),
             ("mobile_location", self._pick_mobile_location_arrival_event(user, now=now)),
+            ("anonymous_area", self._pick_mobile_anonymous_area_event(user, now=now)),
             ("birthday_curiosity", self._pick_birthday_curiosity_event(user, now)),
             ("habit", self._habit_proactive_event_for_user(user, now=now)),
             ("state", self._pick_state_need_event(user, now=now)),
@@ -3181,13 +3189,10 @@ class ProactiveMixin(UserRestGateMixin):
                 impulse["expire_at"] = _safe_float(impulse.get("expire_at"), 0) + shift
             if self._queue_proactive_impulse(user, impulse):
                 queued += 1
-                if source == "mobile_location":
-                    transition_key = _single_line(event.get("_mobile_location_transition_key"), 80)
-                    if transition_key:
-                        user["last_mobile_location_arrival_key"] = transition_key
-                        if _single_line(user.get("mobile_location_priority_key"), 80) == transition_key:
-                            user["mobile_location_priority_key"] = ""
-                            user["mobile_location_priority_until"] = 0
+                if source == "anonymous_area":
+                    pending = user.get("mobile_anonymous_area_pending")
+                    if isinstance(pending, dict):
+                        pending["candidate_at"] = now
         return queued
 
     def _queue_random_proactive_impulse(
@@ -3548,6 +3553,8 @@ class ProactiveMixin(UserRestGateMixin):
         user["planned_proactive_motive"] = ""
         user["planned_proactive_topic"] = ""
         user["planned_proactive_impulse_id"] = ""
+        user["planned_mobile_location_transition_key"] = ""
+        user["planned_mobile_location_event_type"] = ""
         user["planned_proactive_window_start_at"] = 0
         user["planned_proactive_best_until_at"] = 0
         user["planned_proactive_expire_at"] = 0
@@ -3774,6 +3781,182 @@ class ProactiveMixin(UserRestGateMixin):
             and bool(user.get("enabled", True))
         ]
 
+    @staticmethod
+    def _anonymous_area_token(scene: dict[str, Any]) -> str:
+        """Return an opaque kilometre-scale token; never persist raw location data."""
+        if not isinstance(scene, dict):
+            return ""
+        area = _single_line(scene.get("area_label"), 100)
+        if not area:
+            return ""
+        # Keep the durable token at city/district granularity. The raw area
+        # label is never stored, and no coordinate is needed for this social
+        # cue; a broader token also avoids pretending to recognise a venue.
+        return hashlib.sha256(area.encode("utf-8")).hexdigest()[:20]
+
+    @staticmethod
+    def _anonymous_area_is_stable(scene: dict[str, Any]) -> bool:
+        if not isinstance(scene, dict) or not scene.get("available"):
+            return False
+        if scene.get("presence_state") in {"at_place", "departing", "arriving", "in_transit"}:
+            return False
+        return not bool(scene.get("in_motion"))
+
+    def _anonymous_area_runtime_store(self) -> dict[str, dict[str, Any]]:
+        store = getattr(self, "_mobile_anonymous_area_runtime", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._mobile_anonymous_area_runtime = store
+        return store
+
+    def _anonymous_area_visit_records(self, user: dict[str, Any]) -> list[dict[str, Any]]:
+        records = user.get("mobile_anonymous_area_visits")
+        if not isinstance(records, list):
+            records = []
+            user["mobile_anonymous_area_visits"] = records
+        return [item for item in records if isinstance(item, dict)]
+
+    @staticmethod
+    def _mobile_location_humanization_budget_available(
+        user: dict[str, Any],
+        *,
+        now: float,
+    ) -> bool:
+        """Keep location-derived social cues from piling up in one hour."""
+        last_at = _safe_float(user.get("last_mobile_location_humanization_at"), 0.0)
+        return last_at <= 0 or now - last_at >= _MOBILE_LOCATION_HUMANIZATION_BUDGET_SECONDS
+
+    def _observe_mobile_anonymous_area(
+        self,
+        user: dict[str, Any],
+        scene: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Track coarse unmarked-area dwell without writing every GPS sample."""
+        if not isinstance(user, dict):
+            return False
+        check_now = _now_ts() if now is None else float(now)
+        user_id = _single_line(user.get("user_id") or user.get("id"), 120)
+        if not user_id:
+            return False
+        store = self._anonymous_area_runtime_store()
+        current = store.get(user_id) if isinstance(store.get(user_id), dict) else {}
+        token = self._anonymous_area_token(scene) if self._anonymous_area_is_stable(scene) else ""
+        previous_token = _single_line(current.get("token"), 40)
+        last_seen = _safe_float(current.get("last_seen_at"), 0.0)
+        changed = False
+
+        def finish_previous() -> None:
+            nonlocal changed
+            if not previous_token:
+                return
+            dwell_seconds = max(0.0, last_seen - _safe_float(current.get("started_at"), last_seen))
+            policy_getter = getattr(self, "_proactive_quota_policy", None)
+            policy = policy_getter(user) if callable(policy_getter) else {}
+            tier = _safe_int(policy.get("tier"), 3, 1, 5) if isinstance(policy, dict) else 3
+            threshold = _ANONYMOUS_AREA_DWELL_THRESHOLDS_SECONDS.get(tier, 10**9)
+            visits = self._anonymous_area_visit_records(user)
+            visit = next((item for item in visits if _single_line(item.get("token"), 40) == previous_token), None)
+            familiar = _safe_int(visit.get("count"), 0, 0) >= 3 if isinstance(visit, dict) else False
+            if dwell_seconds >= threshold or familiar:
+                user["mobile_anonymous_area_pending"] = {
+                    "token": previous_token,
+                    "left_at": check_now,
+                    "dwell_minutes": int(round(dwell_seconds / 60.0)),
+                    "visit_count": _safe_int(visit.get("count"), 1, 1) if isinstance(visit, dict) else 1,
+                    "familiar": familiar,
+                    "expires_at": check_now + _ANONYMOUS_AREA_PENDING_TTL_SECONDS,
+                }
+                changed = True
+            store.pop(user_id, None)
+
+        if not token:
+            finish_previous()
+            return changed
+        if previous_token and previous_token != token:
+            finish_previous()
+            current = {}
+            previous_token = ""
+        if previous_token and last_seen > 0 and check_now - last_seen > _ANONYMOUS_AREA_STABLE_GAP_SECONDS:
+            finish_previous()
+            current = {}
+            previous_token = ""
+        if not previous_token:
+            started_at = check_now
+            current = {"token": token, "started_at": started_at, "last_seen_at": check_now}
+            store[user_id] = current
+            visits = self._anonymous_area_visit_records(user)
+            visit = next((item for item in visits if _single_line(item.get("token"), 40) == token), None)
+            if not isinstance(visit, dict) or check_now - _safe_float(visit.get("last_visit_at"), 0.0) > _ANONYMOUS_AREA_VISIT_GAP_SECONDS:
+                if not isinstance(visit, dict):
+                    visit = {"token": token, "count": 0, "first_visit_at": check_now}
+                    visits.append(visit)
+                visit["count"] = min(20, _safe_int(visit.get("count"), 0, 0) + 1)
+                visit["last_visit_at"] = check_now
+                user["mobile_anonymous_area_visits"] = visits[-8:]
+                changed = True
+            return changed
+        current["last_seen_at"] = check_now
+        return changed
+
+    def _pick_mobile_anonymous_area_event(
+        self,
+        user: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Turn a completed anonymous-area visit into a delayed, low-pressure thought."""
+        if not isinstance(user, dict) or self._private_user_role(user) == "friend":
+            return None
+        check_now = _now_ts() if now is None else float(now)
+        if not self._mobile_location_humanization_budget_available(user, now=check_now):
+            return None
+        pending = user.get("mobile_anonymous_area_pending")
+        if not isinstance(pending, dict) or _safe_float(pending.get("expires_at"), 0.0) <= check_now:
+            if isinstance(pending, dict) and pending:
+                user["mobile_anonymous_area_pending"] = {}
+            return None
+        candidate_at = _safe_float(pending.get("candidate_at"), 0.0)
+        if candidate_at > 0 and check_now - candidate_at < 24 * 3600:
+            return None
+        familiar = bool(pending.get("familiar"))
+        dwell_minutes = _safe_int(pending.get("dwell_minutes"), 0, 0, 24 * 60)
+        if familiar:
+            return {
+                "date": _today_key(),
+                "window": self._window_from_delay_minutes(20, width_minutes=70),
+                "reason": "anonymous_area_familiarity",
+                "action": "message",
+                "why": "用户最近几次在相似的未命名区域停留，离开后自然产生一点熟悉感",
+                "topic": "最近好像有个常去的地方",
+                "motive": "不是想查问位置，只是最近几次都想起对方似乎有个常去的地方，想轻轻聊起",
+                "scene": "用户离开一个最近重复到访的匿名区域后",
+                "tone": "像聊天时忽然注意到，不追问地点名称",
+                "impulse": "先分享一点模糊的熟悉感，把命名权留给用户",
+                "_scheduled_ts": check_now + random.uniform(12 * 60, 42 * 60),
+                "context_key": "anonymous_area_context",
+                "context": {"visit_count": _safe_int(pending.get("visit_count"), 3, 1), "after_departure": True},
+                "origin_event_id": f"anonymous-area-familiarity:{pending.get('token')}:{int(pending.get('left_at') or check_now)}",
+                "followup_kind": "anonymous_area_familiarity",
+            }
+        return {
+            "date": _today_key(),
+            "window": self._window_from_delay_minutes(20, width_minutes=70),
+            "reason": "anonymous_area_dwell",
+            "action": "message",
+            "why": "用户在未命名区域稳定停留了一段时间，离开后想用不打扰的方式关心一下",
+            "topic": "刚才在外面待了挺久",
+            "motive": "刚才好像在外面待了挺久，离开一会儿后想轻轻问问今天还顺不顺",
+            "scene": "用户离开一个未命名区域后的回程余韵",
+            "tone": "轻一点，不暴露位置感知，不追问具体地点",
+            "impulse": "先关心感受，不把位置本身说成话题",
+            "_scheduled_ts": check_now + random.uniform(12 * 60, 42 * 60),
+            "context_key": "anonymous_area_context",
+            "context": {"dwell_minutes": dwell_minutes, "after_departure": True},
+            "origin_event_id": f"anonymous-area-dwell:{pending.get('token')}:{int(pending.get('left_at') or check_now)}",
+            "followup_kind": "anonymous_area_dwell",
+        }
+
     async def _mobile_location_watch_once(
         self,
         *,
@@ -3809,6 +3992,8 @@ class ProactiveMixin(UserRestGateMixin):
                 scene = scene_getter(user)
             except Exception:
                 continue
+            anonymous_changed = self._observe_mobile_anonymous_area(user, scene, now=check_now)
+            changed = changed or anonymous_changed
             transition_key = _single_line(scene.get("transition_key"), 80) if isinstance(scene, dict) else ""
             if not transition_key:
                 user["mobile_location_watch_initialized"] = True
