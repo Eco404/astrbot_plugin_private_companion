@@ -14649,21 +14649,25 @@ function renderTokenMemoryPluginSummary(scope, plugin) {
   const totals = scope?.totals || {};
   const displayName = scope?.displayName || plugin?.display_name || "我会牢牢记住你";
   const totalTokens = Number(totals.total_tokens || 0);
+  const reportedTokens = Number(totals.reported_tokens ?? Math.max(0, totalTokens - Number(totals.estimated_tokens || 0)));
+  const estimatedTokens = Number(totals.estimated_tokens || 0);
   const calls = Number(totals.calls || 0);
   const errors = Number(totals.errors || 0);
-  const avgTokens = Math.round(Number(totals.avg_tokens || 0));
+  const avgReportedTokens = Math.round(Number(totals.avg_reported_tokens ?? totals.avg_tokens ?? 0));
   const estimatedRatio = Math.round(Number(totals.estimated_ratio || 0) * 100);
   const updatedAt = plugin?.updated_at ? `最近更新：${plugin.updated_at}` : "还没有统计更新时间";
   box.innerHTML = `
     <div class="token-plugin-note">
       <b>${escapeHtml(displayName)}</b>
-      <span>${escapeHtml(plugin?.note || "仅展示记忆插件自身模型消耗，不计入陪伴插件每日 Token 限额。")}</span>
+      <span>${escapeHtml(plugin?.note || "已确认 Token 来自 Provider 用量；估算 Token 只标记无用量返回或失败请求。")}</span>
     </div>
     <div class="token-plugin-stats">
-      ${tokenMetricCard("Token", formatNumber(totalTokens))}
+      ${tokenMetricCard("已确认 Token", formatNumber(reportedTokens))}
+      ${tokenMetricCard("估算 Token", formatNumber(estimatedTokens))}
+      ${tokenMetricCard("合计记账", formatNumber(totalTokens))}
       ${tokenMetricCard("调用次数", formatNumber(calls))}
-      ${tokenMetricCard("平均 Token", formatNumber(avgTokens))}
-      ${tokenMetricCard("估算 / 失败", `${estimatedRatio}% · ${formatNumber(errors)}`)}
+      ${tokenMetricCard("平均已确认", formatNumber(avgReportedTokens))}
+      ${tokenMetricCard("估算占比 / 失败", `${estimatedRatio}% · ${formatNumber(errors)}`)}
     </div>
     <p class="muted small">${escapeHtml(updatedAt)}</p>
   `;
@@ -14677,10 +14681,12 @@ function renderTokenMemoryPluginTaskTable(rows, available, displayName = "记忆
     return;
   }
   box.innerHTML = tokenTable(
-    [`${displayName}任务`, "总 Token", "输入", "输出", "调用", "失败"],
+    [`${displayName}任务`, "已确认", "估算", "合计", "输入", "输出", "调用", "失败"],
     rows,
     (item) => [
       tokenTaskLabel(item.key),
+      formatNumber(item.reported_tokens),
+      formatNumber(item.estimated_tokens),
       formatNumber(item.total_tokens),
       formatNumber(item.prompt_tokens),
       formatNumber(item.completion_tokens),
@@ -14699,10 +14705,12 @@ function renderTokenMemoryPluginProviderTable(rows, available) {
     return;
   }
   box.innerHTML = tokenTable(
-    ["Provider", "总 Token", "缓存", "调用", "估算", "平均延迟"],
+    ["Provider", "已确认", "估算", "合计", "缓存", "调用", "估算占比", "平均延迟"],
     rows,
     (item) => [
       item.key || "default",
+      formatNumber(item.reported_tokens),
+      formatNumber(item.estimated_tokens),
       formatNumber(item.total_tokens),
       tokenCacheText(item),
       formatNumber(item.calls),
@@ -14721,13 +14729,14 @@ function renderTokenMemoryPluginRecentTable(rows, available, displayName = "记�
     return;
   }
   box.innerHTML = tokenTable(
-    ["时间", `${displayName}任务`, "Provider", "Token", "缓存", "延迟", "状态"],
+    ["时间", `${displayName}任务`, "Provider", "已确认 / 估算", "合计", "缓存", "延迟", "状态"],
     rows,
     (item) => [
       formatRecentTime(item.ts, item.time),
       tokenTaskLabel(item.task),
       item.provider || "default",
-      `${formatNumber(item.total_tokens)}${item.estimated ? " 估" : ""}`,
+      `${formatNumber(item.reported_tokens)} / ${formatNumber(item.estimated_tokens)}`,
+      formatNumber(item.total_tokens),
       tokenCacheText(item),
       `${formatNumber(Math.round(Number(item.elapsed_ms || item.latency_ms || 0)))} ms`,
       item.success ? "成功" : `失败 ${item.error || ""}`.trim(),

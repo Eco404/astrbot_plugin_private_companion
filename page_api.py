@@ -291,12 +291,7 @@ class PrivateCompanionPageApi(
         saver = getattr(plugin, "_save_data_sync", None)
         if not callable(saver):
             return
-        try:
-            saver(sections=sections)
-        except TypeError as exc:
-            if "unexpected keyword argument" not in str(exc) or "sections" not in str(exc):
-                raise
-            saver()
+        saver(sections=sections)
 
     IMAGE_API_RUNTIME_SETTING_KEYS = {
         "external_image_api_platform",

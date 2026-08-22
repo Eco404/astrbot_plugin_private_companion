@@ -14659,7 +14659,7 @@ function renderTokenMemoryPluginSummary(scope, plugin) {
   box.innerHTML = `
     <div class="token-plugin-note">
       <b>${escapeHtml(displayName)}</b>
-      <span>${escapeHtml(plugin?.note || "仅展示记忆插件自身模型消耗，不计入陪伴插件每日 Token 限额。")}</span>
+      <span>${escapeHtml(plugin?.note || "已确认 Token 来自 Provider 用量；估算 Token 只标记无用量返回或失败请求。")}</span>
     </div>
     <div class="token-plugin-stats">
       ${tokenMetricCard("已确认 Token", formatNumber(reportedTokens))}
