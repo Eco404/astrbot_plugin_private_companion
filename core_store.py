@@ -617,6 +617,65 @@ class CoreStoreMixin:
         else:
             shutil.copy2(backup_path, path)
 
+    def _storage_backend_state_path(self) -> Path:
+        data_dir = getattr(self, "data_dir", "")
+        if not data_dir:
+            manager = getattr(self, "store_manager", None)
+            data_file = getattr(manager, "data_file", "")
+            data_dir = Path(data_file).parent if data_file else Path(getattr(self, "data_file", ".")).parent
+        return Path(data_dir) / ".storage-backend-state.json"
+
+    def _read_storage_backend_state(self) -> dict[str, str] | None:
+        try:
+            with self._storage_backend_state_path().open("r", encoding="utf-8") as stream:
+                state = json.load(stream)
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+            return None
+        if not isinstance(state, dict):
+            return None
+        backend = str(state.get("backend") or "").strip().lower()
+        sqlite_path = str(state.get("sqlite_path") or "").strip()
+        if backend not in {"json", "sqlite"}:
+            return None
+        return {"backend": backend, "sqlite_path": sqlite_path}
+
+    def _write_storage_backend_state(self, backend: str, sqlite_path: str) -> None:
+        path = self._storage_backend_state_path()
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with temporary.open("w", encoding="utf-8") as stream:
+                json.dump(
+                    {"backend": backend, "sqlite_path": sqlite_path},
+                    stream,
+                    ensure_ascii=False,
+                )
+                stream.flush()
+                try:
+                    os.fsync(stream.fileno())
+                except OSError:
+                    pass
+            os.replace(temporary, path)
+        except OSError as exc:
+            logger.warning(
+                "[PrivateCompanion] 后端状态标记写入失败，不影响当前存储: %s",
+                _single_line(exc, 160),
+            )
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _legacy_json_is_newer_than_sqlite(self, sqlite_path: Path) -> bool:
+        """Detect a pre-marker JSON->SQLite switch without trusting a stale mirror."""
+        try:
+            json_mtime = Path(self.data_file).stat().st_mtime_ns
+            sqlite_mtime = sqlite_path.stat().st_mtime_ns
+        except OSError:
+            return False
+        return json_mtime - sqlite_mtime > 1_000_000_000
+
     def _rebuild_store_manager(self, *, reload_data: bool = False) -> None:
         backend = str(getattr(self, "storage_backend", "json") or "json").strip().lower() or "json"
         if backend not in {"json", "sqlite"}:
@@ -674,6 +733,24 @@ class CoreStoreMixin:
                 == Path(default_sqlite_path).resolve()
                 else previous_manager_sqlite_path
             )
+        migration_source_backend = ""
+        migration_source_sqlite_path = ""
+        if not reload_data:
+            state = self._read_storage_backend_state()
+            if state is not None:
+                state_backend = state["backend"]
+                state_sqlite_path = state["sqlite_path"]
+                switched_path = (
+                    backend == "sqlite"
+                    and state_backend == "sqlite"
+                    and state_sqlite_path
+                    and Path(state_sqlite_path).resolve() != Path(sqlite_path).resolve()
+                )
+                if state_backend != backend or switched_path:
+                    migration_source_backend = state_backend
+                    migration_source_sqlite_path = state_sqlite_path
+            elif backend == "sqlite" and self._legacy_json_is_newer_than_sqlite(Path(sqlite_path)):
+                migration_source_backend = "json"
         same_store = bool(
             reload_data
             and previous_manager is not None
@@ -695,7 +772,34 @@ class CoreStoreMixin:
                 ensure_defaults=self._ensure_store_defaults,
                 new_store=self._new_store,
             )
-            if reload_data and not same_store and isinstance(previous_data, dict):
+            if not reload_data and migration_source_backend:
+                source_sqlite_path = migration_source_sqlite_path or default_sqlite_path
+                source_manager = StoreManager(
+                    backend_name=migration_source_backend,
+                    data_file=self.data_file,
+                    sqlite_path=source_sqlite_path,
+                    ensure_defaults=self._ensure_store_defaults,
+                    new_store=self._new_store,
+                )
+                source_backend = (
+                    source_manager.sqlite_backend
+                    if migration_source_backend == "sqlite"
+                    else source_manager.json_backend
+                )
+                if source_backend.exists():
+                    source_data = source_backend.load_store()
+                    target_backup = self._backup_store_switch_target(backend, target_path)
+                    target_write_started = True
+                    with self._data_save_io_lock():
+                        with next_manager._store_lock:
+                            next_manager.backend.save_store(deepcopy(source_data))
+                        self._advance_data_save_write_generation()
+                    logger.info(
+                        "[PrivateCompanion] 已从 %s 后端迁移到 %s 后端",
+                        migration_source_backend,
+                        backend,
+                    )
+            elif reload_data and not same_store and isinstance(previous_data, dict):
                 # A backend change must carry the current authority forward before
                 # reading the target, otherwise switching away from SQLite falls
                 # back to an obsolete JSON mirror.
@@ -742,6 +846,7 @@ class CoreStoreMixin:
         if reload_data and isinstance(loaded, dict):
             self.data = loaded
             self._refresh_data_save_revision_from_manager()
+            self._write_storage_backend_state(backend, sqlite_path)
 
     async def _save_config_if_possible(self) -> bool:
         for method_name in ("save_config", "save", "save_conf"):
@@ -1610,6 +1715,10 @@ class CoreStoreMixin:
                     before_maintenance,
                     data,
                     persisted_bookshelf_tombstones,
+                )
+                self._write_storage_backend_state(
+                    manager.backend_name,
+                    str(getattr(manager, "sqlite_path", "") or ""),
                 )
                 return data
             except Exception as exc:
