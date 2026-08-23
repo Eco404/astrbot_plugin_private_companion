@@ -71,6 +71,36 @@ def event_data_save_boundary(handler: Any = None, *, flush: bool = False) -> Any
     return wrapped
 
 
+def _persona_value(owner: Any, key: str, default: Any = None) -> Any:
+    """Read the active persona setting, with a legacy harness fallback."""
+    getter = getattr(owner, "persona_setting", None)
+    if callable(getter):
+        try:
+            return getter(key, default)
+        except Exception:
+            pass
+    return getattr(owner, key, default)
+
+
+def _persona_feature_enabled(owner: Any, key: str, default: bool = False) -> bool:
+    """Apply a persona-scoped feature flag and retain proactive-only unlocks."""
+    if not hasattr(owner, "enable_multi_persona_mode"):
+        checker = getattr(owner, "_feature_enabled_or_temp_unlocked", None)
+        if callable(checker):
+            try:
+                return bool(checker(key, default))
+            except Exception:
+                pass
+    if bool(_persona_value(owner, key, default)):
+        return True
+    unlocker = getattr(owner, "_proactive_only_temp_unlock_allows", None)
+    return bool(
+        _persona_value(owner, "enable_proactive_only_mode", False)
+        and callable(unlocker)
+        and unlocker(key)
+    )
+
+
 @_coalesce_event_data_saves
 async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: Any) -> Any:
     """记录私聊互动、图片防抖、用户画像和主动陪伴反馈。"""
@@ -316,7 +346,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         fast_target_user
         and text
         and not forward_only_prompt
-        and not bool(getattr(self, "enable_smart_message_debounce", False))
+        and not bool(_persona_value(self, 'enable_smart_message_debounce', False))
         and self._message_debounce_seconds("text") <= 0
         and self._is_lightweight_private_passive_inbound(text)
         and not self._meal_care_requires_full_reply(fast_user, text)
@@ -449,7 +479,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 now=received_ts,
             )
         fast_interaction_warmth_applied = (
-            bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            bool(_persona_value(self, "enable_custom_relationship_stage_policy", False))
             and fast_user_is_owner
             and self._apply_interaction_warmth_to_state(text, fast_user)
         )
@@ -517,7 +547,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             ))
         private_image_enhancement_enabled = (
             self._feature_enabled_or_temp_unlocked("enable_private_image_self_recognition")
-            and bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True)))
+            and bool(_persona_value(self, 'enable_message_debounce', _persona_value(self, 'enable_semantic_message_debounce', True)))
             and self._message_debounce_seconds("image") > 0
         )
         private_image_only = (
@@ -566,7 +596,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                     has_visual_provider = False
                 setattr(event, "private_companion_delayed_image_sources", usable_images[:5])
                 has_dynamic_gif_sources = (
-                    bool(getattr(self, "enable_private_image_gif_enhancement", True))
+                    bool(_persona_value(self, 'enable_private_image_gif_enhancement', True))
                     and self._private_image_sources_include_gif(usable_images)
                 )
                 image_mode = self._private_image_delivery_mode(
@@ -665,7 +695,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 buffers[key]["images"] = persisted_images
                 buffers[key]["original_event"] = event
                 has_dynamic_gif_sources = (
-                    bool(getattr(self, "enable_private_image_gif_enhancement", True))
+                    bool(_persona_value(self, 'enable_private_image_gif_enhancement', True))
                     and self._private_image_sources_include_gif(persisted_images)
                 )
                 umo = str(getattr(event, "unified_msg_origin", "") or "")
@@ -803,7 +833,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         if (
             isinstance(suspended, dict)
             and suspended.get("active")
-            and _now_ts() - _safe_float(suspended.get("created_at"), 0) <= self.proactive_reply_context_hours * 3600
+            and _now_ts() - _safe_float(suspended.get("created_at"), 0) <= _persona_value(self, 'proactive_reply_context_hours', 12) * 3600
         ):
             suspended["resume_ready"] = True
             suspended["complaint_enabled"] = False
@@ -912,9 +942,9 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             if (
                 not rest_silence_early_block
                 and (
-                    self.enable_intent_emotion_analysis
-                    or self.enable_relationship_state_machine
-                    or self.enable_emotion_simulation
+                    _persona_value(self, 'enable_intent_emotion_analysis', True)
+                    or _persona_value(self, 'enable_relationship_state_machine', True)
+                    or _persona_value(self, 'enable_emotion_simulation', True)
                 )
             ):
                 intent_profile = self._analyze_inbound_intent(text)
@@ -929,7 +959,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                         event_id=self._event_message_id(event),
                         now=received_ts,
                     )
-                if self.enable_intent_emotion_analysis:
+                if _persona_value(self, 'enable_intent_emotion_analysis', True):
                     user["intent_profile"] = intent_profile
                 if self._should_use_llm_emotion_judgement(text, intent_profile):
                     # Model review does not block the current passive reply; it keeps using cached emotion state.
@@ -1020,7 +1050,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
                 now=received_ts,
             )
         interaction_warmth_applied = (
-            bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            bool(_persona_value(self, 'enable_custom_relationship_stage_policy', False))
             and bool(text)
             and is_target_user
             and user_is_owner
@@ -1175,7 +1205,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
         logger.debug("[PrivateCompanion] 群聊戳一戳 notice 已放行给专用插件")
         return
     self._qzone_note_event_bot(event)
-    if not self._feature_enabled_or_temp_unlocked("enable_group_companion"):
+    if not _persona_feature_enabled(self, "enable_group_companion"):
         return
     group_id = self._extract_group_id_from_event(event)
     if not group_id or not self._group_enabled_for_event(group_id):
@@ -1367,7 +1397,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                 )
             )
             if (at_bot or reply_to_bot) and boundary_profile_known and bool(
-                getattr(self, "enable_relationship_boundary_feedback", True)
+                _persona_value(self, 'enable_relationship_boundary_feedback', True)
             ):
                 current_sender.setdefault("user_id", scoped_sender_id)
                 group_boundary_intent = self._analyze_inbound_intent(text)
@@ -1521,7 +1551,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             setattr(event, "is_at_or_wake_command", True)
             setattr(event, "is_wake", True)
             scene.update({"trigger": "bot_conversation_followup", "talking_to": "bot", "talking_to_name": "你", "reason": "contextual_followup_after_bot_wake"})
-        elif self.enable_group_wakeup_enhancement and str(scene.get("trigger") or "") == "mention_bot_name":
+        elif _persona_value(self, "enable_group_wakeup_enhancement", False) and str(scene.get("trigger") or "") == "mention_bot_name":
             setattr(event, "is_at_or_wake_command", True)
             setattr(event, "is_wake", True)
             strength = self._group_wakeup_strength("direct_word", group, scene)
@@ -1532,7 +1562,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                     "talking_to": "bot",
                     "talking_to_name": "你",
                     "reason": "direct_wakeup_word",
-                    "wakeup_word": _single_line(self.bot_name, 60),
+                    "wakeup_word": _single_line(_persona_value(self, "bot_name", ""), 60),
                     "wakeup_strength": strength,
                     "wakeup_strength_label": self._group_wakeup_strength_label(strength),
                     "wakeup_fatigue": dict(fatigue),
@@ -1543,7 +1573,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             group["last_group_wakeup"] = {
                 "ts": _now_ts(),
                 "type": "direct_word",
-                "word": _single_line(self.bot_name, 60),
+                "word": _single_line(_persona_value(self, "bot_name", ""), 60),
                 "strength": strength,
                 "strength_label": self._group_wakeup_strength_label(strength),
                 "reason": "direct_wakeup_word",
@@ -1808,7 +1838,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
                     "[PrivateCompanion] 群聊高强度消息已合并等待: group=%s sender=%s scope=%s recent_wakeups=%s floor=%s reason=%s wait=%ss text=%s",
                     group_id,
                     sender_id,
-                    getattr(self, "group_high_intensity_merge_scope", "group"),
+                    _persona_value(self, "group_high_intensity_merge_scope", "group"),
                     high_intensity_state.get("recent_wakeups"),
                     high_intensity_state.get("merge_recent_floor"),
                     high_intensity_state.get("reason"),
@@ -2004,7 +2034,7 @@ async def handle_group_message(self: Any, event: Any, *args: Any, **kwargs: Any)
             group_snapshot_high_intensity.get("merge_active"),
             group_snapshot_high_intensity.get("merge_recent_floor"),
             group_snapshot_high_intensity.get("reason"),
-            getattr(self, "group_high_intensity_merge_scope", "group"),
+            _persona_value(self, "group_high_intensity_merge_scope", "group"),
             self._group_high_intensity_merge_wait_seconds(),
         )
     await self._maybe_group_interject(

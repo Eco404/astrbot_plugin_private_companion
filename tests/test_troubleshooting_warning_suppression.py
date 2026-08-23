@@ -47,6 +47,68 @@ class TroubleshootingWarningSuppressionTests(unittest.TestCase):
         self.assertEqual(provider, "proactive.candidate.provider.photo_text")
         self.assertEqual(send, "proactive.candidate.send.photo_text")
 
+    def test_persona_routing_warning_is_rendered_with_semantic_code(self) -> None:
+        self.api.plugin = SimpleNamespace(
+            _format_timestamp_elapsed=lambda _ts: "刚刚"
+        )
+        events = self.api._troubleshooting_recent_events(
+            diagnostics=[],
+            proactive_tasks={},
+            proactive_candidates={},
+            token_stats={"recent": []},
+            persona_routing_warnings=[
+                {
+                    "code": "persona.route.passive_primary_fallback",
+                    "level": "warn",
+                    "disposition": "fallback",
+                    "reason_code": "persona_profile_missing",
+                    "requested_persona_id": "alt",
+                    "active_persona_id": "main",
+                    "window_key": "QBot123:GroupMessage:opaque",
+                    "last_ts": 1,
+                    "count": 3,
+                }
+            ],
+        )
+
+        item = events[0]
+        self.assertEqual("人格路由", item["source"])
+        self.assertEqual("被动消息已回退主人格", item["title"])
+        self.assertEqual(
+            "persona.route.passive_primary_fallback", item["warning_code"]
+        )
+        self.assertEqual(
+            self.api._troubleshooting_semantic_warning_type(item["warning_code"]),
+            item["warning_type"],
+        )
+
+    def test_unspecified_plugin_persona_has_dedicated_title(self) -> None:
+        self.api.plugin = SimpleNamespace(
+            _format_timestamp_elapsed=lambda _ts: "刚刚"
+        )
+        events = self.api._troubleshooting_recent_events(
+            diagnostics=[],
+            proactive_tasks={},
+            proactive_candidates={},
+            token_stats={"recent": []},
+            persona_routing_warnings=[
+                {
+                    "code": "persona.route.plugin_persona_unspecified",
+                    "level": "warn",
+                    "disposition": "sent_with_warning",
+                    "reason_code": "plugin_persona_unspecified",
+                    "window_key": "onebot:FriendMessage:1",
+                    "last_ts": 1,
+                    "count": 1,
+                }
+            ],
+        )
+
+        self.assertEqual("插件人格未指定", events[0]["title"])
+        self.assertEqual(
+            "persona.route.plugin_persona_unspecified", events[0]["warning_code"]
+        )
+
     def test_only_warning_level_items_are_suppressed(self) -> None:
         key = self.api._troubleshooting_warning_type("check", "测试警告")
         items = [

@@ -32,6 +32,7 @@ from .relationship_ledger import normalize_relationship_mode
 from .relationship_policy import relationship_projection_for_bridge
 from .namespace_capability import negotiate_namespace_capability
 from .identity_namespace import validate_namespace_context
+from .persona_config import runtime_persona_setting
 
 
 # The v2 contract was published by the previous Memory Companion release.
@@ -1406,10 +1407,17 @@ class MemoryCompanionAdapterMixin:
                 value = ""
             if value:
                 return value
-        for attr in ("plugin_specific_persona_id", "multi_persona_primary_id"):
-            value = _single_line(getattr(self, attr, ""), 96)
+        primary_getter = getattr(self, "_primary_persona_id", None)
+        if callable(primary_getter):
+            try:
+                value = _single_line(primary_getter(), 96)
+            except Exception:
+                value = ""
             if value:
                 return value
+        value = _single_line(getattr(self, "plugin_specific_persona_id", ""), 96)
+        if value:
+            return value
         # Single-persona installs still need a non-empty namespace for v3.
         return "default"
 
@@ -2283,8 +2291,8 @@ class MemoryCompanionAdapterMixin:
     ) -> None:
         payload = self._memory_companion_build_private_context(user_id=user_id, user=user, text=text, event=event)
         policy = (
-            getattr(self, "relationship_stage_policy", None)
-            if bool(getattr(self, "enable_custom_relationship_stage_policy", False))
+            runtime_persona_setting(self, "relationship_stage_policy", None)
+            if bool(runtime_persona_setting(self, "enable_custom_relationship_stage_policy", False))
             else None
         )
         projection = relationship_projection_for_bridge(

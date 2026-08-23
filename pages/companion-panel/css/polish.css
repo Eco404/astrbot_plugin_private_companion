@@ -9,6 +9,498 @@
   --panel-sticky-shadow: 0 8px 22px rgba(15, 42, 74, 0.10);
 }
 
+/* Multi-persona configuration order: common management, selector, context,
+   then the selected persona's behavior settings. */
+#panel-config .config-persona-context,
+#panel-config .config-persona-settings {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 16px;
+  min-width: 0;
+}
+
+#panel-config .config-persona-top-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: stretch;
+  min-width: 0;
+}
+
+#panel-config .config-persona-top-row > #proactiveOnlyModeCard,
+#panel-config .config-persona-top-row > #multiPersonaModeSummary {
+  grid-column: auto;
+  width: 100%;
+  min-width: 0;
+}
+
+#panel-config .config-persona-top-row .proactive-mode-stack {
+  height: 100%;
+  margin-top: 0;
+}
+
+#panel-config .config-persona-top-row .proactive-mode-settings-row {
+  height: 100%;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+#panel-config .config-persona-top-row .proactive-mode-card {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+#panel-config .config-persona-selector {
+  display: grid;
+  grid-template-columns: minmax(220px, 360px) minmax(0, 1fr);
+  align-items: end;
+  gap: 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 14px 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-ring);
+}
+
+#panel-config .config-persona-selector[hidden] {
+  display: none;
+}
+
+#panel-config .config-persona-selector label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+#panel-config .config-persona-selector select {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 10px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+#panel-config .config-persona-selector-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#panel-config .config-persona-selector-meta b {
+  color: var(--ink);
+}
+
+#panel-config .config-persona-selector-meta span {
+  color: var(--muted);
+}
+
+#panel-config .config-persona-stats {
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 14px 16px 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-ring);
+}
+
+#panel-config .config-persona-stats > header,
+#panel-config .persona-management-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+#panel-config .config-persona-stats h2,
+#panel-config .persona-management-head h2 {
+  margin: 3px 0 0;
+  font-size: 18px;
+}
+
+#panel-config .config-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0;
+}
+
+#panel-config .config-stats .stat {
+  min-height: 76px;
+}
+
+#panel-config .config-common-multi-persona-summary {
+  min-width: 0;
+}
+
+#panel-config .multi-persona-mode-summary {
+  cursor: pointer;
+  transition: border-color .16s var(--ease), background .16s var(--ease), box-shadow .16s var(--ease);
+}
+
+#panel-config .multi-persona-mode-summary:hover {
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--line));
+  box-shadow: 0 10px 24px rgba(15, 42, 74, .08);
+}
+
+#panel-config .multi-persona-mode-summary.on {
+  border-left: 4px solid var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 42%, white);
+}
+
+#panel-config .multi-persona-mode-summary.off {
+  border-left: 4px solid #b15a4f;
+}
+
+#panel-config .multi-persona-mode-summary.dirty {
+  border-color: color-mix(in srgb, #b7791f 58%, var(--line));
+}
+
+#panel-config .multi-persona-mode-summary.on .feature-toggle-visual {
+  background: var(--accent);
+}
+
+#panel-config .multi-persona-mode-summary.on .feature-toggle-visual::after {
+  transform: translateX(16px);
+}
+
+#panel-config .persona-management-feature-view {
+  min-width: 0;
+  border-top: 1px solid var(--line-soft);
+  padding: 16px;
+}
+
+#panel-config .multi-persona-feature-head {
+  grid-template-columns: minmax(0, 1fr) 132px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+#panel-config .persona-setting-disabled-note {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+#panel-config .persona-management-head p {
+  max-width: 780px;
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#panel-config .persona-management-status,
+#panel-config .persona-management-mode-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+#panel-config .persona-management-mode-control .feature-detail-toggle {
+  min-height: 36px;
+}
+
+#panel-config .persona-management-mode-control button {
+  min-height: 34px;
+}
+
+#panel-config .persona-management-note {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#panel-config .persona-config-degraded {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+  border: 1px solid color-mix(in srgb, #b15d28 38%, var(--line));
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, #fff0df 72%, var(--panel));
+  color: #75401f;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+#panel-config .persona-primary-setup {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 280px) auto;
+  align-items: end;
+  gap: 10px;
+  margin-bottom: 12px;
+  border: 1px solid color-mix(in srgb, #b7791f 42%, var(--line));
+  border-radius: 8px;
+  padding: 11px;
+  background: color-mix(in srgb, #fff7df 72%, var(--panel));
+}
+
+#panel-config .persona-primary-setup header,
+#panel-config .persona-primary-setup label,
+#panel-config .persona-primary-readonly {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+#panel-config .persona-primary-setup header span,
+#panel-config .persona-primary-setup label,
+#panel-config .persona-primary-readonly span,
+#panel-config .persona-primary-readonly small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+#panel-config .persona-primary-setup select {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 9px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+#panel-config .persona-primary-readonly strong,
+#panel-config .persona-primary-readonly code {
+  overflow-wrap: anywhere;
+}
+
+#panel-config .multi-persona-legacy-routing {
+  margin-bottom: 12px;
+  border-color: color-mix(in srgb, #b7791f 34%, var(--line));
+}
+
+#panel-config .multi-persona-legacy-routing code {
+  overflow-wrap: anywhere;
+}
+
+#panel-config .persona-topology-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 11px;
+  background: color-mix(in srgb, var(--surface) 92%, var(--panel));
+}
+
+#panel-config .persona-topology-form > label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+#panel-config .persona-topology-form select {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 9px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+}
+
+#panel-config .persona-topology-form fieldset {
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+#panel-config .persona-topology-form legend {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+#panel-config .persona-topology-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+}
+
+#panel-config .persona-topology-checks label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ink);
+  font-size: 11px;
+}
+
+#panel-config .persona-topology-switch {
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 132px;
+  min-height: 34px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  padding: 5px 7px;
+  background: var(--surface);
+}
+
+#panel-config .persona-topology-switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+#panel-config .persona-topology-switch input:checked + .feature-toggle-visual {
+  background: var(--accent);
+}
+
+#panel-config .persona-topology-switch input:checked + .feature-toggle-visual::after {
+  transform: translateX(16px);
+}
+
+#panel-config .persona-topology-switch input:disabled + .feature-toggle-visual {
+  background: color-mix(in srgb, var(--accent) 58%, #a6b1bd);
+  opacity: .86;
+}
+
+#panel-config .persona-topology-switch > span:last-child {
+  line-height: 1.35;
+}
+
+#panel-config .persona-management-body {
+  min-width: 0;
+}
+
+#panel-config .persona-config-admin-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+#panel-config .persona-config-create-form,
+#panel-config .persona-config-detach-form {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 13px;
+  background: color-mix(in srgb, var(--panel) 94%, var(--surface));
+}
+
+#panel-config .persona-config-create-form header,
+#panel-config .persona-config-detach-form header {
+  display: grid;
+  gap: 3px;
+}
+
+#panel-config .persona-config-create-form header span,
+#panel-config .persona-config-detach-form header span,
+#panel-config .persona-config-detach-preview {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+#panel-config .persona-config-admin-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+#panel-config .persona-config-admin-fields label,
+#panel-config .persona-config-detach-form > label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+#panel-config .persona-config-admin-fields input,
+#panel-config .persona-config-admin-fields select,
+#panel-config .persona-config-detach-form select {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 9px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+#panel-config .persona-config-detach-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+#panel-config .persona-config-detach-preview {
+  display: grid;
+  gap: 3px;
+  min-height: 48px;
+  border: 1px dashed var(--line);
+  border-radius: 7px;
+  padding: 9px;
+  overflow-wrap: anywhere;
+}
+
+#panel-config .persona-config-detach-preview b {
+  color: var(--ink);
+}
+
+#panel-config .persona-management-empty {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#panel-config .persona-management-empty b {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+@media (max-width: 760px) {
+  #panel-config .config-persona-selector,
+  #panel-config .config-persona-top-row,
+  #panel-config .config-stats,
+  #panel-config .persona-config-admin-grid,
+  #panel-config .persona-config-admin-fields,
+  #panel-config .persona-primary-setup {
+    grid-template-columns: 1fr;
+  }
+
+  #panel-config .config-persona-stats > header,
+  #panel-config .persona-management-head,
+  #panel-config .multi-persona-feature-head,
+  #panel-config .persona-topology-form {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  #panel-config .persona-topology-form {
+    grid-template-columns: 1fr;
+  }
+}
+
 html {
   scroll-padding-top: 72px;
 }
@@ -3627,6 +4119,50 @@ small {
   text-align: right;
 }
 
+.folio-persona-context {
+  display: flex;
+  min-width: 0;
+  max-width: min(58%, 720px);
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.page-persona-selector {
+  display: inline-flex;
+  min-width: 210px;
+  align-items: center;
+  gap: 8px;
+}
+
+.page-persona-selector[hidden] {
+  display: none;
+}
+
+.page-persona-selector > span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.page-persona-selector select {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 0 30px 0 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 700;
+}
+
+.folio-persona-context #subtitle {
+  max-width: 260px;
+}
+
 .folio-stats {
   grid-template-columns: repeat(4, minmax(100px, 1fr));
 }
@@ -3736,6 +4272,23 @@ small {
   #subtitle {
     max-width: none;
     text-align: left;
+  }
+
+  .folio-persona-context {
+    width: 100%;
+    max-width: none;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .page-persona-selector {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .folio-persona-context #subtitle {
+    max-width: none;
   }
 
   .folio-stats {

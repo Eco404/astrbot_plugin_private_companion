@@ -30,7 +30,25 @@ def test_persona_display_label_preserves_label_and_full_id():
             'const label = String(persona.label || persona.name || "").trim();'
             in helper
         )
-        assert 'display = `${label} · ${id}`;' in helper
+        assert 'const cleanLabel = label.replace(/\\s*（默认）\\s*$/, "").trim();' in helper
+        assert 'display = `${cleanLabel} · ${id}`;' in helper
+        assert 'plugin_specific_persona_id: personaId' in script
+        assert 'state.multiPersona = {' in script
+
+
+def test_persona_switch_refreshes_bot_name_and_invalidates_worldbook_requests():
+    for script in _panel_scripts():
+        assert 'subtitle.textContent = `${overview.plugin?.bot_name || "Private Companion"} · 总览已加载`;' in script
+        reset = script.split("function resetPersonaScopedPageState()", 1)[1].split(
+            "async function selectPagePersona", 1
+        )[0]
+        assert "state.worldbookLivingMemory = {};" in reset
+        assert "state.worldbookLivingMemoryRequestSeq += 1;" in reset
+        loader = script.split("async function loadWorldbookLivingMemory", 1)[1].split(
+            "async function handleWorldbookMemberAction", 1
+        )[0]
+        assert "const personaId = selectedPagePersonaId();" in loader
+        assert "selectedPagePersonaId() !== personaId" in loader
 
 
 def test_multi_persona_selectors_keep_raw_id_as_value_and_use_shared_label():
@@ -47,53 +65,84 @@ def test_multi_persona_selectors_keep_raw_id_as_value_and_use_shared_label():
         assert "escapeHtml(item.label || item.name || item.id)" not in script
 
 
-def test_window_binding_uses_available_personas_before_profile_save():
+def test_persona_migration_only_uses_saved_configured_profiles():
     for script in _panel_scripts():
-        assert "function multiPersonaBindingIds(root = document)" in script
-        assert "const available = (state.roleplayPersonas || [])" in script
-        assert "async function ensureMultiPersonaBindingProfile(personaId" in script
-        assert 'enable_multi_persona_mode: true' in script
-        assert 'await ensureMultiPersonaBindingProfile(personaId, detailPage);' in script
-        assert 'data-persona-window-target ${bindingIds.length ? "" : "disabled"}' in script
+        migration = script.split("function multiPersonaMigrationDetailCard()", 1)[1].split(
+            "function bodyMonitorFeatureDetailCard", 1
+        )[0]
+        assert "state.multiPersona?.configured_profiles" in migration
+        assert "state.multiPersona?.enabled_ids" in migration
+        assert "已启用且已建立配置的人格" in migration
 
 
-def test_window_binding_requires_enabled_mode_and_persisted_target():
+def test_plugin_routing_controls_and_api_calls_are_removed():
     for script in _panel_scripts():
-        migration_start = script.index("function multiPersonaMigrationDetailCard()")
-        migration_end = script.index("function bodyMonitorFeatureDetailCard()", migration_start)
-        migration = script[migration_start:migration_end]
-        assert 'if (!modeRequested) return "";' in migration
-
-        ensure_start = script.index("async function ensureMultiPersonaBindingProfile(")
-        ensure_end = script.index("const MULTI_PERSONA_MIGRATION_KEYS", ensure_start)
-        ensure = script[ensure_start:ensure_end]
-        assert "const returnedIds = saved?.settings?.multi_persona_ids;" in ensure
-        assert "const savedModeEnabled = toBool(saved?.settings?.enable_multi_persona_mode);" in ensure
-        assert "|| !savedModeEnabled" in ensure
-        assert "!savedIds.includes(pid)" in ensure
-        assert "服务器未确认该人格已加入多人格列表" in ensure
-        assert 'state.featureDetailBaseline?.key === "enable_multi_persona_mode"' in ensure
-        assert "persistedSettings.multi_persona_ids" in ensure
-        assert "toBool(persistedSettings.enable_multi_persona_mode)" in ensure
+        for marker in (
+            "multi_persona_primary_id",
+            "multi_persona_window_bindings",
+            "/persona/window-bindings",
+            "/persona/switch",
+            "data-persona-window-edit",
+            "data-persona-window-delete",
+            "data-persona-window-bind",
+            "function bindPersonaWindowBindingActions",
+            "function ensureMultiPersonaBindingProfile",
+        ):
+            assert marker not in script
 
 
-def test_conflicting_window_binding_migrates_and_clears_cache_before_switch():
+def test_primary_persona_is_read_only_and_owned_by_astrbot():
     for script in _panel_scripts():
-        assert "const MULTI_PERSONA_MIGRATION_KEYS = Object.freeze([" in script
-        assert "source_persona_id: sourcePersonaId" in script
-        assert "migrate_keys: [...MULTI_PERSONA_MIGRATION_KEYS]" in script
-        assert "result.migrated?.cache_cleared" in script
-        assert "取消后可选择仅清理缓存并切换" in script
-        assert "不迁移资料，仅清理原人格和目标人格缓存后切换窗口绑定吗" in script
-        assert "result.cache_cleared" in script
-        assert 'if (result.conflict) {' in script
-        assert "窗口绑定已变化，请重新确认后再切换" in script
-        assert "该窗口已绑定其他人格，确认改为当前选择？" not in script
+        assert "function astrBotPersonaRecords()" in script
+        assert 'source !== "独立资料" && source !== "插件配置"' in script
+        assert "function configuredPrimaryPersonaId()" in script
+        assert "plugin_specific_persona_id</code> · 状态 ${primaryPersonaId ? \"primary\" : \"missing\"} · 路由权威 AstrBot" in script
+        assert '<select name="multi_persona_primary_id"' not in script
+        topology = script.split('querySelector("[data-common-persona-topology]")', 1)[1].split(
+            "const topologyForm", 1
+        )[0]
+        assert "multi_persona_primary_id:" not in topology
 
 
-def test_window_binding_rows_offer_persistent_unbind_action():
+def test_missing_primary_setup_is_two_phase_and_legacy_routing_is_read_only():
     for script in _panel_scripts():
-        assert 'data-persona-window-unbind="${escapeHtml(windowKey)}"' in script
-        assert 'postJson("/persona/unbind", { window_key: windowKey })' in script
-        assert "现有人格资料和聊天记录不会删除" in script
-        assert "delete nextBindings[windowKey]" in script
+        assert 'data-persona-primary-setup' in script
+        assert 'settings: { plugin_specific_persona_id: personaId }' in script
+        primary_save = script.index('settings: { plugin_specific_persona_id: personaId }')
+        mode_save = script.index('enable_multi_persona_mode: true', primary_save)
+        assert primary_save < mode_save
+        assert "请先在多人格设置中补充 AstrBot 有效主人格" in script
+        assert "function multiPersonaLegacyRoutingNotice()" in script
+        assert "status.legacy_routing" in script
+        assert "旧插件窗口绑定已停用" in script
+        assert "插件不会再读取或修改这些绑定" in script
+
+
+def test_config_creation_uses_persisted_topology_and_detach_requires_real_config():
+    for script in _panel_scripts():
+        assert "state.multiPersona?.configured_profiles" in script
+        assert 'const syncCreatePersonaOptions = () => {' not in script
+        assert 'querySelectorAll("[data-common-persona-id]:checked") || [])\n        .map' not in script
+        assert 'const candidates = copySourceRecords.filter((item) => String(item.id || "").trim() !== targetId);' in script
+        assert 'if (mode === "copy" && sourcePersonaId === personaId)' in script
+        assert '.filter((item) => configuredPersonaIds.has(String(item.id || "").trim()))' in script
+
+
+def test_one_global_persona_state_drives_header_and_config_selectors():
+    for script in _panel_scripts():
+        assert script.count('selectedPersonaId: ""') == 1
+        assert "function pagePersonaRecords()" in script
+        assert "function renderPagePersonaSelector()" in script
+        assert "async function selectPagePersona(nextPersonaId, control = null)" in script
+        assert script.count("void selectPagePersona(event.currentTarget.value, event.currentTarget);") >= 2
+        assert 'url.searchParams.set("_persona_id", selectedPersonaId);' in script
+        assert 'body: JSON.stringify({ ...payload, _persona_id: personaId })' in script
+
+
+def test_topology_default_marker_and_follow_confirmation_are_unambiguous():
+    for script in _panel_scripts():
+        assert "function personaTopologyLabel(personaOrId)" in script
+        assert 'personaTopologyLabel(item)' in script
+        assert "function consumePersonaFollowConfirmation(button)" in script
+        assert 'button.textContent = "点击确认";' in script
+        assert "window.setTimeout(() => resetPersonaFollowConfirmation(button), 3000)" in script

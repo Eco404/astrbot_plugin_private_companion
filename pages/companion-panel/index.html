@@ -96,7 +96,7 @@
       to { opacity: 1; transform: scaleX(1); transform-origin: left; }
     }
   </style>
-  <link rel="stylesheet" href="./app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1&amp;touch=reality-workspace-v1&amp;migration-notice=v2&amp;component-order=v1&amp;layout=model-routing-v2&amp;release=6.3.2" />
+  <link rel="stylesheet" href="./app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1&amp;touch=reality-workspace-v1&amp;migration-notice=v2&amp;component-order=v1&amp;layout=model-routing-v2&amp;release=6.3.4" />
   <!-- Keep the structured roleplay form readable while a WebUI asset is being refreshed. -->
   <style id="roleplay-layout-fallback">
     .roleplay-form,
@@ -163,7 +163,7 @@
   </style>
   <link rel="stylesheet" href="./css/header-tools.css?v=20260713-font-options" />
   <link rel="stylesheet" href="./css/qzone-mobile.css?v=20260711-qzone-image-preview" />
-  <link rel="stylesheet" href="./css/polish.css?v=20260810-responsive-containment-v1&amp;world=20260811-responsive-v2&amp;config=config-lifecycle-v1" />
+  <link rel="stylesheet" href="./css/polish.css?v=20260810-responsive-containment-v1&amp;world=20260811-responsive-v2&amp;config=multi-persona-summary-v2" />
   <script>
     (function () {
       try {
@@ -229,7 +229,13 @@
             <div class="folio-eyebrow"><b>●</b> PRIVATE COMPANION</div>
             <h1 class="folio-title">陪伴面板</h1>
           </div>
-          <p id="subtitle">读取运行态中...</p>
+          <div class="folio-persona-context">
+            <label id="pagePersonaSelector" class="page-persona-selector" for="pagePersonaSelect" hidden>
+              <span>界面人格</span>
+              <select id="pagePersonaSelect" aria-label="切换当前界面显示的人格"></select>
+            </label>
+            <p id="subtitle">读取运行态中...</p>
+          </div>
         </div>
         <div class="folio-stats" id="stats"></div>
       </div>
@@ -1441,9 +1447,9 @@ QQ空间 = 公开札记
             <p>基础维护、运行节奏与功能生命周期集中管理。</p>
           </div>
           <nav class="config-section-nav" aria-label="配置区域">
-            <button type="button" data-config-section-target="config-common-settings">基础与维护</button>
-            <button type="button" data-config-section-target="config-runtime-settings">运行节奏</button>
-            <button type="button" data-config-section-target="config-feature-settings">功能开关</button>
+            <button type="button" data-config-section-target="config-common-settings">通用设置</button>
+            <button type="button" data-config-section-target="config-runtime-settings">人格运行</button>
+            <button type="button" data-config-section-target="config-feature-settings">人格开关</button>
           </nav>
         </header>
         <div class="config-grid">
@@ -1451,12 +1457,12 @@ QQ空间 = 公开札记
             <summary class="config-fold-summary">
               <div class="config-fold-heading">
                 <span class="config-fold-kicker">配置工作台</span>
-                <h2>常用配置</h2>
-                <p>主动能力、动态注入、群聊范围、数据维护与页面外观。</p>
+                <h2>通用设置</h2>
+                <p>多人格拓扑、AstrBot 路由状态、群聊范围、数据维护与页面外观。</p>
                 <span class="config-fold-preview" aria-label="包含的配置范围">
-                  <span>日常能力</span>
+                  <span>人格管理</span>
+                  <span>AstrBot 路由</span>
                   <span>群聊范围</span>
-                  <span>数据维护</span>
                   <span>页面外观</span>
                 </span>
               </div>
@@ -1686,6 +1692,32 @@ QQ空间 = 公开札记
             </div>
           </details>
 
+          <section class="config-persona-context" aria-label="当前人格配置范围">
+            <div class="config-persona-selector" id="configPersonaSelector" hidden>
+              <label for="configPersonaSelect">
+                <span>人格配置</span>
+                <select id="configPersonaSelect" aria-label="选择要查看和编辑的人格"></select>
+              </label>
+              <div class="config-persona-selector-meta" id="configPersonaSelectorMeta" aria-live="polite"></div>
+            </div>
+            <div class="config-persona-top-row">
+              <div id="proactiveOnlyModeCard"></div>
+              <div id="multiPersonaModeSummary" class="config-common-multi-persona-summary"></div>
+            </div>
+            <section class="config-persona-stats" id="configPersonaStats" aria-labelledby="configPersonaStatsTitle">
+              <header>
+                <div>
+                  <span class="config-fold-kicker">当前人格</span>
+                  <h2 id="configPersonaStatsTitle">统计面板</h2>
+                </div>
+                <span id="configPersonaStatsSource" class="muted">统计随人格选择更新</span>
+              </header>
+              <div class="folio-stats config-stats" id="configStats"></div>
+            </section>
+          </section>
+
+          <section class="config-persona-settings" id="config-persona-settings" aria-label="人格配置">
+
           <details class="config-fold-panel config-runtime-details" id="config-runtime-settings">
             <summary class="config-fold-summary">
               <div class="config-fold-heading">
@@ -1755,7 +1787,6 @@ QQ空间 = 公开札记
               </div>
               <div id="featureFilterResult" class="feature-filter-result" aria-live="polite"></div>
             </header>
-            <div id="proactiveOnlyModeCard"></div>
             <div id="featureSwitchSummary" class="feature-switch-summary"></div>
             <div class="feature-filter-workspace" id="featureFilterWorkspace">
               <div class="feature-filter-topline">
@@ -1789,6 +1820,7 @@ QQ空间 = 公开札记
             </div>
             <div class="feature-switch-board" id="featureFlags"></div>
           </article>
+          </section>
         </div>
       </section>
 
@@ -2036,6 +2068,6 @@ QQ空间 = 公开札记
   <!-- Loaded on demand by app.js through AstrBot's relative dynamic-import rewriting:
        ./js/panels/provider-tree.js?v=20260804-private-reading-capability-v1&amp;manual=provider-input-v2&amp;layout=v2
        ./js/panels/qzone-panel.js?v=20260810-qzone-classic-loader-v1 -->
-  <script src="./app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2&amp;page=lazy-classic-loader-v1&amp;scope=photo-scope-quota-v1&amp;touch=reality-workspace-v1&amp;memory-source=memory-companion-v2&amp;user-create=profile-v1&amp;relationship-role-photo=pr125-v1&amp;camera-runtime-scope=v1&amp;config=config-lifecycle-v1&amp;troubleshooting=diagnostic-category-label-v1&amp;content-visibility=v1&amp;migration-notice=v4&amp;component-order=v1&amp;layout=model-routing-v2&amp;persona-style-batch-recovery=v1&amp;preset-save=v1&amp;release=6.3.2"></script>
+  <script src="./app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2&amp;page=lazy-classic-loader-v1&amp;scope=photo-scope-quota-v1&amp;touch=reality-workspace-v1&amp;memory-source=memory-companion-v2&amp;user-create=profile-v1&amp;relationship-role-photo=pr125-v1&amp;camera-runtime-scope=v1&amp;config=multi-persona-summary-v2&amp;troubleshooting=diagnostic-category-label-v1&amp;content-visibility=v1&amp;migration-notice=v4&amp;component-order=v1&amp;layout=model-routing-v2&amp;persona-style-batch-recovery=v1&amp;preset-save=v1&amp;release=6.3.4"></script>
 </body>
 </html>
