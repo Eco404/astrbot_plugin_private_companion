@@ -104,6 +104,7 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _now_ts, _path_text, _redact_outbound_secrets, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
+from .memory_context_policy import core_memory_usage_contract
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -2568,12 +2569,15 @@ class ProactiveEngineMixin:
                 max_chars=800,
             )
             if memory_context:
+                core_memory_contract = core_memory_usage_contract(memory_context, stage="review")
+                core_memory_section = f"\n\n{core_memory_contract}" if core_memory_contract else ""
                 prompt = (
                     f"{prompt.rstrip()}\n\n"
                     "<!-- private_companion_memory_review_context_v1 -->\n"
                     "【我会牢牢记住你 相关记忆】\n"
                     f"{memory_context}\n"
                     "使用方式：只辅助判断是否适合主动、是否需要改写或延后；不要在理由里暴露检索过程。"
+                    f"{core_memory_section}"
                 )
         started = time.perf_counter()
         raw = await self._llm_call(

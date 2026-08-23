@@ -137,6 +137,7 @@ from .helpers import (
     _today_key,
     normalize_bot_relationship_cards,
 )
+from .memory_context_policy import core_memory_usage_contract
 from .final_response_persistence import (
     FinalResponsePersistenceMixin,
     collect_proactive_delivery,
@@ -3190,13 +3191,16 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 max_chars=760,
             )
         if memory_context:
-                prompt = (
-                    f"{prompt.rstrip()}\n\n"
-                    "<!-- private_companion_memory_generation_context_v1 -->\n"
-                    "【我会牢牢记住你 可用记忆】\n"
-                    f"{memory_context}\n"
-                    "使用方式：只作为自然连续性和边界参考；能贴住当前切口就轻轻用,不相关就忽略。不要说“我查到/我记忆里”。"
-                )
+            core_memory_contract = core_memory_usage_contract(memory_context, stage="generation")
+            core_memory_section = f"\n\n{core_memory_contract}" if core_memory_contract else ""
+            prompt = (
+                f"{prompt.rstrip()}\n\n"
+                "<!-- private_companion_memory_generation_context_v1 -->\n"
+                "【我会牢牢记住你 可用记忆】\n"
+                f"{memory_context}\n"
+                "使用方式：只作为自然连续性和边界参考；能贴住当前切口就轻轻用,不相关就忽略。不要说“我查到/我记忆里”。"
+                f"{core_memory_section}"
+            )
         relationship_guard_getter = getattr(self, "_format_generation_relationship_authority_guard", None)
         if callable(relationship_guard_getter) and "关系事实权限" not in prompt:
             try:
