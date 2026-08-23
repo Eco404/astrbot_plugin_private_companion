@@ -13,7 +13,10 @@ class _JudgeHarness(ProactiveEngineMixin):
         self.proactive_persona_judge_max_daily = 12
         self.enable_llm_proactive_persona_judge = True
         self.default_nickname = "用户"
+        self.response_review_provider_id = ""
+        self.mai_style_provider_id = ""
         self.llm_calls = 0
+        self.captured_prompt = ""
 
     def _get_default_persona_prompt(self):
         return "自然、尊重边界"
@@ -35,6 +38,7 @@ class _JudgeHarness(ProactiveEngineMixin):
 
     async def _llm_call(self, *args, **kwargs):
         self.llm_calls += 1
+        self.captured_prompt = str(args[0]) if args else ""
         return '{"decision":"send","score":88,"reason":"自然"}'
 
     def _format_proactive_model_judge_prompt(self, user, *, now=None):
@@ -184,6 +188,25 @@ class ProactivePersonaJudgeEfficiencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["decision"], "send")
         self.assertTrue(result["local"])
         self.assertEqual(harness.llm_calls, 0)
+
+    async def test_model_judge_applies_core_memory_evidence_contract(self):
+        harness = _JudgeHarness()
+
+        async def compose_memory(**_kwargs):
+            return (
+                '<core_memory>\n'
+                '<memory label="health" kind="state">用户需要每天提醒吃药</memory>\n'
+                '</core_memory>'
+            )
+
+        harness._memory_companion_compose_feature_context = compose_memory
+        result = await harness._review_planned_proactive_with_model(_user(role="friend"), now=1_000.0)
+
+        self.assertEqual(result["decision"], "send")
+        self.assertEqual(harness.llm_calls, 1)
+        self.assertIn("【核心记忆证据权限】", harness.captured_prompt)
+        self.assertIn("不得仅凭核心记忆新建主动候选", harness.captured_prompt)
+        self.assertIn("不能单独充当现实触发证据", harness.captured_prompt)
 
 
 if __name__ == "__main__":
