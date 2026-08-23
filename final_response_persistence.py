@@ -23,6 +23,7 @@ from .helpers import (
     _safe_float,
     _single_line,
     _strip_internal_message_blocks,
+    _strip_outbound_control_blocks,
 )
 from .persona_config import runtime_persona_setting
 
@@ -699,15 +700,19 @@ class FinalResponsePersistenceMixin:
         assistant_response: str,
     ) -> bool:
         response_text = str(assistant_response or "").strip()
+        # Media markers are useful to the companion's private continuity state,
+        # but AstrBot's official conversation history is rendered directly by
+        # chat clients. Keep internal metadata out of that user-visible field.
+        visible_response_text = _strip_outbound_control_blocks(response_text)
         message = getattr(event, "_private_companion_official_assistant_message", None)
         if (
-            not response_text
+            not visible_response_text
             or message is None
             or str(getattr(message, "role", "") or "") != "assistant"
         ):
             return False
         try:
-            message.content = [TextPart(text=response_text)]
+            message.content = [TextPart(text=visible_response_text)]
             if hasattr(message, "tool_calls"):
                 message.tool_calls = None
             if hasattr(message, "tool_call_id"):
@@ -734,8 +739,9 @@ class FinalResponsePersistenceMixin:
     ) -> bool:
         umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
         response_text = str(assistant_response or "").strip()
+        visible_response_text = _strip_outbound_control_blocks(response_text)
         conv_mgr = getattr(getattr(self, "context", None), "conversation_manager", None)
-        if not umo or not response_text or conv_mgr is None:
+        if not umo or not visible_response_text or conv_mgr is None:
             return False
         requested_cid = str(
             getattr(event, "_private_companion_response_conversation_id", "") or ""
@@ -758,7 +764,7 @@ class FinalResponsePersistenceMixin:
                 if isinstance(raw_history, list)
                 else []
             )
-            history.append(AssistantMessageSegment(content=response_text).model_dump())
+            history.append(AssistantMessageSegment(content=visible_response_text).model_dump())
             await conv_mgr.update_conversation(umo, conv_id, history=history)
             return True
 

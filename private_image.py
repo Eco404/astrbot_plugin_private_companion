@@ -30,7 +30,7 @@ from astrbot.core import file_token_service
 from astrbot.core.astr_main_agent import MainAgentBuildConfig, build_main_agent
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .helpers import _missing_optional_model_dependency, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, _url_host_is_public
+from .helpers import _missing_optional_model_dependency, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _strip_outbound_control_blocks, _today_key, _url_host_is_public
 from .persona_config import runtime_persona_setting
 from .segmented_message import (
     component_kind,
@@ -5223,7 +5223,9 @@ class PrivateImageMixin:
             cleaned = ""
         if not cleaned:
             cleaned = re.sub(r"</?(?:pc[_-]?tts|t{2,}s)\b[^>]*>", "", str(reply or ""), flags=re.IGNORECASE).strip()
-        return _single_line(cleaned or reply, 1200)
+        # This text is persisted into AstrBot's user-visible conversation
+        # history; remove plugin-only markers before it reaches that store.
+        return _single_line(_strip_outbound_control_blocks(cleaned or reply), 1200)
 
     async def _archive_private_image_turn_to_conversation(
         self,

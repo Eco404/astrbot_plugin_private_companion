@@ -13,6 +13,7 @@ from astrbot.core.agent.message import Message, TextPart
 from astrbot.core.provider.entities import LLMResponse
 
 from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
+from astrbot_plugin_private_companion.private_image import PrivateImageMixin
 from astrbot_plugin_private_companion.final_response_persistence import (
     FinalResponsePersistenceMixin,
     collect_proactive_delivery,
@@ -221,6 +222,15 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('<pc_history_media images="1" />', archived)
         self.assertNotIn("随消息发送了一张图片", archived)
 
+    def test_private_image_history_text_hides_internal_media_marker(self):
+        harness = PrivateImageMixin.__new__(PrivateImageMixin)
+
+        archived = harness._private_image_context_assistant_message(
+            '图片回复 <pc_history_media images="1" />'
+        )
+
+        self.assertEqual("图片回复", archived)
+
     async def test_raw_assistant_is_deferred_and_only_delivered_text_is_persisted(self):
         captured: list[str] = []
 
@@ -318,6 +328,40 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
             "特殊发送路径的实际回复",
             harness.conversation_manager.history[-1]["content"],
         )
+
+    async def test_passive_official_history_hides_internal_media_marker(self):
+        harness = _Harness()
+        event = _Event()
+
+        written = await harness._finalize_passive_delivered_response(
+            event,
+            chain=[Plain("实际发送的图片说明"), Image(file="image.png")],
+        )
+
+        self.assertTrue(written)
+        archived = harness.conversation_manager.history[-1]["content"]
+        self.assertEqual("实际发送的图片说明", archived)
+        self.assertNotIn("pc_history_media", archived)
+
+    async def test_proactive_official_history_hides_internal_media_marker(self):
+        harness = _Harness()
+        internal_text = harness._build_proactive_archive_assistant_text(
+            text="主动发送的图片说明",
+            image_path="image.png",
+            action_summary="发图",
+        )
+
+        self.assertIn("pc_history_media", internal_text)
+        written = await harness._archive_proactive_message_to_conversation(
+            user={"umo": UMO},
+            user_prompt="【主动承接占位】",
+            assistant_response=internal_text,
+        )
+
+        self.assertTrue(written)
+        archived = harness.conversation_manager.history[-1]["content"]
+        self.assertIn("主动发送的图片说明", archived)
+        self.assertNotIn("pc_history_media", archived)
 
     async def test_missing_memory_plugins_does_not_block_official_history(self):
         harness = _Harness()

@@ -134,6 +134,7 @@ from .helpers import (
     _safe_int,
     _single_line,
     _strip_internal_message_blocks,
+    _strip_outbound_control_blocks,
     _today_key,
     normalize_bot_relationship_cards,
 )
@@ -16705,10 +16706,13 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         umo = str(umo or user.get("umo") or "").strip()
         if not umo or not assistant_response:
             return False
+        visible_assistant_response = _strip_outbound_control_blocks(assistant_response)
+        if not visible_assistant_response:
+            return False
         for attempt in range(4):
             try:
                 user_msg_obj = UserMessageSegment(content=str(user_prompt or ""))
-                assistant_msg_obj = AssistantMessageSegment(content=str(assistant_response or ""))
+                assistant_msg_obj = AssistantMessageSegment(content=visible_assistant_response)
                 async def _write():
                     conv_id = await self._ensure_conversation_id_for_umo(umo, title="Private Companion 主动消息")
                     if not conv_id:
