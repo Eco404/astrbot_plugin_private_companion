@@ -33750,11 +33750,12 @@ function renderRealityTouchHomeHealthPanel() {
   const data = state.realityTouch;
   if (!data) return realityTouchLoadingPanel("家居与健康能力");
   const mobile = data.configuration?.mobile || {};
+  const home = data.configuration?.home || {};
+  const health = data.configuration?.health || {};
   const observations = Array.isArray(data.mobile_observations) ? data.mobile_observations : [];
   const selectedId = state.realityTouchSelectedUserId || selectedRealityTouchUser()?.user_id || observations[0]?.user_id || "";
   const observation = observations.find((item) => String(item.user_id) === String(selectedId)) || observations[0] || {};
   const telemetry = observation.telemetry || {};
-  const plannerAvailable = data.external_planner_available === true;
   const users = Array.isArray(data.users) ? data.users : [];
   const userMap = new Map(users.map((item) => [String(item.user_id || ""), item]));
   observations.forEach((item) => {
@@ -33762,27 +33763,32 @@ function renderRealityTouchHomeHealthPanel() {
     if (id && !userMap.has(id)) userMap.set(id, item);
   });
   const userOptions = Array.from(userMap.values()).map((item) => `<option value="${escapeHtml(item.user_id || "")}" ${String(item.user_id) === String(selectedId) ? "selected" : ""}>${escapeHtml(item.label || item.user_id || "未命名用户")}</option>`).join("");
-  const providerLabels = (Array.isArray(data.external_capabilities) ? data.external_capabilities : [])
-    .map((item) => escapeHtml(item.label || item.provider || "外部能力"))
-    .join("、");
   const actionResult = data.action_result && typeof data.action_result === "object" ? data.action_result : null;
   return `
     <article id="reality-home-health" class="exp-detail-card reality-touch-card reality-workspace-card">
       <div class="reality-touch-section-head">
-        <div><span>外部能力</span><h3>家居与健康</h3></div>
-        <span class="reality-audio-backend ${plannerAvailable ? "ready" : "limited"}">${plannerAvailable ? "规划器可调用" : "未接入规划器"}</span>
+        <div><span>独立模块</span><h3>家居控制</h3></div>
+        <span class="reality-audio-backend ${home.available ? "ready" : "limited"}">${home.available ? "已配置" : "未配置"}</span>
       </div>
-      <p class="reality-device-intro">这里提供实际请求入口。输入“查询健康状态”会读取当前选中用户的短期 telemetry；输入“打开客厅灯”会交给现实触及规划器。设备控制仍需要明确确认。</p>
-      <div class="reality-provider-status ${plannerAvailable ? "is-positive" : "is-muted"}"><b>${plannerAvailable ? `已接入：${providerLabels || "现实触及 provider"}` : "尚未接入家居 provider"}</b><span>${plannerAvailable ? "家居请求会交给已注册 provider；健康查询仍可直接读取手机 telemetry。" : "健康查询仍可直接读取手机 telemetry；米家控制需要由对应插件注册现实触及 provider。"}</span></div>
+      <p class="reality-device-intro">家居控制与健康数据分开管理。家居模块只保存服务地址和令牌，未配置时不会发起设备请求。</p>
+      <form class="reality-home-config" data-reality-home-config>
+        <label class="reality-enable-field"><input type="checkbox" name="home_enabled" ${home.enabled ? "checked" : ""}><span><b>启用家居模块</b><small>支持 Home Assistant REST 兼容服务；米家可先通过 Home Assistant 暴露。</small></span></label>
+        <label><span>服务地址</span><input name="home_base_url" value="${escapeHtml(home.base_url || "")}" placeholder="http://127.0.0.1:8123"></label>
+        <label><span>访问令牌</span><input name="home_access_token" type="password" autocomplete="new-password" placeholder="${home.access_token_configured ? "已配置，留空保持" : "粘贴长期访问令牌"}"></label>
+        <div class="reality-mobile-inline-fields"><label><span>默认区域</span><input name="home_default_area" value="${escapeHtml(home.default_area || "")}" placeholder="客厅"></label><label><span>请求超时（秒）</span><input name="home_request_timeout_seconds" type="number" min="1" max="30" value="${Number(home.request_timeout_seconds || 5)}"></label></div>
+        <button type="submit" class="primary">保存家居配置</button>
+      </form>
       <form class="reality-home-health-action" data-reality-home-action>
         <label><span>请求用户</span><select name="home_user_id">${userOptions || '<option value="">暂无可用用户</option>'}</select></label>
-        <label class="reality-home-health-request"><span>家居 / 健康请求</span><textarea name="home_request" rows="2" maxlength="500" placeholder="例如：查询我现在的健康状态；打开客厅灯；执行回家场景"></textarea></label>
+        <label class="reality-home-health-request"><span>家居请求</span><textarea name="home_request" rows="2" maxlength="500" placeholder="例如：打开客厅灯"></textarea></label>
         <button type="submit" class="primary" ${userOptions ? "" : "disabled"}>提交请求</button>
       </form>
       <div class="reality-home-health-result ${actionResult ? "has-result" : ""}">
         <b>${actionResult ? escapeHtml(actionResult.summary || actionResult.message || actionResult.reason || "请求已返回") : "尚未提交请求"}</b>
-        <small>${plannerAvailable ? "控制请求不会绕过授权；需要确认时，请在请求中明确写出“确认执行”。" : "健康相关请求会返回手机实际接收状态；家居控制在 provider 接入后可执行。"}</small>
+        <small>家居控制只处理明确的打开或关闭请求；复杂场景请在家居服务中配置。</small>
       </div>
+      <div id="reality-health" class="reality-touch-section-head"><div><span>独立模块</span><h3>健康数据接收</h3></div><span class="reality-audio-backend ${health.enabled ? "ready" : "limited"}">${health.enabled ? "已开启" : "未开启"}</span></div>
+      <form class="reality-health-config" data-reality-health-config><label class="reality-enable-field"><input type="checkbox" name="health_enabled" ${health.enabled ? "checked" : ""}><span><b>接收健康数据</b><small>只接收手机端主动上报的结构化数据，不读取手机健康应用。</small></span></label><label><span>数据有效期（秒）</span><input name="health_ttl_seconds" type="number" min="60" max="604800" step="60" value="${Number(health.ttl_seconds || 3600)}"></label><button type="submit" class="primary">保存健康配置</button></form>
     </article>
   `;
 }
@@ -33821,11 +33827,12 @@ function renderRealityTouchPage() {
       <nav class="reality-section-nav" aria-label="现实触及页面分区">
         <a href="#reality-connect"><span>01</span>手机连接</a>
         <a href="#reality-mobile-data"><span>02</span>手机数据</a>
-        <a href="#reality-home-health"><span>03</span>家居与健康</a>
-        <a href="#reality-audio"><span>04</span>本机音频</a>
-        <a href="#reality-camera"><span>05</span>本机摄像头</a>
-        <a href="#reality-automation"><span>06</span>用户与提醒</a>
-        <a href="#reality-runtime"><span>07</span>运行状态</a>
+        <a href="#reality-home-health"><span>03</span>家居控制</a>
+        <a href="#reality-health"><span>04</span>健康数据</a>
+        <a href="#reality-audio"><span>05</span>本机音频</a>
+        <a href="#reality-camera"><span>06</span>本机摄像头</a>
+        <a href="#reality-automation"><span>07</span>用户与提醒</a>
+        <a href="#reality-runtime"><span>08</span>运行状态</a>
       </nav>
       <div class="reality-console-layout">
         <main class="reality-console-main">
@@ -33851,6 +33858,8 @@ function realityGlobalConfigPayload(root, enabledOverride) {
   const mobile = configuration.mobile || {};
   const form = root.querySelector("[data-reality-mobile-config]");
   const dataForm = root.querySelector("[data-reality-mobile-data-config]");
+  const homeForm = root.querySelector("[data-reality-home-config]");
+  const healthForm = root.querySelector("[data-reality-health-config]");
   const field = (name) => dataForm?.elements[name] || form?.elements[name];
   return {
     action: "save_global_config",
@@ -33859,6 +33868,17 @@ function realityGlobalConfigPayload(root, enabledOverride) {
     timezone: configuration.timezone || "Asia/Shanghai",
     authorized_user_ids: Array.isArray(configuration.authorized_user_ids) ? configuration.authorized_user_ids : [],
     audio_default_playback_volume: Number(configuration.audio_default_playback_volume ?? 35),
+    home: {
+      enabled: homeForm ? Boolean(homeForm.elements.home_enabled?.checked) : Boolean(configuration.home?.enabled),
+      base_url: homeForm?.elements.home_base_url?.value || configuration.home?.base_url || "",
+      access_token: homeForm?.elements.home_access_token?.value || "",
+      default_area: homeForm?.elements.home_default_area?.value || configuration.home?.default_area || "",
+      request_timeout_seconds: Number(homeForm?.elements.home_request_timeout_seconds?.value || configuration.home?.request_timeout_seconds || 5),
+    },
+    health: {
+      enabled: healthForm ? Boolean(healthForm.elements.health_enabled?.checked) : Boolean(configuration.health?.enabled),
+      ttl_seconds: Number(healthForm?.elements.health_ttl_seconds?.value || configuration.health?.ttl_seconds || 3600),
+    },
     mobile: {
       enabled: form ? Boolean(form.elements.mobile_enabled?.checked) : Boolean(mobile.enabled),
       host: form?.elements.mobile_host?.value || mobile.host || "0.0.0.0",
@@ -36927,6 +36947,22 @@ function bindRealityTouchActions(root) {
       renderRealityTouchPage();
     }
   });
+  for (const selector of ["[data-reality-home-config]", "[data-reality-health-config]"]) {
+    root.querySelector(selector)?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = event.currentTarget.querySelector('button[type="submit"]');
+      const result = await runAction(
+        () => postJson("/reality-touch/update", realityGlobalConfigPayload(root)),
+        "现实触及模块配置已保存",
+        button,
+        { reload: false },
+      );
+      if (result) {
+        state.realityTouch = result;
+        renderRealityTouchPage();
+      }
+    });
+  }
   root.querySelector("[data-reality-touch-user]")?.addEventListener("change", (event) => {
     state.realityTouchSelectedUserId = event.currentTarget.value || "";
     renderExperimentalPage();

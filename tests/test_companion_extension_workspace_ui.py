@@ -87,8 +87,11 @@ def test_reality_workspace_exposes_mobile_gateway_without_owning_implementation(
     assert '刷新接收状态' in script
     assert 'data-reality-home-action' in script
     assert 'action: "external_reality_request"' in script
-    assert 'external_planner_available' in script
-    assert 'external_capabilities' in script
+    assert 'data-reality-home-config' in script
+    assert 'data-reality-health-config' in script
+    assert 'name="home_base_url"' in script
+    assert 'name="home_access_token"' in script
+    assert 'name="health_enabled"' in script
     assert 'action_result' in script
     assert 'href="#reality-mobile-data"' in script
     assert 'href="#reality-home-health"' in script
