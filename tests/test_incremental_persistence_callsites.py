@@ -320,6 +320,24 @@ class IncrementalPersistenceCallsiteTests(unittest.TestCase):
         self.assertIn("updated_rules", source)
         self.assertIn("expression_voice_profile", source)
 
+    def test_private_pipeline_initializes_expression_feedback_before_text_gate(self) -> None:
+        handler = _private_handler()
+        initializers = [
+            node
+            for node in ast.walk(handler)
+            if isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "expression_feedback"
+        ]
+        self.assertTrue(initializers)
+        self.assertIsInstance(initializers[0].value, ast.Dict)
+        text_gates = [
+            node
+            for node in ast.walk(handler)
+            if isinstance(node, ast.If) and ast.unparse(node.test) == "text"
+        ]
+        self.assertTrue(any(node.lineno > initializers[0].lineno for node in text_gates))
+
     def test_private_pipeline_saves_smart_state_at_early_and_final_commit_points(
         self,
     ) -> None:

@@ -820,6 +820,9 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         self._note_morning_greeting_reply(user, now=received_ts or _now_ts())
         private_memory_managed = False
         private_memory_revision = None
+        # Feedback is only evaluated for textual inbound messages, but the
+        # final persistence section is shared by all private message types.
+        expression_feedback: dict[str, Any] = {}
         if text:
             user["inbound_count"] = _safe_int(user.get("inbound_count"), 0) + 1
         self._apply_relationship_event(
