@@ -2140,8 +2140,6 @@ class DailyStateTickMixin:
                 )
                 if isinstance(next_chain_followup, dict):
                     current["pending_followup_event"] = next_chain_followup
-            if reason == "reading_archive_recommendation_request":
-                current["reading_archive_recommendation_context"] = {}
             if simulation_active:
                 self._consume_simulation_event(current)
             else:

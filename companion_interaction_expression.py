@@ -24,8 +24,8 @@ except ImportError:  # pragma: no cover
 
 
 EXPRESSION_CONTRACT_VERSION = "companion_interaction_expression.v2"
-CONTENT_TIERS = ("normal", "flirt", "adult")
-CONTENT_TIER_LABELS = {"normal": "日常", "flirt": "含蓄暧昧", "adult": "成人私密"}
+CONTENT_TIERS = ("normal", "flirt")
+CONTENT_TIER_LABELS = {"normal": "日常", "flirt": "含蓄暧昧"}
 _CONTENT_STAGE_INDEX = {
     "deeply_distant": 0,
     "strongly_distant": 1,
@@ -337,21 +337,17 @@ def content_intent_from_text(value: Any) -> dict[str, Any]:
 
     text = _bounded_text(value, 500).lower()
     compact = "".join(text.split())
-    adult_requested = bool(
-        re.search(r"(?:进入|开启|启用|切换到|继续)(?:一下|这个|当前)?(?:成人模式|成人内容|nsfw)", compact)
+    explicit_sensitive_request = bool(
+        re.search(r"(?:进入|开启|启用|切换到|继续)(?:一下|这个|当前)?(?:更暧昧|亲密模式|nsfw)", compact)
         or re.search(r"(?:请|帮我|给我|继续)(?:写|描写|创作|展开)[^，。！？!?]{0,16}(?:露骨|性爱|色情|性描写)", compact)
     )
-    flirt_requested = adult_requested or bool(
+    flirt_requested = explicit_sensitive_request or bool(
         re.search(r"(?:请|可以|想|要|回复|语气|对我)[^，。！？!?]{0,12}(?:更暧昧|暧昧一点|调情|撩我|亲密一点|亲密点|更亲密)", compact)
         or re.search(r"(?:回复|语气|对我)[^，。！？!?]{0,8}甜一点", compact)
     )
-    consent = adult_requested and bool(
-        re.search(r"(?:我同意|我允许)[^\n]{0,20}(?:成人|nsfw|继续)", compact)
-        or re.search(r"(?:成人|nsfw)[^，。！？!?]{0,20}(?:我同意|我允许|可以继续)", compact)
-    )
     return {
-        "requested_content_tier": "adult" if adult_requested else ("flirt" if flirt_requested else "normal"),
-        "turn_consent": consent,
+        "requested_content_tier": "flirt" if flirt_requested else "normal",
+        "turn_consent": False,
     }
 
 
@@ -381,40 +377,6 @@ def _resolve_content_tier(
         and stage_rank >= _CONTENT_STAGE_INDEX["intimate"]
         and band not in {ExpressionBand.AVOIDANT, ExpressionBand.HURT}
     )
-    if requested == "adult":
-        adult_checks = {
-            "adult_disabled": _flag(policy.get("adult_enabled")),
-            # Identity, audience, age, per-turn consent and provider matching
-            # remain fixed boundaries. Only relationship-expression gates are
-            # administrator-relaxable, and missing switches stay fail-closed.
-            "adult_owner_required": owner_account,
-            "adult_exclusive_required": (
-                not _flag(policy.get("require_exclusive", True)) or owner_exclusive
-            ),
-            "adult_affectionate_required": (
-                not _flag(policy.get("require_affectionate", True))
-                or band == ExpressionBand.AFFECTIONATE
-            ),
-            "adult_interaction_boundary": band not in {ExpressionBand.AVOIDANT, ExpressionBand.HURT},
-            "adult_private_required": private_chat,
-            "adult_age_confirmation_required": _flag(policy.get("adult_owner_confirmed")),
-            "adult_turn_consent_required": (
-                not _flag(policy.get("require_turn_consent")) or _flag(intent.get("turn_consent"))
-            ),
-            "adult_local_provider_required": (
-                _flag(policy.get("local_provider_configured")) and _flag(policy.get("local_provider_match"))
-            ),
-        }
-        failures = [code for code, passed in adult_checks.items() if not passed]
-        if not failures:
-            reasons.append("adult_content_tier_allowed")
-            return "adult", "configured_local_only"
-        reasons.extend(failures)
-        if flirt_allowed:
-            reasons.append("adult_downgraded_to_flirt")
-            return "flirt", "current_provider"
-        reasons.append("adult_downgraded_to_normal")
-        return "normal", "current_provider"
     if flirt_allowed:
         reasons.append("flirt_content_tier_allowed")
         return "flirt", "current_provider"
@@ -802,12 +764,10 @@ def expression_decision_prompt(value: ExpressionDecision | Mapping[str, Any]) ->
     provider_policy = _text(decision.get("content_provider_policy"))
     if provider_policy == "unmanaged":
         content_instruction = ""
-    elif content_tier == "adult":
-        content_instruction = "内容尺度=成人私密；只承接本轮明确同意的成年人私聊，不扩大同意，不转入群聊或主动消息；插件二次复核固定使用后台指定 Provider"
     elif content_tier == "flirt":
         content_instruction = "内容尺度=含蓄暧昧；可以亲密和调情，但保持非露骨，不描写成人性行为"
     else:
-        content_instruction = "内容尺度=日常；不要主动升级为暧昧或成人内容"
+        content_instruction = "内容尺度=日常；不要主动升级为暧昧或露骨内容"
     dimensions = (
         f"节奏={str(decision.get('pacing') or 'steady')[:12]}，"
         f"直接度={str(decision.get('directness') or 'natural')[:12]}，"

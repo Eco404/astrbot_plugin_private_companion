@@ -135,9 +135,6 @@ COMMON_KEYS = frozenset(
         "private_user_delivery_aliases",
         "target_platform",
         "environment_perception_timezone",
-        # Shared adult-content boundary and provider credential.
-        "adult_content_owner_confirmed",
-        "ADULT_CONTENT_PROVIDER_ID",
         "enable_group_relationship_affinity",
         "group_relationship_affinity_allowlist",
         "group_relationship_daily_net_cap",
@@ -247,16 +244,12 @@ PRIMARY_AND_KEYS = frozenset(
     {
         "enable_relationship_content_tiers",
         "enable_flirt_content_tier",
-        "enable_adult_content_tier",
         "enable_group_nsfw_private_fallback",
     }
 )
 
 SAFETY_OR_KEYS = frozenset(
     {
-        "adult_content_require_exclusive",
-        "adult_content_require_affectionate",
-        "adult_content_require_turn_consent",
         "enable_group_member_safety",
         "enable_group_privacy_guard",
         "enable_group_third_party_portrait_guard",

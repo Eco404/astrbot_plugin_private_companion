@@ -524,12 +524,6 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
     self.owner_group_interaction_projection = self._cfg_bool(c, "owner_group_interaction_projection", True)
     self.enable_relationship_content_tiers = self._cfg_bool(c, "enable_relationship_content_tiers", False)
     self.enable_flirt_content_tier = self._cfg_bool(c, "enable_flirt_content_tier", True)
-    self.enable_adult_content_tier = self._cfg_bool(c, "enable_adult_content_tier", False)
-    self.adult_content_owner_confirmed = self._cfg_bool(c, "adult_content_owner_confirmed", False)
-    self.adult_content_require_turn_consent = self._cfg_bool(c, "adult_content_require_turn_consent", True)
-    self.adult_content_require_exclusive = self._cfg_bool(c, "adult_content_require_exclusive", True)
-    self.adult_content_require_affectionate = self._cfg_bool(c, "adult_content_require_affectionate", True)
-    self.adult_content_provider_id = self._cfg_str(c, "ADULT_CONTENT_PROVIDER_ID", "")
     self.owner_exclusive_label = self._cfg_str(c, "owner_exclusive_label", "专属联结", "专属联结")
     self.owner_exclusive_tone = self._cfg_str(c, "owner_exclusive_tone", "温暖、亲近、稳定", "温暖、亲近、稳定")
     self.owner_exclusive_address_style = self._cfg_str(
@@ -1994,59 +1988,7 @@ def _initialize_group_and_provider_config(self: Any, c: Any) -> None:
     self.qzone_emotional_vent_threshold = self._cfg_int(c, "qzone_emotional_vent_threshold", 90, 40, 100)
     self.qzone_emotional_vent_cooldown_hours = self._cfg_int(c, "qzone_emotional_vent_cooldown_hours", 72, 4, 336)
     self.qzone_emotional_vent_probability = self._cfg_unit_interval(c, "qzone_emotional_vent_probability", 0.35, 0.0)
-    self.enable_reading_archive_integration = self._cfg_bool(c, "enable_reading_archive_integration", False)
-    self.enable_reading_archive_boredom_read = self._cfg_bool(c, "enable_reading_archive_boredom_read", False)
-    self.enable_reading_archive_ask_recommendation = self._cfg_bool(
-        c,
-        "enable_reading_archive_ask_recommendation",
-        False,
-    )
-    self.enable_reading_archive_vision = self._cfg_bool(
-        c,
-        "enable_reading_archive_vision",
-        True,
-    )
-    self.enable_reading_archive_page_comments = self._cfg_bool(
-        c,
-        "enable_reading_archive_page_comments",
-        True,
-    )
-    self.enable_reading_archive_rating = self._cfg_bool(
-        c,
-        "enable_reading_archive_rating",
-        True,
-    )
-    self.reading_archive_min_interval_hours = self._cfg_int(c, "reading_archive_min_interval_hours", 18, 4, 168)
-    self.reading_archive_max_photo_count = self._cfg_int(c, "reading_archive_max_photo_count", 60, 8, 120)
-    self.reading_archive_share_probability = self._cfg_unit_interval(
-        c, "reading_archive_share_probability", 0.18, 0.0
-    )
-    self.reading_archive_ask_probability = self._cfg_unit_interval(c, "reading_archive_ask_probability", 0.16, 0.0)
-    self.enable_reading_archive_preference_influence = self._cfg_bool(
-        c,
-        "enable_reading_archive_preference_influence",
-        True,
-    )
-    self.reading_archive_preference_min_ratings = self._cfg_int(
-        c,
-        "reading_archive_preference_min_ratings",
-        5,
-        1,
-        30,
-    )
-    self.reading_archive_preference_max_terms = self._cfg_int(
-        c,
-        "reading_archive_preference_max_terms",
-        8,
-        2,
-        20,
-    )
-    self.reading_archive_default_keywords = self._cfg_str(
-        c, "reading_archive_default_keywords", "纯爱,恋爱,同人"
-    )
-    self.reading_archive_blocked_tags = self._cfg_str(c, "reading_archive_blocked_tags", "連載中,長篇,青年漫")
     self.plugin_vision_provider_id = self._cfg_str(c, "PLUGIN_VISION_PROVIDER_ID", "")
-    self.reading_archive_vision_provider_id = self._cfg_str(c, "READING_ARCHIVE_VISION_PROVIDER_ID", "")
     self._apply_quick_provider_defaults()
     self.group_episode_refresh_minutes = self._cfg_int(c, "group_episode_refresh_minutes", 180, 30, 1440)
     self.group_slang_summary_minutes = self._cfg_int(c, "group_slang_summary_minutes", 360, 60, 2880)

@@ -62,29 +62,19 @@ def _bookshelf_item_identity(item: Any) -> str:
     item_type = str(item.get("type") or item.get("kind") or "").strip()
     album_id = str(item.get("album_id") or item.get("id") or "").strip()
     key = str(item.get("key") or "").strip()
-    if not album_id and key.startswith("jm_album:"):
+    if not album_id and key.startswith("archive_item:"):
         album_id = key.split(":", 1)[1].strip()
-    if not album_id and key.startswith("jm-"):
+    if not album_id and key.startswith("archive-"):
         album_id = key[3:].strip()
     if album_id:
-        return f"{item_type or 'jm_album'}:{album_id}"
+        return f"{item_type or 'archive_item'}:{album_id}"
     return key
 
 
 def _is_jm_bookshelf_item(item: Any) -> bool:
-    if not isinstance(item, dict):
-        return False
-    item_type = str(item.get("type") or item.get("kind") or "").strip()
-    if item_type:
-        return item_type == "jm_album"
-    key = str(item.get("key") or "").strip()
-    if key.startswith("jm_album:") or key.startswith("jm-"):
-        return True
-    source = str(item.get("source") or "").strip()
-    return bool(
-        isinstance(item.get("pages"), list)
-        and (str(item.get("album_id") or "").strip() or source.startswith("bookshelf_"))
-    )
+    # Keep legacy records untouched, but exclude them from public recovery and
+    # deletion reconciliation.
+    return False
 
 
 def _bookshelf_item_album_id(item: Any) -> str:

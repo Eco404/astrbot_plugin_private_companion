@@ -826,15 +826,6 @@ class PrivateCompanionPageApi(
             ("/photo_reference/assets/delete", self.delete_photo_reference_asset, ["POST"], "Private Companion Page delete visual reference asset"),
             ("/daily_outfit/image", self.get_daily_outfit_image, ["GET"], "Private Companion Page daily outfit image"),
             ("/daily_outfit/image_data", self.get_daily_outfit_image_data, ["GET"], "Private Companion Page daily outfit image data"),
-            ("/bookshelf/unlock", self.unlock_bookshelf, ["POST"], "Private Companion Page unlock bookshelf"),
-            ("/bookshelf/session", self.get_bookshelf_session, ["GET", "POST"], "Private Companion Page restore bookshelf session"),
-            ("/bookshelf/image", self.get_bookshelf_image, ["GET"], "Private Companion Page bookshelf image"),
-            ("/bookshelf/image_data", self.get_bookshelf_image_data, ["GET"], "Private Companion Page bookshelf image data"),
-            ("/bookshelf/delete", self.delete_bookshelf_item, ["POST"], "Private Companion Page delete bookshelf item"),
-            ("/bookshelf/rate", self.rate_bookshelf_item, ["POST"], "Private Companion Page rate bookshelf item"),
-            ("/bookshelf/tags", self.update_bookshelf_item_tags, ["POST"], "Private Companion Page update bookshelf item tags"),
-            ("/bookshelf/comments/update", self.update_bookshelf_item_comments, ["POST"], "Private Companion Page update bookshelf item comments"),
-            ("/bookshelf/reading_state", self.update_bookshelf_reading_state, ["POST"], "Private Companion Page update bookshelf reading state"),
             ("/memo/list", self.list_memo_notes, ["GET"], "Private Companion Page list memo notes"),
             ("/memo/update", self.update_memo_note, ["POST"], "Private Companion Page update memo note"),
             ("/qzone/status", self.get_qzone_status, ["GET"], "Private Companion Page qzone status"),
@@ -10247,7 +10238,6 @@ class PrivateCompanionPageApi(
             "screen_narration": "识屏转述",
             "forward_message": "合并转发转述",
             "forward_message_image_vision": "转发图片识别",
-            "reading_archive_vision": "夹层视觉",
             "private_image_vision": "私聊图片识别",
             "group_image_vision": "群聊图片识别",
             "private_image_only_framework": "单图回复主链",
@@ -11110,9 +11100,9 @@ class PrivateCompanionPageApi(
             return ""
         album_id = self._single_line(item.get("album_id") or item.get("id"), limit)
         key = self._single_line(item.get("key"), 120)
-        if not album_id and key.startswith("jm_album:"):
+        if not album_id and key.startswith("archive_item:"):
             album_id = self._single_line(key.split(":", 1)[1], limit)
-        if not album_id and key.startswith("jm-"):
+        if not album_id and key.startswith("archive-"):
             album_id = self._single_line(key[3:], limit)
         return album_id
 
@@ -11234,24 +11224,10 @@ class PrivateCompanionPageApi(
             revision = 0
         self.plugin.data["daily_diary_delete_revision"] = revision + 1
 
-    def _is_bookshelf_jm_album(self, item: Any) -> bool:
-        if not isinstance(item, dict):
-            return False
-        kind = self._single_line(item.get("type") or item.get("kind"), 32)
-        if kind:
-            return kind == "jm_album"
-        key = self._single_line(item.get("key"), 120)
-        return bool(
-            key.startswith("jm_album:")
-            or key.startswith("jm-")
-            or (
-                isinstance(item.get("pages"), list)
-                and (
-                    self._single_line(item.get("album_id"), 80)
-                    or self._single_line(item.get("source"), 80).startswith("bookshelf_")
-                )
-            )
-        )
+    def _is_bookshelf_archive_item(self, item: Any) -> bool:
+        # Historical archive records remain on disk for migration safety, but
+        # the public companion package never reads, renders, or manages them.
+        return False
 
     def _bookshelf_deleted_album_ids(self, state: Any) -> set[str]:
         if not isinstance(state, dict):
@@ -11271,8 +11247,8 @@ class PrivateCompanionPageApi(
             if (marker := " ".join(self._single_line(value, 160).split()).casefold())
         }
 
-    def _is_deleted_bookshelf_jm_album(self, item: Any, state: Any) -> bool:
-        if not self._is_bookshelf_jm_album(item):
+    def _is_deleted_bookshelf_archive_item(self, item: Any, state: Any) -> bool:
+        if not self._is_bookshelf_archive_item(item):
             return False
         album_id = self._bookshelf_album_id(item)
         if album_id:
@@ -11507,7 +11483,7 @@ class PrivateCompanionPageApi(
             shelf_items = data.get("bookshelf_items") if isinstance(data.get("bookshelf_items"), list) else []
             target = None
             for item in shelf_items:
-                if not self._is_bookshelf_jm_album(item):
+                if not self._is_bookshelf_archive_item(item):
                     continue
                 if self._bookshelf_album_id(item, limit=40) == album_id:
                     target = item
@@ -11624,17 +11600,17 @@ class PrivateCompanionPageApi(
                         storage_type,
                         remaining,
                     )
-                elif kind == "jm_album":
-                    album_id = album_payload_id or item_id.removeprefix("jm-")
-                    album_id = album_id.removeprefix("jm-").removeprefix("jm_album:")
+                elif kind == "archive_item":
+                    album_id = album_payload_id or item_id.removeprefix("archive-")
+                    album_id = album_id.removeprefix("archive-").removeprefix("archive_item:")
                     match_keys = {
                         value
                         for value in {
                             album_id,
                             item_id,
-                            item_id.removeprefix("jm-"),
-                            f"jm-{album_id}" if album_id else "",
-                            f"jm_album:{album_id}" if album_id else "",
+                            item_id.removeprefix("archive-"),
+                            f"archive-{album_id}" if album_id else "",
+                            f"archive_item:{album_id}" if album_id else "",
                         }
                         if value
                     }
@@ -11645,7 +11621,7 @@ class PrivateCompanionPageApi(
                     removed_album_ids: set[str] = set()
                     kept = []
                     for item in items:
-                        if not self._is_bookshelf_jm_album(item):
+                        if not self._is_bookshelf_archive_item(item):
                             kept.append(item)
                             continue
                         item_values = {
@@ -11713,7 +11689,7 @@ class PrivateCompanionPageApi(
                         removed_titles = [
                             self._single_line(item.get("title"), 120)
                             for item in items
-                            if self._is_bookshelf_jm_album(item)
+                            if self._is_bookshelf_archive_item(item)
                             and self._bookshelf_album_id(item) in removed_album_ids
                         ]
                         if title_payload:
@@ -11735,7 +11711,7 @@ class PrivateCompanionPageApi(
                 else:
                     return self._error("不支持的资料柜项目类型")
                 if changed:
-                    if kind == "jm_album":
+                    if kind == "archive_item":
                         self._mark_bookshelf_data_changed()
                     self.plugin._save_data_sync(sections={"bookshelf_items"})
                 data = deepcopy(self.plugin.data)
@@ -11809,7 +11785,7 @@ class PrivateCompanionPageApi(
                 target = next(
                     (
                         item for item in items
-                        if self._is_bookshelf_jm_album(item)
+                        if self._is_bookshelf_archive_item(item)
                         and self._bookshelf_album_id(item, limit=32) == album_id
                     ),
                     None,
@@ -11856,7 +11832,7 @@ class PrivateCompanionPageApi(
                     return self._error("夹层记录结构异常，未写入评分")
                 target: dict[str, Any] | None = None
                 for item in items:
-                    if not self._is_bookshelf_jm_album(item):
+                    if not self._is_bookshelf_archive_item(item):
                         continue
                     if self._bookshelf_album_id(item) == album_id:
                         item["user_rating"] = rating
@@ -11966,7 +11942,7 @@ class PrivateCompanionPageApi(
                     return self._error("夹层记录结构异常，未写入标签")
                 target: dict[str, Any] | None = None
                 for item in items:
-                    if not self._is_bookshelf_jm_album(item):
+                    if not self._is_bookshelf_archive_item(item):
                         continue
                     if self._bookshelf_album_id(item) == album_id:
                         item["user_liked_tags"] = liked_tags
@@ -12011,7 +11987,7 @@ class PrivateCompanionPageApi(
             return None
         return None
 
-    def _jm_album_comment_sample(self, item: dict[str, Any]) -> tuple[Path | None, list[Path], list[int]]:
+    def _archive_item_comment_sample(self, item: dict[str, Any]) -> tuple[Path | None, list[Path], list[int]]:
         cover_path = self._resolve_bookshelf_data_file(item.get("cover_path"))
         pages = item.get("pages") if isinstance(item.get("pages"), list) else []
         page_by_index: dict[int, Path] = {}
@@ -12048,7 +12024,7 @@ class PrivateCompanionPageApi(
                     (
                         item
                         for item in items
-                        if self._is_bookshelf_jm_album(item)
+                        if self._is_bookshelf_archive_item(item)
                         and self._bookshelf_album_id(item) == album_id
                     ),
                     None,
@@ -12061,7 +12037,7 @@ class PrivateCompanionPageApi(
                 if target is None:
                     return self._error("没有找到这条资料归档记录")
                 target_snapshot = deepcopy(target)
-            cover_path, page_paths, sampled_pages = self._jm_album_comment_sample(target_snapshot)
+            cover_path, page_paths, sampled_pages = self._archive_item_comment_sample(target_snapshot)
             if not page_paths:
                 return self._error("没有找到可用于重读的本地图片")
             vision = getattr(self.plugin, "_call_reading_archive_vision", None)
@@ -12113,7 +12089,7 @@ class PrivateCompanionPageApi(
                     return self._error("夹层记录结构异常，未写入批注")
                 written = False
                 for item in items:
-                    if not self._is_bookshelf_jm_album(item):
+                    if not self._is_bookshelf_archive_item(item):
                         continue
                     if self._bookshelf_album_id(item) == album_id:
                         item.update(updates)
@@ -21534,12 +21510,6 @@ class PrivateCompanionPageApi(
             "owner_group_interaction_projection",
             "enable_relationship_content_tiers",
             "enable_flirt_content_tier",
-            "enable_adult_content_tier",
-            "adult_content_owner_confirmed",
-            "adult_content_require_turn_consent",
-            "adult_content_require_exclusive",
-            "adult_content_require_affectionate",
-            "ADULT_CONTENT_PROVIDER_ID",
             "owner_exclusive_label",
             "owner_exclusive_tone",
             "owner_exclusive_address_style",
@@ -23909,7 +23879,6 @@ class PrivateCompanionPageApi(
             "NARRATION_PROVIDER_ID": "narration_provider_id",
             "HISTORY_SUMMARY_PROVIDER_ID": "history_summary_provider_id",
             "RESPONSE_REVIEW_PROVIDER_ID": "response_review_provider_id",
-            "ADULT_CONTENT_PROVIDER_ID": "adult_content_provider_id",
             "SMART_SILENCE_PROVIDER_ID": "smart_silence_provider_id",
             "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID": "proactive_persona_judge_provider_id",
             "TROUBLESHOOTING_PROVIDER_ID": "troubleshooting_provider_id",
@@ -23925,7 +23894,6 @@ class PrivateCompanionPageApi(
             "GROUP_MEMBER_SAFETY_PROVIDER_ID": "group_member_safety_provider_id",
             "FORWARD_MESSAGE_PROVIDER_ID": "forward_message_provider_id",
             "PLUGIN_VISION_PROVIDER_ID": "plugin_vision_provider_id",
-            "READING_ARCHIVE_VISION_PROVIDER_ID": "reading_archive_vision_provider_id",
             "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID": "reaction_expression_embedding_provider_id",
             "NEWS_PROVIDER_ID": "news_provider_id",
             "WEB_EXPLORATION_PROVIDER_ID": "web_exploration_provider_id",
@@ -24773,12 +24741,6 @@ class PrivateCompanionPageApi(
             "owner_group_interaction_projection",
             "enable_relationship_content_tiers",
             "enable_flirt_content_tier",
-            "enable_adult_content_tier",
-            "adult_content_owner_confirmed",
-            "adult_content_require_turn_consent",
-            "adult_content_require_exclusive",
-            "adult_content_require_affectionate",
-            "ADULT_CONTENT_PROVIDER_ID",
             "owner_exclusive_label",
             "owner_exclusive_tone",
             "owner_exclusive_address_style",
@@ -26438,23 +26400,10 @@ class PrivateCompanionPageApi(
         }
 
     def _reading_archive_summary(self, data: dict[str, Any]) -> dict[str, Any]:
-        state = data.get("reading_archive_integration") if isinstance(data.get("reading_archive_integration"), dict) else {}
-        try:
-            available = bool(getattr(self.plugin, "_reading_archive_available", lambda: False)())
-        except Exception:
-            available = False
-        album = state.get("last_album") if isinstance(state.get("last_album"), dict) else {}
-        album_id = self._bookshelf_album_id(album)
-        album_title = " ".join(self._single_line(album.get("title"), 160).split()).casefold()
-        if (
-            (album_id and album_id in self._bookshelf_deleted_album_ids(state))
-            or (
-                not album_id
-                and album_title
-                and album_title in self._bookshelf_deleted_title_markers(state)
-            )
-        ):
-            album = {}
+        # The public package exposes no external or page-level reading source.
+        state = {}
+        album = {}
+        available = False
         return {
             "enabled": bool(available and getattr(self.plugin, "enable_reading_archive_integration", False)),
             "boredom_read_enabled": bool(
@@ -26462,9 +26411,9 @@ class PrivateCompanionPageApi(
             ),
             "ask_recommendation_enabled": bool(available and getattr(self.plugin, "enable_reading_archive_ask_recommendation", False)),
             "available": available,
-            "last_read_at": self.plugin._format_timestamp_elapsed(state.get("last_read_at", 0)),
-            "last_status": state.get("last_status", ""),
-            "last_keyword": state.get("last_keyword", ""),
+            "last_read_at": "",
+            "last_status": "disabled",
+            "last_keyword": "",
             "last_album": {
                 "id": self._single_line(album.get("id"), 32),
                 "title": self._single_line(album.get("title"), 100),
@@ -26486,8 +26435,9 @@ class PrivateCompanionPageApi(
     ) -> str:
         if not album_id or (page_index < 1 and not cover):
             return ""
-        url = f"{self._page_asset_prefix()}/bookshelf/image?album_id={quote(str(album_id), safe='')}"
-        if cover:
+        # Legacy archive records are never rendered by the public package.
+        return ""
+        if False and cover:
             url += "&cover=1"
         elif page_index > 0:
             url += f"&page={page_index}"
@@ -26529,7 +26479,7 @@ class PrivateCompanionPageApi(
         return ""
 
     async def _bookshelf_summary(self, data: dict[str, Any], *, unlocked: bool, access_token: str = "") -> dict[str, Any]:
-        if unlocked:
+        if unlocked and False:
             recoverer = getattr(self.plugin, "_recover_bookshelf_items_from_local_pages_inplace", None)
             if callable(recoverer):
                 try:
@@ -26544,8 +26494,8 @@ class PrivateCompanionPageApi(
         jm_items = [
             item
             for item in shelf_items
-            if self._is_bookshelf_jm_album(item)
-            and not self._is_deleted_bookshelf_jm_album(item, jm_state)
+            if self._is_bookshelf_archive_item(item)
+            and not self._is_deleted_bookshelf_archive_item(item, jm_state)
         ]
         secret_state = data.get("bookshelf_secret") if isinstance(data.get("bookshelf_secret"), dict) else {}
         reason_sanitizer = getattr(self.plugin, "_sanitize_bookshelf_password_reason", None)
@@ -26559,20 +26509,20 @@ class PrivateCompanionPageApi(
             password_hint = self._single_line(secret_state.get("reason"), 80)
         if not password_hint:
             password_hint = "提示会在通过“陪伴 输出夹层密码”生成后显示。"
-        last_album = jm_state.get("last_album") if isinstance(jm_state.get("last_album"), dict) else {}
+        last_album = {}
         last_album_id = self._bookshelf_album_id(last_album)
         if (
             last_album
             and last_album_id
-            and not self._is_deleted_bookshelf_jm_album(
-                {**last_album, "type": last_album.get("type") or "jm_album"},
+            and not self._is_deleted_bookshelf_archive_item(
+                {**last_album, "type": last_album.get("type") or "archive_item"},
                 jm_state,
             )
             and not any(self._bookshelf_album_id(item) == last_album_id for item in jm_items)
         ):
             jm_items.append(
                 {
-                    "type": "jm_album",
+                    "type": "archive_item",
                     "title": last_album.get("title"),
                     "album_id": last_album_id,
                     "description": last_album.get("description") or last_album.get("intro") or last_album.get("summary"),
@@ -26601,7 +26551,7 @@ class PrivateCompanionPageApi(
             )
         data_root = Path(str(getattr(self.plugin, "data_dir", ""))).resolve()
         covers_root = data_root / "reading_archive_covers"
-        if unlocked:
+        if unlocked and False:
             pages_root = data_root / "bookshelf_pages"
             known_jm_ids = {
                 self._bookshelf_album_id(item)
@@ -26650,7 +26600,7 @@ class PrivateCompanionPageApi(
                 cover_path = covers_root / f"{album_id}.jpg"
                 jm_items.append(
                     {
-                        "type": "jm_album",
+                        "type": "archive_item",
                         "album_id": album_id,
                         "title": meta.get("title") or f"资料归档 {album_id}",
                         "description": meta.get("reason") or "",
@@ -26860,8 +26810,8 @@ class PrivateCompanionPageApi(
                     cover_src = self._bookshelf_cover_url(album_id, item, page_items, data_root, access_token=access_token)
                 secret_books.append(
                     {
-                        "id": f"jm-{album_id or len(secret_books)}",
-                        "kind": "jm_album",
+                        "id": f"archive-{album_id or len(secret_books)}",
+                        "kind": "archive_item",
                         "category": "资料归档",
                         "album_id": album_id,
                         "title": self._single_line(item.get("title"), 100) or "未命名阅读记录",
@@ -26939,7 +26889,7 @@ class PrivateCompanionPageApi(
             "public_count": len(public_books),
             "secret_count": locked_count,
             "diary_count": 1 if diaries else 0,
-            "jm_album_count": len(jm_items),
+            "archive_item_count": len(jm_items),
             "reading_now_count": sum(1 for item in jm_items if self._int(item.get("reading_progress_page")) > 0 and not self._float(item.get("reading_completed_at"))),
             "memo_notes": self._memo_notes_payload(data),
             "password_hint": password_hint,

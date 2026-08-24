@@ -1772,10 +1772,7 @@ class LlmToolActionsMixin:
         raw_diaries = self.data.get("bot_diaries") if isinstance(self.data.get("bot_diaries"), list) else []
         diaries = [item for item in raw_diaries if isinstance(item, dict)]
         raw_shelf_items = self.data.get("bookshelf_items") if isinstance(self.data.get("bookshelf_items"), list) else []
-        reading_items = [
-            item for item in raw_shelf_items
-            if isinstance(item, dict) and item.get("type") == "jm_album"
-        ]
+        reading_items: list[dict[str, Any]] = []
         raw_notes = self.data.get("memo_notes") if isinstance(self.data.get("memo_notes"), list) else []
         notes = [note for note in (normalize_memo_note(item) for item in raw_notes) if note]
         snapshot.update(
@@ -3143,6 +3140,7 @@ class LlmToolActionsMixin:
             requester_id = resolver(event, requester_id)
         requester = None
         request_scope = "private"
+        group_gate_message = "当前群聊未启用陪伴功能，或请求者身份不可用。"
         user_getter = getattr(self, "_get_user", None)
         if callable(user_getter):
             if not requester_id:
@@ -3221,6 +3219,12 @@ class LlmToolActionsMixin:
                         group_id = group_id_getter(event) if callable(group_id_getter) else ""
                         checker = getattr(self, "_group_enabled_for_event", None)
                         group_enabled = bool(group_id and callable(checker) and checker(group_id))
+                        if not runtime_persona_setting(self, "enable_group_companion", True):
+                            group_gate_message = "群聊陪伴总开关未开启。"
+                        elif callable(getattr(self, "_group_allowed_by_access_mode", None)) and not self._group_allowed_by_access_mode(group_id):
+                            group_gate_message = "本群不在当前群聊访问名单内。"
+                        elif not group_enabled:
+                            group_gate_message = "本群单独停用；请在群聊面板启用本群。"
                     requester_authorized = (group_enabled if request_scope == "group" else isinstance(requester, dict))
             else:
                 requester = (
@@ -3234,6 +3238,12 @@ class LlmToolActionsMixin:
                     group_id = group_id_getter(event) if callable(group_id_getter) else ""
                     checker = getattr(self, "_group_enabled_for_event", None)
                     group_enabled = bool(group_id and callable(checker) and checker(group_id))
+                    if not runtime_persona_setting(self, "enable_group_companion", True):
+                        group_gate_message = "群聊陪伴总开关未开启。"
+                    elif callable(getattr(self, "_group_allowed_by_access_mode", None)) and not self._group_allowed_by_access_mode(group_id):
+                        group_gate_message = "本群不在当前群聊访问名单内。"
+                    elif not group_enabled:
+                        group_gate_message = "本群单独停用；请在群聊面板启用本群。"
                 requester_authorized = (group_enabled if request_scope == "group" else isinstance(requester, dict))
             if not requester_authorized:
                 return public_receipt(
@@ -3242,7 +3252,7 @@ class LlmToolActionsMixin:
                         "success": False,
                         "generated": False,
                         "sent": False,
-                        "message": "当前群聊未启用陪伴功能，或请求者身份不可用。",
+                        "message": group_gate_message,
                         "must_not_claim_sent": True,
                         "retryable": False,
                     },

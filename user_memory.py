@@ -8462,8 +8462,8 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         )
 
     @staticmethod
-    def _response_contains_explicit_adult_content(value: Any) -> bool:
-        """Compatibility alias for integrations that used the old detector name."""
+    def _response_contains_explicit_sensitive_content(value: Any) -> bool:
+        """Compatibility-safe detector for clearly explicit sexual output."""
         return UserMemoryMixin._response_contains_content_tier_review_candidate(value)
 
     @staticmethod
@@ -8512,7 +8512,6 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         flags = self._response_review_flags(response_text, user, inbound_text=inbound_text)
         if (
             content_policy_enabled
-            and content_tier != "adult"
             and self._response_contains_content_tier_review_candidate(response_text)
         ):
             flags.append("content_tier_review_candidate")
@@ -8567,7 +8566,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         attribution_guard = self._format_private_fact_attribution_guard(user, inbound_text)
         creative_review_context = str(creative_context or "").strip()[:3200]
         content_tier_prompt = (
-            f"【统一内容尺度】\n{content_tier}；normal 不主动升级，flirt 只允许非露骨暧昧，adult 只承接本轮明确同意的成年人私聊。"
+            f"【统一内容尺度】\n{content_tier}；normal 不主动升级，flirt 只允许非露骨暧昧。"
             if content_policy_enabled
             else ""
         )
@@ -8647,7 +8646,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
                 max_tokens=260,
                 provider_id=review_provider_id,
                 task="response_review",
-                strict_provider=content_tier == "adult",
+                strict_provider=False,
             )
         except Exception as exc:
             logger.warning(
@@ -10559,10 +10558,9 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             "photo_text": "发图",
             "poke": "戳一戳",
             "voice": "语音",
-            "reading_archive_read": "资料归档",
         }
         parts = []
-        for key in ("screen_peek", "photo_text", "poke", "voice", "reading_archive_read"):
+        for key in ("screen_peek", "photo_text", "poke", "voice"):
             stats = raw.get(key)
             if not isinstance(stats, dict):
                 continue

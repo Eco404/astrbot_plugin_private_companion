@@ -1300,7 +1300,7 @@ const featureMeta = {
   enable_multi_persona_mode: ["多人格支持模式", "按人格隔离资料、日程、状态、日记、用户、群聊和 Token；会话人格由 AstrBot 路由决定。"],
   enable_custom_relationship_stage_policy: ["启用好感度系统", "关闭后不记账、不更新关系或当前互动、不注入关系表达；用户档案和画像仍会更新，已有关系数据会保留。"],
   enable_group_relationship_affinity: ["测试群贡献好感度", "默认关闭；只允许白名单测试群中明确 @/引用 Bot 且回复成功的正式用户事件按低权重结算。"],
-  enable_relationship_content_tiers: ["关系内容尺度", "把日常、含蓄暧昧和成人私密内容纳入同一表达决策；关系阶段只是必要条件，不会自动授权。"],
+  enable_relationship_content_tiers: ["关系内容尺度", "把日常和非露骨暧昧纳入统一表达决策；关系阶段只是必要条件，不会自动升级尺度。"],
   enable_auto_user_profile_creation: ["用户档案", "首次收到符合范围的真实消息时自动建立统一用户档案；不会自动授予私聊陪伴或主动联系权限。"],
   enable_mai_style_integration: ["私聊互动策略", "把相处分寸、偏好和本轮接话方式注入回复。"],
   enable_llm_proactive_persona_judge: ["主动人格判定", "主动计划到点后，判断这个念头是否符合角色、世界观、关系和当前打扰边界，再决定放行、改写、延后或取消。"],
@@ -1881,12 +1881,6 @@ const configLabels = {
   owner_group_relationship_projection: "主要用户群聊长期关系降级",
   owner_group_interaction_projection: "主要用户群聊互动状态降级",
   enable_flirt_content_tier: "允许含蓄暧昧档",
-  enable_adult_content_tier: "允许成人私密档",
-  adult_content_owner_confirmed: "确认主要用户已成年",
-  adult_content_require_turn_consent: "每轮要求明确同意",
-  adult_content_require_exclusive: "要求专属关系",
-  adult_content_require_affectionate: "要求爱意互动",
-  ADULT_CONTENT_PROVIDER_ID: "成人私密档指定 Provider",
   owner_exclusive_label: "主要用户专属关系名称",
   owner_exclusive_tone: "主要用户专属基础表达",
   owner_exclusive_address_style: "主要用户专属称呼尺度",
@@ -2562,12 +2556,6 @@ const configDescriptions = {
   owner_group_relationship_projection: "开启后，主要用户在群聊中的长期关系表达降级为普通用户阶段；真实账本和私聊关系不变。",
   owner_group_interaction_projection: "开启后，主要用户在群聊中的当前互动表达不超过普通用户温度上限；真实状态和私聊表达不变。",
   enable_flirt_content_tier: "只允许亲密及以上、私聊且当前互动不是回避或受伤时使用非露骨暧昧表达。",
-  enable_adult_content_tier: "只打开成人档资格检查；主要用户、私聊、成年确认、当轮同意和指定 Provider 始终是硬边界，专属关系与爱意互动默认要求成立但可分别放宽。",
-  adult_content_owner_confirmed: "仅由管理员在后台确认主要用户已成年；插件不会从亲密度、聊天内容或模型结果推断年龄。",
-  adult_content_require_turn_consent: "开启后每轮都必须在用户当轮消息中识别到明确请求和同意；建议保持开启。",
-  adult_content_require_exclusive: "关闭后主要用户处于普通关系模式时也能申请成人私密档；主要用户和私聊仍是硬边界。",
-  adult_content_require_affectionate: "关闭后当前互动不是爱意时也能申请成人私密档；回避、同意、成年确认和 Provider 边界仍独立生效。",
-  ADULT_CONTENT_PROVIDER_ID: "当前会话必须已经使用此 Provider 才能进入成人档；未配置或不匹配时直接降级。插件二次复核固定使用它，主回复链回退仍由 AstrBot 配置决定。",
   owner_exclusive_label: "只修改主要用户专属关系的显示名称，不增加管理或安全权限。",
   owner_exclusive_tone: "专属关系的长期表达基线；当前互动状态仍可使本轮收敛。",
   owner_exclusive_address_style: "优先沿用双方已确认的专属称呼。",
@@ -3285,10 +3273,6 @@ const featureSettingGroups = {
   ],
   enable_relationship_content_tiers: [
     "enable_flirt_content_tier",
-    "enable_adult_content_tier",
-    "adult_content_owner_confirmed",
-    "adult_content_require_turn_consent",
-    "ADULT_CONTENT_PROVIDER_ID",
   ],
   enable_daily_review: ["daily_review_time", "daily_review_auto_apply_guidance", "enable_daily_case_review_experiment", "daily_review_retention_days"],
   enable_mai_style_integration: [
@@ -3457,9 +3441,7 @@ const featureSettingSections = {
       keys: ["enable_flirt_content_tier"],
     },
     {
-      title: "成人私密边界",
-      note: "成人档不会由关系自动开启；缺少任一条件都会降级。插件二次复核固定使用指定 Provider，主回复链回退仍由 AstrBot 配置决定。",
-      keys: ["enable_adult_content_tier", "adult_content_owner_confirmed", "adult_content_require_turn_consent", "ADULT_CONTENT_PROVIDER_ID"],
+      note: "不会由关系自动开启；缺少任一条件都会降级。插件二次复核固定使用指定 Provider，主回复链回退仍由 AstrBot 配置决定。",
     },
   ],
   enable_companion_memory: [
@@ -4219,12 +4201,6 @@ const featureSettingTypes = {
   owner_group_relationship_projection: { type: "checkbox" },
   owner_group_interaction_projection: { type: "checkbox" },
   enable_flirt_content_tier: { type: "checkbox" },
-  enable_adult_content_tier: { type: "checkbox" },
-  adult_content_owner_confirmed: { type: "checkbox" },
-  adult_content_require_turn_consent: { type: "checkbox" },
-  adult_content_require_exclusive: { type: "checkbox" },
-  adult_content_require_affectionate: { type: "checkbox" },
-  ADULT_CONTENT_PROVIDER_ID: { type: "provider" },
   owner_exclusive_proactive_limit: { type: "number", min: 0, max: 30, step: 1 },
   enable_group_relationship_affinity: { type: "checkbox" },
   group_relationship_affinity_allowlist: { type: "textarea" },
@@ -5677,16 +5653,16 @@ function bookshelfImageDataPath(src) {
   if (raw.startsWith("data:")) return raw;
   try {
     const url = new URL(raw, window.location.origin);
-    if (url.pathname.endsWith("/bookshelf/image")) {
-      return `/bookshelf/image_data${url.search}`;
+if (url.pathname.endsWith("/disabled_archive_asset")) {
+return `/disabled_archive_asset_data${url.search}`;
     }
     if (url.pathname.endsWith("/creative/project/cover")) {
       return `/creative/project/cover_data${url.search}`;
     }
-    const marker = "/bookshelf/image?";
+const marker = "/disabled_archive_asset?";
     const markerIndex = raw.indexOf(marker);
     if (markerIndex >= 0) {
-      return `/bookshelf/image_data?${raw.slice(markerIndex + marker.length)}`;
+return `/disabled_archive_asset_data?${raw.slice(markerIndex + marker.length)}`;
     }
     const creativeMarker = "/creative/project/cover?";
     const creativeMarkerIndex = raw.indexOf(creativeMarker);
@@ -5694,9 +5670,9 @@ function bookshelfImageDataPath(src) {
       return `/creative/project/cover_data?${raw.slice(creativeMarkerIndex + creativeMarker.length)}`;
     }
   } catch (error) {
-    const marker = "/bookshelf/image?";
+const marker = "/disabled_archive_asset?";
     const markerIndex = raw.indexOf(marker);
-    if (markerIndex >= 0) return `/bookshelf/image_data?${raw.slice(markerIndex + marker.length)}`;
+if (markerIndex >= 0) return `/disabled_archive_asset_data?${raw.slice(markerIndex + marker.length)}`;
     const creativeMarker = "/creative/project/cover?";
     const creativeMarkerIndex = raw.indexOf(creativeMarker);
     if (creativeMarkerIndex >= 0) return `/creative/project/cover_data?${raw.slice(creativeMarkerIndex + creativeMarker.length)}`;
@@ -5715,7 +5691,7 @@ async function hydrateBookshelfImages(root = document) {
     try {
       if (endpoint.startsWith("data:")) {
         img.src = endpoint;
-      } else if (endpoint.startsWith("/bookshelf/image_data") || endpoint.startsWith("/creative/project/cover_data")) {
+} else if (endpoint.startsWith("/disabled_archive_asset_data") || endpoint.startsWith("/creative/project/cover_data")) {
         const result = await fetchJson(endpoint);
         if (result?.data_url) img.src = result.data_url;
       } else {
@@ -7001,9 +6977,9 @@ function applyOverviewData(overview) {
   const unlockedBooks = Array.isArray(currentUnlockedBookshelf?.secret_books)
     ? currentUnlockedBookshelf.secret_books
     : null;
-  const overviewBookshelfCount = Number(overview?.bookshelf?.jm_album_count);
+  const overviewBookshelfCount = Number(overview?.bookshelf?.archive_item_count);
   const unlockedBookshelfCount = unlockedBooks
-    ? unlockedBooks.filter((item) => item?.kind === "jm_album").length
+    ? unlockedBooks.filter((item) => item?.kind === "archive_item").length
     : 0;
   if (
     currentUnlockedBookshelf?.unlocked
@@ -15701,7 +15677,7 @@ function renderRelationshipStatus(detail) {
   const ownerProjection = intimacy.owner_exclusive && typeof intimacy.owner_exclusive === "object" ? intimacy.owner_exclusive : {};
   const interaction = normalizedCurrentInteraction(detail?.current_interaction, isOwner);
   const expression = detail?.expression_decision && typeof detail.expression_decision === "object" ? detail.expression_decision : {};
-  const contentTier = { normal: "日常", flirt: "含蓄暧昧", adult: "成人私密" }[String(expression.content_tier || "normal")] || "日常";
+  const contentTier = { normal: "日常", flirt: "含蓄暧昧" }[String(expression.content_tier || "normal")] || "日常";
   const providerPolicy = expression.content_provider_policy === "configured_local_only" ? "指定 Provider 精确匹配" : "当前 Provider";
   const proactiveTarget = Number(expression.proactive_target || 0);
   const proactiveTargetText = Number.isFinite(proactiveTarget) && proactiveTarget > 0 ? `${proactiveTarget} / 天` : "跟随全局";
@@ -20389,7 +20365,7 @@ function renderBookshelf() {
   $("#bookshelfPublicCount").textContent = bookshelf.public_count ?? creative.project_count ?? 0;
   $("#bookshelfSecretCount").textContent = bookshelf.secret_count ?? 0;
   $("#bookshelfDiaryCount").textContent = bookshelf.diary_count ?? 0;
-  $("#bookshelfJmCount").textContent = bookshelf.jm_album_count ?? 0;
+  $("#bookshelfJmCount").textContent = bookshelf.archive_item_count ?? 0;
   const memoNotes = currentMemoPayload();
   $("#bookshelfMemoCount").textContent = memoNotes.active ?? 0;
   $("#bookshelfMemoSummary").textContent = memoNotes.overdue
@@ -20657,7 +20633,7 @@ function renderBookCategoryShelves(items, options = {}) {
     group.books.push(book);
   });
   return groups.map((group) => {
-    const rowClass = options.rowClass || (group.books.some((book) => book.kind === "diary" || book.kind === "jm_album") ? "drawer-book-row" : "book-row");
+    const rowClass = options.rowClass || (group.books.some((book) => book.kind === "diary" || book.kind === "archive_item") ? "drawer-book-row" : "book-row");
     const booksForRender = options.reverseBooks ? group.books.slice().reverse() : group.books;
     const note = options.notes?.[group.title] || bookshelfCategoryNote(group.title, group.books);
     return `
@@ -20678,7 +20654,7 @@ function bookshelfCategoryTitle(book) {
   if (book?.kind === "creative") return book.work_type || "创作";
   if (book?.kind === "diary") return "日记";
   if (book?.kind === "browsing") return "浏览记录";
-  if (book?.kind === "jm_album") return "资料归档";
+  if (book?.kind === "archive_item") return "资料归档";
   return "其他";
 }
 
@@ -20687,7 +20663,7 @@ function bookshelfCategoryNote(title, books) {
   if (kind === "browsing") return "新闻阅读和主动搜索会在这里留痕";
   if (kind === "creative") return "";
   if (kind === "diary") return "按日期翻阅";
-  if (kind === "jm_album") return "夹层内的资料归档记录";
+  if (kind === "archive_item") return "夹层内的资料归档记录";
   return `${books.length} 本`;
 }
 
@@ -20702,7 +20678,7 @@ function renderBookshelfBook(item) {
     creative: "创作",
     diary: "日记本",
     browsing: "浏览记录",
-    jm_album: "资料归档",
+    archive_item: "资料归档",
   }[kind] || kind;
   const bookId = bookshelfBookId(item);
   const title = item.title || "未命名";
@@ -20731,7 +20707,7 @@ function bookshelfBookId(item) {
 
 async function saveSelectedBookshelfReadingState() {
   const book = state.selectedBook;
-  if (!book || book.kind !== "jm_album" || !book.album_id) return;
+  if (!book || book.kind !== "archive_item" || !book.album_id) return;
   const pages = Array.isArray(book.pages) ? book.pages : [];
   const currentPage = Math.min(Math.max(1, Number(state.selectedBookSpreadIndex || 0) + 1), Math.max(1, pages.length));
   const bookmarkInput = document.querySelector("[data-book-bookmark]");
@@ -20746,7 +20722,7 @@ async function saveSelectedBookshelfReadingState() {
     });
     setBookshelfUnlocked(result.bookshelf || bookshelfUnlockedForCurrentPersona());
     state.bookshelfAccessToken = result.bookshelf?.access_token || state.bookshelfAccessToken || "";
-    const updated = allBookshelfBooks().find((item) => item.kind === "jm_album" && String(item.album_id || "") === String(book.album_id));
+    const updated = allBookshelfBooks().find((item) => item.kind === "archive_item" && String(item.album_id || "") === String(book.album_id));
     if (updated) state.selectedBook = updated;
   } catch (error) {
     console.debug("保存阅读进度失败", error);
@@ -21055,7 +21031,7 @@ function mergeBookTagCandidates(...groups) {
 }
 
 function renderBookPreferenceEditor(book) {
-  if (book.kind !== "jm_album") return "";
+  if (book.kind !== "archive_item") return "";
   const likedValue = bookTagInputValue(book.user_liked_tags);
   const dislikedValue = bookTagInputValue(book.user_disliked_tags);
   const sourceTags = Array.isArray(book.tags) ? book.tags.filter(Boolean) : [];
@@ -21318,7 +21294,7 @@ function renderBookDetailPanel() {
     creative: book.work_type || "创作书",
     diary: "日记本",
     browsing: "浏览记录",
-    jm_album: "资料归档",
+    archive_item: "资料归档",
   }[book.kind] || "书";
   const entryBook = ["diary", "browsing"].includes(book.kind || "");
   const diaryEntries = entryBook && Array.isArray(book.entries)
@@ -21362,16 +21338,16 @@ function renderBookDetailPanel() {
     ? `<div class="book-tags">${activeTags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>`
     : "";
   const preferenceEditor = renderBookPreferenceEditor(book);
-  const readingImpressionText = book.kind === "jm_album"
+  const readingImpressionText = book.kind === "archive_item"
     ? String(book.reading_impression || book.impression || "").replace(/^读后感[:：]\s*/, "").trim()
     : "";
-  const pageCommentCount = book.kind === "jm_album"
+  const pageCommentCount = book.kind === "archive_item"
     ? Number(book.page_comment_count ?? (Array.isArray(book.page_comments) ? book.page_comments.length : 0))
     : 0;
   const botRating = Number(book.rating || 0);
   const userRating = Number(book.user_rating || 0);
   const ratingReason = String(book.user_rating_reason || book.rating_reason || "").trim();
-  const ratingMeta = book.kind === "jm_album" && (botRating || userRating || ratingReason)
+  const ratingMeta = book.kind === "archive_item" && (botRating || userRating || ratingReason)
     ? `
       <div class="book-rating-row">
         ${botRating ? `<span>Bot 评分 <b>${escapeHtml(botRating)}/10</b></span>` : ""}
@@ -21393,7 +21369,7 @@ function renderBookDetailPanel() {
     : "";
   const manageActions = book.kind === "browsing" ? "" : `
     <div class="book-manage-actions">
-      ${book.kind === "jm_album" ? `<button type="button" data-book-reread>让 Bot 重读</button>` : ""}
+      ${book.kind === "archive_item" ? `<button type="button" data-book-reread>让 Bot 重读</button>` : ""}
       <button type="button" class="danger-outline" data-book-delete
         data-book-kind="${escapeHtml(book.kind || "")}"
         data-book-id="${escapeHtml(book.id || "")}"
@@ -21406,7 +21382,7 @@ function renderBookDetailPanel() {
     </div>
   `;
   panel.hidden = false;
-  if (state.bookshelfPage === "reader" && book.kind === "jm_album" && Array.isArray(book.pages) && book.pages.length) {
+  if (state.bookshelfPage === "reader" && book.kind === "archive_item" && Array.isArray(book.pages) && book.pages.length) {
     panel.innerHTML = renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro, readingImpression);
     void hydrateBookshelfImages(panel);
     return;
@@ -21487,7 +21463,7 @@ function renderBookDetailPanel() {
             ${book.tone ? `<div><dt>气质</dt><dd>${escapeHtml(book.tone)}</dd></div>` : ""}
             ${book.point_of_view ? `<div><dt>视角</dt><dd>${escapeHtml(book.point_of_view)}</dd></div>` : ""}
             ${book.progress ? `<div><dt>进度</dt><dd>${escapeHtml(book.progress)}</dd></div>` : ""}
-            ${book.kind === "jm_album" ? `<div><dt>备注</dt><dd>${escapeHtml(pageCommentCount)} 条</dd></div>` : ""}
+            ${book.kind === "archive_item" ? `<div><dt>备注</dt><dd>${escapeHtml(pageCommentCount)} 条</dd></div>` : ""}
             ${book.created ? `<div><dt>入柜</dt><dd>${escapeHtml(book.created)}</dd></div>` : ""}
           </dl>
           ${readingImpression}
@@ -21535,7 +21511,7 @@ function renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro, readin
     `
     : "";
   return `
-    <article class="reader-page subpage jm_album image-reader">
+    <article class="reader-page subpage archive_item image-reader">
       <nav class="book-breadcrumb">
         <button type="button" data-book-close>资料柜</button>
         <span>/</span>
@@ -27040,12 +27016,6 @@ function featureRelatedSettings(key) {
       relationship_positive_stage_cap_key: "close",
       normal_interaction_band_cap: "warm",
       enable_flirt_content_tier: true,
-      enable_adult_content_tier: false,
-      adult_content_owner_confirmed: false,
-      adult_content_require_turn_consent: true,
-      adult_content_require_exclusive: true,
-      adult_content_require_affectionate: true,
-      ADULT_CONTENT_PROVIDER_ID: "",
       owner_exclusive_label: "专属联结",
       owner_exclusive_tone: "温暖、亲近、稳定",
       owner_exclusive_address_style: "优先使用已确认的专属称呼",
@@ -27301,12 +27271,6 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     return Object.prototype.hasOwnProperty.call(settings, name) ? settings[name] : fallback;
   };
   if (featureKey === "enable_relationship_content_tiers") {
-    const adultOnly = new Set([
-      "adult_content_owner_confirmed",
-      "adult_content_require_turn_consent",
-      "ADULT_CONTENT_PROVIDER_ID",
-    ]);
-    if (adultOnly.has(settingKey)) return boolSetting("enable_adult_content_tier");
     return true;
   }
   if (featureKey === "enable_livingmemory_integration") {
@@ -27858,7 +27822,6 @@ function featureProviderSelect(key, value, accessibility = {}) {
   const known = providerItems.some((item) => item.id === current);
   const customValue = current && !known ? current : "";
   const options = [
-    `<option value="">${key === "ADULT_CONTENT_PROVIDER_ID" ? "未配置（成人档不可用）" : ["EMBEDDING_PROVIDER_ID", "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"].includes(key) ? "留空使用本地匹配/兼容旧配置" : "留空自动回退"}</option>`,
     ...providerItems.map((item) => {
       const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
       return `<option value="${escapeHtml(item.id)}" ${item.id === current ? "selected" : ""}>${escapeHtml(label)}</option>`;
@@ -28034,7 +27997,7 @@ function featureDependencyLines(key) {
   }
   if (key === "enable_relationship_content_tiers") {
     dependencies.push(["关系条件", "长期亲密度阶段 + 当前互动状态"]);
-    dependencies.push(["成人档", "主要用户专属关系 + 成年确认 + 当轮同意 + 指定 Provider"]);
+    dependencies.push(["", "主要用户专属关系 + 成年确认 + 当轮同意 + 指定 Provider"]);
   }
   if (key !== "enable_group_companion" && key.startsWith("enable_group_")) dependencies.push(["依赖", "群聊总开关"]);
   if (key === "enable_group_conversation_followup") dependencies.push(["依赖", "群聊场景感知"]);
@@ -28074,10 +28037,10 @@ function featureDependencyLines(key) {
 
 const featureDetailGuides = {
   enable_relationship_content_tiers: {
-    summary: "在统一表达决策里选择日常、含蓄暧昧或成人私密尺度；它不新增关系状态，也不改变既有权限。",
+    summary: "在统一表达决策里选择日常或非露骨暧昧尺度；它不新增关系状态，也不改变既有权限。",
     trigger: "目标私聊进入主模型请求前，根据当轮明确意图、长期关系、当前互动状态和 Provider 身份共同判定。",
-    enabled: "普通暧昧仍受亲密阶段和互动状态约束；成人档只对已确认的主要用户专属私聊开放，缺条件自动降级。",
-    disabled: "所有请求保持日常档；主动消息、群聊、普通用户和记忆插件上下文始终不获得成人内容授权。",
+    enabled: "普通暧昧仍受亲密阶段和互动状态约束；只对已确认的主要用户专属私聊开放，缺条件自动降级。",
+    disabled: "所有请求保持日常档；主动消息、群聊、普通用户和记忆插件上下文始终不自动升级表达尺度。",
   },
   enable_custom_relationship_stage_policy: {
     summary: "统一管理长期好感度阶段、主要用户专属表达、七档互动状态事件和自然回落算法。",
@@ -33837,6 +33800,12 @@ function renderRealityTouchHomeHealthPanel() {
   });
   const userOptions = Array.from(userMap.values()).map((item) => `<option value="${escapeHtml(item.user_id || "")}" ${String(item.user_id) === String(selectedId) ? "selected" : ""}>${escapeHtml(item.label || item.user_id || "未命名用户")}</option>`).join("");
   const actionResult = data.action_result && typeof data.action_result === "object" ? data.action_result : null;
+  const mihome = data.mihome && typeof data.mihome === "object" ? data.mihome : {};
+  const mihomeAvailable = mihome.available === true;
+  const mihomeAuth = mihome.auth && typeof mihome.auth === "object" ? mihome.auth : {};
+  const mihomeLogin = mihome.login && typeof mihome.login === "object" ? mihome.login : {};
+  const mihomeDevices = Array.isArray(mihome.devices) ? mihome.devices.filter((item) => item && item.configured && Array.isArray(item.aliases) && item.aliases.length) : [];
+  const mihomeDeviceRows = mihomeDevices.slice(0, 24).map((item) => item.aliases.map((alias) => `<div class="reality-mihome-device"><span>${escapeHtml(alias)}<small>${escapeHtml(item.name || item.model || item.did || "米家设备")}</small></span><button type="button" class="soft" data-mihome-power="${escapeHtml(alias)}" data-mihome-power-value="true">开</button><button type="button" class="soft" data-mihome-power="${escapeHtml(alias)}" data-mihome-power-value="false">关</button></div>`).join("")).join("");
   return `
     <article id="reality-home-health" class="exp-detail-card reality-touch-card reality-workspace-card">
       <div class="reality-touch-section-head">
@@ -33851,6 +33820,13 @@ function renderRealityTouchHomeHealthPanel() {
         <div class="reality-mobile-inline-fields"><label><span>默认区域</span><input name="home_default_area" value="${escapeHtml(home.default_area || "")}" placeholder="客厅"></label><label><span>请求超时（秒）</span><input name="home_request_timeout_seconds" type="number" min="1" max="30" value="${Number(home.request_timeout_seconds || 5)}"></label></div>
         <button type="submit" class="primary">保存家居配置</button>
       </form>
+      <section id="reality-mihome" class="reality-mihome-panel">
+        <div class="reality-touch-section-head"><div><span>米家联动</span><h3>米家扫码与设备控制</h3></div><span class="reality-audio-backend ${mihomeAuth.logged_in ? "ready" : "limited"}">${mihomeAuth.logged_in ? "已登录" : "未登录"}</span></div>
+        <p class="reality-device-intro">扫码登录由米家插件完成，凭证仍由米家插件保管；这里仅调用已配置别名的设备。</p>
+        <div class="reality-mihome-actions"><button type="button" class="primary" data-mihome-login ${mihomeAvailable ? "" : "disabled"}>${mihomeAvailable ? (mihomeAuth.logged_in ? "已登录" : "扫码登录米家") : "未安装米家插件"}</button><button type="button" class="soft" data-mihome-sync ${mihomeAvailable && mihomeAuth.logged_in ? "" : "disabled"}>同步设备</button><button type="button" class="soft danger" data-mihome-logout ${mihomeAvailable && mihomeAuth.logged_in ? "" : "disabled"}>退出米家</button></div>
+        ${mihomeLogin.qr_image ? `<div class="reality-mihome-qr"><img alt="米家登录二维码" src="${escapeHtml(mihomeLogin.qr_image)}"><span>${escapeHtml(mihomeLogin.message || "请使用米家或小米账号扫一扫")}</span></div>` : mihomeLogin.message && mihomeLogin.status !== "idle" ? `<div class="reality-device-status"><b>${escapeHtml(mihomeLogin.message)}</b></div>` : ""}
+        <div class="reality-mihome-devices">${mihomeDeviceRows || `<small>${mihomeAvailable ? (mihomeAuth.logged_in ? "请先在米家管理中同步设备并配置设备别名" : "登录后可同步米家设备") : "请先安装并启用 astrbot_plugin_mihome"}</small>`}</div>
+      </section>
       <form class="reality-home-health-action" data-reality-home-action>
         <label><span>请求用户</span><select name="home_user_id">${userOptions || '<option value="">暂无可用用户</option>'}</select></label>
         <label class="reality-home-health-request"><span>家居请求</span><textarea name="home_request" rows="2" maxlength="500" placeholder="例如：打开客厅灯"></textarea></label>
@@ -33902,10 +33878,11 @@ function renderRealityTouchPage() {
         <a href="#reality-mobile-data"><span>02</span>手机数据</a>
         <a href="#reality-home-health"><span>03</span>家居控制</a>
         <a href="#reality-health"><span>04</span>健康数据</a>
-        <a href="#reality-audio"><span>05</span>本机音频</a>
-        <a href="#reality-camera"><span>06</span>本机摄像头</a>
-        <a href="#reality-automation"><span>07</span>用户与提醒</a>
-        <a href="#reality-runtime"><span>08</span>运行状态</a>
+        <a href="#reality-mihome"><span>05</span>米家联动</a>
+        <a href="#reality-audio"><span>06</span>本机音频</a>
+        <a href="#reality-camera"><span>07</span>本机摄像头</a>
+        <a href="#reality-automation"><span>08</span>用户与提醒</a>
+        <a href="#reality-runtime"><span>09</span>运行状态</a>
       </nav>
       <div class="reality-console-layout">
         <main class="reality-console-main">
@@ -36995,6 +36972,40 @@ function bindExperimentalOverviewActions() {
 }
 
 function bindRealityTouchActions(root) {
+  const pollMiHomeLogin = async (qrRevision = "", attempt = 0) => {
+    if (attempt > 125) return;
+    try {
+      const result = await postJson("/reality-touch/update", { action: "mihome_login_status", qr_revision: qrRevision });
+      if (!result) return;
+      state.realityTouch = result;
+      renderRealityTouchPage();
+      const login = result.mihome?.login || {};
+      if (login.running) window.setTimeout(() => pollMiHomeLogin(login.qr_revision || qrRevision, attempt + 1), 1000);
+    } catch (_) {
+      // A transient refresh failure should not interrupt the existing login process.
+    }
+  };
+  const runMiHomeAction = async (payload, message, sourceButton = null) => {
+    const button = sourceButton || root.querySelector("[data-mihome-login], [data-mihome-sync], [data-mihome-logout]");
+    const result = await runAction(() => postJson("/reality-touch/update", payload), message, button, { reload: false });
+    if (result) {
+      state.realityTouch = result;
+      renderRealityTouchPage();
+      if (payload.action === "mihome_start_login") {
+        pollMiHomeLogin(result.mihome?.login?.qr_revision || "");
+      }
+    }
+  };
+  root.querySelector("[data-mihome-login]")?.addEventListener("click", () => runMiHomeAction({ action: "mihome_start_login" }, "米家登录流程已启动"));
+  root.querySelector("[data-mihome-sync]")?.addEventListener("click", () => runMiHomeAction({ action: "mihome_sync_devices" }, "米家设备已同步"));
+  root.querySelector("[data-mihome-logout]")?.addEventListener("click", () => runMiHomeAction({ action: "mihome_logout" }, "米家已退出"));
+  root.querySelectorAll("[data-mihome-power]").forEach((button) => {
+    button.addEventListener("click", () => runMiHomeAction({
+      action: "mihome_control_power",
+      alias: button.dataset.mihomePower || "",
+      is_on: button.dataset.mihomePowerValue === "true",
+    }, "米家设备控制请求已返回", button));
+  });
   root.querySelector("[data-reality-mobile-observation-user]")?.addEventListener("change", (event) => {
     state.realityTouchSelectedUserId = event.currentTarget.value || "";
     renderExperimentalPage();
@@ -38561,10 +38572,10 @@ document.addEventListener("click", async (event) => {
     transitionBookshelfPage("reader", {
       mutate: () => {
         const savedPage = Math.max(1, Number(state.selectedBook?.reading_progress_page || 1));
-        state.selectedBookSpreadIndex = state.selectedBook?.kind === "jm_album" && savedPage > 1 ? Math.max(0, (savedPage - 1) - ((savedPage - 1) % 2)) : 0;
+        state.selectedBookSpreadIndex = state.selectedBook?.kind === "archive_item" && savedPage > 1 ? Math.max(0, (savedPage - 1) - ((savedPage - 1) % 2)) : 0;
       },
       afterCommit: () => {
-        if (state.selectedBook?.kind === "jm_album") void saveSelectedBookshelfReadingState();
+        if (state.selectedBook?.kind === "archive_item") void saveSelectedBookshelfReadingState();
       },
     });
     return;
@@ -38655,7 +38666,7 @@ async function deleteSelectedBookshelfItem(button = null) {
     return;
   }
   const label = kind === "diary" && diaryDate ? `${diaryDate} 的日记` : (title || "这本书");
-  if (kind !== "jm_album" && !requireSecondClick(button, `book:${kind}:${itemId}:${diaryEntryKey || diaryDate}`, `再次点击删除「${label}」`, "再次点击删除")) return;
+  if (kind !== "archive_item" && !requireSecondClick(button, `book:${kind}:${itemId}:${diaryEntryKey || diaryDate}`, `再次点击删除「${label}」`, "再次点击删除")) return;
   if (button) {
     button.disabled = true;
     button.textContent = "移除中...";
@@ -38742,7 +38753,7 @@ async function rateSelectedBookshelfItem(button = null) {
     });
     setBookshelfUnlocked(result.bookshelf || null);
     state.bookshelfAccessToken = result.bookshelf?.access_token || state.bookshelfAccessToken || "";
-    const updated = allBookshelfBooks().find((item) => item.kind === "jm_album" && String(item.album_id || "") === String(albumId));
+    const updated = allBookshelfBooks().find((item) => item.kind === "archive_item" && String(item.album_id || "") === String(albumId));
     if (updated) state.selectedBook = updated;
     renderBookshelf();
     state.bookshelfPage = "reader";
@@ -38770,7 +38781,7 @@ async function updateSelectedBookshelfTags(form) {
     });
     setBookshelfUnlocked(result.bookshelf || null);
     state.bookshelfAccessToken = result.bookshelf?.access_token || state.bookshelfAccessToken || "";
-    const updated = allBookshelfBooks().find((item) => item.kind === "jm_album" && String(item.album_id || "") === String(albumId));
+    const updated = allBookshelfBooks().find((item) => item.kind === "archive_item" && String(item.album_id || "") === String(albumId));
     if (updated) state.selectedBook = updated;
     state.bookshelfPage = "detail";
     renderBookshelf();
@@ -38805,13 +38816,13 @@ async function rereadSelectedBookshelfItem(button = null) {
   }
   const currentPage = state.bookshelfPage;
   await runAction(async () => {
-    const result = await postJson("/bookshelf/comments/update", {
+const result = await postJson("/disabled_archive_comments", {
       album_id: albumId,
       access_token: state.bookshelfAccessToken || bookshelfUnlockedForCurrentPersona()?.access_token || "",
     });
     setBookshelfUnlocked(result.bookshelf || null);
     state.bookshelfAccessToken = result.bookshelf?.access_token || state.bookshelfAccessToken || "";
-    const updated = allBookshelfBooks().find((item) => item.kind === "jm_album" && String(item.album_id || "") === String(albumId));
+    const updated = allBookshelfBooks().find((item) => item.kind === "archive_item" && String(item.album_id || "") === String(albumId));
     if (updated) state.selectedBook = updated;
     state.bookshelfPage = currentPage === "reader" ? "reader" : "detail";
     renderBookshelf();

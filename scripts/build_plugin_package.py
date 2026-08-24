@@ -101,15 +101,20 @@ def collect_runtime_files(root: Path) -> list[Path]:
 
 
 def validate_public_source(files: list[Path]) -> None:
-    """Keep retired connectors and generic runtime buses out of uploads."""
+    """Reject retired integrations from the public archive.
+
+    Keep this list explicit.  Constructing forbidden markers at runtime makes
+    the release process look like it is trying to evade source review, and it
+    also makes the policy difficult to audit.
+    """
 
     forbidden_markers = (
-        "jm_" + "cos" + "mos",
-        "private_" + "read" + "ing",
-        "astrbot_plugin_" + "jm_" + "cos" + "mos",
-        "register_" + "reality_touch_provider",
-        "call_" + "reality_touch_provider",
-        "resolve_" + "reality_touch_request",
+        "jm_cosmos",
+        "private_reading",
+        "astrbot_plugin_jm_cosmos",
+        "register_reality_touch_provider",
+        "call_reality_touch_provider",
+        "resolve_reality_touch_request",
     )
     for source in files:
         if source.suffix.lower() not in {".py", ".json", ".md", ".js", ".css", ".html", ".yaml", ".yml"}:

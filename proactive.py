@@ -1765,15 +1765,13 @@ class ProactiveMixin(UserRestGateMixin):
         normalized = str(reason or "").strip()
         return normalized in {
             "group_share",
-            "reading_archive_share",
-            "reading_archive_recommendation_request",
             "creative_share",
             "weather_alert",
         }
 
     def _friend_sensitive_proactive_action(self, action: Any) -> bool:
         parts = {part.strip() for part in str(action or "").split("+") if part.strip()}
-        return bool(parts & {"screen_peek", "photo_text", "reading_archive_read"})
+        return bool(parts & {"screen_peek", "photo_text"})
 
     def _friend_can_receive_proactive_reason(self, user: dict[str, Any] | None, reason: Any, action: Any = "") -> bool:
         if not isinstance(user, dict) or self._private_user_role(user) != "friend":
@@ -1965,7 +1963,7 @@ class ProactiveMixin(UserRestGateMixin):
     @staticmethod
     def _friend_unanswered_should_remove_action(action: str) -> bool:
         parts = {part.strip() for part in str(action or "").split("+") if part.strip()}
-        return bool(parts & {"poke", "voice", "photo_text", "screen_peek", "reading_archive_read"})
+        return bool(parts & {"poke", "voice", "photo_text", "screen_peek"})
 
     def _friend_unanswered_plan_patch(
         self,
@@ -2793,7 +2791,7 @@ class ProactiveMixin(UserRestGateMixin):
     @staticmethod
     def _proactive_action_is_intimate(action: str) -> bool:
         parts = {part.strip() for part in str(action or "").split("+") if part.strip()}
-        return bool(parts & {"poke", "voice", "photo_text", "screen_peek", "reading_archive_read"})
+        return bool(parts & {"poke", "voice", "photo_text", "screen_peek"})
 
     @staticmethod
     def _proactive_text_is_intimate(*parts: Any) -> bool:

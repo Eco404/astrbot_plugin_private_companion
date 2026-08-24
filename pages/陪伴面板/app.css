@@ -14461,7 +14461,7 @@ body.daily-outfit-preview-open {
     #2c6cb0;
 }
 
-.shelf-book.jm_album .book-spine {
+.shelf-book.archive_item .book-spine {
   background:
     linear-gradient(90deg, rgba(0, 0, 0, 0.22), transparent 14px, rgba(255, 255, 255, 0.1) 34px, transparent 52px),
     #6b5a8c;
@@ -16535,8 +16535,8 @@ html[data-bookshelf-direction="backward"]::view-transition-new(bookshelf-view) {
   background: #2c6cb0;
 }
 
-.book-preview.jm_album .book-preview-cover,
-.reader-page.jm_album .reader-toolbar {
+.book-preview.archive_item .book-preview-cover,
+.reader-page.archive_item .reader-toolbar {
   background: #6b5a8c;
 }
 
@@ -17176,7 +17176,7 @@ html[data-bookshelf-cover-preview="open"] {
     #8a5f2d;
 }
 
-.reader-page.jm_album .reader-cover {
+.reader-page.archive_item .reader-cover {
   background:
     linear-gradient(90deg, rgba(0, 0, 0, 0.16), transparent 18px),
     #6b5a8c;
@@ -28180,6 +28180,16 @@ pre {
   transform: translateX(16px);
 }
 
+/* The reality page is not an experimental-subpage, so its global toggle
+   needs an explicit checked-state rule instead of inheriting that selector. */
+.reality-global-toggle input:checked + .feature-toggle-visual {
+  background: var(--accent);
+}
+
+.reality-global-toggle input:checked + .feature-toggle-visual::after {
+  transform: translateX(16px);
+}
+
 .exp-caution {
   display: grid;
   gap: 4px;
@@ -33381,6 +33391,55 @@ pre {
   border-left-width: 3px;
   border-radius: 6px;
   background: color-mix(in srgb, var(--accent-soft) 62%, var(--panel));
+}
+
+.reality-mihome-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.reality-mihome-actions,
+.reality-mihome-device {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.reality-mihome-qr {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  border: 1px dashed var(--line);
+  background: var(--panel);
+}
+
+.reality-mihome-qr img {
+  width: 168px;
+  height: 168px;
+  background: #fff;
+}
+
+.reality-mihome-device {
+  border-bottom: 1px solid var(--line-soft);
+  padding: 8px 0;
+}
+
+.reality-mihome-device > span {
+  display: grid;
+  gap: 2px;
+  min-width: 180px;
+  margin-right: auto;
+  font-weight: 700;
+}
+
+.reality-mihome-device small {
+  color: var(--muted);
+  font-weight: 400;
 }
 
 .reality-device-status,

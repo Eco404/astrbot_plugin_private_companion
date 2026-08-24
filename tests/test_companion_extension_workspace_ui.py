@@ -96,6 +96,8 @@ def test_reality_workspace_exposes_mobile_gateway_without_owning_implementation(
     assert 'href="#reality-mobile-data"' in script
     assert 'href="#reality-home-health"' in script
     assert "syncRealityTouchOverviewState(result)" in script
+    assert ".reality-global-toggle input:checked + .feature-toggle-visual" in css
+    assert ".reality-global-toggle input:checked + .feature-toggle-visual::after" in css
     assert '"enable_experimental_bluetooth_wakeup",\n  "enable_daily_case_review_experiment"' not in script
 
 

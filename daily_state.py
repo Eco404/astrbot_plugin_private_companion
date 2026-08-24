@@ -2609,8 +2609,6 @@ class DailyStateMixin(DailyStateTickMixin):
             base = "刚好有点空，想看看那边是不是还在忙"
         elif action == "photo_text":
             base = "刚刚看到的画面想分享一下"
-        elif action == "reading_archive_read":
-            base = "刚刚私下翻到一点漫画内容,只想含糊地提一句"
         elif action == "poke":
             base = "想做一次轻量提醒"
         elif action == "voice":
@@ -14937,7 +14935,7 @@ class DailyStateMixin(DailyStateTickMixin):
             else:
                 estimated_minutes = 0
             action = _single_line(payload.get("action"), 24) or "message"
-            if action not in {"message", "screen_peek", "photo_text", "voice", "reading_archive_read"}:
+            if action not in {"message", "screen_peek", "photo_text", "voice"}:
                 action = "message"
             if not self._friend_can_receive_proactive_reason(user, reason, action):
                 reason = "check_in"
@@ -17822,10 +17820,8 @@ class DailyStateMixin(DailyStateTickMixin):
             ("网页探索", self._maybe_trigger_web_exploration),
             ("AI日报追踪", self._maybe_track_ai_daily),
             ("新闻无聊阅读", self._maybe_trigger_news_boredom_read),
-            ("夹层无聊阅读", self._maybe_trigger_reading_archive_boredom_read),
             ("QQ空间生活说说", self._maybe_publish_qzone_life_post),
             ("QQ空间评论收件箱", self._maybe_process_qzone_comment_inbox),
-            ("夹层推荐请求", self._maybe_schedule_reading_archive_recommendation_request),
         ):
             try:
                 await task_factory()

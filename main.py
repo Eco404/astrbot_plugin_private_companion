@@ -1561,8 +1561,6 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_ALIASES = {
     "候选菜单": "enable_food_menu_recommendation",
     "饭点关心": "enable_meal_care_proactive",
     "吃饭关心": "enable_meal_care_proactive",
-    "资料柜偏好": "enable_reading_archive_preference_influence",
-    "夹层偏好": "enable_reading_archive_preference_influence",
     "关系网": "enable_worldbook_member_recognition",
     "跨用户记忆": "enable_cross_user_memory_bridge",
     "跨用户记忆互通": "enable_cross_user_memory_bridge",
@@ -1589,7 +1587,6 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_LABELS = {
     "enable_skill_growth_passive_injection": "技能被动注入",
     "enable_food_menu_recommendation": "吃什么候选",
     "enable_meal_care_proactive": "饭点主动关心",
-    "enable_reading_archive_preference_influence": "资料归档偏好影响",
     "enable_worldbook_member_recognition": "关系网成员识别",
     "enable_cross_user_memory_bridge": "跨用户记忆互通",
     "enable_atrelay_tools": "跨群转述工具",
@@ -1620,7 +1617,6 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_GROUPS = {
         "enable_group_companion",
         "enable_skill_growth_passive_injection",
         "enable_food_menu_recommendation",
-        "enable_reading_archive_preference_influence",
         "enable_worldbook_member_recognition",
         "enable_cross_user_memory_bridge",
         "enable_livingmemory_integration",
@@ -12387,7 +12383,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         # must be refreshed in either mode when the page saves a new value.
         for attr, config_key in (
             ("embedding_provider_id", "EMBEDDING_PROVIDER_ID"),
-            ("adult_content_provider_id", "ADULT_CONTENT_PROVIDER_ID"),
             ("group_member_safety_provider_id", "GROUP_MEMBER_SAFETY_PROVIDER_ID"),
             ("reaction_expression_embedding_provider_id", "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID"),
             ("deepseek_peak_replacement_provider_id", "DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID"),
@@ -12430,12 +12425,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "diary_provider_id": "DREAM_DIARY_PROVIDER_ID",
             "photo_prompt_provider_id": "PHOTO_PROMPT_PROVIDER_ID",
             "embedding_provider_id": "EMBEDDING_PROVIDER_ID",
-            "adult_content_provider_id": "ADULT_CONTENT_PROVIDER_ID",
             "group_member_safety_provider_id": "GROUP_MEMBER_SAFETY_PROVIDER_ID",
             "reaction_expression_embedding_provider_id": "REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID",
             "deepseek_peak_replacement_provider_id": "DEEPSEEK_PEAK_REPLACEMENT_PROVIDER_ID",
             "sensitive_replacement_provider_id": "SENSITIVE_REPLACEMENT_PROVIDER_ID",
-            "reading_archive_vision_provider_id": "READING_ARCHIVE_VISION_PROVIDER_ID",
         }
 
         if str(getattr(self, "provider_config_mode", "quick") or "quick").strip().lower() != "quick":
@@ -12492,14 +12485,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "photo_prompt_provider_id",
         ):
             fill(attr, creative or complex_model)
-        # JM reading has its own visual route even in quick mode.  Keeping it
-        # independent prevents a generic image-model change from changing the
-        # cost and output quality of bookshelf analysis.
-        self.reading_archive_vision_provider_id = self._cfg_str(
-            config,
-            "READING_ARCHIVE_VISION_PROVIDER_ID",
-            str(getattr(self, "reading_archive_vision_provider_id", "") or ""),
-        )
         self.plugin_vision_provider_id = configured_provider("PLUGIN_VISION_PROVIDER_ID", plugin_vision)
 
     def _detect_astrbot_version(self) -> str:
@@ -13175,12 +13160,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             timeout=1.2,
         )
         add_spec("bookshelf.reading", "bookshelf", 62, lambda: self._format_bookshelf_reading_context_for_reply(inbound_text, current_user))
-        add_spec(
-            "reading_archive.preference",
-            "reading_archive",
-            63,
-            lambda: self._format_reading_archive_preference_influence_for_reply(inbound_text, current_user),
-        )
         add_spec("news.recent", "news", 64, lambda: self._format_recent_news_context_for_reply(inbound_text))
         add_spec("web_exploration.recent", "web_exploration", 65, lambda: self._format_recent_web_exploration_context_for_reply(inbound_text))
         if is_private_chat:
@@ -15765,7 +15744,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "enable_private_image_self_recognition",
             "enable_group_companion",
             "enable_skill_growth_passive_injection",
-            "enable_reading_archive_preference_influence",
             "enable_worldbook_member_recognition",
             "enable_livingmemory_integration",
         }
@@ -16019,12 +15997,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 "googleapis.com/v1beta/openai",
             )
         )
-
-    def _adult_content_provider_matches(self, event: AstrMessageEvent | None, req: ProviderRequest | None) -> bool:
-        configured = _single_line(getattr(self, "adult_content_provider_id", ""), 160).casefold()
-        if not configured:
-            return False
-        return any(part.casefold() == configured for part in self._llm_request_provider_identity_parts(event, req))
 
     def _llm_request_uses_deepseek_family_provider(self, event: AstrMessageEvent | None, req: ProviderRequest | None) -> bool:
         identity = " ".join(self._llm_request_provider_identity_parts(event, req)).lower()
@@ -16309,14 +16281,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 content_policy={
                     "enabled": bool(runtime_persona_setting(self, 'enable_relationship_content_tiers', False)),
                     "flirt_enabled": bool(runtime_persona_setting(self, 'enable_flirt_content_tier', True)),
-                    "adult_enabled": bool(runtime_persona_setting(self, 'enable_adult_content_tier', False)),
-                    "adult_owner_confirmed": bool(getattr(self, "adult_content_owner_confirmed", False)),
-                    "require_turn_consent": bool(runtime_persona_setting(self, 'adult_content_require_turn_consent', True)),
-                    "require_exclusive": bool(runtime_persona_setting(self, 'adult_content_require_exclusive', True)),
-                    "require_affectionate": bool(runtime_persona_setting(self, 'adult_content_require_affectionate', True)),
                     "private_chat": is_private,
-                    "local_provider_configured": bool(getattr(self, "adult_content_provider_id", "")),
-                    "local_provider_match": self._adult_content_provider_matches(event, req),
                 },
                 channel_scope="private" if is_private else "group",
             )

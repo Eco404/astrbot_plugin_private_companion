@@ -121,7 +121,6 @@ class SelfTimelineMixin:
         entries.extend(self._self_timeline_from_diaries(data))
         entries.extend(self._self_timeline_from_proactive_audit(data, user=user))
         entries.extend(self._self_timeline_from_creative(data))
-        entries.extend(self._self_timeline_from_reading_archive(data))
         entries.extend(self._self_timeline_from_photo_generation(data, user=user))
         entries.extend(self._self_timeline_from_qzone_publish(data))
 
@@ -327,27 +326,6 @@ class SelfTimelineMixin:
                     }
                 )
         return entries
-
-    def _self_timeline_from_reading_archive(self, data: dict[str, Any]) -> list[dict[str, Any]]:
-        state = data.get("reading_archive_integration") if isinstance(data.get("reading_archive_integration"), dict) else {}
-        album = state.get("last_album") if isinstance(state.get("last_album"), dict) else {}
-        if not album:
-            return []
-        ts = _safe_float(album.get("created_ts") or state.get("last_read_at"), 0)
-        title = _single_line(album.get("title"), 100)
-        impression = _single_line(album.get("reading_impression") or album.get("impression"), 220)
-        keyword = _single_line(album.get("keyword"), 40)
-        return [
-            {
-                "source": "资料归档",
-                "ts": ts,
-                "date": self._self_timeline_date_from_ts(ts),
-                "when": self._self_timeline_when_from_ts(ts),
-                "summary": f"翻到《{title}》" if title else "翻了一会儿资料柜夹层",
-                "detail": "；".join(part for part in (f"关键词:{keyword}" if keyword else "", impression) if part),
-                "keywords": "看了什么 读了什么 翻了什么 资料 漫画 夹层 阅读 " + " ".join([title, impression, keyword]),
-            }
-        ]
 
     def _self_timeline_photo_continuity_key(self, user: dict[str, Any] | None) -> str:
         if not isinstance(user, dict):

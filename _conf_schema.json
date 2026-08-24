@@ -368,7 +368,7 @@
       "enable_relationship_content_tiers": {
         "description": "关系内容尺度",
         "type": "bool",
-        "hint": "把日常、含蓄暧昧和成人私密内容纳入统一表达决策。默认关闭；开启也不会仅凭亲密度自动放宽内容。",
+        "hint": "把日常和非露骨暧昧纳入统一表达决策。默认关闭；开启也不会仅凭亲密度自动升级尺度。",
         "default": false
       },
       "enable_flirt_content_tier": {
@@ -377,49 +377,6 @@
         "hint": "仅在私聊、长期关系至少达到亲密且当前互动不是回避或受伤时允许；始终保持非露骨。",
         "default": true,
         "condition": "enable_relationship_content_tiers"
-      },
-      "enable_adult_content_tier": {
-        "description": "允许成人私密档",
-        "type": "bool",
-        "hint": "高风险总开关。主要用户、私聊、成年确认、当轮明确同意和指定 Provider 精确匹配始终是硬边界；专属关系与爱意互动默认也要求满足，可通过下方开关分别放宽。",
-        "default": false,
-        "condition": "enable_relationship_content_tiers"
-      },
-      "adult_content_require_exclusive": {
-        "description": "要求专属关系",
-        "type": "bool",
-        "hint": "关闭后主要用户处于普通关系模式时也可申请成人私密档；建议保持开启。主要用户与私聊边界不受此开关影响。",
-        "default": true,
-        "condition": "enable_adult_content_tier"
-      },
-      "adult_content_require_affectionate": {
-        "description": "要求爱意互动",
-        "type": "bool",
-        "hint": "关闭后当前互动不是爱意时也可申请成人私密档；建议保持开启。回避、同意、成年确认和 Provider 边界仍会独立检查。",
-        "default": true,
-        "condition": "enable_adult_content_tier"
-      },
-      "adult_content_owner_confirmed": {
-        "description": "确认主要用户已成年",
-        "type": "bool",
-        "hint": "这是管理员后台确认，不会从关系分数、用户话术或模型输出自动推断。",
-        "default": false,
-        "condition": "enable_adult_content_tier"
-      },
-      "adult_content_require_turn_consent": {
-        "description": "每轮要求明确同意",
-        "type": "bool",
-        "hint": "建议保持开启。开启后只有当轮消息同时明确请求成人尺度并表达同意时才允许。",
-        "default": true,
-        "condition": "enable_adult_content_tier"
-      },
-      "ADULT_CONTENT_PROVIDER_ID": {
-        "description": "成人私密档指定 Provider",
-        "type": "string",
-        "hint": "当前会话 Provider 必须与此 ID 精确一致；不可用或不匹配时成人档直接降级。插件二次复核固定使用它，主回复链回退仍由 AstrBot 配置决定。",
-        "default": "",
-        "condition": "enable_adult_content_tier",
-        "_special": "select_provider"
       },
       "owner_exclusive_label": {
         "description": "主要用户专属关系名称",

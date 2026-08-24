@@ -2794,8 +2794,6 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "news_share",
             "web_exploration_share",
             "creative_share",
-            "reading_archive_share",
-            "reading_archive_recommendation_request",
         }
         if troubleshooting_hint:
             current_schedule = "（本轮不使用生活片段；只按用户刚发起的测试请求自然开口，不补写虚构见闻）"
@@ -5106,8 +5104,6 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "news_share",
             "web_exploration_share",
             "creative_share",
-            "reading_archive_share",
-            "reading_archive_recommendation_request",
             "weather_alert",
             "goodnight_screen_check",
         }
@@ -7387,24 +7383,6 @@ Output:
             payload.setdefault("summary", "留了句语音")
             payload.setdefault("effective_action", "voice")
             return payload
-        if action == "reading_archive_read":
-            result = await self._run_reading_archive_read_action(user)
-            if isinstance(result, dict):
-                user["reading_archive_reading_context"] = result
-                return {
-                    "success": True,
-                    "context": self._format_reading_archive_action_context(user),
-                    "extra_components": [],
-                    "summary": "私下翻了会儿漫画",
-                    "effective_action": "reading_archive_read",
-                }
-            return {
-                "success": False,
-                "context": "资料归档线索：这次没有找到适合继续看的内容",
-                "extra_components": [],
-                "summary": "没有读到合适内容",
-                "effective_action": "reading_archive_read",
-            }
         if action.startswith("external:"):
             return await self._execute_external_proactive_ability(action.split(":", 1)[1], user, name, reason)
         return {"success": True, "context": "message：只发送私聊文本", "extra_components": [], "summary": "文字", "effective_action": "message"}
