@@ -2510,7 +2510,7 @@ class PrivateCompanionPlugin(
                     "previous_backup": str(backup_path),
                 }
                 self.data = replacement
-                if bool(getattr(self, "default_enable_configured_targets", False)):
+                if bool(runtime_persona_setting(self, "default_enable_configured_targets", False)):
                     sync_targets = getattr(self, "_sync_configured_targets", None)
                     if callable(sync_targets):
                         sync_targets()
@@ -3835,11 +3835,25 @@ class PrivateCompanionPlugin(
         revision = int(profile.get(PERSONA_SETTINGS_REVISION_KEY) or 0)
         settings = profile.get(PERSONA_SETTINGS_KEY) or {}
         detached = detach_persona_settings(settings, self._primary_persona_config(), manifest=self._persona_scope_manifest())
+        existing = sorted(set(detached) & set(settings))
         missing = sorted(set(detached) - set(settings))
         digest = hashlib.sha256(
             json.dumps({"persona_id": pid, "revision": revision, "settings": detached}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        return {"ok": True, "persona_id": pid, "revision": revision, "missing_keys": missing, "materialized_count": len(detached), "preview_hash": digest}
+        return {
+            "ok": True,
+            "persona_id": pid,
+            "revision": revision,
+            "existing_override_keys": existing,
+            "existing_override_count": len(existing),
+            "follow_primary_keys": missing,
+            "follow_primary_count": len(missing),
+            "final_settings_count": len(detached),
+            # Kept for compatibility with clients built before split statistics.
+            "missing_keys": missing,
+            "materialized_count": len(detached),
+            "preview_hash": digest,
+        }
 
     async def _detach_persona_settings_async(self, persona_id: Any, *, expected_revision: Any, preview_hash: Any) -> dict[str, Any]:
         preview = self._persona_detach_preview(persona_id)
@@ -9958,7 +9972,11 @@ class PrivateCompanionPlugin(
         *,
         reply_text: str,
     ) -> dict[str, str]:
-        provider_id = self._task_provider(self.response_review_provider_id, self.group_followup_judge_provider_id, self.mai_style_provider_id)
+        provider_id = self._task_provider(
+            runtime_persona_setting(self, "response_review_provider_id", ""),
+            runtime_persona_setting(self, "group_followup_judge_provider_id", ""),
+            runtime_persona_setting(self, "mai_style_provider_id", ""),
+        )
         if not provider_id:
             return {"decision": "send", "reason": "未配置复核模型"}
         scene = getattr(event, "private_companion_group_scene", None)
@@ -10210,8 +10228,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         if getattr(result, "use_t2i_", None) or getattr(result, "use_markdown_", None):
             return
-        platform_supports = getattr(self, "_platform_supports", None)
-        if callable(platform_supports) and not platform_supports("segmented_reply", event=event):
+        if not self._segmented_platform_allows(event=event):
             return
         if not chain:
             return
@@ -11879,7 +11896,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             ),
         }
         label, attr, note = specs.get(channel, ("表达风格", f"persona_{channel}_voice_prompt", "只在对应链路使用。"))
-        text = self._normalize_persona_voice_text(getattr(self, attr, ""), max_chars=1400)
+        text = self._normalize_persona_voice_text(
+            runtime_persona_setting(self, attr, ""),
+            max_chars=1400,
+        )
         if not text:
             return ""
         return f"【人格标准化：{label}】\n{text}\n使用边界：{note}"
@@ -15141,7 +15161,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         raw = await self._llm_call(
             prompt,
             max_tokens=180,
-            provider_id=self._task_provider(self.rest_wakeup_provider_id, self.response_review_provider_id, self.llm_provider_id),
+            provider_id=self._task_provider(
+                runtime_persona_setting(self, "rest_wakeup_provider_id", ""),
+                runtime_persona_setting(self, "response_review_provider_id", ""),
+                runtime_persona_setting(self, "llm_provider_id", ""),
+            ),
             task="rest_wakeup_judge",
         )
         payload = self._extract_json_payload(raw or "")

@@ -2090,6 +2090,7 @@ const configLabels = {
   segmented_proactive_face_strategy: "平台表情位置",
   segmented_proactive_other_strategy: "其他附件位置",
   segmented_proactive_split_mode: "分段模式",
+  enable_qq_official_segmented_reply: "允许 qq_official 使用分段",
   segmented_proactive_match_width_variants: "自动匹配全角/半角",
   segmented_proactive_regex: "分段正则",
   segmented_proactive_split_words: "分段词列表",
@@ -2902,6 +2903,7 @@ const configDescriptions = {
   segmented_proactive_face_strategy: "控制平台原生 Face/Emoji 组件，不影响表情包素材库。",
   segmented_proactive_other_strategy: "文件、视频等其他附件默认单独发送，减少平台对混合消息链的兼容差异。",
   segmented_proactive_split_mode: "regex 使用正则切句；words 使用分段词列表，更适合清理句号、空格等固定分隔符。网址会自动保护，不会被按点号或斜杠拆开。",
+  enable_qq_official_segmented_reply: "需在QQ群和私聊中开启“允许机器人主动发言”",
   segmented_proactive_match_width_variants: "仅在分段词列表模式生效。开启后，~／～、,／，、!／！等常见标点只需配置一种写法，分段和清理都会匹配另一种；不会改写发送正文。",
   segmented_proactive_regex: "分段模式为 regex 时使用的切分正则。",
   segmented_proactive_split_words: "分段模式为 words 时使用的分段词。推荐一行一个；中文逗号要单独写一行，或写“逗号”。英文点号会把连续 ... 当成一个省略号边界；配置了“……”时会自动兼容单个“…”。网址内部字符会自动保护，完整网址结束处可作为自然断点；括号、标题引号和 <image>/<video> 这类尖括号媒体块内部字符会跳过。",
@@ -3324,7 +3326,7 @@ const featureSettingGroups = {
   enable_daily_diary: ["daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_busy_reply_gate: ["busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes"],
-  enable_segmented_proactive_reply: ["enable_segmented_proactive_chat_profiles", "segmented_proactive_private_enabled", "segmented_proactive_private_scope", "segmented_proactive_private_threshold", "segmented_proactive_private_min_segment_chars", "segmented_proactive_private_max_segments", "segmented_proactive_private_send_as_forward", "segmented_proactive_private_interval_method", "segmented_proactive_private_interval_min", "segmented_proactive_private_interval_max", "segmented_proactive_private_log_base", "segmented_proactive_group_enabled", "segmented_proactive_group_scope", "segmented_proactive_group_threshold", "segmented_proactive_group_min_segment_chars", "segmented_proactive_group_max_segments", "segmented_proactive_group_send_as_forward", "segmented_proactive_group_interval_method", "segmented_proactive_group_interval_min", "segmented_proactive_group_interval_max", "segmented_proactive_group_log_base", "segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "segmented_proactive_component_order", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy", "segmented_proactive_split_mode", "segmented_proactive_match_width_variants", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
+  enable_segmented_proactive_reply: ["enable_segmented_proactive_chat_profiles", "segmented_proactive_private_enabled", "segmented_proactive_private_scope", "segmented_proactive_private_threshold", "segmented_proactive_private_min_segment_chars", "segmented_proactive_private_max_segments", "segmented_proactive_private_send_as_forward", "segmented_proactive_private_interval_method", "segmented_proactive_private_interval_min", "segmented_proactive_private_interval_max", "segmented_proactive_private_log_base", "segmented_proactive_group_enabled", "segmented_proactive_group_scope", "segmented_proactive_group_threshold", "segmented_proactive_group_min_segment_chars", "segmented_proactive_group_max_segments", "segmented_proactive_group_send_as_forward", "segmented_proactive_group_interval_method", "segmented_proactive_group_interval_min", "segmented_proactive_group_interval_max", "segmented_proactive_group_log_base", "segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "segmented_proactive_component_order", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy", "segmented_proactive_split_mode", "enable_qq_official_segmented_reply", "segmented_proactive_match_width_variants", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection", "enable_passive_state_continuity_anchor"],
   enable_passive_state_delta_injection: ["enable_passive_state_continuity_anchor"],
   enable_health_state: ["humanized_state_intensity"],
@@ -4041,7 +4043,7 @@ const featureSettingSections = {
     {
       title: "共享切分规则与兼容默认值",
       note: "分隔符与内容处理规则由两类会话共享；会话范围、长度和分段数在独立配置关闭时作为兼容默认值使用。",
-      keys: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_split_mode", "segmented_proactive_match_width_variants", "segmented_proactive_regex", "segmented_proactive_split_words"],
+      keys: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_split_mode", "enable_qq_official_segmented_reply", "segmented_proactive_match_width_variants", "segmented_proactive_regex", "segmented_proactive_split_words"],
     },
     {
       title: "共享默认发送方式",
@@ -4464,6 +4466,7 @@ const featureSettingTypes = {
   segmented_proactive_face_strategy: { type: "select", options: [["inline", "嵌入正文"], ["separate", "单独发送"], ["previous", "跟随上段"], ["next", "跟随下段"]] },
   segmented_proactive_other_strategy: { type: "select", options: [["inline", "嵌入正文"], ["separate", "单独发送"], ["previous", "跟随上段"], ["next", "跟随下段"]] },
   segmented_proactive_split_mode: { type: "select", options: [["regex", "正则"], ["words", "分段词列表"]] },
+  enable_qq_official_segmented_reply: { type: "checkbox" },
   segmented_proactive_match_width_variants: { type: "checkbox" },
   segmented_proactive_interval_method: { type: "select", options: [["log", "按字数对数"], ["random", "随机"]] },
   segmented_proactive_content_cleanup_scope: { type: "select", options: [["all", "全段清理"], ["trailing", "仅句尾清理"]] },
@@ -4612,6 +4615,9 @@ function collectSettingValue(key, input) {
     } catch {
       return raw.split(/[\s,，、]+/).filter(Boolean);
     }
+  }
+  if (["segmented_proactive_split_words", "segmented_proactive_content_cleanup_words"].includes(key)) {
+    return parseSegmentedWordList(input.value);
   }
   if (key === "multi_persona_ids") {
     const host = input.closest("[data-feature-param-group='multi_persona_ids']");
@@ -5631,7 +5637,8 @@ function personaDisplayLabel(personaOrId, options = {}) {
   if (cleanLabel && id && cleanLabel.toLocaleLowerCase().includes(id.toLocaleLowerCase()) === false) {
     display = `${cleanLabel} · ${id}`;
   }
-  const source = options.includeSource ? String(persona.source || "").trim() : "";
+  const rawSource = options.includeSource ? String(persona.source || "").trim() : "";
+  const source = rawSource === "运行态人格" ? "" : rawSource;
   if (source && !display.toLocaleLowerCase().includes(source.toLocaleLowerCase())) {
     display = display ? `${display} · ${source}` : source;
   }
@@ -6165,6 +6172,7 @@ async function savePersonaScopedFeatureChanges(payload, control = null, successM
     return false;
   } finally {
     setActionBusy(control, false);
+    setPersonaOperationBusy(false);
     syncFeatureFooterAction();
   }
 }
@@ -6177,6 +6185,7 @@ async function followPersonaSetting(key, control = null) {
     showToast("人格配置版本不可用，请刷新后重试", "error");
     return false;
   }
+  setPersonaOperationBusy(true);
   setActionBusy(control, true);
   try {
     const result = await postJson("/persona/settings/update", {
@@ -12293,6 +12302,7 @@ async function updateTroubleshootingWarningSuppression(control) {
   } catch (error) {
     showToast(`更新警告屏蔽失败：${error.message}`, "error");
     setActionBusy(control, false);
+    setPersonaOperationBusy(false);
     return;
   }
   try {
@@ -23282,7 +23292,7 @@ function renderConfigPersonaSelector() {
       ? "主人格配置"
       : "独立人格配置";
     meta.innerHTML = selected
-      ? `当前编辑：<b>${escapeHtml(personaDisplayLabel(selected))}</b><span>${escapeHtml(source)} · ${configuredIds.has(selected) ? "运行中" : "已停用，可编辑恢复"} · 保存只影响所选人格${state.personaConfigState && state.personaConfigState.persona_id === selected ? ` · 版本 ${escapeHtml(state.personaConfigState.revision ?? 0)}` : ""}</span>${state.personaConfigError ? `<em class="persona-config-error">${escapeHtml(state.personaConfigError)}</em>` : ""}`
+      ? `当前编辑：<b>${escapeHtml(personaDisplayLabel(selected))}</b><span>${escapeHtml(source)} · ${configuredIds.has(selected) ? "运行中" : "已停用，可编辑恢复"} · 保存只影响所选人格</span>${state.personaConfigError ? `<em class="persona-config-error">${escapeHtml(state.personaConfigError)}</em>` : ""}`
       : "请先在通用设置中配置人格列表";
   }
   if (select.dataset.bound === "1") return;
@@ -23361,7 +23371,7 @@ function renderPersonaConfigManagement() {
       <div class="persona-management-status"><span class="module-badge">${enabled ? `${escapeHtml(enabledPersonaIds.size)} / ${escapeHtml(ids.length)} 启用` : "总开关未开启"}</span></div>
     </header>
     <div class="persona-management-note">
-      <span>创建方式：跟随主人格、从默认值创建、复制已有人格；也可以把当前有效配置脱离主人格并固化。</span>
+      <span>创建方式：跟随主人格、从默认值创建、复制已有人格；也可以把跟随项以当前值写入人格自身配置。</span>
       <span>人格配置缺少某个键时继续读取主人格；显式的 false、0、空列表和空字符串会保留为独立值。</span>
     </div>
     ${primarySetup}
@@ -23387,13 +23397,13 @@ function renderPersonaConfigManagement() {
         <button type="submit" class="feature-param-save" ${createPersonaRecords.length ? "" : "disabled"}>创建人格配置</button>
       </form>
       <form class="persona-config-detach-form" data-persona-config-detach>
-        <header><b>脱离主人格跟随</b><span>把目标人格缺失键的当前有效值固化到自身配置。</span></header>
+        <header><b>脱离主人格跟随</b><span>把指定人格原本的跟随项以值的方式写入自身配置。</span></header>
         <label><span>目标人格</span><select name="persona_id">${detachOptions || '<option value="">暂无独立人格配置</option>'}</select></label>
         <div class="persona-config-detach-actions">
-          <button type="button" data-persona-detach-preview ${detachOptions ? "" : "disabled"}>预览固化内容</button>
+          <button type="button" data-persona-detach-preview ${detachOptions ? "" : "disabled"}>统计变更</button>
           <button type="button" class="feature-param-save" data-persona-detach-apply disabled>确认脱离</button>
         </div>
-        <div class="persona-config-detach-preview" data-persona-detach-result>${state.personaDetachPreview ? personaDetachPreviewHtml(state.personaDetachPreview) : "尚未生成预览。"}</div>
+        <div class="persona-config-detach-preview" data-persona-detach-result>${state.personaDetachPreview ? personaDetachPreviewHtml(state.personaDetachPreview) : "尚未统计变更。"}</div>
       </form>
     </div>
     <div class="persona-management-body">${multiPersonaMigrationDetailCard()}</div>
@@ -23606,7 +23616,7 @@ function bindPersonaManagementActions(root) {
     state.personaDetachPreview = null;
     const result = detachForm.querySelector("[data-persona-detach-result]");
     const apply = detachForm.querySelector("[data-persona-detach-apply]");
-    if (result) result.textContent = "人格已变化，请重新预览。";
+    if (result) result.textContent = "人格已变化，请重新统计变更。";
     if (apply) apply.disabled = true;
   });
   detachForm?.querySelector("[data-persona-detach-preview]")?.addEventListener("click", async (event) => {
@@ -23620,13 +23630,13 @@ function bindPersonaManagementActions(root) {
       if (output) output.innerHTML = personaDetachPreviewHtml(result);
       if (apply) apply.disabled = !result;
       return result;
-    }, "脱离预览已生成", event.currentTarget, { reload: false });
+    }, "变更统计已生成", event.currentTarget, { reload: false });
   });
   detachForm?.querySelector("[data-persona-detach-apply]")?.addEventListener("click", async (event) => {
     const preview = state.personaDetachPreview;
     const personaId = String(detachSelect?.value || "").trim();
-    if (!preview || !personaId) return showToast("请先生成脱离预览", "error");
-    if (!window.confirm(`确认将“${personaDisplayLabel(personaId)}”的当前有效配置全部固化吗？`)) return;
+    if (!preview || !personaId) return showToast("请先统计变更", "error");
+    if (!window.confirm(`确认将“${personaDisplayLabel(personaId)}”原本跟随主人格的配置项以当前值写入自身配置吗？`)) return;
     const saved = await runAction(() => postJson("/persona/config/detach-apply", {
       persona_id: personaId,
       expected_revision: preview.revision ?? preview.persona_settings_revision ?? 0,
@@ -23640,11 +23650,14 @@ function bindPersonaManagementActions(root) {
 }
 
 function personaDetachPreviewHtml(preview) {
-  const keys = Array.isArray(preview?.materialized_keys)
-    ? preview.materialized_keys
-    : (Array.isArray(preview?.keys) ? preview.keys : []);
-  const count = Number(preview?.materialized_count ?? preview?.count ?? keys.length ?? 0);
-  return `<b>将固化 ${escapeHtml(count)} 个配置项</b><span>${escapeHtml(keys.slice(0, 12).join("、") || "当前缺失项将使用预览中的有效值")}${keys.length > 12 ? ` 等 ${escapeHtml(keys.length)} 项` : ""}</span>`;
+  const followKeys = Array.isArray(preview?.follow_primary_keys)
+    ? preview.follow_primary_keys
+    : (Array.isArray(preview?.missing_keys) ? preview.missing_keys : []);
+  const existingCount = Number(preview?.existing_override_count ?? 0);
+  const followCount = Number(preview?.follow_primary_count ?? followKeys.length ?? 0);
+  const finalCount = Number(preview?.final_settings_count ?? preview?.materialized_count ?? existingCount + followCount);
+  const changedKeys = followKeys.slice(0, 12).join("、");
+  return `<b>本次写入 ${escapeHtml(followCount)} 项跟随设置</b><span>原有 ${escapeHtml(existingCount)} 项独立设置保持不变；完成后共 ${escapeHtml(finalCount)} 项独立设置。</span><span>${escapeHtml(changedKeys || "当前没有需要写入的跟随项")}${followKeys.length > 12 ? ` 等 ${escapeHtml(followKeys.length)} 项` : ""}</span>`;
 }
 
 function renderStorageConfig(options = {}) {
@@ -25254,6 +25267,16 @@ function decodeSegmentedWordToken(value) {
   return raw;
 }
 
+function encodeSegmentedWordToken(value) {
+  const raw = String(value ?? "");
+  if (raw === " ") return "<space>";
+  if (raw === "\n") return "<newline>";
+  if (raw === "\t") return "<tab>";
+  if (raw === ",") return "<comma>";
+  if (raw === "，") return "<zh_comma>";
+  return raw;
+}
+
 function parseSegmentedWordList(value) {
   if (Array.isArray(value)) {
     return value.map(decodeSegmentedWordToken).filter((item) => item !== "");
@@ -25272,6 +25295,7 @@ const segmentedWidthVariantGroups = [
   ["(", "（"], [")", "）"], ["[", "［"], ["]", "］"], ["{", "｛"], ["}", "｝"], ["<", "＜"], [">", "＞"],
   ["\"", "＂"], ["'", "＇"], ["\\", "＼"], ["/", "／"], ["|", "｜"], ["+", "＋"], ["-", "－"], ["=", "＝"],
   ["*", "＊"], ["&", "＆"], ["%", "％"], ["#", "＃"], ["@", "＠"], ["$", "＄"], ["^", "＾"], ["_", "＿"],
+  ["--", "－－", "——"],
 ];
 
 function expandSegmentedWidthVariantWords(words) {
@@ -25302,6 +25326,15 @@ function decodeSegmentedReplacementToken(value, replacement = false) {
     return aliases.get(lower);
   }
   return trimmed.replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+}
+
+function encodeSegmentedReplacementToken(value, replacement = false) {
+  const raw = String(value ?? "");
+  if (raw === " ") return "<space>";
+  if (raw === "\n" || raw === "\r\n" || raw === "\r") return "<newline>";
+  if (raw === "\t") return "<tab>";
+  if (replacement && raw === "") return "<empty>";
+  return raw.replaceAll("\r\n", "\\n").replaceAll("\r", "\\n").replaceAll("\n", "\\n").replaceAll("\t", "\\t");
 }
 
 function parseSegmentedReplacementRules(value) {
@@ -25479,6 +25512,13 @@ function splitSegmentedWordsOutsideProtected(value, splitWords) {
   const feedPlain = (chunk) => {
     const text = String(chunk || "");
     let index = 0;
+    const nextIsAsciiDigit = (start, allowSpaces = false) => {
+      let position = start;
+      if (allowSpaces) {
+        while (position < text.length && /\s/.test(text[position])) position += 1;
+      }
+      return position < text.length && /[0-9]/.test(text[position]);
+    };
     while (index < text.length) {
       const matched = words.find((word) => text.startsWith(word, index));
       if (matched) {
@@ -25490,9 +25530,34 @@ function splitSegmentedWordsOutsideProtected(value, splitWords) {
             end += 1;
           }
           current += delimiter;
+          if (nextIsAsciiDigit(end)) {
+            index = end;
+            continue;
+          }
           pushCurrent();
           index = end;
           continue;
+        }
+        if (matched === ",") {
+          const end = index + matched.length;
+          current += delimiter;
+          if (nextIsAsciiDigit(end)) {
+            index = end;
+            continue;
+          }
+          pushCurrent();
+          index = end;
+          continue;
+        }
+        if (["-", "－", "—"].includes(matched[0]) && [...matched].every((char) => char === matched[0])) {
+          let end = index + matched.length;
+          while (end < text.length && text[end] === matched[0]) end += 1;
+          const dashRun = text.slice(index, end);
+          if (dashRun.length >= 2 && nextIsAsciiDigit(end, true)) {
+            current += dashRun;
+            index = end;
+            continue;
+          }
         }
         if (["…", "~", "～"].includes(matched)) {
           let end = index + matched.length;
@@ -25501,6 +25566,10 @@ function splitSegmentedWordsOutsideProtected(value, splitWords) {
             end += matched.length;
           }
           current += delimiter;
+          if (["~", "～"].includes(matched) && nextIsAsciiDigit(end, true)) {
+            index = end;
+            continue;
+          }
           pushCurrent();
           index = end;
           continue;
@@ -25545,6 +25614,7 @@ function segmentedJoinPair(left, right) {
   const rhs = String(right || "").trim();
   if (!lhs) return rhs;
   if (!rhs) return lhs;
+  if (/^(?:…+|\.{2,})$/.test(lhs)) return `${lhs}${rhs}`;
   if (/[！？!?]$/.test(lhs)) return `${lhs} ${rhs}`.trim();
   let softened = lhs.replace(/[。…~～]+$/g, "，").replace(/[!?！？]+$/g, "，");
   if (!/[，,、\s]$/.test(softened)) softened += "，";
@@ -27649,12 +27719,15 @@ function bindRelationshipPolicyEditor(root = document) {
 
 function featureTextareaValue(key, value) {
   if (!Array.isArray(value)) return String(value ?? "");
+  if (["segmented_proactive_split_words", "segmented_proactive_content_cleanup_words"].includes(key)) {
+    return value.map(encodeSegmentedWordToken).join("\n");
+  }
   return value.map((item) => {
     if (!item || typeof item !== "object") return String(item ?? "");
     if (key === "segmented_proactive_content_replacements") {
-      const from = item.from ?? item.old ?? item.source ?? "";
-      const to = item.to ?? item.new ?? item.replacement ?? "";
-      return `${String(from)} => ${String(to)}`;
+      const from = encodeSegmentedReplacementToken(item.from ?? item.old ?? item.source ?? "");
+      const to = encodeSegmentedReplacementToken(item.to ?? item.new ?? item.replacement ?? "", true);
+      return `${from} => ${to}`;
     }
     try {
       return JSON.stringify(item);
