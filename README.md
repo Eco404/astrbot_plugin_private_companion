@@ -6,6 +6,9 @@
 
 面向 AstrBot 的持续型 AI 陪伴核心。插件以角色状态、日程、关系和生活事件为统一上下文，为私聊、群聊、主动消息和外部能力提供连续、可配置且可审计的运行基础。
 
+> **使用文档：** [插件 Wiki](https://vue.syuan.org)<br>
+> 安装、配置、功能说明与常见问题请优先查阅 Wiki。
+
 | 项目 | 当前信息 |
 | --- | --- |
 | 插件名 | <code>astrbot_plugin_private_companion</code> |
@@ -88,7 +91,6 @@ Proactive Chat 的深度联动如果遇到版本不兼容或缺少上游方法�
 
 ## 文档与支持
 
-- 使用文档：[插件 Wiki](https://vue.syuan.org)
 - 源代码：[GitHub 仓库](https://github.com/menglimi/astrbot_plugin_private_companion)
 - 问题反馈：[GitHub Issues](https://github.com/menglimi/astrbot_plugin_private_companion/issues)
 - 版本记录：[CHANGELOG.md](./CHANGELOG.md)

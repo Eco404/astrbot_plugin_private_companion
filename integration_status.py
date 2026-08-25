@@ -88,6 +88,7 @@ from .constants import (
     _REASON_TEXT,
     _SIMULATION_FALLBACK_EVENTS,
 )
+from .plugin_identity import PLUGIN_ID
 from .dreaming import (
     build_dream_memory_fragments,
     dream_fragment_effective_weight,
@@ -316,6 +317,185 @@ class IntegrationStatusMixin:
                 changed.append("private_companion_page_alias_scope")
         except Exception as exc:
             logger.debug("[PrivateCompanion] AstrBot 插件页别名鉴权兼容补丁跳过: %s", _single_line(exc, 120))
+
+        # A hot-reload can leave a StarMetadata object whose root_dir_name still
+        # points at a temporary/old checkout.  The page and README routers use
+        # that field directly, so a valid installed plugin can look missing.
+        # Resolve only this plugin back to the directory of the currently loaded
+        # module; other plugins keep AstrBot's normal path handling.
+        companion_root = Path(__file__).resolve().parent
+
+        def _is_companion_plugin(value: Any) -> bool:
+            return str(getattr(value, "name", value) or "").strip() == PLUGIN_ID
+
+        def _usable_companion_root() -> Path | None:
+            if not companion_root.is_dir():
+                return None
+            if not (companion_root / "metadata.yaml").is_file():
+                return None
+            return companion_root
+
+        try:
+            from astrbot.dashboard.services import plugin_page_service as service_mod
+
+            original_get_root = getattr(service_mod.PluginPageService, "get_plugin_root_dir", None)
+            if callable(original_get_root) and not getattr(
+                original_get_root, "_private_companion_root_fallback", False
+            ):
+                def _get_plugin_root_with_fallback(page_service, plugin):
+                    try:
+                        root = original_get_root(page_service, plugin)
+                    except (FileNotFoundError, ValueError):
+                        root = None
+                    fallback = _usable_companion_root()
+                    if _is_companion_plugin(plugin) and fallback is not None:
+                        if root is None or not (root / "pages").is_dir():
+                            return fallback
+                    if root is None:
+                        raise FileNotFoundError("Plugin directory metadata is missing")
+                    return root
+
+                _get_plugin_root_with_fallback._private_companion_root_fallback = True
+                service_mod.PluginPageService.get_plugin_root_dir = _get_plugin_root_with_fallback
+                changed.append("page_root_fallback")
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] AstrBot 新插件页目录兼容补丁跳过: %s", _single_line(exc, 120))
+
+        try:
+            from astrbot.dashboard.routes import plugin as legacy_route_mod
+
+            original_get_root = getattr(legacy_route_mod.PluginRoute, "_get_plugin_root_dir", None)
+            if callable(original_get_root) and not getattr(
+                original_get_root, "_private_companion_root_fallback", False
+            ):
+                def _get_plugin_root_with_fallback(route, plugin):
+                    try:
+                        root = original_get_root(route, plugin)
+                    except (FileNotFoundError, ValueError):
+                        root = None
+                    fallback = _usable_companion_root()
+                    if _is_companion_plugin(plugin) and fallback is not None:
+                        if root is None or not (root / "pages").is_dir():
+                            return fallback
+                    if root is None:
+                        raise FileNotFoundError("Plugin directory metadata is missing")
+                    return root
+
+                _get_plugin_root_with_fallback._private_companion_root_fallback = True
+                legacy_route_mod.PluginRoute._get_plugin_root_dir = _get_plugin_root_with_fallback
+                changed.append("legacy_page_root_fallback")
+
+                original_logo_token = getattr(legacy_route_mod.PluginRoute, "get_plugin_logo_token", None)
+                if callable(original_logo_token) and not getattr(
+                    original_logo_token, "_private_companion_root_fallback", False
+                ):
+                    async def _get_logo_token_with_fallback(route, logo_path):
+                        candidate = Path(str(logo_path or ""))
+                        fallback = _usable_companion_root()
+                        if (
+                            fallback is not None
+                            and candidate.name.lower() == "logo.png"
+                            and not candidate.is_file()
+                            and "private-companion" in str(candidate).lower()
+                        ):
+                            return await original_logo_token(route, str(fallback / "logo.png"))
+                        return await original_logo_token(route, logo_path)
+
+                    _get_logo_token_with_fallback._private_companion_root_fallback = True
+                    legacy_route_mod.PluginRoute.get_plugin_logo_token = _get_logo_token_with_fallback
+                    changed.append("legacy_logo_root_fallback")
+
+                for method_name in ("get_plugin_readme", "get_plugin_changelog"):
+                    original_method = getattr(legacy_route_mod.PluginRoute, method_name, None)
+                    if not callable(original_method) or getattr(
+                        original_method, "_private_companion_root_fallback", False
+                    ):
+                        continue
+
+                    async def _read_document_with_fallback(route, _original=original_method, _kind=method_name):
+                        result = await _original(route)
+                        if not isinstance(result, dict) or result.get("status") != "error":
+                            return result
+                        try:
+                            plugin_name = legacy_route_mod.request.args.get("name")
+                        except Exception:
+                            plugin_name = None
+                        fallback = _usable_companion_root()
+                        if str(plugin_name or "").strip() != PLUGIN_ID or fallback is None:
+                            return result
+                        candidates = (
+                            ("README.md",)
+                            if _kind == "get_plugin_readme"
+                            else ("CHANGELOG.md", "changelog.md", "CHANGELOG", "changelog")
+                        )
+                        for filename in candidates:
+                            path = fallback / filename
+                            if not path.is_file():
+                                continue
+                            try:
+                                content = path.read_text(encoding="utf-8")
+                            except OSError:
+                                return result
+                            message = (
+                                "成功获取README内容"
+                                if _kind == "get_plugin_readme"
+                                else "成功获取更新日志"
+                            )
+                            return legacy_route_mod.Response().ok(
+                                {"content": content}, message
+                            ).__dict__
+                        return result
+
+                    _read_document_with_fallback._private_companion_root_fallback = True
+                    setattr(legacy_route_mod.PluginRoute, method_name, _read_document_with_fallback)
+                changed.append("legacy_readme_root_fallback")
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] AstrBot 旧插件页目录兼容补丁跳过: %s", _single_line(exc, 120))
+
+        try:
+            from astrbot.dashboard.services import plugin_service as service_mod
+
+            original_resolve_dir = getattr(service_mod.PluginService, "resolve_plugin_dir", None)
+            if callable(original_resolve_dir) and not getattr(
+                original_resolve_dir, "_private_companion_root_fallback", False
+            ):
+                def _resolve_plugin_dir_with_fallback(plugin_service, plugin_name):
+                    try:
+                        return original_resolve_dir(plugin_service, plugin_name)
+                    except Exception:
+                        fallback = _usable_companion_root()
+                        if str(plugin_name or "").strip() == PLUGIN_ID and fallback is not None:
+                            return fallback
+                        raise
+
+                _resolve_plugin_dir_with_fallback._private_companion_root_fallback = True
+                service_mod.PluginService.resolve_plugin_dir = _resolve_plugin_dir_with_fallback
+                changed.append("readme_root_fallback")
+
+            original_logo_url = getattr(service_mod.PluginService, "resolve_plugin_logo_url", None)
+            if callable(original_logo_url) and not getattr(
+                original_logo_url, "_private_companion_root_fallback", False
+            ):
+                async def _resolve_logo_url_with_fallback(plugin_service, plugin, logo_token_resolver):
+                    fallback = _usable_companion_root()
+                    logo_path = str(getattr(plugin, "logo_path", "") or "")
+                    candidate = Path(logo_path)
+                    if (
+                        fallback is not None
+                        and _is_companion_plugin(plugin)
+                        and candidate.name.lower() == "logo.png"
+                        and not candidate.is_file()
+                    ):
+                        logo_path = str(fallback / "logo.png")
+                        token = await logo_token_resolver(logo_path)
+                        return f"/api/file/{token}" if token else None
+                    return await original_logo_url(plugin_service, plugin, logo_token_resolver)
+
+                _resolve_logo_url_with_fallback._private_companion_root_fallback = True
+                service_mod.PluginService.resolve_plugin_logo_url = _resolve_logo_url_with_fallback
+                changed.append("logo_root_fallback")
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] AstrBot README目录兼容补丁跳过: %s", _single_line(exc, 120))
 
         if changed:
             logger.info("[PrivateCompanion] AstrBot 插件页入口兼容已应用: %s", ", ".join(changed))
@@ -1302,4 +1482,3 @@ class IntegrationStatusMixin:
         yi = _ALMANAC_YI[seed % len(_ALMANAC_YI)]
         ji = _ALMANAC_JI[(seed // 7) % len(_ALMANAC_JI)]
         return f"宜{yi}，忌{ji}"
-
