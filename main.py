@@ -15675,7 +15675,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     @_multi_persona_event_context
     async def redact_outbound_secrets_before_send(self, event: AstrMessageEvent, *args, **kwargs):
         """Final passive-reply guard against API keys, tokens and passwords."""
-        if self is None or not self.enabled:
+        if self is None or not self.enabled or not bool(getattr(self, "enable_outbound_secret_redaction", True)):
             return
         result = event.get_result()
         chain = list(getattr(result, "chain", []) or []) if result is not None else []

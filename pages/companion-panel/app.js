@@ -1327,6 +1327,7 @@ const featureMeta = {
   enable_user_habit_learning: ["用户习惯画像", "学习用户常在什么时段做什么、问什么；被动只在相关时理解，主动可到点关心。"],
   enable_food_menu_recommendation: ["吃什么候选", "管理常吃菜、菜馆和外卖；用户纠结吃什么时，只取少量贴合项作为回复参考。"],
   enable_humanized_states: ["拟人生活状态", "统一管理生活日程、日程细化、日记，以及精力、睡眠、梦境、健康、饥饿和周期等扮演状态。"],
+  enable_outbound_secret_redaction: ["发送前敏感凭据脱敏", "发送前自动隐藏回复中的 API Key、Token、Bearer、密码等敏感凭据。关闭后不再修改最终发送文本，请仅在确认误判时使用。"],
   enable_daily_plan: ["每日拟人化日程", "每天按设定时间生成 Bot 从起床到入睡前的生活节奏。"],
   enable_detail_enhancement: ["日程细化", "临近当前日程段时补充小事件、状态变化和可能的主动契机。"],
   enable_daily_diary: ["每日 Bot 日记", "每天写一条短日记，作为次日状态延续和自然分享素材。"],
@@ -1465,6 +1466,7 @@ const featureGroups = [
       "enable_smart_silence",
       "enable_proactive_quote_trigger_message",
       "enable_tts_enhancement",
+      "enable_outbound_secret_redaction",
     ],
   },
   {
@@ -1614,6 +1616,7 @@ const featureStageKeySets = {
     "enable_smart_silence",
     "enable_proactive_quote_trigger_message",
     "enable_tts_enhancement",
+    "enable_outbound_secret_redaction",
     "enable_mai_style_integration",
     "enable_llm_proactive_persona_judge",
     "enable_proactive_message_review",
