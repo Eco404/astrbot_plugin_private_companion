@@ -449,6 +449,65 @@ class SceneContextMixin:
             except Exception:
                 interruption_context = None
 
+        calendar_snapshot: dict[str, Any] = {}
+        calendar_getter = getattr(self, "_agenda_calendar_snapshot", None)
+        if callable(calendar_getter):
+            try:
+                candidate = calendar_getter(captured.date().isoformat(), now=captured)
+                if isinstance(candidate, dict):
+                    calendar_snapshot = candidate
+            except Exception:
+                calendar_snapshot = {}
+        calendar_timeline: dict[str, Any] = {}
+        timeline_getter = getattr(self, "_agenda_calendar_timeline", None)
+        if callable(timeline_getter):
+            try:
+                candidate = timeline_getter(captured.date().isoformat(), now=captured, history_days=2, horizon_days=7)
+                if isinstance(candidate, dict):
+                    calendar_timeline = candidate
+            except Exception:
+                calendar_timeline = {}
+        calendar_candidates: list[dict[str, Any]] = []
+        candidates_getter = getattr(self, "_agenda_calendar_candidates_store", None)
+        if callable(candidates_getter):
+            try:
+                raw_candidates = candidates_getter()
+                if isinstance(raw_candidates, list):
+                    calendar_candidates = [
+                        {
+                            "candidate_id": _single_line(item.get("candidate_id") or item.get("calendar_id"), 160),
+                            "title": _single_line(item.get("title"), 100),
+                            "date": _single_line(item.get("start_date") or item.get("date"), 24),
+                            "end_date": _single_line(item.get("end_date"), 24),
+                            "confidence": item.get("confidence"),
+                            "source_excerpt": _single_line(item.get("source_excerpt"), 220),
+                            "lifecycle_status": _single_line(item.get("lifecycle_status") or "pending_confirmation", 32),
+                            "source_message_at": _single_line(item.get("source_message_at"), 32),
+                        }
+                        for item in raw_candidates
+                        if isinstance(item, dict)
+                        and _single_line(item.get("title"), 100)
+                        and str(item.get("lifecycle_state") or item.get("lifecycle") or "candidate") not in {"confirmed", "active", "completed", "cancelled", "expired"}
+                    ][:8]
+            except Exception:
+                calendar_candidates = []
+        # Keep the full daily calendar visible. ``effective_events`` is useful
+        # for execution, but hiding overridden records makes the scene lose
+        # the stable phase/rhythm context that the timeline is meant to carry.
+        calendar_events = calendar_snapshot.get("events", calendar_snapshot.get("effective_events", []))
+        calendar_events = [
+            {
+                "title": _single_line(item.get("title"), 100),
+                "kind": _single_line(item.get("kind") or item.get("type"), 24),
+                "occurrence_date": _single_line(item.get("occurrence_date") or item.get("date") or item.get("start_date"), 24),
+                "end_date": _single_line(item.get("end_date"), 24),
+                "calendar_effective": item.get("calendar_effective", True),
+                "overridden_by": _single_line(item.get("overridden_by"), 100),
+            }
+            for item in calendar_events
+            if isinstance(item, dict) and _single_line(item.get("title"), 100)
+        ][:12] if isinstance(calendar_events, list) else []
+
         location = ""
         location_getter = getattr(self, "_current_location_state_text", None)
         if callable(location_getter):
@@ -658,6 +717,29 @@ class SceneContextMixin:
                 "interruption": interruption_context if isinstance(interruption_context, dict) else {},
                 "overridden_by_realtime_activity": bool(realtime_extension.get("activity")),
             },
+            "calendar": {
+                "date": _single_line(calendar_snapshot.get("date"), 20) or today,
+                "events": calendar_events,
+                "pending_candidates": calendar_candidates,
+                "timeline": {
+                    "current_phase": [item for item in (calendar_timeline.get("current_phase", []) if isinstance(calendar_timeline.get("current_phase"), list) else []) if isinstance(item, dict)][:6],
+                    "rhythms": [item for item in (calendar_timeline.get("rhythms", []) if isinstance(calendar_timeline.get("rhythms"), list) else []) if isinstance(item, dict)][:6],
+                    "recent_changes": [item for item in (calendar_timeline.get("recent_changes", []) if isinstance(calendar_timeline.get("recent_changes"), list) else []) if isinstance(item, dict)][:6],
+                    "upcoming": [item for item in (calendar_timeline.get("upcoming", []) if isinstance(calendar_timeline.get("upcoming"), list) else []) if isinstance(item, dict)][:8],
+                    "transitions": [item for item in (calendar_timeline.get("transitions", []) if isinstance(calendar_timeline.get("transitions"), list) else []) if isinstance(item, dict)][:6],
+                    "uncertainties": [item for item in (calendar_timeline.get("uncertainties", []) if isinstance(calendar_timeline.get("uncertainties"), list) else []) if isinstance(item, dict)][:6],
+                    "continuity": calendar_timeline.get("continuity") if isinstance(calendar_timeline.get("continuity"), dict) else {},
+                },
+                "conflicts": [
+                    item for item in (calendar_snapshot.get("conflicts", []) if isinstance(calendar_snapshot.get("conflicts"), list) else [])
+                    if isinstance(item, dict)
+                ][:8],
+                "applied_exceptions": [
+                    _single_line(item, 100)
+                    for item in (calendar_snapshot.get("applied_exceptions", []) if isinstance(calendar_snapshot.get("applied_exceptions"), list) else [])
+                    if _single_line(item, 100)
+                ][:8],
+            },
             "realtime": realtime_extension,
             "location": {
                 "raw": location,
@@ -742,6 +824,9 @@ class SceneContextMixin:
         realtime = scene.get("realtime") if isinstance(scene.get("realtime"), dict) else {}
         realtime_activity = realtime.get("activity") if isinstance(realtime.get("activity"), dict) else {}
         realtime_continuity = realtime.get("continuity") if isinstance(realtime.get("continuity"), dict) else {}
+        calendar = scene.get("calendar") if isinstance(scene.get("calendar"), dict) else {}
+        calendar_timeline = calendar.get("timeline") if isinstance(calendar.get("timeline"), dict) else {}
+        calendar_candidates = calendar.get("pending_candidates") if isinstance(calendar.get("pending_candidates"), list) else []
 
         parts = [
             f"时间：{_single_line(scene.get('date'), 20)} {_single_line(scene.get('time'), 12)}（{_single_line(scene.get('daypart'), 12)}）",
@@ -760,6 +845,57 @@ class SceneContextMixin:
                 parts.append(f"原定日程（仅作被打断的背景）：{_single_line(schedule.get('text'), 320)}")
         elif _single_line(schedule.get("text"), 320):
             parts.append(f"当前日程：{_single_line(schedule.get('text'), 320)}")
+        calendar_events = calendar.get("events") if isinstance(calendar.get("events"), list) else []
+        calendar_lines = []
+        for item in calendar_events[:8]:
+            if not isinstance(item, dict):
+                continue
+            title = _single_line(item.get("title"), 80)
+            if not title:
+                continue
+            if item.get("calendar_effective") is False:
+                status = "当天不生效"
+            elif str(item.get("status") or "confirmed") in {"confirmed", "active"}:
+                status = "已确认约束"
+            else:
+                status = "待确认安排"
+            calendar_lines.append(f"{title}（{status}）")
+        if calendar_lines:
+            parts.append(
+                "今天日历上的记录：" + "、".join(calendar_lines)
+                + "。它们是生活背景，不代表已经执行；不要因为其中一条记录就自动改写当前对话或删掉原定日程。"
+            )
+        candidate_lines = []
+        for item in calendar_candidates[:5]:
+            if isinstance(item, dict) and _single_line(item.get("title"), 80):
+                date_text = _single_line(item.get("date"), 20) or "近期"
+                candidate_lines.append(f"{_single_line(item.get('title'), 80)}（{date_text}，待确认）")
+        if candidate_lines:
+            parts.append(
+                "对话里出现了这些待确认的日历候选：" + "、".join(candidate_lines)
+                + "。它们只是询问线索，不是已确认事实；只能自然询问，不能断言用户已经安排、正在执行或已经完成。"
+            )
+        phase_lines = []
+        for item in calendar_timeline.get("current_phase", []) if isinstance(calendar_timeline.get("current_phase"), list) else []:
+            if isinstance(item, dict) and _single_line(item.get("title"), 80):
+                phase_lines.append(_single_line(item.get("title"), 80))
+        rhythm_lines = []
+        for item in calendar_timeline.get("rhythms", []) if isinstance(calendar_timeline.get("rhythms"), list) else []:
+            if isinstance(item, dict) and _single_line(item.get("title"), 80):
+                rhythm_lines.append(_single_line(item.get("title"), 80))
+        transition = calendar_timeline.get("next_transition") if isinstance(calendar_timeline.get("next_transition"), dict) else {}
+        if phase_lines:
+            parts.append("当前生活阶段：" + "、".join(phase_lines[:4]) + "。阶段应保持跨日连续，除非有明确转换。")
+        if rhythm_lines:
+            parts.append("稳定节律参考：" + "、".join(rhythm_lines[:4]) + "。这是默认倾向，不是今天必须执行的硬命令。")
+        if transition and _single_line(transition.get("title"), 80):
+            parts.append(
+                f"近期可能变化：{_single_line(transition.get('date'), 20)} {_single_line(transition.get('title'), 80)}。"
+                "在变化真正确认前，不要提前把场景切换过去。"
+            )
+        calendar_conflicts = calendar.get("conflicts") if isinstance(calendar.get("conflicts"), list) else []
+        if calendar_conflicts:
+            parts.append("日历存在重叠：保留为背景冲突；同优先级或待确认记录不要自行断言哪一条已经发生。")
         continuity_text = _single_line(realtime_continuity.get("summary"), 1800)
         if continuity_text:
             parts.append(

@@ -118,6 +118,10 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         return
     sender_display_name = _single_line(self._sender_display_name(event), 40)
     text = _single_line(event.message_str, 120)
+    # Keep optional feedback/observation results defined when the message is
+    # empty or exits through a lightweight branch.
+    expression_feedback: dict[str, Any] = {}
+    calendar_observation_result: dict[str, Any] = {}
     async with self._data_lock:
         private_user, auto_profile_created = self._ensure_auto_private_user_profile(
             event,
@@ -483,6 +487,25 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             and fast_user_is_owner
             and self._apply_interaction_warmth_to_state(text, fast_user)
         )
+        fast_calendar_observation_result: dict[str, Any] = {}
+        observer = getattr(self, "_agenda_observe_calendar_message", None)
+        if callable(observer):
+            try:
+                fast_calendar_observation_result = observer(
+                    text=safe_text or text,
+                    event_time=received_ts,
+                    source_ref=self._event_message_id(event) or f"{str(getattr(event, 'unified_msg_origin', '') or '')}:{received_ts}",
+                    conversation_id=str(getattr(event, "unified_msg_origin", "") or ""),
+                    source_user_id=user_id,
+                    target_user_id=user_id,
+                    subject_actor_id=str(getattr(self, "bot_personal_subject", "") or "bot_self"),
+                ) or {}
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanion] 轻量私聊日历候选观察失败，已放行当前回复: user=%s error=%s",
+                    user_id,
+                    _single_line(exc, 160),
+                )
         if fast_interaction_warmth_applied:
             self._apply_relationship_event(
                 fast_user,
@@ -496,6 +519,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             fast_save_sections.add("food_menu")
         if fast_interaction_warmth_applied:
             fast_save_sections.update({"state_conditions", "daily_state"})
+        fast_save_sections.update(fast_calendar_observation_result.get("changed_sections") or ())
         self._schedule_data_save(sections=fast_save_sections)
         if (
             rest_silence_applied
@@ -924,6 +948,25 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
             )
             if private_memory_write_allowed and private_memory_managed and private_memory_revision is None:
                 private_memory_write_allowed = False
+            if private_memory_write_allowed and is_target_user:
+                observer = getattr(self, "_agenda_observe_calendar_message", None)
+                if callable(observer):
+                    try:
+                        calendar_observation_result = observer(
+                            text=safe_text or text,
+                            event_time=received_ts,
+                            source_ref=self._event_message_id(event) or f"{str(getattr(event, 'unified_msg_origin', '') or '')}:{received_ts}",
+                            conversation_id=str(getattr(event, "unified_msg_origin", "") or ""),
+                            source_user_id=user_id,
+                            target_user_id=user_id,
+                            subject_actor_id=str(getattr(self, "bot_personal_subject", "") or "bot_self"),
+                        ) or {}
+                    except Exception as exc:
+                        logger.warning(
+                            "[PrivateCompanion] 日历候选观察失败，已放行当前回复: user=%s error=%s",
+                            user_id,
+                            _single_line(exc, 160),
+                        )
             if private_memory_write_allowed:
                 user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
             if self._expression_private_learning_source_enabled(user, user_id):
@@ -1120,6 +1163,7 @@ async def handle_private_message(self: Any, event: Any, *args: Any, **kwargs: An
         save_sections = {"users"}
         if private_memory_managed and private_memory_revision is not None:
             save_sections.add("_req041_private_memory")
+        save_sections.update(calendar_observation_result.get("changed_sections") or ())
         if expression_feedback:
             save_sections.update(expression_feedback.get("updated_sections") or ())
             if _safe_int(expression_feedback.get("updated_rules"), 0, 0) > 0:

@@ -8,7 +8,12 @@ from typing import Any
 
 from astrbot.api import logger
 
-from .helpers import _redact_outbound_secrets, _single_line, _strip_nonstandard_chat_control_tags
+from .helpers import (
+    _redact_outbound_secrets,
+    _single_line,
+    _strip_nonstandard_chat_control_tags,
+    _strip_outbound_control_blocks,
+)
 from .persona_config import runtime_persona_setting
 
 
@@ -161,6 +166,19 @@ class TtsToolSanitizerMixin:
 
     def _clean_tool_plain_text_tts_markup(self, raw_text: Any) -> str:
         text = str(raw_text or "")
+        if not text:
+            return ""
+        # Tool payloads can bypass the normal decorating-result chain. Apply
+        # the same outbound control cleanup here so internal sentinels (such
+        # as the photo-delivery marker) are never sent as visible text.
+        cleaned_outbound = _strip_outbound_control_blocks(text)
+        if cleaned_outbound != text:
+            logger.info(
+                "[PrivateCompanion] 已清理工具直发文本中的内部控制标记: before=%s after=%s",
+                _single_line(text, 120),
+                _single_line(cleaned_outbound, 120),
+            )
+            text = cleaned_outbound
         if not text:
             return ""
         cleaned_control = _strip_nonstandard_chat_control_tags(text)

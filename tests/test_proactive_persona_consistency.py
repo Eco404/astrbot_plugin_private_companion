@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -14,10 +15,20 @@ class _PersonaManager:
         return {"prompt": f"persona-for:{umo}"}
 
 
+class _BrokenPersonaManager:
+    async def get_default_persona_v3(self, umo=""):
+        raise sqlite3.OperationalError("no active connection")
+
+
+class _CancelledPersonaManager:
+    async def get_default_persona_v3(self, umo=""):
+        raise asyncio.CancelledError()
+
+
 class _PersonaCacheHarness(DailyStateMixin):
-    def __init__(self):
+    def __init__(self, manager=None):
         self.plugin_specific_persona_id = ""
-        self.context = SimpleNamespace(persona_manager=_PersonaManager())
+        self.context = SimpleNamespace(persona_manager=manager or _PersonaManager())
         self._default_persona_prompt_cache = ""
         self._default_persona_prompt_cache_at = 0.0
         self._default_persona_prompt_cache_umo = ""
@@ -181,6 +192,24 @@ class ProactivePersonaConsistencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second, "persona-for:session-b")
         self.assertEqual(harness._get_default_persona_prompt("session-a"), "persona-for:session-a")
         self.assertEqual(harness._get_default_persona_prompt("session-b"), "persona-for:session-b")
+
+    async def test_persona_database_connection_error_uses_fallback(self):
+        harness = _PersonaCacheHarness(_BrokenPersonaManager())
+
+        self.assertEqual(
+            harness._get_default_persona_prompt("session-a"),
+            "未读取到 AstrBot 默认人格。请保持简洁、温和、有边界,不额外创造新身份。",
+        )
+        result = await harness._refresh_default_persona_prompt("session-a")
+
+        self.assertEqual(result, harness._get_default_persona_prompt("session-a"))
+
+    async def test_internal_persona_lookup_cancellation_uses_fallback(self):
+        harness = _PersonaCacheHarness(_CancelledPersonaManager())
+
+        result = await harness._refresh_default_persona_prompt("session-a")
+
+        self.assertEqual(result, harness._get_default_persona_prompt("session-a"))
 
     async def test_final_send_review_receives_full_persona(self):
         harness = _ProactivePersonaHarness()

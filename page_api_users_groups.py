@@ -343,6 +343,12 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         }
 
         summary["domains"] = self._identity_domain_summary(person_id, snapshot or {})
+        archive_ready_checker = getattr(self, "_identity_archive_remote_available", None)
+        archive_ready = (
+            bool(archive_ready_checker())
+            if callable(archive_ready_checker)
+            else True
+        )
         summary["lifecycle"] = {
             "can_unlink_current": bool(
                 summary.get("current_identity_linked")
@@ -350,8 +356,11 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 and summary.get("profile_status") == "active"
             ),
             "can_archive": bool(
-                summary.get("linked") and summary.get("profile_status") == "active"
+                summary.get("linked")
+                and summary.get("profile_status") == "active"
+                and archive_ready
             ),
+            "archive_ready": archive_ready,
             "can_purge": bool(summary.get("profile_status") == "deleted"),
             "can_relink_current": bool(
                 summary.get("current_identity_detached")
@@ -359,6 +368,18 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             ),
         }
         return summary
+
+    def _identity_archive_remote_available(self) -> bool:
+        """Only expose the destructive archive action when scoped cleanup is bound."""
+        checker = getattr(self.plugin, "_req041_scoped_archive_available", None)
+        if not callable(checker):
+            # Compatibility with older plugin instances that predate the
+            # scoped cleanup readiness probe.
+            return True
+        try:
+            return bool(checker())
+        except Exception:
+            return False
 
     @staticmethod
     def _relationship_score_input(value: Any) -> int:
@@ -661,7 +682,10 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                 actor_id="page_administrator", reason_code="person_archive",
             )
             if not result.get("ok"):
-                return self._error(str(result.get("code") or "人物归档失败"))
+                code = str(result.get("code") or "人物归档失败")
+                if code == "scoped_identity_archive_unavailable":
+                    return self._error("记忆插件的作用域归档服务尚未就绪，请先启动或更新记忆插件后刷新页面")
+                return self._error(code)
             return self._ok({"result": self._safe_person_lifecycle_result(result, "archive")})
         except Exception as exc:
             logger.warning("[PrivateCompanionPage] 人物归档失败: %s", exc)

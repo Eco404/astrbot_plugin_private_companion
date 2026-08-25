@@ -6233,6 +6233,20 @@ class PrivateCompanionPlugin(
                 deleted_sections=normalized_deleted,
             )
 
+    def _req041_scoped_archive_available(self) -> bool:
+        """Return whether a confirmed identity archive can reach Memory safely."""
+        synchronizer = getattr(self, "req041_scoped_projection_sync", None)
+        if synchronizer is None or not callable(
+            getattr(synchronizer, "archive_identity_scopes", None)
+        ):
+            return False
+        status = getattr(self, "req041_migration_status", None)
+        if not isinstance(status, dict):
+            return False
+        if str(status.get("state") or "").strip().lower() in {"degraded", "paused", "stopped"}:
+            return False
+        return True
+
     async def archive_unified_person(
         self,
         person_id: str,
@@ -6276,6 +6290,12 @@ class PrivateCompanionPlugin(
             if not confirmation_token or confirmation_token != prepared.get("confirmation_token"):
                 return {
                     "ok": False, "state": "prepared", "code": "archive_confirmation_mismatch",
+                    "person_id": clean_person, "operation_id": clean_operation, "changed": False,
+                }
+            archive_available = getattr(self, "_req041_scoped_archive_available", None)
+            if callable(archive_available) and not archive_available():
+                return {
+                    "ok": False, "state": "prepared", "code": "scoped_identity_archive_unavailable",
                     "person_id": clean_person, "operation_id": clean_operation, "changed": False,
                 }
             confirmed = registry.confirm_person_archive(

@@ -1041,6 +1041,20 @@ def migrate_store(data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         if migrated_items != data["daily_plan"]["items"]:
             data["daily_plan"]["items"] = migrated_items
             changed = True
+    # Calendar is an additive long-lived constraint layer.  Keep the import
+    # local so the historical C3 contract remains importable in isolation and
+    # malformed calendar rows cannot affect legacy agenda normalization.
+    try:
+        try:
+            from .calendar_contracts import migrate_calendar_store
+        except ImportError:
+            from calendar_contracts import migrate_calendar_store
+        data, calendar_changed = migrate_calendar_store(data)
+        changed = changed or calendar_changed
+    except Exception:
+        # The existing agenda store must remain loadable even if a deployment
+        # carries an unexpectedly malformed calendar extension.
+        pass
     return data, changed
 
 

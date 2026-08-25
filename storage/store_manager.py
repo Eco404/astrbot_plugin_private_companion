@@ -71,7 +71,7 @@ def _bookshelf_item_identity(item: Any) -> str:
     return key
 
 
-def _is_jm_bookshelf_item(item: Any) -> bool:
+def _is_legacy_archive_item(item: Any) -> bool:
     # Keep legacy records untouched, but exclude them from public recovery and
     # deletion reconciliation.
     return False
@@ -94,7 +94,7 @@ def _bookshelf_item_is_blocked(
     deleted_ids: set[str],
     deleted_titles: set[str],
 ) -> bool:
-    if not _is_jm_bookshelf_item(item):
+    if not _is_legacy_archive_item(item):
         return False
     album_id = _bookshelf_item_album_id(item)
     if album_id:

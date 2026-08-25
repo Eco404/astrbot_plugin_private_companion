@@ -21,7 +21,7 @@ import sys
 import uuid
 from contextlib import asynccontextmanager
 from copy import copy, deepcopy
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -93,6 +93,15 @@ from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 from .page_api_settings import PageSettingNormalizerMixin
 from .model_routing import build_rules, normalize_scope
 from .planning import evaluate_daily_plan_quality, generate_daily_plan, generate_detail_enhancement
+from .agenda_contracts import timezone_or_default
+from .calendar_contracts import (
+    AgendaContractError,
+    calendar_lifecycle_summary,
+    normalize_calendar_record,
+    normalize_calendar_records,
+    resolve_calendar_timeline,
+    resolve_calendar_snapshot,
+)
 from .memo_notes import (
     apply_memo_note_action,
     memo_note_due_state,
@@ -725,10 +734,392 @@ class PrivateCompanionPageApi(
             pass
         return PAGE_API_PREFIX
 
+    # Calendar records are durable constraints and are intentionally exposed
+    # separately from the generated ``daily_plan``.  These small helpers keep
+    # range parsing and the response contract consistent across the page and
+    # the standalone API transport.
+    def _calendar_page_date(self, value: Any, *, fallback: date | None = None) -> date:
+        raw = self._single_line(value, 40)
+        if "T" in raw:
+            raw = raw.split("T", 1)[0]
+        if raw:
+            try:
+                return date.fromisoformat(raw)
+            except ValueError as exc:
+                raise ValueError("日期格式应为 YYYY-MM-DD") from exc
+        if fallback is not None:
+            return fallback
+        now_getter = getattr(self.plugin, "_agenda_now", None)
+        try:
+            current = now_getter() if callable(now_getter) else datetime.now().astimezone()
+            if isinstance(current, datetime):
+                tz_getter = getattr(self.plugin, "_agenda_timezone_name", None)
+                timezone_name = tz_getter() if callable(tz_getter) else getattr(self.plugin, "calendar_timezone", "Asia/Shanghai")
+                return current.astimezone(timezone_or_default(timezone_name)).date()
+            if isinstance(current, date):
+                return current
+        except Exception:
+            pass
+        return datetime.now().date()
+
+    def _calendar_page_range(self) -> tuple[date, date]:
+        """Resolve a bounded month/range query for calendar projections."""
+        month = self._single_line(request.args.get("month"), 16)
+        start_raw = request.args.get("start") or request.args.get("from") or request.args.get("date")
+        end_raw = request.args.get("end") or request.args.get("to")
+        if month:
+            try:
+                month_start = date.fromisoformat(f"{month[:7]}-01")
+            except ValueError as exc:
+                raise ValueError("月份格式应为 YYYY-MM") from exc
+            next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+            return month_start, next_month - timedelta(days=1)
+        current = self._calendar_page_date(None)
+        start = self._calendar_page_date(start_raw, fallback=current)
+        end = self._calendar_page_date(end_raw, fallback=start)
+        if not start_raw and not end_raw:
+            # A month-sized default makes the first page useful while keeping
+            # the query bounded for installations with many recurring rules.
+            start = current.replace(day=1)
+            next_month = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+            end = next_month - timedelta(days=1)
+        if end < start:
+            raise ValueError("结束日期不能早于开始日期")
+        if (end - start).days > 366:
+            raise ValueError("日历查询范围不能超过 366 天")
+        return start, end
+
+    def _calendar_page_records(self) -> list[dict[str, Any]]:
+        getter = getattr(self.plugin, "_agenda_calendar_records_store", None)
+        rows: list[dict[str, Any]] = []
+        if callable(getter):
+            try:
+                rows = deepcopy(getter())
+            except Exception:
+                rows = []
+        else:
+            data = getattr(self.plugin, "data", {})
+            if isinstance(data, dict):
+                for section in ("calendar_events", "calendar_rules", "calendar_exceptions", "calendar_records"):
+                    values = data.get(section)
+                    if isinstance(values, list):
+                        rows.extend(deepcopy(item) for item in values if isinstance(item, dict))
+
+        # ``important_dates`` predates the long-lived calendar.  Project it as
+        # read-only yearly/single-day entries so the page has one place to
+        # inspect all durable dates, while the existing reminder pipeline keeps
+        # owning edits and proactive birthday/anniversary behavior.
+        data = getattr(self.plugin, "data", {})
+        important_dates = data.get("important_dates") if isinstance(data, dict) else []
+        if isinstance(important_dates, list):
+            for entry in important_dates:
+                if not isinstance(entry, dict) or not self._normalize_bool_value(entry.get("enabled", True)):
+                    continue
+                title = self._single_line(entry.get("title") or entry.get("name"), 120)
+                raw_date = self._single_line(entry.get("date") or entry.get("day"), 32)
+                if not title or not raw_date:
+                    continue
+                if "T" in raw_date:
+                    raw_date = raw_date.split("T", 1)[0]
+                display_date = raw_date
+                repeat_yearly = self._normalize_bool_value(entry.get("repeat_yearly", len(raw_date) == 5))
+                month_day = raw_date[5:] if len(raw_date) >= 10 and raw_date[4:5] == "-" else raw_date
+                if repeat_yearly and len(month_day) == 5:
+                    try:
+                        month, day = (int(part) for part in month_day.split("-", 1))
+                        date.fromisoformat(f"2000-{month:02d}-{day:02d}")
+                    except (TypeError, ValueError):
+                        continue
+                    start_date = f"2000-{month_day}"
+                    projected: dict[str, Any] = {
+                        "kind": "recurrence",
+                        "calendar_id": f"important-date:{self._single_line(entry.get('id'), 80) or hashlib.sha1(f'{title}|{raw_date}'.encode('utf-8', errors='ignore')).hexdigest()[:16]}",
+                        "title": title,
+                        "start_date": start_date,
+                        "date": start_date,
+                        "frequency": "yearly",
+                        "interval": 1,
+                        "all_day": True,
+                    }
+                else:
+                    if len(raw_date) == 5 and raw_date[2:3] == "-":
+                        raw_date = f"{self._calendar_page_date(None).year}-{raw_date}"
+                    try:
+                        date.fromisoformat(raw_date)
+                    except ValueError:
+                        continue
+                    projected = {
+                        "kind": "event",
+                        "calendar_id": f"important-date:{self._single_line(entry.get('id'), 80) or hashlib.sha1(f'{title}|{raw_date}'.encode('utf-8', errors='ignore')).hexdigest()[:16]}",
+                        "title": title,
+                        "date": raw_date,
+                        "start_date": raw_date,
+                        "end_date": raw_date,
+                        "all_day": True,
+                    }
+                projected.update(
+                    {
+                        "type": projected["kind"],
+                        "priority": self._int(entry.get("priority"), 50),
+                        "note": self._single_line(entry.get("note"), 180),
+                        "source": "important_dates",
+                        "read_only": True,
+                        "legacy_date": display_date,
+                    }
+                )
+                rows.append(projected)
+        return rows
+
+    def _calendar_page_candidates(self) -> list[dict[str, Any]]:
+        """Return observation proposals separately from formal calendar rows."""
+
+        data = getattr(self.plugin, "data", {})
+        values: list[Any] = []
+        if isinstance(data, dict):
+            for section in ("calendar_candidates", "calendar_observations"):
+                if isinstance(data.get(section), list):
+                    values.extend(data[section])
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in values:
+            if not isinstance(raw, dict):
+                continue
+            candidate = deepcopy(raw)
+            candidate_id = str(candidate.get("candidate_id") or candidate.get("calendar_id") or "")
+            if candidate_id in seen:
+                continue
+            seen.add(candidate_id)
+            summary = calendar_lifecycle_summary(candidate)
+            candidate["lifecycle_summary"] = summary
+            candidate["source_excerpt"] = self._single_line(candidate.get("source_excerpt") or candidate.get("source_text"), 320)
+            candidate["title"] = self._single_line(candidate.get("title") or "生活安排", 120)
+            result.append(candidate)
+        result.sort(key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""), reverse=True)
+        return result[:100]
+
+    def _calendar_page_payload(self, start: date, end: date, *, records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        timezone_name = "Asia/Shanghai"
+        tz_getter = getattr(self.plugin, "_agenda_timezone_name", None)
+        if callable(tz_getter):
+            try:
+                timezone_name = str(tz_getter() or timezone_name)
+            except Exception:
+                pass
+        raw_records = records if records is not None else self._calendar_page_records()
+        normalized = normalize_calendar_records(raw_records, timezone_name=timezone_name)
+        candidates = self._calendar_page_candidates()
+        candidate_audit: list[dict[str, Any]] = []
+        for candidate in candidates:
+            candidate_id = str(candidate.get("candidate_id") or candidate.get("calendar_id") or "")
+            trace = candidate.get("decision_trace") if isinstance(candidate.get("decision_trace"), list) else []
+            for entry in trace:
+                if isinstance(entry, dict):
+                    row = deepcopy(entry)
+                    row["candidate_id"] = candidate_id
+                    row["title"] = self._single_line(candidate.get("title"), 120)
+                    candidate_audit.append(row)
+        candidate_audit.sort(key=lambda row: str(row.get("at") or ""), reverse=True)
+        instances: list[dict[str, Any]] = []
+        conflicts: list[dict[str, Any]] = []
+        cursor = start
+        while cursor <= end:
+            snapshot = resolve_calendar_snapshot(normalized, cursor, timezone_name=timezone_name)
+            day_events = snapshot.get("events") if isinstance(snapshot.get("events"), list) else []
+            instances.extend(deepcopy(item) for item in day_events if isinstance(item, dict))
+            day_conflicts = snapshot.get("conflicts") if isinstance(snapshot.get("conflicts"), list) else []
+            conflicts.extend(deepcopy(item) for item in day_conflicts if isinstance(item, dict))
+            cursor += timedelta(days=1)
+        seen_conflicts: set[str] = set()
+        unique_conflicts: list[dict[str, Any]] = []
+        for item in conflicts:
+            conflict_id = str(item.get("conflict_id") or "")
+            if conflict_id in seen_conflicts:
+                continue
+            seen_conflicts.add(conflict_id)
+            unique_conflicts.append(item)
+        conflicts = unique_conflicts
+        today = self._calendar_page_date(None)
+        # Resolve from the page projection so legacy ``important_dates`` are
+        # visible in today's snapshot as well as in the month record list.
+        # The pure resolver is the same contract used by AgendaRuntimeMixin.
+        today_snapshot = resolve_calendar_snapshot(normalized, today, timezone_name=timezone_name)
+        timeline = resolve_calendar_timeline(
+            normalized,
+            today,
+            timezone_name=timezone_name,
+            history_days=3,
+            horizon_days=14,
+        )
+        return {
+            "records": normalized,
+            "candidates": candidates,
+            "candidate_audit": candidate_audit[:100],
+            "instances": instances,
+            "today": today_snapshot,
+            "timeline": timeline,
+            "conflicts": conflicts,
+            "range": {"start": start.isoformat(), "end": end.isoformat()},
+            "timezone": timezone_name,
+            "calendar_version": today_snapshot.get("calendar_version", 1) if isinstance(today_snapshot, dict) else 1,
+        }
+
+    async def confirm_calendar_candidate(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        candidate_id = self._single_line(payload.get("candidate_id") or payload.get("id"), 160) if isinstance(payload, dict) else ""
+        decide = getattr(self.plugin, "_agenda_decide_calendar_candidate", None)
+        if not candidate_id or not callable(decide):
+            return self._error("缺少候选记录 ID")
+        try:
+            lock = getattr(self.plugin, "_data_lock", None)
+            if lock is None:
+                saved = decide(candidate_id, "confirm", source="manual", note="观察页确认")
+            else:
+                async with lock:
+                    saved = decide(candidate_id, "confirm", source="manual", note="观察页确认")
+            if not saved:
+                return self._error("未找到对应候选记录", status_code=404)
+            return self._ok({"candidate": saved, "confirmed": True})
+        except (ValueError, AgendaContractError) as exc:
+            return self._error(str(exc))
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 确认日历候选失败: %s", self._single_line(exc, 180), exc_info=True)
+            return self._exception_error("确认候选失败")
+
+    async def reject_calendar_candidate(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        candidate_id = self._single_line(payload.get("candidate_id") or payload.get("id"), 160) if isinstance(payload, dict) else ""
+        decide = getattr(self.plugin, "_agenda_decide_calendar_candidate", None)
+        if not candidate_id or not callable(decide):
+            return self._error("缺少候选记录 ID")
+        try:
+            lock = getattr(self.plugin, "_data_lock", None)
+            if lock is None:
+                saved = decide(candidate_id, "reject", source="manual", note="观察页忽略")
+            else:
+                async with lock:
+                    saved = decide(candidate_id, "reject", source="manual", note="观察页忽略")
+            if not saved:
+                return self._error("未找到对应候选记录", status_code=404)
+            return self._ok({"candidate": saved, "rejected": True})
+        except (ValueError, AgendaContractError) as exc:
+            return self._error(str(exc))
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 忽略日历候选失败: %s", self._single_line(exc, 180), exc_info=True)
+            return self._exception_error("忽略候选失败")
+
+    async def get_calendar(self) -> dict[str, Any]:
+        try:
+            start, end = self._calendar_page_range()
+            lock = getattr(self.plugin, "_data_lock", None)
+            if lock is None:
+                payload = self._calendar_page_payload(start, end)
+            else:
+                async with lock:
+                    payload = self._calendar_page_payload(start, end)
+            return self._ok(payload)
+        except ValueError as exc:
+            return self._error(str(exc))
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 获取日历失败: %s", self._single_line(exc, 180), exc_info=True)
+            return self._exception_error("获取日历失败")
+
+    async def get_calendar_conflicts(self) -> dict[str, Any]:
+        result = await self.get_calendar()
+        if not isinstance(result, dict) or result.get("success") is False:
+            return result
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        return self._ok({
+            "conflicts": data.get("conflicts", []),
+            "count": len(data.get("conflicts", [])) if isinstance(data.get("conflicts"), list) else 0,
+            "range": data.get("range", {}),
+            "today": data.get("today", {}),
+        })
+
+    async def preview_calendar(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        record = payload.get("record") if isinstance(payload, dict) and isinstance(payload.get("record"), dict) else payload
+        if not isinstance(record, dict):
+            return self._error("日历记录格式无效")
+        try:
+            tz_getter = getattr(self.plugin, "_agenda_timezone_name", None)
+            timezone_name = tz_getter() if callable(tz_getter) else getattr(self.plugin, "calendar_timezone", "Asia/Shanghai")
+            normalized = normalize_calendar_record(record, timezone_name=str(timezone_name or "Asia/Shanghai"))
+            raw_records = self._calendar_page_records()
+            existing_id = str(normalized.get("calendar_id") or "")
+            merged = [item for item in raw_records if str(item.get("calendar_id") or "") != existing_id]
+            merged.append(normalized)
+            start_value = payload.get("start") if isinstance(payload, dict) else None
+            end_value = payload.get("end") if isinstance(payload, dict) else None
+            start = self._calendar_page_date(start_value)
+            end = self._calendar_page_date(end_value, fallback=start)
+            if end < start or (end - start).days > 366:
+                raise ValueError("预览范围无效")
+            projected = self._calendar_page_payload(start, end, records=merged)
+            projected["record"] = normalized
+            return self._ok(projected)
+        except (ValueError, AgendaContractError) as exc:
+            return self._error(str(exc))
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 预览日历失败: %s", self._single_line(exc, 180), exc_info=True)
+            return self._exception_error("预览日历失败")
+
+    async def upsert_calendar(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        record = payload.get("record") if isinstance(payload, dict) and isinstance(payload.get("record"), dict) else payload
+        if not isinstance(record, dict):
+            return self._error("日历记录格式无效")
+        upsert = getattr(self.plugin, "_agenda_upsert_calendar_record", None)
+        if not callable(upsert):
+            return self._error("当前运行环境不支持日历存储", status_code=503)
+        try:
+            lock = getattr(self.plugin, "_data_lock", None)
+            if lock is None:
+                saved = upsert(record)
+            else:
+                async with lock:
+                    saved = upsert(record)
+            return self._ok({"record": saved})
+        except (ValueError, AgendaContractError) as exc:
+            return self._error(str(exc))
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 保存日历失败: %s", self._single_line(exc, 180), exc_info=True)
+            return self._exception_error("保存日历失败")
+
+    async def cancel_calendar(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        calendar_id = self._single_line(
+            payload.get("calendar_id") or payload.get("id") or payload.get("record_id"),
+            160,
+        ) if isinstance(payload, dict) else ""
+        cancel = getattr(self.plugin, "_agenda_cancel_calendar_record", None)
+        if not calendar_id or not callable(cancel):
+            return self._error("缺少日历记录 ID")
+        try:
+            lock = getattr(self.plugin, "_data_lock", None)
+            if lock is None:
+                cancelled = bool(cancel(calendar_id))
+            else:
+                async with lock:
+                    cancelled = bool(cancel(calendar_id))
+            if not cancelled:
+                return self._error("未找到对应日历记录", status_code=404)
+            return self._ok({"calendar_id": calendar_id, "cancelled": True})
+        except Exception as exc:
+            logger.error("[PrivateCompanionPage] 取消日历失败: %s", self._single_line(exc, 180), exc_info=True)
+            return self._exception_error("取消日历失败")
+
     def route_bindings(self) -> list[tuple[str, Any, list[str], str]]:
         """Return the wrapped page handlers used by every transport."""
         routes = [
             ("/overview", self.get_overview, ["GET"], "Private Companion Page overview"),
+            ("/calendar", self.get_calendar, ["GET"], "Private Companion Page long-lived calendar"),
+            ("/calendar/conflicts", self.get_calendar_conflicts, ["GET"], "Private Companion Page calendar conflicts"),
+            ("/calendar/preview", self.preview_calendar, ["POST"], "Private Companion Page preview calendar record"),
+            ("/calendar/upsert", self.upsert_calendar, ["POST"], "Private Companion Page create or update calendar record"),
+            ("/calendar/cancel", self.cancel_calendar, ["POST"], "Private Companion Page cancel calendar record"),
+            ("/calendar/delete", self.cancel_calendar, ["POST"], "Private Companion Page cancel calendar record alias"),
+            ("/calendar/candidates/confirm", self.confirm_calendar_candidate, ["POST"], "Private Companion Page confirm calendar candidate"),
+            ("/calendar/candidates/reject", self.reject_calendar_candidate, ["POST"], "Private Companion Page reject calendar candidate"),
             ("/extension-migration-notice", self.get_extension_migration_notice, ["GET"], "Private Companion Page extension migration notice preference"),
             ("/extension-migration-notice/update", self.update_extension_migration_notice, ["POST"], "Private Companion Page update extension migration notice preference"),
             ("/expression-library", self.get_expression_library, ["GET"], "Private Companion Page expression library"),
@@ -11476,8 +11867,8 @@ class PrivateCompanionPageApi(
         try:
             async with self.plugin._data_lock:
                 data = deepcopy(self.plugin.data)
-            jm_state = data.get("reading_archive_integration") if isinstance(data.get("reading_archive_integration"), dict) else {}
-            deleted_ids = self._bookshelf_deleted_album_ids(jm_state)
+            archive_state = data.get("reading_archive_integration") if isinstance(data.get("reading_archive_integration"), dict) else {}
+            deleted_ids = self._bookshelf_deleted_album_ids(archive_state)
             if album_id in deleted_ids:
                 return {"error": "图片不存在"}
             shelf_items = data.get("bookshelf_items") if isinstance(data.get("bookshelf_items"), list) else []
@@ -11489,7 +11880,7 @@ class PrivateCompanionPageApi(
                     target = item
                     break
             if target is None:
-                last_album = jm_state.get("last_album") if isinstance(jm_state.get("last_album"), dict) else {}
+                last_album = archive_state.get("last_album") if isinstance(archive_state.get("last_album"), dict) else {}
                 if self._single_line(last_album.get("id") or last_album.get("album_id"), 40) == album_id:
                     target = last_album
             pages = target.get("pages") if isinstance(target, dict) and isinstance(target.get("pages"), list) else []
@@ -22896,11 +23287,11 @@ class PrivateCompanionPageApi(
             )
 
         if features.get("enable_reading_archive_integration"):
-            jm_available = bool(getattr(self.plugin, "_reading_archive_available", lambda: False)())
+            archive_available = bool(getattr(self.plugin, "_reading_archive_available", lambda: False)())
             add(
-                "ok" if jm_available else "info",
+                "ok" if archive_available else "info",
                 "资料归档素材",
-                "已检测到可用素材能力" if jm_available else "开关已开，但暂未检测到可用素材能力",
+                "已检测到可用素材能力" if archive_available else "开关已开，但暂未检测到可用素材能力",
             )
 
         if features.get("enable_photo_text_action") and getattr(self.plugin, "enable_local_photo_load_guard", False):
@@ -26489,13 +26880,13 @@ class PrivateCompanionPageApi(
         projects = data.get("creative_projects") if isinstance(data.get("creative_projects"), list) else []
         diaries = self._bookshelf_diary_entries(data.get("bot_diaries"))
         shelf_items = data.get("bookshelf_items") if isinstance(data.get("bookshelf_items"), list) else []
-        jm_state = data.get("reading_archive_integration") if isinstance(data.get("reading_archive_integration"), dict) else {}
-        deleted_jm_ids = self._bookshelf_deleted_album_ids(jm_state)
-        jm_items = [
+        archive_state = data.get("reading_archive_integration") if isinstance(data.get("reading_archive_integration"), dict) else {}
+        deleted_archive_ids = self._bookshelf_deleted_album_ids(archive_state)
+        archive_items = [
             item
             for item in shelf_items
             if self._is_bookshelf_archive_item(item)
-            and not self._is_deleted_bookshelf_archive_item(item, jm_state)
+            and not self._is_deleted_bookshelf_archive_item(item, archive_state)
         ]
         secret_state = data.get("bookshelf_secret") if isinstance(data.get("bookshelf_secret"), dict) else {}
         reason_sanitizer = getattr(self.plugin, "_sanitize_bookshelf_password_reason", None)
@@ -26516,11 +26907,11 @@ class PrivateCompanionPageApi(
             and last_album_id
             and not self._is_deleted_bookshelf_archive_item(
                 {**last_album, "type": last_album.get("type") or "archive_item"},
-                jm_state,
+                archive_state,
             )
-            and not any(self._bookshelf_album_id(item) == last_album_id for item in jm_items)
+            and not any(self._bookshelf_album_id(item) == last_album_id for item in archive_items)
         ):
-            jm_items.append(
+            archive_items.append(
                 {
                     "type": "archive_item",
                     "title": last_album.get("title"),
@@ -26553,13 +26944,13 @@ class PrivateCompanionPageApi(
         covers_root = data_root / "reading_archive_covers"
         if unlocked and False:
             pages_root = data_root / "bookshelf_pages"
-            known_jm_ids = {
+            known_archive_ids = {
                 self._bookshelf_album_id(item)
-                for item in jm_items
+                for item in archive_items
                 if self._bookshelf_album_id(item)
             }
             preference_history = []
-            profile = jm_state.get("preference_profile") if isinstance(jm_state.get("preference_profile"), dict) else {}
+            profile = archive_state.get("preference_profile") if isinstance(archive_state.get("preference_profile"), dict) else {}
             if isinstance(profile.get("history"), list):
                 preference_history = [item for item in profile.get("history", []) if isinstance(item, dict)]
             history_by_album: dict[str, dict[str, Any]] = {}
@@ -26573,8 +26964,8 @@ class PrivateCompanionPageApi(
                     for path in pages_root.iterdir()
                     if path.is_dir()
                     and self._single_line(path.name, 80)
-                    and self._single_line(path.name, 80) not in known_jm_ids
-                    and self._single_line(path.name, 80) not in deleted_jm_ids
+                    and self._single_line(path.name, 80) not in known_archive_ids
+                    and self._single_line(path.name, 80) not in deleted_archive_ids
                 ] if pages_root.exists() else []
             except Exception:
                 orphan_dirs = []
@@ -26598,7 +26989,7 @@ class PrivateCompanionPageApi(
                 meta = history_by_album.get(album_id, {})
                 created_ts = self._float(meta.get("created_ts")) or max((file.stat().st_mtime for file in page_files), default=0.0)
                 cover_path = covers_root / f"{album_id}.jpg"
-                jm_items.append(
+                archive_items.append(
                     {
                         "type": "archive_item",
                         "album_id": album_id,
@@ -26685,7 +27076,7 @@ class PrivateCompanionPageApi(
                     "tags": ["新闻阅读", "主动搜索"],
                 }
             )
-        locked_count = (1 if diaries else 0) + len(jm_items)
+        locked_count = (1 if diaries else 0) + len(archive_items)
         secret_books: list[dict[str, Any]] = []
         if unlocked:
             diary_entries = []
@@ -26720,12 +27111,12 @@ class PrivateCompanionPageApi(
                         "created": diary_entries[-1].get("generated_at", ""),
                     }
             )
-            recent_jm_items = sorted(
-                jm_items,
+            recent_archive_items = sorted(
+                archive_items,
                 key=lambda item: self._float(item.get("created_ts") or item.get("created_at") or item.get("ts")),
                 reverse=True,
             )[:80]
-            for item in recent_jm_items:
+            for item in recent_archive_items:
                 album_id = self._bookshelf_album_id(item, limit=32)
                 pages = item.get("pages") if isinstance(item.get("pages"), list) else []
                 reading_impression = self._single_line(item.get("reading_impression") or item.get("impression"), 1000)
@@ -26889,8 +27280,8 @@ class PrivateCompanionPageApi(
             "public_count": len(public_books),
             "secret_count": locked_count,
             "diary_count": 1 if diaries else 0,
-            "archive_item_count": len(jm_items),
-            "reading_now_count": sum(1 for item in jm_items if self._int(item.get("reading_progress_page")) > 0 and not self._float(item.get("reading_completed_at"))),
+            "archive_item_count": len(archive_items),
+            "reading_now_count": sum(1 for item in archive_items if self._int(item.get("reading_progress_page")) > 0 and not self._float(item.get("reading_completed_at"))),
             "memo_notes": self._memo_notes_payload(data),
             "password_hint": password_hint,
             "public_books": public_books,

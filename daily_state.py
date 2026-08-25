@@ -17,6 +17,7 @@ import math
 import os
 import random
 import re
+import sqlite3
 import shutil
 import sys
 import time
@@ -8470,11 +8471,11 @@ class DailyStateMixin(DailyStateTickMixin):
                 continue
         return None
 
-    def _next_occurrence(self, entry: dict[str, Any]) -> date | None:
+    def _next_occurrence(self, entry: dict[str, Any], now: datetime | None = None) -> date | None:
         base = self._parse_date_value(entry.get("date"))
         if base is None:
             return None
-        today = self._environment_now().date()
+        today = (now or self._environment_now()).date()
         if entry.get("repeat_yearly", True):
             try:
                 candidate = date(today.year, base.month, base.day)
@@ -8488,16 +8489,17 @@ class DailyStateMixin(DailyStateTickMixin):
             return candidate
         return base
 
-    def _get_relevant_important_dates(self) -> list[dict[str, Any]]:
+    def _get_relevant_important_dates(self, now: datetime | None = None) -> list[dict[str, Any]]:
         entries = self.data.get("important_dates", [])
         if not isinstance(entries, list):
             return []
-        today = self._environment_now().date()
+        current = now or self._environment_now()
+        today = current.date()
         relevant = []
         for entry in entries:
             if not isinstance(entry, dict) or not entry.get("enabled", True):
                 continue
-            next_day = self._next_occurrence(entry)
+            next_day = self._next_occurrence(entry, now=current)
             if next_day is None:
                 continue
             days_until = (next_day - today).days
@@ -8544,7 +8546,7 @@ class DailyStateMixin(DailyStateTickMixin):
         month_day = current.strftime("%m-%d")
         today_dates = [
             entry
-            for entry in self._get_relevant_important_dates()
+            for entry in self._get_relevant_important_dates(now=current)
             if _safe_int(entry.get("_days_until"), 999) == 0
         ]
         special_lines = []
@@ -8582,6 +8584,120 @@ class DailyStateMixin(DailyStateTickMixin):
                 has_holiday_signal = True
             if title:
                 special_lines.append(f"- 今天：{title}｜类型：{type_text or '重要日期'}｜备注：{note or '无'}")
+
+        # The durable calendar is a constraint layer, not execution evidence.
+        # Keep its wording explicit so a generated plan can use a confirmed
+        # vacation/school rule without claiming that the event already
+        # happened.  The fallback below preserves compatibility with hosts
+        # that predate AgendaRuntimeMixin.
+        calendar_snapshot = {}
+        snapshot_getter = getattr(self, "_agenda_calendar_snapshot", None)
+        if callable(snapshot_getter):
+            try:
+                candidate = snapshot_getter(current.date().isoformat(), now=current)
+                if isinstance(candidate, dict):
+                    calendar_snapshot = candidate
+            except Exception:
+                calendar_snapshot = {}
+        calendar_timeline: dict[str, Any] = {}
+        timeline_getter = getattr(self, "_agenda_calendar_timeline", None)
+        if callable(timeline_getter):
+            try:
+                candidate = timeline_getter(
+                    current.date().isoformat(),
+                    now=current,
+                    history_days=3,
+                    horizon_days=14,
+                )
+                if isinstance(candidate, dict):
+                    calendar_timeline = candidate
+            except Exception:
+                calendar_timeline = {}
+        calendar_candidates: list[dict[str, Any]] = []
+        candidates_getter = getattr(self, "_agenda_calendar_candidates_store", None)
+        if callable(candidates_getter):
+            try:
+                raw_candidates = candidates_getter()
+                if isinstance(raw_candidates, list):
+                    calendar_candidates = [
+                        item for item in raw_candidates
+                        if isinstance(item, dict)
+                        and str(item.get("lifecycle_state") or item.get("lifecycle") or "candidate") not in {"confirmed", "active", "completed", "cancelled", "expired"}
+                    ][:8]
+            except Exception:
+                calendar_candidates = []
+        all_calendar_events = [
+            item for item in calendar_snapshot.get("effective_events", calendar_snapshot.get("events", []))
+            if isinstance(item, dict) and str(item.get("status") or "") not in {"cancelled", "expired"}
+        ]
+        # New snapshots expose ``events`` as the complete adjusted list and
+        # ``effective_events`` as the planning projection. Older snapshots may
+        # only contain one list, so fall back gracefully.
+        raw_calendar_events = calendar_snapshot.get("events")
+        if isinstance(raw_calendar_events, list):
+            all_calendar_events = [
+                item for item in raw_calendar_events
+                if isinstance(item, dict) and str(item.get("status") or "") not in {"cancelled", "expired"}
+            ]
+        calendar_events = [
+            item for item in calendar_snapshot.get("effective_events", all_calendar_events)
+            if isinstance(item, dict) and str(item.get("status") or "") not in {"cancelled", "expired"}
+        ]
+        calendar_constraints: list[str] = []
+        calendar_conflict_lines: list[str] = []
+        for event in calendar_events[:16]:
+            title = _single_line(event.get("title"), 60)
+            if not title:
+                continue
+            kind = str(event.get("kind") or event.get("type") or "event")
+            kind_label = {
+                "period": "长期区间",
+                "recurrence": "周期规则",
+                "event": "单次事件",
+                "exception": "例外调整",
+            }.get(kind, "日历事件")
+            start_date = _single_line(
+                event.get("occurrence_date") if kind != "period" else event.get("start_date"),
+                24,
+            ) or _single_line(event.get("date") or event.get("start_date"), 24)
+            end_date = _single_line(event.get("end_date"), 24) if kind == "period" else ""
+            date_text = start_date
+            if end_date and end_date != start_date:
+                date_text = f"{start_date} 至 {end_date}"
+            start_at = _single_line(event.get("start_at"), 40)
+            end_at = _single_line(event.get("end_at"), 40)
+            clock_text = ""
+            if (not event.get("all_day") or event.get("start_time") or event.get("end_time")) and start_at and "T" in start_at:
+                clock_text = start_at.split("T", 1)[1][:5]
+                if end_at and "T" in end_at:
+                    clock_text += f"-{end_at.split('T', 1)[1][:5]}"
+            if clock_text:
+                date_text += f" {clock_text}"
+            status_label = "已确认日历约束" if str(event.get("status") or "confirmed") in {"confirmed", "active"} else "待确认日历记录"
+            calendar_constraints.append(f"- {title}｜{kind_label}｜{date_text or '今天'}｜{status_label}")
+            joined = f"{title} {event.get('note', '')} {event.get('description', '')}"
+            if any(token in joined for token in holiday_tokens):
+                has_holiday_signal = True
+        if calendar_constraints:
+            calendar_constraints_block = "今天有效的日历约束（属于计划依据，不等于已经发生）：\n" + "\n".join(calendar_constraints)
+        else:
+            calendar_constraints_block = ""
+        conflicts = calendar_snapshot.get("conflicts") if isinstance(calendar_snapshot.get("conflicts"), list) else []
+        if conflicts:
+            by_id = {
+                str(item.get("source_calendar_id") or item.get("calendar_id") or ""): item
+                for item in all_calendar_events
+                if isinstance(item, dict)
+            }
+            for conflict in conflicts[:8]:
+                winner_id = str(conflict.get("winner_id") or "")
+                loser_id = str(conflict.get("loser_id") or "")
+                winner = _single_line(by_id.get(winner_id, {}).get("title"), 50)
+                loser = _single_line(by_id.get(loser_id, {}).get("title"), 50)
+                if winner and loser:
+                    state = "同优先级，需谨慎处理" if conflict.get("unresolved") else "按优先级采用前者"
+                    suffix = "｜当天不生效" if not conflict.get("unresolved") else ""
+                    calendar_conflict_lines.append(f"- {winner} 覆盖 {loser}｜{state}{suffix}")
         if has_holiday_signal:
             day_tone = "节假日/特殊日期"
         elif is_weekend:
@@ -8596,22 +8712,96 @@ class DailyStateMixin(DailyStateTickMixin):
             rules.append("今天相关的重要日期：\n" + "\n".join(special_lines))
         else:
             rules.append("今天相关的重要日期：无")
+        if calendar_constraints_block:
+            rules.append(calendar_constraints_block)
+        if calendar_candidates:
+            candidate_lines = []
+            for item in calendar_candidates:
+                title = _single_line(item.get("title"), 80)
+                if not title:
+                    continue
+                date_text = _single_line(item.get("start_date") or item.get("date"), 20) or "近期"
+                candidate_lines.append(f"- {title}｜{date_text}｜待确认")
+            if candidate_lines:
+                rules.append(
+                    "近期对话待确认候选（仅供询问参考，不是事实）：\n"
+                    + "\n".join(candidate_lines)
+                    + "\n不得据此断言用户已经安排、正在执行或已经完成；如有必要，只能轻量询问确认。"
+                )
+        if calendar_conflict_lines:
+            rules.append("日历重叠处理：\n" + "\n".join(calendar_conflict_lines))
+        timeline_lines: list[str] = []
+        current_phase = calendar_timeline.get("current_phase") if isinstance(calendar_timeline.get("current_phase"), list) else []
+        if current_phase:
+            phase_text = "、".join(
+                f"{_single_line(item.get('title'), 48)}（{_single_line(item.get('start_date'), 16)} 至 {_single_line(item.get('end_date'), 16) or '待定'}）"
+                for item in current_phase[:4]
+                if isinstance(item, dict) and _single_line(item.get("title"), 48)
+            )
+            if phase_text:
+                timeline_lines.append("当前生活阶段：" + phase_text)
+        rhythms = calendar_timeline.get("rhythms") if isinstance(calendar_timeline.get("rhythms"), list) else []
+        if rhythms:
+            rhythm_text = "、".join(
+                f"{_single_line(item.get('title'), 48)}（下次 {_single_line(item.get('next_occurrence'), 16) or '按周期推算'}）"
+                for item in rhythms[:5]
+                if isinstance(item, dict) and _single_line(item.get("title"), 48)
+            )
+            if rhythm_text:
+                timeline_lines.append("稳定节律参考：" + rhythm_text)
+        recent_changes = calendar_timeline.get("recent_changes") if isinstance(calendar_timeline.get("recent_changes"), list) else []
+        if recent_changes:
+            recent_text = "、".join(
+                f"{_single_line(item.get('title'), 40)}（{_single_line(item.get('occurrence_date'), 16)}）"
+                for item in recent_changes[:4]
+                if isinstance(item, dict) and _single_line(item.get("title"), 40)
+            )
+            if recent_text:
+                timeline_lines.append("最近变化/余波：" + recent_text)
+        transitions = calendar_timeline.get("transitions") if isinstance(calendar_timeline.get("transitions"), list) else []
+        if transitions:
+            transition_text = "、".join(
+                f"{_single_line(item.get('date'), 16)} {_single_line(item.get('title'), 40)}"
+                for item in transitions[:5]
+                if isinstance(item, dict) and _single_line(item.get("title"), 40)
+            )
+            if transition_text:
+                timeline_lines.append("接下来可能发生的转换：" + transition_text)
+        uncertainties = calendar_timeline.get("uncertainties") if isinstance(calendar_timeline.get("uncertainties"), list) else []
+        if uncertainties:
+            uncertainty_text = "、".join(
+                _single_line(item.get("title") or item.get("reason") or "待确认变化", 44)
+                for item in uncertainties[:4]
+                if isinstance(item, dict)
+            )
+            if uncertainty_text:
+                timeline_lines.append("仍不确定的部分：" + uncertainty_text)
+        if timeline_lines:
+            rules.append(
+                "生活时间线（用于保持跨日连续，不等于执行事实）：\n"
+                + "\n".join(f"- {line}" for line in timeline_lines)
+                + "\n不要因为某一条当天计划就擅自结束或改写当前生活阶段；只有用户明确确认或日历明确记录了转换，才改变长期背景。稳定节律是默认倾向，临时事件可以改变当天，不必抹掉长期节律。存在待确认冲突时保留不确定性，用‘可能/先按目前记录’表达。"
+            )
         rules.append(
             "日程判断：先看日期语境,再看人格设定。工作日可以有上课/上班；周末要更松,可以晚起、休息、出门、补一点自己的事；节假日/假期要明显区别于普通日,可以有庆祝、出行、宅家、已明确关系安排或假期拖延。"
         )
         rules.append(
             "如果人格、日程专用设定或重要日期备注里写了调休、补班、补课、考试、值班等例外,优先按这些例外来写。不要凭空塞入身份里没有的校园、职场或节日细节。"
         )
+        if calendar_constraints or timeline_lines:
+            rules.append(
+                "日历使用边界：它提供生活阶段、节律和变化线索，不替代当前会话事实，也不自动删除日程。用户本轮明确说法优先；记录不确定时不要把推断写成确定事实。"
+            )
         return "\n".join(rules)
 
-    def _calendar_day_flags(self, now: datetime | None = None) -> dict[str, bool]:
+    def _calendar_day_flags(self, now: datetime | None = None) -> dict[str, Any]:
         current = now or self._environment_now()
         is_weekend = current.weekday() >= 5
         builtin_holidays = {"01-01", "05-01", "10-01"}
         month_day = current.strftime("%m-%d")
         today_dates = [
             entry
-            for entry in self._get_relevant_important_dates()
+            for entry in self._get_relevant_important_dates(now=current)
             if _safe_int(entry.get("_days_until"), 999) == 0
         ]
         holiday_tokens = (
@@ -8633,6 +8823,36 @@ class DailyStateMixin(DailyStateTickMixin):
         override_tokens = ("调休", "补班", "补课", "考试", "值班", "加班", "返校")
         has_holiday_signal = month_day in builtin_holidays
         has_override_signal = False
+        has_calendar_context = False
+        has_calendar_holiday_signal = False
+        has_calendar_school_work = False
+        calendar_snapshot = {}
+        snapshot_getter = getattr(self, "_agenda_calendar_snapshot", None)
+        if callable(snapshot_getter):
+            try:
+                candidate = snapshot_getter(current.date().isoformat(), now=current)
+                if isinstance(candidate, dict):
+                    calendar_snapshot = candidate
+            except Exception:
+                calendar_snapshot = {}
+        calendar_events = calendar_snapshot.get("effective_events", calendar_snapshot.get("events", []))
+        if isinstance(calendar_events, list):
+            for item in calendar_events:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("status") or "confirmed") not in {"confirmed", "active"}:
+                    continue
+                has_calendar_context = True
+                joined = _single_line(
+                    f"{item.get('title', '')} {item.get('note', '')} {item.get('description', '')}",
+                    180,
+                )
+                if any(token in joined for token in holiday_tokens):
+                    has_calendar_holiday_signal = True
+                if any(token in joined for token in ("上学", "上课", "放学", "学校", "上班", "通勤", "值班", "会议", "考试", "补课")):
+                    has_calendar_school_work = True
+                if any(token in joined for token in override_tokens):
+                    has_override_signal = True
         for entry in today_dates:
             if not isinstance(entry, dict):
                 continue
@@ -8649,49 +8869,35 @@ class DailyStateMixin(DailyStateTickMixin):
             has_override_signal = True
         return {
             "is_weekend": is_weekend,
-            "has_holiday_signal": has_holiday_signal,
+            "has_holiday_signal": has_holiday_signal or has_calendar_holiday_signal,
             "has_override_signal": has_override_signal,
+            "has_calendar_context": has_calendar_context,
+            "has_calendar_school_work": has_calendar_school_work,
+            "calendar_snapshot": calendar_snapshot,
         }
 
     def _plan_conflicts_with_calendar(self, items: list[dict[str, str]], now: datetime | None = None) -> bool:
+        """Report only explicit unresolved calendar conflicts.
+
+        A plan can be a reasonable interpretation of a phase, a rhythm, or a
+        user correction.  Keyword matching (for example, treating every
+        ``上学`` row as invalid during a vacation) made the calendar a hidden
+        hard filter and caused the companion to rewrite its own life.  The
+        planner prompt now receives the timeline and can resolve ambiguity in
+        prose; this hook is reserved for genuinely unresolved overlaps.
+        """
+
         if not items:
             return False
-        flags = self._calendar_day_flags(now)
-        if flags["has_override_signal"]:
+        getter = getattr(self, "_agenda_calendar_timeline", None)
+        if not callable(getter):
             return False
-        if not (flags["is_weekend"] or flags["has_holiday_signal"]):
+        try:
+            timeline = getter(now=(now or self._environment_now()), history_days=0, horizon_days=1)
+        except Exception:
             return False
-        school_or_work_tokens = (
-            "上课",
-            "下课",
-            "放学",
-            "课间",
-            "老师",
-            "作业",
-            "自习",
-            "教室",
-            "食堂",
-            "校门",
-            "班会",
-            "补课",
-            "上班",
-            "通勤",
-            "打卡",
-            "工位",
-            "会议",
-            "下班",
-            "值班",
-        )
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            text = _single_line(
-                f"{item.get('activity', '')} {item.get('message_seed', '')}",
-                220,
-            )
-            if any(token in text for token in school_or_work_tokens):
-                return True
-        return False
+        conflicts = timeline.get("conflicts") if isinstance(timeline, dict) else []
+        return any(isinstance(item, dict) and item.get("unresolved") for item in (conflicts or []))
 
     def _is_micro_plan_activity(self, text: str) -> bool:
         normalized = _single_line(text, 160)
@@ -10506,6 +10712,16 @@ class DailyStateMixin(DailyStateTickMixin):
         return ""
 
     async def _refresh_default_persona_prompt(self, umo: str = "") -> str:
+        def _cancel_requested() -> bool:
+            # A database/manager implementation may raise CancelledError for
+            # its own failed lookup. Preserve cancellation requested for the
+            # plugin task itself so shutdown remains responsive.
+            try:
+                task = asyncio.current_task()
+                return bool(task is not None and task.cancelling())
+            except RuntimeError:
+                return False
+
         try:
             specific_id = str(getattr(self, "_effective_plugin_persona_id", lambda: getattr(self, "plugin_specific_persona_id", ""))() or "").strip()
             cached, cached_at = self._cached_persona_prompt_for_scope(umo, specific_id)
@@ -10534,6 +10750,21 @@ class DailyStateMixin(DailyStateTickMixin):
                         prompt = self._extract_default_persona_prompt(result)
                         if prompt:
                             return self._store_persona_prompt_for_scope(prompt, umo=umo, specific_id=specific_id)
+                except asyncio.CancelledError:
+                    if _cancel_requested():
+                        raise
+                    logger.debug(
+                        "[PrivateCompanion] 指定人格查询被管理器取消(ID: %s),本轮使用缓存人格",
+                        specific_id,
+                    )
+                    return cached or self._get_default_persona_prompt(umo)
+                except (sqlite3.OperationalError, sqlite3.ProgrammingError) as exc:
+                    logger.debug(
+                        "[PrivateCompanion] 指定人格数据库暂不可用(ID: %s),本轮使用缓存人格: %s",
+                        specific_id,
+                        _single_line(exc, 160),
+                    )
+                    return cached or self._get_default_persona_prompt(umo)
                 except asyncio.TimeoutError:
                     logger.warning("[PrivateCompanion] 读取插件指定人格超时(ID: %s),本轮使用缓存人格", specific_id)
                     return cached or self._get_default_persona_prompt(umo)
@@ -10554,6 +10785,15 @@ class DailyStateMixin(DailyStateTickMixin):
             prompt = self._extract_default_persona_prompt(result)
             if prompt:
                 return self._store_persona_prompt_for_scope(prompt, umo=umo, specific_id="")
+        except asyncio.CancelledError:
+            if _cancel_requested():
+                raise
+            logger.debug("[PrivateCompanion] 默认人格查询被管理器取消,本轮使用缓存人格")
+        except (sqlite3.OperationalError, sqlite3.ProgrammingError) as exc:
+            logger.debug(
+                "[PrivateCompanion] 默认人格数据库暂不可用,本轮使用缓存人格: %s",
+                _single_line(exc, 160),
+            )
         except asyncio.TimeoutError:
             logger.warning("[PrivateCompanion] 读取 AstrBot 默认人格超时,本轮使用缓存人格")
         except Exception as e:

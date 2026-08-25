@@ -292,6 +292,12 @@ _DURABLE_SECTION_NAMES = frozenset(
         "agenda_version",
         "agenda_contract_version",
         "observed_activities",
+        "calendar_version",
+        "calendar_events",
+        "calendar_rules",
+        "calendar_exceptions",
+        "calendar_candidates",
+        "calendar_observations",
         "place_cognitive_maps",
         "reality_touch_outputs",
         "window_snapshots",
@@ -960,6 +966,12 @@ class CoreStoreMixin:
             "agenda_version": 1,
             "agenda_contract_version": 0,
             "observed_activities": [],
+            "calendar_version": 1,
+            "calendar_events": [],
+            "calendar_rules": [],
+            "calendar_exceptions": [],
+            "calendar_candidates": [],
+            "calendar_observations": [],
             "place_cognitive_maps": {},
             "reality_touch_outputs": {},
             "window_snapshots": [],
@@ -1108,6 +1120,12 @@ class CoreStoreMixin:
         data.setdefault("agenda_version", 1)
         data.setdefault("agenda_contract_version", 0)
         data.setdefault("observed_activities", [])
+        data.setdefault("calendar_version", 1)
+        data.setdefault("calendar_events", [])
+        data.setdefault("calendar_rules", [])
+        data.setdefault("calendar_exceptions", [])
+        data.setdefault("calendar_candidates", [])
+        data.setdefault("calendar_observations", [])
         data.setdefault("place_cognitive_maps", {})
         data.setdefault("reality_touch_outputs", {})
         data.setdefault("window_snapshots", [])

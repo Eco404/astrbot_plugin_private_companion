@@ -204,6 +204,47 @@ class SceneContextTests(unittest.IsolatedAsyncioTestCase):
         assert "日程打断线索" in formatted
         assert "不代表计划已完成" in formatted
 
+    def test_scene_snapshot_exposes_effective_calendar_constraints(self) -> None:
+        harness = _SceneHarness(str(self.outfit_path))
+        harness._agenda_calendar_snapshot = lambda date_key="", now=None: {
+            "date": date_key or "2026-07-19",
+            "events": [
+                {
+                    "title": "暑假",
+                    "kind": "period",
+                    "occurrence_date": "2026-07-19",
+                    "calendar_effective": True,
+                },
+                {
+                    "title": "工作日上学",
+                    "kind": "recurrence",
+                    "occurrence_date": "2026-07-19",
+                    "calendar_effective": False,
+                    "overridden_by": "summer",
+                },
+            ],
+            "effective_events": [
+                {
+                    "title": "暑假",
+                    "kind": "period",
+                    "occurrence_date": "2026-07-19",
+                    "calendar_effective": True,
+                }
+            ],
+            "conflicts": [],
+            "applied_exceptions": [],
+        }
+
+        snapshot = harness._build_companion_scene_snapshot(
+            harness.data["users"]["10001"],
+            now=datetime(2026, 7, 19, 16, 20, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual("暑假", snapshot["calendar"]["events"][0]["title"])
+        formatted = harness._format_companion_scene_snapshot(snapshot)
+        self.assertIn("今天日历上的记录：暑假（已确认约束）", formatted)
+        self.assertIn("工作日上学（当天不生效）", formatted)
+
     def test_active_shared_activity_overrides_fixed_schedule(self) -> None:
         harness = _SceneHarness(str(self.outfit_path))
         harness._external_realtime_activities = {

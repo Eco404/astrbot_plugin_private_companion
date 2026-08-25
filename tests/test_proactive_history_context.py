@@ -137,6 +137,13 @@ class ProactiveHistoryContextTests(unittest.IsolatedAsyncioTestCase):
         assert "不是已经发生的事实" in hint
         assert harness._format_proactive_future_schedule_hint(reason="news_share") == ""
 
+    def test_calendar_constraints_are_injected_into_generation_and_review_context(self):
+        generation_source = inspect.getsource(ProactiveMessageMixin._build_framework_proactive_prompt)
+        runtime_source = inspect.getsource(ProactiveMessageMixin._format_proactive_review_runtime_context)
+        self.assertIn("_format_proactive_calendar_constraint_hint", generation_source)
+        self.assertIn("今日有效日历约束", generation_source)
+        self.assertIn("_format_proactive_calendar_constraint_hint", runtime_source)
+
     def test_generation_tool_boundary_allows_only_proactive_photo_tool(self):
         generation_source = inspect.getsource(ProactiveMessageMixin._build_framework_proactive_prompt)
 

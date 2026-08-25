@@ -47,6 +47,10 @@ const state = {
   selectedBrowsingIndex: 0,
   memoFilter: "active",
   memoEditorId: "",
+  calendar: null,
+  calendarMonth: "",
+  calendarLoading: false,
+  calendarError: "",
   selectedUserId: "",
   userDetailCache: {},
   userDetailView: "overview",
@@ -230,6 +234,7 @@ const state = {
     configBackups: false,
     userGroupLists: false,
     memoNotes: false,
+    calendar: false,
   },
   lazyScripts: {},
   lazyScriptErrors: {},
@@ -7475,7 +7480,9 @@ function mergeCreativeWorkspace() {
 mergeCreativeWorkspace();
 
 function renderActiveTab(tabName = state.activeTab || "dashboard") {
-  if (tabName === "private") {
+  if (tabName === "calendar") {
+    renderCalendar();
+  } else if (tabName === "private") {
     renderUsers();
   } else if (tabName === "learning") {
     renderLearning();
@@ -7741,6 +7748,270 @@ async function loadMemoNotes(force = false) {
   return state.memoNotes;
 }
 
+function calendarLocalDateKey(value = new Date()) {
+  const dateValue = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(dateValue.getTime())) return "";
+  return `${dateValue.getFullYear()}-${String(dateValue.getMonth() + 1).padStart(2, "0")}-${String(dateValue.getDate()).padStart(2, "0")}`;
+}
+
+function calendarMonthKey(value = new Date()) {
+  const dateValue = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(dateValue.getTime())) return "";
+  return `${dateValue.getFullYear()}-${String(dateValue.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function calendarShiftMonth(month, delta) {
+  const [year, monthNumber] = String(month || calendarMonthKey()).split("-").map(Number);
+  const shifted = new Date(Number.isFinite(year) ? year : new Date().getFullYear(), (Number.isFinite(monthNumber) ? monthNumber : 1) - 1 + delta, 1);
+  return calendarMonthKey(shifted);
+}
+
+function calendarRecordDateText(record) {
+  if (record?.read_only && record?.legacy_date) {
+    return `${String(record.legacy_date).slice(0, 10)} · 每年`;
+  }
+  const start = String(record?.start_date || record?.date || "").slice(0, 10);
+  const end = String(record?.end_date || "").slice(0, 10);
+  if (!start) return "未指定日期";
+  return end && end !== start ? `${start} 至 ${end}` : start;
+}
+
+function calendarKindLabel(kind) {
+  return ({ period: "长期区间", event: "单次事件", recurrence: "周期规则", exception: "例外调整" })[kind] || "日历记录";
+}
+
+function calendarTimeText(item) {
+  const start = String(item?.start_time || "").slice(0, 5);
+  const end = String(item?.end_time || "").slice(0, 5);
+  return start ? (end ? `${start}-${end}` : start) : (item?.all_day ? "全天" : "时间待定");
+}
+
+function calendarInstanceDateText(item) {
+  return String(item?.occurrence_date || item?.start_at || item?.date || "").slice(0, 10) || "未指定日期";
+}
+
+function calendarInstanceTimeText(item) {
+  if (item?.all_day) return "全天";
+  const startAt = String(item?.start_at || "");
+  const endAt = String(item?.end_at || "");
+  if (!startAt.includes("T")) return calendarTimeText(item);
+  const start = startAt.split("T", 2)[1].slice(0, 5);
+  const end = endAt.includes("T") ? endAt.split("T", 2)[1].slice(0, 5) : "";
+  const startDate = startAt.slice(0, 10);
+  const endDate = endAt.slice(0, 10);
+  const suffix = endDate && endDate !== startDate ? " · 跨日" : "";
+  return `${start}${end ? `-${end}` : ""}${suffix}`;
+}
+
+function resetCalendarEditor() {
+  const form = $("#calendarRecordForm");
+  if (!form) return;
+  form.reset();
+  const month = state.calendarMonth || calendarMonthKey();
+  const today = calendarLocalDateKey(new Date());
+  const dateInput = form.elements.start_date;
+  if (dateInput) dateInput.value = month === calendarMonthKey() ? today : `${month}-01`;
+  const kind = form.elements.kind;
+  if (kind) kind.value = "period";
+  form.elements.calendar_id.value = "";
+  const editor = $("#calendarEditor");
+  if (editor) editor.removeAttribute("open");
+}
+
+function fillCalendarEditor(record) {
+  const form = $("#calendarRecordForm");
+  if (!form || !record) return;
+  form.elements.calendar_id.value = String(record.calendar_id || "");
+  form.elements.kind.value = String(record.kind || "event");
+  form.elements.title.value = String(record.title || "");
+  form.elements.start_date.value = String(record.start_date || record.date || "").slice(0, 10);
+  form.elements.end_date.value = String(record.end_date || "").slice(0, 10);
+  form.elements.new_date.value = String(record.new_date || "").slice(0, 10);
+  form.elements.start_time.value = String(record.start_time || "").slice(0, 5);
+  form.elements.end_time.value = String(record.end_time || "").slice(0, 5);
+  form.elements.frequency.value = String(record.frequency || "weekly");
+  form.elements.by_weekday.value = Array.isArray(record.by_weekday) ? record.by_weekday.join(",") : String(record.by_weekday || "");
+  form.elements.target_id.value = String(record.target_id || "");
+  form.elements.action.value = String(record.action || "replace");
+  $("#calendarEditor")?.setAttribute("open", "");
+  form.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function renderCalendar() {
+  const payload = state.calendar;
+  const error = $("#calendarError");
+  if (error) {
+    error.hidden = !state.calendarError;
+    error.textContent = state.calendarError || "";
+  }
+  const monthLabel = $("#calendarMonthLabel");
+  if (monthLabel) {
+    const month = state.calendarMonth || calendarMonthKey();
+    monthLabel.textContent = month.replace("-", "年") + "月";
+  }
+  if (!payload) {
+    $("#calendarTodayEvents")?.replaceChildren();
+    $("#calendarRecords")?.replaceChildren();
+    $("#calendarCandidates")?.replaceChildren();
+    $("#calendarMonthGrid")?.replaceChildren();
+    $("#calendarTimeline")?.replaceChildren();
+    return;
+  }
+  const today = payload.today || {};
+  const todayMeta = $("#calendarTodayMeta");
+  if (todayMeta) todayMeta.textContent = `${today.date || calendarLocalDateKey()} · ${today.timezone || ""}`;
+  const todayEvents = Array.isArray(today.events) ? today.events : [];
+  const todayList = $("#calendarTodayEvents");
+  if (todayList) {
+    todayList.innerHTML = todayEvents.length
+      ? todayEvents.map((item) => `<div class="calendar-event-row"><span class="calendar-event-time">${escapeHtml(calendarTimeText(item))}</span><span><b>${escapeHtml(item.title || "未命名事件")}</b><small>${escapeHtml(calendarKindLabel(item.kind))}${item.status === "tentative" ? " · 待确认" : ""}${item.exception_id ? " · 例外覆盖" : ""}${item.calendar_effective === false ? " · 当天不生效" : ""}</small></span></div>`).join("")
+      : `<div class="empty small">今天没有已确认的日历约束。</div>`;
+  }
+  const conflicts = Array.isArray(today.conflicts) && today.conflicts.length ? today.conflicts : (Array.isArray(payload.conflicts) ? payload.conflicts.filter((item) => String(item.overlap_start || "").slice(0, 10) === String(today.date || "").slice(0, 10)) : []);
+  const conflictList = $("#calendarTodayConflicts");
+  if (conflictList) {
+    conflictList.innerHTML = conflicts.length
+      ? `<strong>今日冲突 ${conflicts.length}</strong>${conflicts.map((item) => `<div class="calendar-conflict-row">${escapeHtml(item.event_ids?.join(" / ") || "存在重叠记录")} · ${item.unresolved ? "需要确认优先级" : `采用 ${escapeHtml(item.winner_id || "高优先级记录")}`}</div>`).join("")}`
+      : `<div class="calendar-clear-note">今日无时间冲突</div>`;
+  }
+  const timeline = payload.timeline || {};
+  const timelineRoot = $("#calendarTimeline");
+  if (timelineRoot) {
+    const phase = Array.isArray(timeline.current_phase) ? timeline.current_phase : [];
+    const rhythms = Array.isArray(timeline.rhythms) ? timeline.rhythms : [];
+    const transitions = Array.isArray(timeline.transitions) ? timeline.transitions.slice(0, 4) : [];
+    const uncertainties = Array.isArray(timeline.uncertainties) ? timeline.uncertainties.slice(0, 3) : [];
+    const title = (item) => escapeHtml(item?.title || "未命名记录");
+    timelineRoot.innerHTML = (phase.length || rhythms.length || transitions.length || uncertainties.length)
+      ? `<div class="calendar-timeline-title">生活时间线</div>${phase.length ? `<div><b>当前阶段</b><span>${phase.map(title).join("、")}</span></div>` : ""}${rhythms.length ? `<div><b>稳定节律</b><span>${rhythms.map(title).join("、")}</span></div>` : ""}${transitions.length ? `<div><b>近期变化</b><span>${transitions.map((item) => `${escapeHtml(item.date || "")} ${title(item)}`).join("、")}</span></div>` : ""}${uncertainties.length ? `<div class="is-uncertain"><b>待确认</b><span>${uncertainties.map(title).join("、")}</span></div>` : ""}`
+      : `<div class="calendar-clear-note">还没有形成连续的生活阶段记录</div>`;
+  }
+  const records = Array.isArray(payload.records) ? payload.records : [];
+  const recordsList = $("#calendarRecords");
+  const activeRecords = records.filter((item) => item.status !== "cancelled" && item.status !== "expired");
+  const recordsMeta = $("#calendarRecordsMeta");
+  if (recordsMeta) recordsMeta.textContent = `${activeRecords.length} 条有效记录 · ${payload.range?.start || ""} 至 ${payload.range?.end || ""}`;
+  if (recordsList) {
+    recordsList.innerHTML = activeRecords.length
+      ? activeRecords.map((item) => `<div class="calendar-record-row"><div class="calendar-record-main"><span class="calendar-record-kind">${escapeHtml(calendarKindLabel(item.kind))}${item.read_only ? " · 旧重要日期" : ""}</span><b>${escapeHtml(item.title || "未命名记录")}</b><small>${escapeHtml(calendarRecordDateText(item))}${item.frequency ? ` · ${escapeHtml(item.frequency)}` : ""}${item.by_weekday?.length ? ` · 周${escapeHtml(item.by_weekday.join(","))}` : ""}</small></div><div class="calendar-record-actions">${item.read_only ? `<span class="muted">由重要日期维护</span>` : `<button type="button" data-calendar-edit="${escapeHtml(item.calendar_id)}">编辑</button><button type="button" data-calendar-cancel="${escapeHtml(item.calendar_id)}">取消</button>`}</div></div>`).join("")
+      : `<div class="empty small">还没有日历记录。可以先添加“暑假”或工作日上学规则。</div>`;
+  }
+  const candidates = Array.isArray(payload.candidates) ? payload.candidates.filter((item) => !["confirmed", "active", "completed", "cancelled", "expired"].includes(String(item.lifecycle_state || item.lifecycle || "candidate"))) : [];
+  const candidatesList = $("#calendarCandidates");
+  const candidatesMeta = $("#calendarCandidatesMeta");
+  if (candidatesMeta) candidatesMeta.textContent = `${candidates.length} 条待确认 · 仅供核对，不代表已安排`;
+  if (candidatesList) {
+    candidatesList.innerHTML = candidates.length
+      ? candidates.map((item) => {
+        const id = escapeHtml(item.candidate_id || item.calendar_id || "");
+        const dateText = escapeHtml(calendarRecordDateText(item));
+        const excerpt = escapeHtml(item.source_excerpt || "来自对话中的安排线索");
+        const confidence = Number(item.confidence);
+        const confidenceText = Number.isFinite(confidence) ? ` · 置信度 ${Math.round(confidence * 100)}%` : "";
+        return `<div class="calendar-candidate-row"><div class="calendar-record-main"><span class="calendar-record-kind">待确认${confidenceText}</span><b>${escapeHtml(item.title || "未命名安排")}</b><small>${dateText} · ${excerpt}</small></div><div class="calendar-record-actions"><button type="button" data-calendar-candidate-confirm="${id}">确认</button><button type="button" data-calendar-candidate-reject="${id}">忽略</button></div></div>`;
+      }).join("")
+      : `<div class="empty small">暂无待确认安排。</div>`;
+  }
+  const monthInstances = Array.isArray(payload.instances) ? payload.instances : [];
+  const monthGrid = $("#calendarMonthGrid") || $("#calendarMonthAgenda");
+  const monthAgendaMeta = $("#calendarMonthAgendaMeta");
+  if (monthAgendaMeta) monthAgendaMeta.textContent = `${monthInstances.length} 个日期实例 · 已应用例外调整`;
+  if (monthGrid) {
+    const month = state.calendarMonth || calendarMonthKey();
+    const [year, monthNumber] = month.split("-").map(Number);
+    const firstDay = new Date(year, monthNumber - 1, 1, 12);
+    const mondayOffset = (firstDay.getDay() + 6) % 7;
+    const todayKey = String(payload.today?.date || calendarLocalDateKey()).slice(0, 10);
+    const grouped = new Map();
+    const appendEntry = (day, item) => {
+      if (!grouped.has(day)) grouped.set(day, []);
+      const entries = grouped.get(day);
+      const identity = String(item.instance_id || item.calendar_id || `${item.title || ""}:${item.start_at || ""}`);
+      if (!entries.some((entry) => String(entry.instance_id || entry.calendar_id || `${entry.title || ""}:${entry.start_at || ""}`) === identity)) entries.push(item);
+    };
+    for (const item of monthInstances) {
+      if (!item || typeof item !== "object") continue;
+      const occurrenceDate = calendarInstanceDateText(item);
+      const startAt = String(item.start_at || "");
+      const endAt = String(item.end_at || "");
+      let startKey = startAt.slice(0, 10) || occurrenceDate;
+      let endKey = occurrenceDate;
+      if (!item.all_day && endAt.slice(0, 10)) {
+        const endMoment = new Date(endAt);
+        if (!Number.isNaN(endMoment.getTime())) {
+          endMoment.setMilliseconds(endMoment.getMilliseconds() - 1);
+          endKey = calendarLocalDateKey(endMoment);
+        } else {
+          endKey = endAt.slice(0, 10);
+        }
+      }
+      const startMoment = new Date(`${startKey}T12:00:00`);
+      const endMoment = new Date(`${endKey || startKey}T12:00:00`);
+      if (Number.isNaN(startMoment.getTime()) || Number.isNaN(endMoment.getTime())) {
+        appendEntry(occurrenceDate, item);
+        continue;
+      }
+      for (let cursor = startMoment; cursor <= endMoment; cursor.setDate(cursor.getDate() + 1)) {
+        const day = calendarLocalDateKey(cursor);
+        if (day.startsWith(`${month}-`)) appendEntry(day, item);
+      }
+    }
+    const cells = [];
+    const startCell = new Date(year, monthNumber - 1, 1 - mondayOffset, 12);
+    for (let index = 0; index < 42; index += 1) {
+      const current = new Date(startCell);
+      current.setDate(startCell.getDate() + index);
+      const day = calendarLocalDateKey(current);
+      const inMonth = current.getMonth() === monthNumber - 1;
+      const entries = (grouped.get(day) || []).slice().sort((a, b) => String(a.start_at || "").localeCompare(String(b.start_at || "")));
+      const entryMarkup = entries.slice(0, 4).map((item) => {
+        const inactive = item.calendar_effective === false;
+        const tentative = item.status === "tentative" || item.commitment_level === "tentative";
+        const status = inactive ? "当天不生效" : (tentative ? "待确认" : calendarKindLabel(item.kind));
+        return `<div class="calendar-grid-event${inactive ? " is-inactive" : ""}${tentative ? " is-tentative" : ""}" title="${escapeHtml(item.title || "未命名事件")}"><span>${escapeHtml(calendarInstanceTimeText(item))}</span><b>${escapeHtml(item.title || "未命名事件")}</b><small>${escapeHtml(status)}</small></div>`;
+      }).join("");
+      const moreMarkup = entries.length > 4 ? `<small class="calendar-grid-more">还有 ${entries.length - 4} 条</small>` : "";
+      cells.push(`<div class="calendar-grid-cell${inMonth ? "" : " is-outside"}${day === todayKey ? " is-today" : ""}" data-calendar-day="${escapeHtml(day)}"><time datetime="${escapeHtml(day)}">${escapeHtml(String(current.getDate()))}</time><div class="calendar-grid-events">${entryMarkup}${moreMarkup}</div></div>`);
+    }
+    monthGrid.innerHTML = `<div class="calendar-grid-weekdays" aria-hidden="true">${["一", "二", "三", "四", "五", "六", "日"].map((day) => `<span>${day}</span>`).join("")}</div><div class="calendar-grid-cells">${cells.join("")}</div>`;
+  }
+}
+
+async function loadCalendar(force = false) {
+  const month = state.calendarMonth || calendarMonthKey();
+  if (state.lazyLoaded.calendar && !force && state.calendar && state.calendarMonth === month) return state.calendar;
+  state.calendarLoading = true;
+  state.calendarError = "";
+  if (state.activeTab === "memory" || state.activeTab === "calendar") renderCalendar();
+  try {
+    const result = await fetchJson(`/calendar?month=${encodeURIComponent(month)}`);
+    state.calendar = result || { records: [], candidates: [], instances: [], today: {}, conflicts: [] };
+    state.calendarMonth = month;
+    state.lazyLoaded.calendar = true;
+    return state.calendar;
+  } catch (error) {
+    state.calendarError = error?.message || "读取日历失败";
+    state.calendar = null;
+    throw error;
+  } finally {
+    state.calendarLoading = false;
+    if (state.activeTab === "memory" || state.activeTab === "calendar") renderCalendar();
+  }
+}
+
+function calendarFormPayload(form) {
+  const payload = {};
+  for (const [key, value] of new FormData(form).entries()) {
+    const text = String(value || "").trim();
+    if (text) payload[key] = text;
+  }
+  if (payload.by_weekday) {
+    payload.by_weekday = payload.by_weekday.split(/[\s,，]+/).map((item) => item.trim()).filter(Boolean);
+  }
+  if (payload.kind === "period" && !payload.end_date) payload.end_date = payload.start_date;
+  return payload;
+}
+
 async function ensureTabData(tabName, force = false) {
   if (tabName === "dashboard") {
     return;
@@ -7748,7 +8019,9 @@ async function ensureTabData(tabName, force = false) {
   if (["private", "group", "learning", "memory", "proactive", "experimental"].includes(tabName) && (!state.lazyLoaded.userGroupLists || force)) {
     await loadUserGroupLists(loadAllRequestSeq, { showErrors: true, force });
   }
-  if (tabName === "tokens") {
+  if (tabName === "calendar" || tabName === "memory") {
+    await loadCalendar(force);
+  } else if (tabName === "tokens") {
     await loadTokenStats(force);
   } else if (tabName === "creative") {
     await Promise.all([
@@ -15997,7 +16270,8 @@ function renderUnifiedIdentityPanel(detail) {
         ${lifecycle.can_purge ? '<button type="button" data-identity-action="purge" class="danger">预览永久删除</button>' : ""}
       </div>
       <div data-identity-lifecycle-preview class="notice-box" role="status" aria-live="polite" hidden></div>
-      ${!lifecycle.can_unlink_current && lifecycle.can_archive ? '<p class="muted">当前是唯一或主身份，不能直接拆分；如需移除，请使用统一人物归档。</p>' : ""}
+        ${!lifecycle.can_unlink_current && lifecycle.can_archive ? '<p class="muted">当前是唯一或主身份，不能直接拆分；如需移除，请使用统一人物归档。</p>' : ""}
+        ${identity.profile_status === "active" && lifecycle.archive_ready === false ? '<p class="muted">记忆插件的作用域归档服务尚未就绪，暂不显示归档执行按钮；请启动或更新记忆插件后刷新。</p>' : ""}
     </section>` : `<section class="detail-block"><header class="detail-block-head"><div><h2>${escapeHtml(pendingGuidance.title)}</h2><p>${escapeHtml(pendingGuidance.detail)}</p></div><span class="badge ${escapeHtml(pendingGuidance.tone)}">安全待确认</span></header><p class="muted">当前页面不会按昵称或模糊 ID 猜测合并。“暂不处理”只移出审核队列，不删除旧资料，不阻断未来精确消息认领。</p>${identity.pending?.found && ["pending", "dismissed"].includes(String(identity.pending?.state || "")) ? `<div class="toolbar"><button type="button" class="secondary-button" data-pending-identity-action="${identity.pending.state === "dismissed" ? "restore" : "dismiss"}">${identity.pending.state === "dismissed" ? "重新加入审核" : "暂不处理"}</button></div>` : ""}</section>`}
   `;
 }
@@ -19528,6 +19802,7 @@ function renderMemory() {
   renderInteractionImpact();
   renderMemoryComposition();
   renderSlangCloud();
+  renderCalendar();
 }
 
 function foodMenuFeaturePanelHtml() {
@@ -20365,7 +20640,7 @@ function renderBookshelf() {
   $("#bookshelfPublicCount").textContent = bookshelf.public_count ?? creative.project_count ?? 0;
   $("#bookshelfSecretCount").textContent = bookshelf.secret_count ?? 0;
   $("#bookshelfDiaryCount").textContent = bookshelf.diary_count ?? 0;
-  $("#bookshelfJmCount").textContent = bookshelf.archive_item_count ?? 0;
+  $("#bookshelfArchiveCount").textContent = bookshelf.archive_item_count ?? 0;
   const memoNotes = currentMemoPayload();
   $("#bookshelfMemoCount").textContent = memoNotes.active ?? 0;
   $("#bookshelfMemoSummary").textContent = memoNotes.overdue
@@ -21383,7 +21658,7 @@ function renderBookDetailPanel() {
   `;
   panel.hidden = false;
   if (state.bookshelfPage === "reader" && book.kind === "archive_item" && Array.isArray(book.pages) && book.pages.length) {
-    panel.innerHTML = renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro, readingImpression);
+    panel.innerHTML = renderArchiveReader(book, kindLabel, displayTitle, displayIntro, readingImpression);
     void hydrateBookshelfImages(panel);
     return;
   }
@@ -21477,7 +21752,7 @@ function renderBookDetailPanel() {
   void hydrateBookshelfImages(panel);
 }
 
-function renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro, readingImpression = "") {
+function renderArchiveReader(book, kindLabel, displayTitle, displayIntro, readingImpression = "") {
   const pages = Array.isArray(book.pages) ? book.pages : [];
   const pageCommentCount = Number(book.page_comment_count ?? (Array.isArray(book.page_comments) ? book.page_comments.length : pages.filter((page) => String(page.comment || "").trim()).length));
   const maxStart = Math.max(0, pages.length - (pages.length % 2 === 0 ? 2 : 1));
@@ -33655,6 +33930,7 @@ function renderRealityTouchMobilePanel() {
         </label>
         <label><span>监听 / 组网地址</span><input name="mobile_host" value="${escapeHtml(serverHost)}" placeholder="例如 100.66.1.4"></label>
         <label><span>端口</span><input name="mobile_port" type="number" min="1" max="65535" value="${Number(mobile.port || 6322)}"></label>
+        <label><span>公网访问地址（可选）</span><input name="mobile_public_base_url" type="url" value="${escapeHtml(mobile.public_base_url || "")}" placeholder="https://example.com/mobile"><small>反向代理或公网访问时用于生成手机房间链接。</small></label>
         <label><span>允许配对的用户 ID</span><input name="mobile_allowed_user_id" value="${escapeHtml(mobile.allowed_user_id || "")}" placeholder="主要用户 ID"></label>
         <label><span>会话有效期（小时）</span><input name="mobile_session_ttl_hours" type="number" min="1" max="720" value="${Number(mobile.session_ttl_hours || 168)}"></label>
         <label><span>位置上下文有效期（秒）</span><input name="mobile_location_ttl_seconds" type="number" min="60" max="86400" value="${Number(mobile.location_ttl_seconds || 900)}"></label>
@@ -33804,6 +34080,7 @@ function renderRealityTouchHomeHealthPanel() {
   const mihomeAvailable = mihome.available === true;
   const mihomeAuth = mihome.auth && typeof mihome.auth === "object" ? mihome.auth : {};
   const mihomeLogin = mihome.login && typeof mihome.login === "object" ? mihome.login : {};
+  const mihomeMappings = Array.isArray(mihome.mappings) ? mihome.mappings : [];
   const mihomeDevices = Array.isArray(mihome.devices) ? mihome.devices.filter((item) => item && item.configured && Array.isArray(item.aliases) && item.aliases.length) : [];
   const mihomeDeviceRows = mihomeDevices.slice(0, 24).map((item) => item.aliases.map((alias) => `<div class="reality-mihome-device"><span>${escapeHtml(alias)}<small>${escapeHtml(item.name || item.model || item.did || "米家设备")}</small></span><button type="button" class="soft" data-mihome-power="${escapeHtml(alias)}" data-mihome-power-value="true">开</button><button type="button" class="soft" data-mihome-power="${escapeHtml(alias)}" data-mihome-power-value="false">关</button></div>`).join("")).join("");
   return `
@@ -33825,7 +34102,13 @@ function renderRealityTouchHomeHealthPanel() {
         <p class="reality-device-intro">扫码登录由米家插件完成，凭证仍由米家插件保管；这里仅调用已配置别名的设备。</p>
         <div class="reality-mihome-actions"><button type="button" class="primary" data-mihome-login ${mihomeAvailable ? "" : "disabled"}>${mihomeAvailable ? (mihomeAuth.logged_in ? "已登录" : "扫码登录米家") : "未安装米家插件"}</button><button type="button" class="soft" data-mihome-sync ${mihomeAvailable && mihomeAuth.logged_in ? "" : "disabled"}>同步设备</button><button type="button" class="soft danger" data-mihome-logout ${mihomeAvailable && mihomeAuth.logged_in ? "" : "disabled"}>退出米家</button></div>
         ${mihomeLogin.qr_image ? `<div class="reality-mihome-qr"><img alt="米家登录二维码" src="${escapeHtml(mihomeLogin.qr_image)}"><span>${escapeHtml(mihomeLogin.message || "请使用米家或小米账号扫一扫")}</span></div>` : mihomeLogin.message && mihomeLogin.status !== "idle" ? `<div class="reality-device-status"><b>${escapeHtml(mihomeLogin.message)}</b></div>` : ""}
-        <div class="reality-mihome-devices">${mihomeDeviceRows || `<small>${mihomeAvailable ? (mihomeAuth.logged_in ? "请先在米家管理中同步设备并配置设备别名" : "登录后可同步米家设备") : "请先安装并启用 astrbot_plugin_mihome"}</small>`}</div>
+        <div class="reality-mihome-devices">${mihomeDeviceRows || `<small>${mihomeAvailable ? (mihomeAuth.logged_in ? "请先同步设备并配置设备别名" : "登录后可在此扫码登录米家") : "现实触及内置米家运行时暂不可用"}</small>`}</div>
+      </section>
+      <section class="reality-mihome-mapping-panel">
+        <div class="reality-touch-section-head"><div><span>米家配置</span><h3>设备别名与控制白名单</h3></div></div>
+        <p class="reality-device-intro">主陪伴插件可以直接管理设备别名；账号凭证仍由现实触及内置米家运行时保管。</p>
+        <div class="reality-mihome-mapping-list" data-mihome-mapping-list>${mihomeMappings.length ? mihomeMappings.map((item) => `<div class="reality-mihome-mapping-row"><input data-mihome-alias value="${escapeHtml(item.alias || "")}" placeholder="客厅灯"><input data-mihome-did value="${escapeHtml(item.did || "")}" placeholder="设备 DID"><button type="button" class="soft danger" data-mihome-remove-mapping>移除</button></div>`).join("") : ""}</div>
+        <div class="reality-mihome-mapping-actions"><button type="button" class="soft" data-mihome-add-mapping>新增设备</button><button type="button" class="primary" data-mihome-save-mappings ${mihomeAvailable ? "" : "disabled"}>保存设备映射</button></div>
       </section>
       <form class="reality-home-health-action" data-reality-home-action>
         <label><span>请求用户</span><select name="home_user_id">${userOptions || '<option value="">暂无可用用户</option>'}</select></label>
@@ -33873,6 +34156,16 @@ function renderRealityTouchPage() {
         <article class="is-info"><span>现实授权</span><b>${Number(counts.consented || 0)} 人</b><small>摄像头授权 ${Number(counts.camera_consented || 0)} 人</small></article>
         <article class="${Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0) ? "is-warm" : "is-muted"}"><span>待执行提醒</span><b>${Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0)}</b><small>官方任务与计划场景</small></article>
       </div>
+      <form class="reality-global-config" data-reality-global-config>
+        <div class="reality-touch-section-head"><div><span>基础配置</span><h3>现实触及运行参数</h3></div></div>
+        <div class="reality-mobile-inline-fields">
+          <label><span>视觉模型 Provider ID</span><input name="vision_provider_id" value="${escapeHtml(data?.configuration?.vision_provider_id || "")}" placeholder="留空则只使用本地画面信息"></label>
+          <label><span>提醒时区</span><input name="timezone" value="${escapeHtml(data?.configuration?.timezone || "Asia/Shanghai")}" placeholder="Asia/Shanghai"></label>
+          <label><span>默认播放音量</span><input name="audio_default_playback_volume" type="number" min="0" max="100" value="${Number(data?.configuration?.audio_default_playback_volume ?? 35)}"></label>
+        </div>
+        <label><span>现实触及授权用户 ID</span><textarea name="authorized_user_ids" rows="2" placeholder="每行一个用户 ID">${escapeHtml((data?.configuration?.authorized_user_ids || []).join("\n"))}</textarea><small>仅限制可配置现实触及的用户，不替代用户本人对音频或摄像头的知情确认。</small></label>
+        <button type="submit" class="primary">保存基础配置</button>
+      </form>
       <nav class="reality-section-nav" aria-label="现实触及页面分区">
         <a href="#reality-connect"><span>01</span>手机连接</a>
         <a href="#reality-mobile-data"><span>02</span>手机数据</a>
@@ -33910,14 +34203,15 @@ function realityGlobalConfigPayload(root, enabledOverride) {
   const dataForm = root.querySelector("[data-reality-mobile-data-config]");
   const homeForm = root.querySelector("[data-reality-home-config]");
   const healthForm = root.querySelector("[data-reality-health-config]");
+  const globalForm = root.querySelector("[data-reality-global-config]");
   const field = (name) => dataForm?.elements[name] || form?.elements[name];
   return {
     action: "save_global_config",
     enabled: enabledOverride == null ? Boolean(configuration.enabled ?? state.realityTouch?.global_enabled) : Boolean(enabledOverride),
-    vision_provider_id: configuration.vision_provider_id || "",
-    timezone: configuration.timezone || "Asia/Shanghai",
-    authorized_user_ids: Array.isArray(configuration.authorized_user_ids) ? configuration.authorized_user_ids : [],
-    audio_default_playback_volume: Number(configuration.audio_default_playback_volume ?? 35),
+    vision_provider_id: globalForm?.elements.vision_provider_id?.value.trim() || configuration.vision_provider_id || "",
+    timezone: globalForm?.elements.timezone?.value.trim() || configuration.timezone || "Asia/Shanghai",
+    authorized_user_ids: globalForm ? globalForm.elements.authorized_user_ids?.value || "" : (Array.isArray(configuration.authorized_user_ids) ? configuration.authorized_user_ids : []),
+    audio_default_playback_volume: Number(globalForm?.elements.audio_default_playback_volume?.value || configuration.audio_default_playback_volume || 35),
     home: {
       enabled: homeForm ? Boolean(homeForm.elements.home_enabled?.checked) : Boolean(configuration.home?.enabled),
       base_url: homeForm?.elements.home_base_url?.value || configuration.home?.base_url || "",
@@ -36972,6 +37266,20 @@ function bindExperimentalOverviewActions() {
 }
 
 function bindRealityTouchActions(root) {
+  root.querySelector("[data-reality-global-config]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = event.currentTarget.querySelector('button[type="submit"]');
+    const result = await runAction(
+      () => postJson("/reality-touch/update", realityGlobalConfigPayload(root)),
+      "现实触及基础配置已保存",
+      button,
+      { reload: false },
+    );
+    if (result) {
+      state.realityTouch = result;
+      renderRealityTouchPage();
+    }
+  });
   const pollMiHomeLogin = async (qrRevision = "", attempt = 0) => {
     if (attempt > 125) return;
     try {
@@ -37005,6 +37313,18 @@ function bindRealityTouchActions(root) {
       alias: button.dataset.mihomePower || "",
       is_on: button.dataset.mihomePowerValue === "true",
     }, "米家设备控制请求已返回", button));
+  });
+  root.querySelector("[data-mihome-add-mapping]")?.addEventListener("click", () => {
+    root.querySelector("[data-mihome-mapping-list]")?.insertAdjacentHTML("beforeend", `<div class="reality-mihome-mapping-row"><input data-mihome-alias placeholder="客厅灯"><input data-mihome-did placeholder="设备 DID"><button type="button" class="soft danger" data-mihome-remove-mapping>移除</button></div>`);
+  });
+  root.querySelectorAll("[data-mihome-remove-mapping]").forEach((button) => button.addEventListener("click", () => button.closest(".reality-mihome-mapping-row")?.remove()));
+  root.querySelector("[data-mihome-save-mappings]")?.addEventListener("click", async (event) => {
+    const mappings = [...root.querySelectorAll(".reality-mihome-mapping-row")].map((row) => ({
+      alias: row.querySelector("[data-mihome-alias]")?.value.trim() || "",
+      did: row.querySelector("[data-mihome-did]")?.value.trim() || "",
+      category: "none",
+    })).filter((item) => item.alias || item.did);
+    await runMiHomeAction({ action: "mihome_save_mappings", mappings }, "米家设备映射已保存", event.currentTarget);
   });
   root.querySelector("[data-reality-mobile-observation-user]")?.addEventListener("change", (event) => {
     state.realityTouchSelectedUserId = event.currentTarget.value || "";
@@ -37698,6 +38018,9 @@ function switchTab(tabName) {
   const opensSocialLearning = tabName === "worldbook";
   const opensDailyReview = tabName === "daily-review";
   if (["bookshelf", "qzone"].includes(tabName)) tabName = "creative";
+  // Calendar is part of the observation workspace now. Keep old deep links
+  // and bookmarks working by redirecting the retired tab to that workspace.
+  if (tabName === "calendar") tabName = "memory";
   if (tabName === "enable_experimental_bluetooth_wakeup") tabName = "reality";
   tabName = tabName === "modules" ? "config" : (opensSocialLearning ? "learning" : (opensDailyReview ? "experimental" : (tabName || "dashboard")));
   if (opensSocialLearning) state.learningSection = "social";
@@ -37802,6 +38125,75 @@ document.querySelectorAll(".annotations .tab[data-tab]").forEach((button) => {
     switchTab(button.dataset.tab);
   });
 });
+
+$("#calendarPreviousMonth")?.addEventListener("click", () => {
+  state.calendarMonth = calendarShiftMonth(state.calendarMonth || calendarMonthKey(), -1);
+  state.lazyLoaded.calendar = false;
+  loadCalendar(true).catch((error) => showToast(`读取日历失败：${error.message}`, "error"));
+});
+
+$("#calendarNextMonth")?.addEventListener("click", () => {
+  state.calendarMonth = calendarShiftMonth(state.calendarMonth || calendarMonthKey(), 1);
+  state.lazyLoaded.calendar = false;
+  loadCalendar(true).catch((error) => showToast(`读取日历失败：${error.message}`, "error"));
+});
+
+$("#calendarTodayButton")?.addEventListener("click", () => {
+  state.calendarMonth = calendarMonthKey();
+  state.lazyLoaded.calendar = false;
+  loadCalendar(true).catch((error) => showToast(`读取日历失败：${error.message}`, "error"));
+});
+
+$("#calendarNewRecordButton")?.addEventListener("click", () => {
+  resetCalendarEditor();
+  $("#calendarEditor")?.setAttribute("open", "");
+  $("#calendarRecordForm")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+});
+
+$("#calendarCancelEditButton")?.addEventListener("click", resetCalendarEditor);
+
+$("#calendarRecordForm")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const payload = calendarFormPayload(form);
+  const result = await runAction(() => postJson("/calendar/upsert", payload), "日历记录已保存", event.submitter, { reload: false });
+  if (!result) return;
+  resetCalendarEditor();
+  state.lazyLoaded.calendar = false;
+  await loadCalendar(true).catch((error) => showToast(`刷新日历失败：${error.message}`, "error"));
+});
+
+$("#calendarRecords")?.addEventListener("click", async (event) => {
+  const editButton = event.target.closest("[data-calendar-edit]");
+  if (editButton) {
+    const record = (state.calendar?.records || []).find((item) => String(item.calendar_id) === String(editButton.dataset.calendarEdit));
+    if (record) fillCalendarEditor(record);
+    return;
+  }
+  const cancelButton = event.target.closest("[data-calendar-cancel]");
+  if (!cancelButton) return;
+  const id = String(cancelButton.dataset.calendarCancel || "").trim();
+  if (!id || !window.confirm("取消这条日历记录？历史记录会保留，但它不再生效。")) return;
+  const result = await runAction(() => postJson("/calendar/cancel", { calendar_id: id }), "日历记录已取消", cancelButton, { reload: false });
+  if (!result) return;
+  state.lazyLoaded.calendar = false;
+  await loadCalendar(true).catch((error) => showToast(`刷新日历失败：${error.message}`, "error"));
+});
+for (const root of [$("#calendarCandidates")]) {
+  root?.addEventListener("click", async (event) => {
+    const confirmButton = event.target.closest("[data-calendar-candidate-confirm]");
+    const rejectButton = event.target.closest("[data-calendar-candidate-reject]");
+    const button = confirmButton || rejectButton;
+    if (!button) return;
+    const candidateId = String(button.dataset.calendarCandidateConfirm || button.dataset.calendarCandidateReject || "").trim();
+    if (!candidateId) return;
+    const endpoint = confirmButton ? "/calendar/candidates/confirm" : "/calendar/candidates/reject";
+    const message = confirmButton ? "日历候选已确认" : "日历候选已忽略";
+    await runAction(() => postJson(endpoint, { candidate_id: candidateId }), message, button, { reload: false });
+    state.lazyLoaded.calendar = false;
+    await loadCalendar(true).catch((error) => showToast(`刷新日历失败：${error.message}`, "error"));
+  });
+}
 
 document.addEventListener("click", (event) => {
   const button = event.target instanceof Element

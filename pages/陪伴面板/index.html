@@ -96,7 +96,7 @@
       to { opacity: 1; transform: scaleX(1); transform-origin: left; }
     }
   </style>
-  <link rel="stylesheet" href="./app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1&amp;touch=reality-workspace-v4&amp;migration-notice=v2&amp;component-order=v1&amp;layout=model-routing-v2&amp;release=6.4.0" />
+  <link rel="stylesheet" href="./app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1&amp;touch=reality-workspace-v4&amp;migration-notice=v2&amp;component-order=v1&amp;layout=model-routing-v2&amp;release=6.4.1" />
   <!-- Keep the structured roleplay form readable while a WebUI asset is being refreshed. -->
   <style id="roleplay-layout-fallback">
     .roleplay-form,
@@ -1057,6 +1057,86 @@ QQ空间 = 公开札记
             <pre id="livingMemoryBox">加载中...</pre>
           </article>
         </div>
+        <section class="observation-calendar" id="calendarWorkspace" aria-label="生活日历">
+          <div class="section-head">
+            <div>
+              <h2>生活日历</h2>
+              <span class="muted">把阶段、节律和具体安排放在同一张表里；记录是背景，不代表已经发生。</span>
+            </div>
+            <div class="actions compact calendar-toolbar">
+              <button type="button" id="calendarPreviousMonth" aria-label="上个月">‹</button>
+              <strong id="calendarMonthLabel">读取中</strong>
+              <button type="button" id="calendarNextMonth" aria-label="下个月">›</button>
+              <button type="button" id="calendarTodayButton">今天</button>
+              <button type="button" class="primary-button" id="calendarNewRecordButton">新增记录</button>
+            </div>
+          </div>
+          <div id="calendarError" class="empty small" hidden></div>
+          <div class="calendar-layout">
+            <article class="calendar-card calendar-today-card">
+              <header><h3>今日快照</h3><small id="calendarTodayMeta">读取中</small></header>
+              <div id="calendarTodayEvents" class="calendar-event-list"></div>
+              <div id="calendarTodayConflicts" class="calendar-conflict-list"></div>
+              <div id="calendarTimeline" class="calendar-timeline"></div>
+            </article>
+            <article class="calendar-card calendar-records-card">
+              <header><h3>本月记录</h3><small id="calendarRecordsMeta">读取中</small></header>
+              <div id="calendarRecords" class="calendar-record-list"></div>
+            </article>
+            <article class="calendar-card calendar-candidates-card">
+              <header><h3>待确认候选</h3><small id="calendarCandidatesMeta">读取中</small></header>
+              <div id="calendarCandidates" class="calendar-candidate-list"></div>
+            </article>
+          </div>
+          <article class="calendar-card calendar-month-agenda-card">
+            <header><h3>月历表</h3><small id="calendarMonthAgendaMeta">读取中</small></header>
+            <div id="calendarMonthAgenda" class="calendar-month-agenda">
+              <div class="calendar-month-grid" id="calendarMonthGrid"></div>
+            </div>
+          </article>
+          <details class="calendar-editor" id="calendarEditor">
+            <summary><span>新增 / 编辑日历记录</span><small>暑假、上学规则、补课或临时调整</small></summary>
+            <form id="calendarRecordForm" class="calendar-form">
+              <input type="hidden" name="calendar_id" />
+              <label>类型
+                <select name="kind">
+                  <option value="period">长期区间</option>
+                  <option value="event">单次事件</option>
+                  <option value="recurrence">周期规则</option>
+                  <option value="exception">例外调整</option>
+                </select>
+              </label>
+              <label>标题 <input name="title" maxlength="120" required placeholder="例如：暑假 / 工作日上学" /></label>
+              <label>开始日期 <input name="start_date" type="date" required /></label>
+              <label>结束日期 <input name="end_date" type="date" /></label>
+              <label>改期到 <input name="new_date" type="date" /><small>仅“改期”例外填写</small></label>
+              <label>开始时间 <input name="start_time" type="time" /></label>
+              <label>结束时间 <input name="end_time" type="time" /></label>
+              <label>周期
+                <select name="frequency">
+                  <option value="weekly">每周</option>
+                  <option value="daily">每天</option>
+                  <option value="monthly">每月</option>
+                  <option value="yearly">每年</option>
+                </select>
+              </label>
+              <label>周几（周期规则） <input name="by_weekday" placeholder="周一,周二 或 0,1" /></label>
+              <label>例外目标 ID <input name="target_id" maxlength="160" placeholder="取消 / 替换 / 改期时填写" /><small>新增例外可留空</small></label>
+              <label>例外动作
+                <select name="action">
+                  <option value="replace">替换</option>
+                  <option value="cancel">取消</option>
+                  <option value="reschedule">改期</option>
+                  <option value="add">新增</option>
+                </select>
+              </label>
+              <div class="calendar-form-actions">
+                <button type="submit" class="primary-button">保存记录</button>
+                <button type="button" id="calendarCancelEditButton">清空</button>
+              </div>
+            </form>
+          </details>
+        </section>
       </section>
 
       <section class="panel" id="panel-proactive">
@@ -1113,7 +1193,7 @@ QQ空间 = 公开札记
             </article>
             <article>
               <span>阅读</span>
-              <b id="bookshelfJmCount">0</b>
+              <b id="bookshelfArchiveCount">0</b>
               <small>资料归档记录</small>
             </article>
             <article>
@@ -2068,6 +2148,6 @@ QQ空间 = 公开札记
   <!-- Loaded on demand by app.js through AstrBot's relative dynamic-import rewriting:
        ./js/panels/provider-tree.js?v=20260804-reading-archive-capability-v1&amp;manual=provider-input-v2&amp;layout=v2
        ./js/panels/qzone-panel.js?v=20260810-qzone-classic-loader-v1 -->
-  <script src="./app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2&amp;page=lazy-classic-loader-v1&amp;scope=photo-scope-quota-v1&amp;touch=reality-workspace-v4&amp;memory-source=memory-companion-v2&amp;user-create=profile-v1&amp;relationship-role-photo=pr125-v1&amp;camera-runtime-scope=v1&amp;config=multi-persona-summary-v2&amp;troubleshooting=diagnostic-category-label-v1&amp;content-visibility=v1&amp;migration-notice=v4&amp;component-order=v1&amp;layout=model-routing-v2&amp;persona-style-batch-recovery=v1&amp;preset-save=v1&amp;release=6.4.0"></script>
+  <script src="./app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2&amp;page=lazy-classic-loader-v1&amp;scope=photo-scope-quota-v1&amp;touch=reality-workspace-v4&amp;memory-source=memory-companion-v2&amp;user-create=profile-v1&amp;relationship-role-photo=pr125-v1&amp;camera-runtime-scope=v1&amp;config=multi-persona-summary-v2&amp;troubleshooting=diagnostic-category-label-v1&amp;content-visibility=v1&amp;migration-notice=v4&amp;component-order=v1&amp;layout=model-routing-v2&amp;persona-style-batch-recovery=v1&amp;preset-save=v1&amp;release=6.4.1"></script>
 </body>
 </html>

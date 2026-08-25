@@ -255,6 +255,41 @@ class TtsToolFullScopeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(resp.completion_text, PHOTO_TOOL_SILENT_SENTINEL)
 
+    def test_send_tool_cleanup_removes_photo_sentinel_before_direct_delivery(self):
+        harness = _ResponseHarness()
+
+        self.assertEqual("", harness._clean_tool_plain_text_tts_markup(PHOTO_TOOL_SILENT_SENTINEL))
+        self.assertEqual(
+            "图片已发出。",
+            harness._clean_tool_plain_text_tts_markup(
+                f"图片已发出。\n  {PHOTO_TOOL_SILENT_SENTINEL}  "
+            ),
+        )
+        self.assertEqual(
+            "[[正常备注]]",
+            harness._clean_tool_plain_text_tts_markup("[[正常备注]]"),
+        )
+
+    def test_same_session_tool_text_does_not_preserve_photo_sentinel(self):
+        harness = _ResponseHarness()
+        event = SimpleNamespace(unified_msg_origin="default:FriendMessage:10001")
+
+        self.assertEqual(
+            "图片已发出。",
+            harness._same_session_tool_text(
+                event,
+                {
+                    "session": "default:FriendMessage:10001",
+                    "messages": [
+                        {
+                            "type": "plain",
+                            "text": f"图片已发出。{PHOTO_TOOL_SILENT_SENTINEL}",
+                        }
+                    ],
+                },
+            ),
+        )
+
     async def test_tool_fast_tag_uses_complete_visible_reply(self):
         harness = _ToolHarness()
         harness._process_tts_tags = AsyncMock(return_value=[Plain("processed")])

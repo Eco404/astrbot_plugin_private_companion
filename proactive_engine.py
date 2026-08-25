@@ -279,7 +279,13 @@ class ProactiveEngineMixin:
                 item = getter()
             except Exception:
                 return None
-            return item if isinstance(item, dict) else None
+            if not isinstance(item, dict):
+                return None
+            # Calendar context is injected into generation/review prompts. It
+            # must not silently delete a plan here: an old plan may be a
+            # deliberate continuation, an uncertain transition, or a user
+            # correction that still needs to be reconciled conversationally.
+            return item
         legacy_getter = getattr(self, "_get_current_plan_item", None)
         try:
             item = legacy_getter(self.data.get("daily_plan", {})) if callable(legacy_getter) else None
@@ -2437,6 +2443,13 @@ class ProactiveEngineMixin:
             self, "default_nickname", "你"
         )
         message_freshness = self._format_proactive_user_message_freshness(user, now=now)
+        calendar_constraint_hint = ""
+        calendar_hint_getter = getattr(self, "_format_proactive_calendar_constraint_hint", None)
+        if callable(calendar_hint_getter):
+            try:
+                calendar_constraint_hint = str(calendar_hint_getter() or "").strip()
+            except Exception:
+                calendar_constraint_hint = ""
         location_formatter = getattr(self, "_format_mobile_user_location_context_for_proactive", None)
         try:
             location_context = location_formatter(user) if callable(location_formatter) else ""
@@ -2497,6 +2510,8 @@ class ProactiveEngineMixin:
 
 【消息时效】
 {message_freshness}
+
+{calendar_constraint_hint}
 
 {location_context}
 

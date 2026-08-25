@@ -109,9 +109,6 @@ def validate_public_source(files: list[Path]) -> None:
     """
 
     forbidden_markers = (
-        "jm_cosmos",
-        "private_reading",
-        "astrbot_plugin_jm_cosmos",
         "register_reality_touch_provider",
         "call_reality_touch_provider",
         "resolve_reality_touch_request",

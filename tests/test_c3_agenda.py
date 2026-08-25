@@ -186,6 +186,44 @@ def test_runtime_snapshot_is_idempotent_and_context_is_formatted() -> None:
     assert "C3日程" in format_agenda_context(host._agenda_build())
 
 
+def test_current_context_does_not_promote_stale_school_plan_during_vacation() -> None:
+    host = Host(
+        {
+            "daily_plan": {
+                "date": "2026-07-30",
+                "items": [{"time": "08:00", "end": "09:00", "activity": "上学"}],
+            },
+            "calendar_events": [{
+                "kind": "period",
+                "calendar_id": "summer",
+                "title": "暑假",
+                "start_date": "2026-07-01",
+                "end_date": "2026-08-31",
+            }],
+        }
+    )
+    host.fixed_now = dt("2026-07-30T08:30:00+08:00")
+    assert host._agenda_current_context_item(now=host.fixed_now) is None
+
+
+def test_calendar_context_does_not_delete_generic_plan_rows() -> None:
+    base = {
+        "daily_plan": {"date": "2026-07-30", "items": [{"time": "08:00", "end": "09:00", "activity": "上学"}]},
+        "calendar_events": [
+            {"kind": "period", "calendar_id": "summer", "title": "暑假", "start_date": "2026-07-01", "end_date": "2026-08-31"},
+            {"kind": "event", "calendar_id": "exam", "title": "考试", "date": "2026-07-30", "start_time": "10:00", "end_time": "11:00"},
+        ],
+    }
+    host = Host(base)
+    host.fixed_now = dt("2026-07-30T08:30:00+08:00")
+    assert host._agenda_current_context_item(now=host.fixed_now) is None
+
+    host.data["daily_plan"]["items"][0]["activity"] = "参加考试"
+    assert host._agenda_calendar_allows_item(host.data["daily_plan"]["items"][0], now=host.fixed_now)
+    host.data["daily_plan"]["items"][0]["activity"] = "补课"
+    assert host._agenda_calendar_allows_item(host.data["daily_plan"]["items"][0], now=host.fixed_now)
+
+
 def test_plan_parser_accepts_common_aliases_and_time_ranges() -> None:
     host = PlanParserHost()
     payload = """```json

@@ -2732,6 +2732,105 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             + "\n".join(lines)
         )
 
+    def _format_proactive_calendar_constraint_hint(self) -> str:
+        """Expose longitudinal calendar context without turning it into a gate."""
+
+        timeline_getter = getattr(self, "_agenda_calendar_timeline", None)
+        timeline: dict[str, Any] = {}
+        if callable(timeline_getter):
+            try:
+                candidate = timeline_getter(history_days=2, horizon_days=7)
+                if isinstance(candidate, dict):
+                    timeline = candidate
+            except Exception:
+                timeline = {}
+        if not timeline:
+            snapshot_getter = getattr(self, "_agenda_calendar_snapshot", None)
+            if not callable(snapshot_getter):
+                return ""
+            try:
+                snapshot = snapshot_getter()
+            except Exception:
+                return ""
+            if not isinstance(snapshot, dict):
+                return ""
+            timeline = {
+                "date": snapshot.get("date"),
+                "today": snapshot.get("events", []),
+                "current_phase": [item for item in snapshot.get("events", []) if isinstance(item, dict) and item.get("kind") == "period"],
+                "rhythms": [item for item in snapshot.get("events", []) if isinstance(item, dict) and item.get("kind") == "recurrence"],
+                "upcoming": [],
+                "uncertainties": [],
+                "transitions": [],
+                "conflicts": snapshot.get("conflicts", []),
+            }
+
+        candidates_getter = getattr(self, "_agenda_calendar_candidates_store", None)
+        pending_candidates: list[dict[str, Any]] = []
+        if callable(candidates_getter):
+            try:
+                raw_candidates = candidates_getter()
+                if isinstance(raw_candidates, list):
+                    pending_candidates = [
+                        item for item in raw_candidates
+                        if isinstance(item, dict)
+                        and str(item.get("lifecycle_state") or item.get("lifecycle") or "candidate") not in {"confirmed", "active", "completed", "cancelled", "expired"}
+                    ][:5]
+            except Exception:
+                pending_candidates = []
+
+        def line(item: Any, *, include_date: bool = True) -> str:
+            if not isinstance(item, dict):
+                return ""
+            title = _single_line(item.get("title") or item.get("name"), 72)
+            if not title:
+                return ""
+            date_text = _single_line(item.get("occurrence_date") or item.get("date") or item.get("start_date"), 20)
+            end_date = _single_line(item.get("end_date"), 20)
+            if end_date and end_date != date_text:
+                date_text = f"{date_text}至{end_date}"
+            status = "已确认" if str(item.get("status") or "confirmed") in {"confirmed", "active"} and str(item.get("commitment_level") or "confirmed") != "tentative" else "待确认"
+            return f"{title}（{date_text or '今天'}，{status}）" if include_date else f"{title}（{status}）"
+
+        sections: list[str] = []
+        phases = [line(item) for item in timeline.get("current_phase", [])[:4]] if isinstance(timeline.get("current_phase"), list) else []
+        phases = [item for item in phases if item]
+        if phases:
+            sections.append("当前生活阶段：" + "、".join(phases))
+        rhythms = [line(item, include_date=False) for item in timeline.get("rhythms", [])[:4]] if isinstance(timeline.get("rhythms"), list) else []
+        rhythms = [item for item in rhythms if item]
+        if rhythms:
+            sections.append("稳定节律：" + "、".join(rhythms))
+        upcoming = [line(item) for item in timeline.get("upcoming", [])[:5]] if isinstance(timeline.get("upcoming"), list) else []
+        upcoming = [item for item in upcoming if item]
+        if upcoming:
+            sections.append("接下来可参考：" + "、".join(upcoming))
+        transitions = []
+        for item in timeline.get("transitions", [])[:4] if isinstance(timeline.get("transitions"), list) else []:
+            if isinstance(item, dict) and _single_line(item.get("title"), 60):
+                transitions.append(f"{_single_line(item.get('date'), 16)} {_single_line(item.get('title'), 60)}")
+        if transitions:
+            sections.append("近期可能变化：" + "、".join(transitions))
+        uncertainties = [line(item) for item in timeline.get("uncertainties", [])[:3] if isinstance(item, dict)]
+        uncertainties = [item for item in uncertainties if item]
+        if uncertainties:
+            sections.append("待确认：" + "、".join(uncertainties))
+        candidate_lines = []
+        for item in pending_candidates:
+            candidate = line(item)
+            if candidate:
+                candidate_lines.append(candidate)
+        if candidate_lines:
+            sections.append("对话待确认候选：" + "、".join(candidate_lines))
+        if not sections:
+            return ""
+        return (
+            "【生活时间线参考】\n"
+            + "\n".join(f"- {item}" for item in sections)
+            + "\n这些是跨日背景和可能的生活节奏，不代表事情已经执行。保持同一生活阶段的连续感，不要因为一次旧日程或单个标题就擅自改写阶段；用户当前明确说法优先，待确认变化只用轻量、可回退的语气。"
+            + "待确认候选只能用于自然询问，不能据此断言用户已经安排、正在执行或已经完成。"
+        )
+
     def _proactive_troubleshooting_request_hint(self, user: dict[str, Any] | None) -> str:
         if not isinstance(user, dict) or _single_line(user.get("planned_proactive_source"), 40).lower() != "troubleshooting":
             return ""
@@ -2760,6 +2859,26 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "不要暗示拍摄或事件与发送处于同一时刻，也不要提延后、等待、系统或调度。"
         )
 
+    def _proactive_current_plan_item(self, plan: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """Prefer the agenda disclosure boundary over raw daily-plan prose."""
+
+        getter = getattr(self, "_agenda_current_context_item", None)
+        if callable(getter):
+            try:
+                value = getter()
+            except Exception:
+                value = None
+            if isinstance(value, dict):
+                return value
+        legacy = getattr(self, "_get_current_plan_item", None)
+        if callable(legacy):
+            try:
+                value = legacy(plan if isinstance(plan, dict) else self.data.get("daily_plan", {}))
+            except Exception:
+                value = None
+            return value if isinstance(value, dict) else None
+        return None
+
     async def _build_framework_proactive_prompt(
         self,
         *,
@@ -2786,7 +2905,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "proactive.action_context",
         )
         relationship_fact = self._format_proactive_relationship_fact(user)
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._proactive_current_plan_item(self.data.get("daily_plan", {}))
         current_schedule = self._format_schedule_context_for_prompt() or self._format_plan_item_for_prompt(current_item)
         troubleshooting_hint = self._proactive_troubleshooting_request_hint(user)
         source_focused_reasons = {
@@ -2848,6 +2967,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         time_guard = self._proactive_time_guard_hint(reason, current_item)
         deferred_share_tense_hint = self._deferred_immediate_share_tense_hint(user, action)
         future_schedule_hint = self._format_proactive_future_schedule_hint(reason=reason)
+        calendar_constraint_hint = self._format_proactive_calendar_constraint_hint()
         recent_topics_hint = self._format_recent_proactive_topics_hint(user)
         # Search for unresolved open-loop / promise memories from the memory plugin
         open_loops_hint = ""
@@ -3010,6 +3130,8 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             prompt = f"{prompt.rstrip()}\n\n{mobile_arrival_hint}"
         if future_schedule_hint and "【接下来可参考的日程】" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{future_schedule_hint}"
+        if calendar_constraint_hint and "【今日有效日历约束】" not in prompt:
+            prompt = f"{prompt.rstrip()}\n\n{calendar_constraint_hint}"
         if reason == "creative_share":
             prompt = f"{prompt.rstrip()}\n\n{self._creative_share_excerpt_prompt_hint()}"
         route_prompt_getter = getattr(self, "_proactive_route_prompt", None)
@@ -5205,7 +5327,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             )
         private_elapsed = check_now - last_private_at if last_private_at > 0 else -1
         sent_elapsed = check_now - last_sent_at if last_sent_at > 0 else -1
-        return "\n".join(
+        runtime_context = "\n".join(
             part
             for part in (
                 f"当前判定时间：{now_dt.strftime('%Y-%m-%d %H:%M')}",
@@ -5216,6 +5338,8 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             )
             if part
         )
+        calendar_hint = self._format_proactive_calendar_constraint_hint()
+        return f"{runtime_context}\n{calendar_hint}".strip() if calendar_hint else runtime_context
 
     def _stale_proactive_review_defer_release_reason(
         self,
@@ -6797,7 +6921,7 @@ Output:
             for part in (
                 action_context,
                 self._format_schedule_context_for_prompt(),
-                self._format_plan_item_for_prompt(self._get_current_plan_item(self.data.get("daily_plan", {}))),
+                self._format_plan_item_for_prompt(self._proactive_current_plan_item(self.data.get("daily_plan", {}))),
             )
             if _single_line(part, 260)
         )
@@ -6879,7 +7003,7 @@ Output:
             return ""
         now = self._environment_now()
         minutes = now.hour * 60 + now.minute
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._proactive_current_plan_item(self.data.get("daily_plan", {}))
         current_text = _single_line(self._format_plan_item_for_prompt(current_item), 180)
         current_is_school_or_afternoon = bool(re.search(r"(上课|课间|放学|校门|教室|作业|书包|回家路上)", current_text))
         if reason == "morning_greeting" and re.search(r"(晚上|晚安|睡觉|好梦|睡前|夜里|放学|下班)", cleaned):
@@ -7464,7 +7588,7 @@ Output:
             "reason": reason,
             "bot_name": runtime_persona_setting(self, "bot_name", "小星"),
             "state": deepcopy(self.data.get("daily_state", {})),
-            "current_plan_item": deepcopy(self._get_current_plan_item(self.data.get("daily_plan", {})) or {}),
+            "current_plan_item": deepcopy(self._proactive_current_plan_item(self.data.get("daily_plan", {})) or {}),
             "config": config,
             "plugin": self,
         }
@@ -11583,7 +11707,7 @@ Output:
 
         current_schedule = ""
         try:
-            current_item = self._get_current_plan_item(plan)
+            current_item = self._proactive_current_plan_item(plan)
             if isinstance(current_item, dict):
                 current_schedule = _single_line(self._format_plan_item_for_prompt(current_item), 260)
         except Exception:
@@ -12400,7 +12524,7 @@ Output:
         prompt_format_instruction = self._photo_generation_prompt_format_instruction()
         persona = self._get_default_persona_prompt()
         state = self.data.get("daily_state", {})
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._proactive_current_plan_item(self.data.get("daily_plan", {}))
         style_name, style_instruction = self._get_photo_style_instruction()
         style_prompt_en = self._photo_style_prompt_en(style_name, style_instruction)
         topic_hint = _single_line(user.get("planned_proactive_topic"), 60)
@@ -17391,7 +17515,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         must still be generated by the framework chain and pass send review.
         """
         state = self.data.get("daily_state", {})
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_item = self._proactive_current_plan_item(self.data.get("daily_plan", {}))
         can_do = self.data.get("can_do", [])
         energy = _safe_int(state.get("energy") if isinstance(state, dict) else 70, 70, 0, 100)
         mood = _single_line(state.get("mood_bias") if isinstance(state, dict) else "平稳", 20)
