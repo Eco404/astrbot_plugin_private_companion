@@ -273,6 +273,24 @@ class PhotoPromptFormatTests(unittest.TestCase):
         self.assertIn('["replace", "完全替换"]', script)
         self.assertIn('values.photo_generation_negative_prompt_mode || "safe_default"', script)
 
+    def test_negative_prompt_policy_hot_apply_keeps_runtime_and_grouped_config_in_sync(self) -> None:
+        self.harness.config = {
+            "photo_action_config": {
+                "photo_generation_negative_prompt_mode": "safe_default",
+            },
+        }
+        api = PrivateCompanionPageApi.__new__(PrivateCompanionPageApi)
+        api.plugin = self.harness
+        api._schema_key_index_cache = None
+
+        api._apply_config_value("photo_generation_negative_prompt_mode", "merge")
+
+        self.assertEqual(self.harness.photo_generation_negative_prompt_mode, "merge")
+        self.assertEqual(
+            self.harness.config["photo_action_config"]["photo_generation_negative_prompt_mode"],
+            "merge",
+        )
+
     def test_workflow_fixed_prompt_config_is_exposed_and_normalized(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         items = schema["photo_action_config"]["items"]

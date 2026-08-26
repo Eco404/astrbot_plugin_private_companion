@@ -24202,6 +24202,19 @@ class PrivateCompanionPageApi(
         if key == "external_image_download_use_environment_proxy":
             self.plugin.external_image_download_use_environment_proxy = self._normalize_bool_value(value)
             return
+        if key == "photo_generation_negative_prompt_mode":
+            # This setting is displayed through ``runtime_persona_setting``.
+            # Keep the hot-applied runtime value in sync with the persisted
+            # schema value so the panel does not revert to the startup default
+            # until the next plugin restart.
+            normalizer = getattr(self.plugin, "_normalize_photo_generation_negative_prompt_mode", None)
+            normalized = (
+                normalizer(value)
+                if callable(normalizer)
+                else self._normalize_setting_value(key, value)
+            )
+            self.plugin.photo_generation_negative_prompt_mode = normalized
+            return
         if key == "provider_config_mode":
             normalizer = getattr(self.plugin, "_normalize_provider_config_mode", None)
             self.plugin.provider_config_mode = (
