@@ -102,6 +102,8 @@ class SegmentedConfigSaveTests(unittest.TestCase):
             },
             "legacy_compat_config": {
                 "enable_segmented_proactive_reply": True,
+                "enable_llm_controlled_segmenting": True,
+                "enable_segmented_plugin_rules": False,
                 "segmented_proactive_scope": "all_llm",
                 "segmented_proactive_chat_scope": "private",
                 "segmented_proactive_threshold": 420,
@@ -151,6 +153,8 @@ class SegmentedConfigSaveTests(unittest.TestCase):
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         expected = {
             "enable_segmented_proactive_reply": True,
+            "enable_llm_controlled_segmenting": True,
+            "enable_segmented_plugin_rules": False,
             "enable_segmented_proactive_chat_profiles": True,
             "segmented_proactive_private_enabled": True,
             "segmented_proactive_private_scope": "all_llm",

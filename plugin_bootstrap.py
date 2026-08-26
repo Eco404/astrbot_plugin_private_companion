@@ -959,6 +959,19 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
     self._reply_component_style_cache: dict[str, tuple[str, str]] = {}
     self._group_reply_quote_target_cache: dict[str, dict[str, Any]] = {}
     self.enable_segmented_proactive_reply = self._cfg_bool(c, "enable_segmented_proactive_reply", False)
+    # The legacy switch remains the module master switch.  Rule-based
+    # segmentation defaults on so existing configurations keep their behavior;
+    # the LLM-controlled protocol is opt-in.
+    self.enable_llm_controlled_segmenting = self._cfg_bool(
+        c,
+        "enable_llm_controlled_segmenting",
+        False,
+    )
+    self.enable_segmented_plugin_rules = self._cfg_bool(
+        c,
+        "enable_segmented_plugin_rules",
+        True,
+    )
     self.segmented_proactive_scope = self._cfg_str(c, "segmented_proactive_scope", "proactive_only", "proactive_only")
     if self.segmented_proactive_scope not in {"proactive_only", "all_llm"}:
         self.segmented_proactive_scope = "proactive_only"

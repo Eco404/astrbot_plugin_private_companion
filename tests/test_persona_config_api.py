@@ -395,6 +395,9 @@ def test_existing_sparse_profile_is_repaired_without_materializing_old_keys():
             "enable_group_bot_name_wakeup": True,
             "enable_qq_official_segmented_reply": False,
             "intercept_astrbot_group_context": True,
+            "group_scene_recent_max_chars": 4000,
+            "enable_llm_controlled_segmenting": False,
+            "enable_segmented_plugin_rules": True,
         }
         assert "quiet_hours" not in profile["persona_settings"]
 

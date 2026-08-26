@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
 
-PERSONA_SETTINGS_SCHEMA_VERSION = 3
+PERSONA_SETTINGS_SCHEMA_VERSION = 4
 PERSONA_CONFIG_SCHEMA_VERSION = PERSONA_SETTINGS_SCHEMA_VERSION
 SCOPE_MANIFEST_VERSION = 1
 PERSONA_SETTINGS_KEY = "persona_settings"
@@ -28,6 +28,11 @@ PERSONA_SETTINGS_REVISION_KEY = "persona_settings_revision"
 PERSONA_SETTINGS_NEW_KEYS_BY_VERSION: dict[int, tuple[str, ...]] = {
     2: ("enable_group_bot_name_wakeup",),
     3: ("enable_qq_official_segmented_reply", "intercept_astrbot_group_context"),
+    4: (
+        "group_scene_recent_max_chars",
+        "enable_llm_controlled_segmenting",
+        "enable_segmented_plugin_rules",
+    ),
 }
 
 MODE_FOLLOW_PRIMARY = "follow_primary"

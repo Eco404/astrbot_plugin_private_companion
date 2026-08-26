@@ -1339,7 +1339,7 @@ const featureMeta = {
   enable_hunger_state: ["饥饿/胃口状态", "开启后视为可用，允许当前扮演状态出现饿、胃口不好或想吃东西。"],
   enable_qq_presence_sync: ["同步 QQ 在线状态", "让日程细化把在线/忙碌等基础状态同步到 QQ；不包含自定义短状态。"],
   enable_qq_custom_presence_sync: ["同步 QQ 自定义短状态", "默认关闭；仅协议端明确支持时再开启，用于“专注中/休息中”等短状态。"],
-  enable_segmented_proactive_reply: ["分段发送", "把文字拆成自然短句，并统一安排语音、图片、@、表情与附件所在的消息链。"],
+  enable_segmented_proactive_reply: ["分段发送", "分段模块总开关；可分别启用 LLM 自主边界和插件规则补充分段，并统一安排语音、图片、@、表情与附件所在的消息链。"],
   inject_passive_states: ["被动状态注入", "普通聊天前注入“当前扮演状态”，只影响语气、长短和节奏。"],
   enable_passive_state_delta_injection: ["被动状态增量注入", "同一会话只在状态首次出现、明显变化或用户询问近况时注入短状态摘要，减少重复动态提示词。"],
   enable_passive_state_continuity_anchor: ["被动状态连续性锚点", "默认关闭；仅在私聊被动增量注入的状态未变化轮次，注入不超过 300 字的 Bot 当下连续性提示。"],
@@ -1791,6 +1791,8 @@ const proactiveOnlyLockedFeatureKeys = new Set([
   "enable_livingmemory_integration",
   "enable_tts_enhancement",
   "enable_segmented_proactive_reply",
+  "enable_llm_controlled_segmenting",
+  "enable_segmented_plugin_rules",
 ]);
 
 function proactiveOnlyModeEnabled() {
@@ -2063,6 +2065,8 @@ const configLabels = {
   enable_private_image_vision_cache: "重复图片转述缓存",
   private_image_vision_cache_max_items: "图片转述缓存上限",
   enable_segmented_proactive_reply: "分段发送",
+  enable_llm_controlled_segmenting: "LLM 自主分段",
+  enable_segmented_plugin_rules: "插件规则分段",
   segmented_proactive_scope: "分段作用范围",
   segmented_proactive_chat_scope: "分段会话范围",
   enable_segmented_proactive_chat_profiles: "私聊/群聊独立配置",
@@ -2874,6 +2878,8 @@ const configDescriptions = {
   enable_private_image_vision_cache: "开启后，同一张图片或表情包会按内容哈希复用上次视觉摘要，避免重复调用识图模型；会保留压缩预览图用于管理，不保留原始大图，也不会缓存最终聊天回复。",
   private_image_vision_cache_max_items: "最多保留多少条图片视觉摘要缓存。达到上限后会清理最久未命中的旧缓存，0 表示不限制。",
   segmented_proactive_threshold: "纯文本短于或等于该字数时才考虑分段；太长的内容保持一整条，避免读起来散。",
+  enable_llm_controlled_segmenting: "允许直接回复使用的 LLM 通过单独一行 <<PRIVATE_COMPANION_SPLIT>> 控制消息边界。默认输出一条消息；长文、说明、教程、代码、列表和引用尽量不要主动分段。",
+  enable_segmented_plugin_rules: "按标点、换行和分段词执行插件规则分段。默认开启；总开关保持升级前的值，因此旧版行为不会改变。关闭后仍可只使用 LLM 自主分段。",
   segmented_proactive_scope: "插件主动只影响插件主动消息；全部纯文本回复还会处理普通模型回复和插件生成的非命令文本。回复引用固定跟随第一段，语音、图片、@、平台表情与附件按各自位置策略编排。",
   segmented_proactive_chat_scope: "控制分段在哪类会话生效：全部、仅私聊或仅群聊。不匹配的会话会保持整条发送。",
   enable_segmented_proactive_chat_profiles: "开启后，私聊和群聊分别使用自己的启用状态、作用范围、分段上限、合并发送和间隔；分隔符、内容清理/替换和媒体组件位置继续共享。关闭时兼容旧版会话范围设置。",
@@ -2881,7 +2887,7 @@ const configDescriptions = {
   segmented_proactive_private_scope: "私聊配置下，选择只处理插件主动消息，或连普通模型纯文本回复也一起分段。",
   segmented_proactive_private_threshold: "私聊中，纯文本超过该字数时保持整条发送，避免长文被切碎。",
   segmented_proactive_private_min_segment_chars: "私聊中，过短的片段会并入相邻消息，避免单独发送“嗯”“哈哈”等短句。",
-  segmented_proactive_private_max_segments: "私聊单条文本最多拆成几条消息。",
+  segmented_proactive_private_max_segments: "私聊插件规则分段的文本段上限；LLM 自主分段不会被截断，但会占用插件规则的剩余段数。",
   segmented_proactive_private_send_as_forward: "私聊切出多段时优先打包成合并转发消息；平台不支持时回退普通分段。",
   segmented_proactive_private_interval_method: "私聊分段之间使用按字数对数间隔或随机间隔。",
   segmented_proactive_private_interval_min: "私聊随机间隔的下限；普通回复只影响后台补发片段。",
@@ -2891,14 +2897,14 @@ const configDescriptions = {
   segmented_proactive_group_scope: "群聊配置下，选择只处理插件主动消息，或连普通模型纯文本回复也一起分段。",
   segmented_proactive_group_threshold: "群聊中，纯文本超过该字数时保持整条发送，避免刷屏式长文拆分。",
   segmented_proactive_group_min_segment_chars: "群聊中，过短的片段会并入相邻消息，减少刷屏。",
-  segmented_proactive_group_max_segments: "群聊单条文本最多拆成几条消息。",
+  segmented_proactive_group_max_segments: "群聊插件规则分段的文本段上限；LLM 自主分段不会被截断，但会占用插件规则的剩余段数。",
   segmented_proactive_group_send_as_forward: "群聊切出多段时优先打包成合并转发消息；平台不支持时回退普通分段。",
   segmented_proactive_group_interval_method: "群聊分段之间使用按字数对数间隔或随机间隔。",
   segmented_proactive_group_interval_min: "群聊随机间隔的下限；普通回复只影响后台补发片段。",
   segmented_proactive_group_interval_max: "群聊随机间隔的上限；普通回复只影响后台补发片段。",
   segmented_proactive_group_log_base: "群聊按字数对数计算间隔时使用的底数。",
   segmented_proactive_min_segment_chars: "分段后短于或等于该字数的片段会并入相邻消息，避免“哈哈”“我也觉得”这类附和语单独发出。",
-  segmented_proactive_max_segments: "一次主动文本最多拆成几条。默认 3，过高会显得刷屏；图片、语音和附加组件不占用这个文本段数。",
+  segmented_proactive_max_segments: "插件规则分段的文本段上限 M。LLM 自主分段已有 N 段时，插件最多再增加 M-N 段；N 大于或等于 M 时保留全部 LLM 段并跳过插件规则。",
   segmented_proactive_send_as_forward: "开启后，切出多段时优先打包成合并转发消息发送；平台不支持时自动回退为普通逐条分段。",
   segmented_proactive_voice_strategy: "语音默认单独发送。选择嵌入时会和相邻正文进入同一消息链；回复引用始终优先绑定第一段正文。",
   segmented_proactive_image_strategy: "控制普通图片的位置。表情包素材库生成的图片使用下方“表情包位置”，不会被普通图片设置覆盖。",
@@ -3328,7 +3334,7 @@ const featureSettingGroups = {
   enable_daily_diary: ["daily_diary_time", "daily_diary_form", "daily_diary_length", "daily_diary_creativity", "daily_diary_custom_direction", "daily_diary_generate_share_seed", "max_diary_entries"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_busy_reply_gate: ["busy_reply_min_delay_seconds", "busy_reply_max_delay_seconds", "busy_reply_proactive_resume_buffer_minutes"],
-  enable_segmented_proactive_reply: ["enable_segmented_proactive_chat_profiles", "segmented_proactive_private_enabled", "segmented_proactive_private_scope", "segmented_proactive_private_threshold", "segmented_proactive_private_min_segment_chars", "segmented_proactive_private_max_segments", "segmented_proactive_private_send_as_forward", "segmented_proactive_private_interval_method", "segmented_proactive_private_interval_min", "segmented_proactive_private_interval_max", "segmented_proactive_private_log_base", "segmented_proactive_group_enabled", "segmented_proactive_group_scope", "segmented_proactive_group_threshold", "segmented_proactive_group_min_segment_chars", "segmented_proactive_group_max_segments", "segmented_proactive_group_send_as_forward", "segmented_proactive_group_interval_method", "segmented_proactive_group_interval_min", "segmented_proactive_group_interval_max", "segmented_proactive_group_log_base", "segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "segmented_proactive_component_order", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy", "segmented_proactive_split_mode", "enable_qq_official_segmented_reply", "segmented_proactive_match_width_variants", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
+  enable_segmented_proactive_reply: ["enable_llm_controlled_segmenting", "enable_segmented_plugin_rules", "enable_segmented_proactive_chat_profiles", "segmented_proactive_private_enabled", "segmented_proactive_private_scope", "segmented_proactive_private_threshold", "segmented_proactive_private_min_segment_chars", "segmented_proactive_private_max_segments", "segmented_proactive_private_send_as_forward", "segmented_proactive_private_interval_method", "segmented_proactive_private_interval_min", "segmented_proactive_private_interval_max", "segmented_proactive_private_log_base", "segmented_proactive_group_enabled", "segmented_proactive_group_scope", "segmented_proactive_group_threshold", "segmented_proactive_group_min_segment_chars", "segmented_proactive_group_max_segments", "segmented_proactive_group_send_as_forward", "segmented_proactive_group_interval_method", "segmented_proactive_group_interval_min", "segmented_proactive_group_interval_max", "segmented_proactive_group_log_base", "segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "segmented_proactive_component_order", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy", "segmented_proactive_split_mode", "enable_qq_official_segmented_reply", "segmented_proactive_match_width_variants", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection", "enable_passive_state_continuity_anchor"],
   enable_passive_state_delta_injection: ["enable_passive_state_continuity_anchor"],
   enable_health_state: ["humanized_state_intensity"],
@@ -4031,40 +4037,45 @@ const featureSettingSections = {
   ],
   enable_segmented_proactive_reply: [
     {
+      title: "分段管线",
+      note: "总开关关闭时两种分段都停用；LLM 自主分段使用单独一行控制标记，插件规则分段继续使用下方规则。",
+      keys: ["enable_llm_controlled_segmenting", "enable_segmented_plugin_rules"],
+    },
+    {
+      title: "模块作用范围",
+      note: "私聊/群聊范围同时约束 LLM 自主分段和插件规则分段；普通模型回复只有选择全部纯文本回复时才会使用自主分段。",
+      keys: ["segmented_proactive_scope", "segmented_proactive_chat_scope"],
+    },
+    {
       title: "私聊与群聊独立配置",
       note: "开启独立配置后，分别调整私聊和群聊的启用、作用范围、分段数量、合并发送和发送间隔；关闭时继续使用下方共享默认值。",
       keys: ["enable_segmented_proactive_chat_profiles", "segmented_proactive_private_enabled", "segmented_proactive_private_scope", "segmented_proactive_private_threshold", "segmented_proactive_private_min_segment_chars", "segmented_proactive_private_max_segments", "segmented_proactive_private_send_as_forward", "segmented_proactive_private_interval_method", "segmented_proactive_private_interval_min", "segmented_proactive_private_interval_max", "segmented_proactive_private_log_base", "segmented_proactive_group_enabled", "segmented_proactive_group_scope", "segmented_proactive_group_threshold", "segmented_proactive_group_min_segment_chars", "segmented_proactive_group_max_segments", "segmented_proactive_group_send_as_forward", "segmented_proactive_group_interval_method", "segmented_proactive_group_interval_min", "segmented_proactive_group_interval_max", "segmented_proactive_group_log_base"],
+    },
+    {
+      title: "两种分段管线共用设置",
+      note: "平台许可、最终发送方式和消息间隔作用于最终段列表；分段词由两条管线共用同一配置面板，但只用于插件规则补充分段。",
+      keys: ["enable_qq_official_segmented_reply", "segmented_proactive_match_width_variants", "segmented_proactive_split_words", "segmented_proactive_send_as_forward", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
+    },
+    {
+      title: "内容清理",
+      note: "两种分段管线都在最终发送前应用；用于去掉句尾分隔符、空格或换行，括号和双引号内的内容会被保护。",
+      keys: ["enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words"],
+    },
+    {
+      title: "内容替换",
+      note: "两种分段管线都在最终发送前按顺序替换；网址与媒体标签会被保护。",
+      keys: ["enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements"],
+    },
+    {
+      title: "插件规则分段设置",
+      note: "LLM 已经产生 N 段时，插件最多补充 M-N 个边界，并优先尝试最长的可分段文本。",
+      keys: ["segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_split_mode", "segmented_proactive_regex"],
     },
     {
       title: "组件发送位置",
       note: "先调整组件类型的整体先后，再决定每类组件是否嵌入正文或独立发送；回复引用固定跟随第一段正文。",
       kind: "component-placement",
       keys: ["segmented_proactive_component_order", "segmented_proactive_voice_strategy", "segmented_proactive_image_strategy", "segmented_proactive_at_strategy", "segmented_proactive_face_strategy", "reaction_expression_delivery_mode", "segmented_proactive_other_strategy"],
-    },
-    {
-      title: "共享切分规则与兼容默认值",
-      note: "分隔符与内容处理规则由两类会话共享；会话范围、长度和分段数在独立配置关闭时作为兼容默认值使用。",
-      keys: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_split_mode", "enable_qq_official_segmented_reply", "segmented_proactive_match_width_variants", "segmented_proactive_regex", "segmented_proactive_split_words"],
-    },
-    {
-      title: "共享默认发送方式",
-      note: "独立配置关闭时使用；开启后请分别设置私聊和群聊的合并发送。",
-      keys: ["segmented_proactive_send_as_forward"],
-    },
-    {
-      title: "内容清理",
-      note: "用于去掉句尾分隔符、空格或换行；括号和双引号内的内容会被保护。",
-      keys: ["enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words"],
-    },
-    {
-      title: "内容替换",
-      note: "按顺序把指定原文替换成新内容，再执行长度判断和分段；网址与媒体标签会被保护。",
-      keys: ["enable_segmented_proactive_content_replacement", "segmented_proactive_content_replacements"],
-    },
-    {
-      title: "共享默认发送间隔",
-      note: "独立配置关闭时使用；开启后请分别设置私聊和群聊的发送间隔。",
-      keys: ["segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
     },
   ],
   enable_photo_text_action: [
@@ -4422,6 +4433,8 @@ const featureSettingTypes = {
   segmented_proactive_chat_scope: { type: "select", options: [["all", "全部"], ["private", "仅私聊"], ["group", "仅群聊"]] },
   enable_segmented_proactive_chat_profiles: { type: "checkbox" },
   segmented_proactive_private_enabled: { type: "checkbox" },
+  enable_llm_controlled_segmenting: { type: "checkbox" },
+  enable_segmented_plugin_rules: { type: "checkbox" },
   segmented_proactive_private_scope: { type: "select", options: [["proactive_only", "仅插件主动"], ["all_llm", "全部纯文本回复"]] },
   segmented_proactive_private_threshold: { type: "number", min: 20, max: 1024, step: 2 },
   segmented_proactive_private_min_segment_chars: { type: "number", min: 1, max: 40, step: 1 },
@@ -26032,6 +26045,8 @@ function segmentedPreviewValues(root = document) {
   const settings = state.overview?.settings || {};
   const keys = [
     "enable_segmented_proactive_reply",
+    "enable_llm_controlled_segmenting",
+    "enable_segmented_plugin_rules",
     "segmented_proactive_scope",
     "segmented_proactive_chat_scope",
     "enable_segmented_proactive_chat_profiles",
@@ -26067,6 +26082,10 @@ function segmentedPreviewValues(root = document) {
     values[key] = value == null ? settings[key] : value;
   });
   values.enable_segmented_proactive_reply = toBool(values.enable_segmented_proactive_reply);
+  values.enable_llm_controlled_segmenting = toBool(values.enable_llm_controlled_segmenting);
+  values.enable_segmented_plugin_rules = values.enable_segmented_plugin_rules == null
+    ? true
+    : toBool(values.enable_segmented_plugin_rules);
   const masterSegmentedEnabled = values.enable_segmented_proactive_reply;
   values.segmented_proactive_send_as_forward = toBool(values.segmented_proactive_send_as_forward);
   values.segmented_proactive_match_width_variants = values.segmented_proactive_match_width_variants == null
@@ -26097,11 +26116,195 @@ function segmentedPreviewValues(root = document) {
   return values;
 }
 
+function splitLlmControlledPreview(text) {
+  const marker = "<<PRIVATE_COMPANION_SPLIT>>";
+  const lines = String(text || "").trim().split(/\r?\n/);
+  const parts = [];
+  let current = [];
+  let found = false;
+  let fenceChar = "";
+  let fenceWidth = 0;
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (!fenceChar) {
+      const opening = trimmed.match(/^(`{3,}|~{3,})/);
+      if (opening) {
+        fenceChar = opening[1][0];
+        fenceWidth = opening[1].length;
+        current.push(line);
+        return;
+      }
+    } else {
+      const closing = new RegExp(`^${fenceChar}{${fenceWidth},}\\s*$`);
+      if (closing.test(trimmed)) {
+        fenceChar = "";
+        fenceWidth = 0;
+        current.push(line);
+        return;
+      }
+    }
+    if (!fenceChar && trimmed === marker && !line.trimStart().startsWith(">")) {
+      found = true;
+      const body = current.join("\n").trim();
+      if (body) parts.push(body);
+      current = [];
+      return;
+    }
+    current.push(line);
+  });
+  const tail = current.join("\n").trim();
+  if (tail) parts.push(tail);
+  return found && parts.length > 1 ? parts : [String(text || "").trim()];
+}
+
+function hasFencedLlmMarkerPreview(text) {
+  const marker = "<<PRIVATE_COMPANION_SPLIT>>";
+  let fenceChar = "";
+  let fenceWidth = 0;
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!fenceChar) {
+      const opening = line.match(/^(`{3,}|~{3,})/);
+      if (opening) {
+        fenceChar = opening[1][0];
+        fenceWidth = opening[1].length;
+      }
+      continue;
+    }
+    const closing = new RegExp(`^${fenceChar}{${fenceWidth},}\\s*$`);
+    if (closing.test(line)) {
+      fenceChar = "";
+      fenceWidth = 0;
+      continue;
+    }
+    if (line === marker) return true;
+  }
+  return false;
+}
+
+function applySegmentedPreviewCommonTransforms(text, values) {
+  let normalized = String(text || "").trim();
+  if (!normalized) return "";
+  if (values.enable_segmented_proactive_content_replacement) {
+    const [replaced, count] = applySegmentedPreviewReplacements(
+      normalized,
+      values.segmented_proactive_content_replacements,
+    );
+    if (count > 0 && replaced.trim()) normalized = replaced.trim();
+  }
+  if (!values.enable_segmented_proactive_content_cleanup) return normalized;
+
+  const splitMode = String(values.segmented_proactive_split_mode || "regex");
+  const cleanupScope = String(values.segmented_proactive_content_cleanup_scope || "all");
+  const cleanupWords = values.segmented_proactive_match_width_variants
+    ? expandSegmentedWidthVariantWords(parseSegmentedWordList(values.segmented_proactive_content_cleanup_words))
+    : parseSegmentedWordList(values.segmented_proactive_content_cleanup_words);
+  let cleanupRegex = null;
+  if (splitMode !== "words" && values.segmented_proactive_content_cleanup_rule) {
+    try {
+      cleanupRegex = new RegExp(String(values.segmented_proactive_content_cleanup_rule), "g");
+    } catch (_error) {
+      cleanupRegex = null;
+    }
+  }
+  const stripTrailingWords = (value, words) => {
+    let next = String(value || "").trimEnd();
+    const sortedWords = Array.from(new Set(words.filter((word) => word !== ""))).sort((a, b) => b.length - a.length);
+    let changed = true;
+    while (changed && next) {
+      changed = false;
+      for (const word of sortedWords) {
+        if (next.endsWith(word)) {
+          next = next.slice(0, -word.length).trimEnd();
+          changed = true;
+          break;
+        }
+      }
+    }
+    return next;
+  };
+  const stripTrailingRegex = (value, pattern) => {
+    let next = String(value || "").trimEnd();
+    if (!pattern) return next;
+    let changed = true;
+    while (changed && next) {
+      changed = false;
+      const matches = Array.from(next.matchAll(pattern));
+      const trailing = matches.reverse().find((match) => match.index != null && match.index + match[0].length === next.length && match[0].length > 0);
+      if (trailing) {
+        next = next.slice(0, trailing.index).trimEnd();
+        changed = true;
+      }
+    }
+    return next;
+  };
+  const [protectedText, protectedUrls] = protectSegmentedUrls(normalized);
+  let cleaned = "";
+  segmentedProtectedCleanupChunks(protectedText).forEach(([chunk, protectedChunk]) => {
+    if (protectedChunk) {
+      cleaned += chunk;
+      return;
+    }
+    let next = chunk;
+    if (splitMode === "words") {
+      if (cleanupScope === "trailing") next = stripTrailingWords(next, cleanupWords);
+      else cleanupWords.forEach((word) => { if (word !== "") next = next.split(word).join(""); });
+    } else if (cleanupRegex) {
+      next = cleanupScope === "trailing" ? stripTrailingRegex(next, cleanupRegex) : next.replace(cleanupRegex, "");
+    }
+    cleaned += next;
+  });
+  return restoreSegmentedUrls(cleaned.trim(), protectedUrls);
+}
+
 function simulateSegmentedProactive(text, values) {
   let normalized = String(text || "").trim();
   if (!normalized) return { segments: [], status: "请输入一段主动消息示例。" };
   if (!values.enable_segmented_proactive_reply) {
     return { segments: [normalized], status: "主动分段未开启，真实发送会保持一整条。" };
+  }
+  const llmSegments = values.enable_llm_controlled_segmenting
+    ? splitLlmControlledPreview(normalized)
+    : [normalized];
+  if (
+    llmSegments.length === 1
+    && (values.enable_llm_controlled_segmenting || values.segmented_preview_preserve_fenced_marker)
+    && hasFencedLlmMarkerPreview(normalized)
+  ) {
+    const transformed = applySegmentedPreviewCommonTransforms(normalized, values);
+    return { segments: transformed ? [transformed] : [], status: "代码围栏中的分段标记仅作为正文保留，不参与分段。" };
+  }
+  if (values.enable_llm_controlled_segmenting && llmSegments.length > 1) {
+    if (!values.enable_segmented_plugin_rules) {
+      const transformed = llmSegments.map((item) => applySegmentedPreviewCommonTransforms(item, values)).filter(Boolean);
+      return { segments: transformed, status: `LLM 自主分段预计发送 ${transformed.length} 段；插件规则分段已关闭。` };
+    }
+    const maxSegments = Math.max(1, Number(values.segmented_proactive_max_segments || 3));
+    if (llmSegments.length >= maxSegments) {
+      const transformed = llmSegments.map((item) => applySegmentedPreviewCommonTransforms(item, values)).filter(Boolean);
+      return { segments: transformed, status: `LLM 自主分段预计发送 ${transformed.length} 段；已达到或超过插件规则上限，跳过插件规则分段。` };
+    }
+    const result = [...llmSegments];
+    let remaining = maxSegments - llmSegments.length;
+    const order = llmSegments.map((_, index) => index).sort((left, right) => (llmSegments[right].length - llmSegments[left].length) || (left - right));
+    order.forEach((index) => {
+      if (remaining <= 0) return;
+      const candidateValues = { ...values, enable_llm_controlled_segmenting: false, segmented_preview_preserve_fenced_marker: true, segmented_proactive_max_segments: remaining + 1 };
+      const candidate = simulateSegmentedProactive(llmSegments[index], candidateValues).segments || [];
+      if (candidate.length > 1 && candidate.length - 1 <= remaining) {
+        result[index] = candidate;
+        remaining -= candidate.length - 1;
+      }
+    });
+    result.forEach((item, index) => {
+      if (!Array.isArray(item)) result[index] = applySegmentedPreviewCommonTransforms(item, values);
+    });
+    const flattened = result.flat().filter((item) => String(item || "").trim());
+    return { segments: flattened, status: `LLM 自主分段预计发送 ${flattened.length} 段；插件规则最多补充分段 ${maxSegments - llmSegments.length} 次。` };
+  }
+  if (!values.enable_segmented_plugin_rules) {
+    const transformed = applySegmentedPreviewCommonTransforms(normalized, values);
+    return { segments: transformed ? [transformed] : [], status: "插件规则分段已关闭，当前示例没有有效的 LLM 分段标记。" };
   }
   let replacementCount = 0;
   if (values.enable_segmented_proactive_content_replacement) {
@@ -26540,6 +26743,7 @@ function updateSegmentedConfigVisibility(root = document) {
   const values = segmentedPreviewValues(root);
   const mode = String(values.segmented_proactive_split_mode || "regex");
   const cleanupEnabled = Boolean(values.enable_segmented_proactive_content_cleanup);
+  const pluginRulesEnabled = toBool(values.enable_segmented_plugin_rules);
   const intervalMethod = String(values.segmented_proactive_interval_method || "log");
   const independentProfiles = toBool(values.enable_segmented_proactive_chat_profiles);
   const privateEnabled = toBool(segmentedControlValue(root, "segmented_proactive_private_enabled"));
@@ -26552,6 +26756,8 @@ function updateSegmentedConfigVisibility(root = document) {
     segmented_proactive_threshold: !independentProfiles,
     segmented_proactive_min_segment_chars: !independentProfiles,
     segmented_proactive_max_segments: !independentProfiles,
+    enable_llm_controlled_segmenting: true,
+    enable_segmented_plugin_rules: true,
     segmented_proactive_send_as_forward: !independentProfiles,
     segmented_proactive_interval_method: !independentProfiles,
     segmented_proactive_interval_min: !independentProfiles && intervalMethod === "random",
@@ -26577,9 +26783,9 @@ function updateSegmentedConfigVisibility(root = document) {
     segmented_proactive_group_interval_min: independentProfiles && groupEnabled && groupIntervalMethod === "random",
     segmented_proactive_group_interval_max: independentProfiles && groupEnabled && groupIntervalMethod === "random",
     segmented_proactive_group_log_base: independentProfiles && groupEnabled && groupIntervalMethod === "log",
-    segmented_proactive_regex: mode === "regex",
-    segmented_proactive_match_width_variants: mode === "words",
-    segmented_proactive_split_words: mode === "words",
+    segmented_proactive_regex: pluginRulesEnabled && mode === "regex",
+    segmented_proactive_match_width_variants: pluginRulesEnabled && mode === "words",
+    segmented_proactive_split_words: pluginRulesEnabled && mode === "words",
     segmented_proactive_content_cleanup_scope: cleanupEnabled,
     segmented_proactive_content_cleanup_rule: cleanupEnabled && mode === "regex",
     segmented_proactive_content_cleanup_words: cleanupEnabled && mode === "words",
@@ -26612,7 +26818,7 @@ function bindSegmentedPreview(root = document) {
       });
     });
   });
-  const controls = scope.querySelectorAll('[name^="segmented_proactive_"], [name="reaction_expression_delivery_mode"], [name="enable_segmented_proactive_reply"], [name="enable_segmented_proactive_content_cleanup"], [name="enable_segmented_proactive_content_replacement"], [data-feature-param^="segmented_proactive_"], [data-feature-param="reaction_expression_delivery_mode"], [data-feature-param="enable_segmented_proactive_content_cleanup"], [data-feature-param="enable_segmented_proactive_content_replacement"], [data-feature-detail-toggle="enable_segmented_proactive_reply"]');
+  const controls = scope.querySelectorAll('[name^="segmented_proactive_"], [name="reaction_expression_delivery_mode"], [name="enable_segmented_proactive_reply"], [name="enable_llm_controlled_segmenting"], [name="enable_segmented_plugin_rules"], [name="enable_segmented_proactive_content_cleanup"], [name="enable_segmented_proactive_content_replacement"], [data-feature-param^="segmented_proactive_"], [data-feature-param="reaction_expression_delivery_mode"], [data-feature-param="enable_llm_controlled_segmenting"], [data-feature-param="enable_segmented_plugin_rules"], [data-feature-param="enable_segmented_proactive_content_cleanup"], [data-feature-param="enable_segmented_proactive_content_replacement"], [data-feature-detail-toggle="enable_segmented_proactive_reply"]');
   controls.forEach((control) => {
     if (control.dataset.segmentedConfigBound) return;
     control.dataset.segmentedConfigBound = "1";
