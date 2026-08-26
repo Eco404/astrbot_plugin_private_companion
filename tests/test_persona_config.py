@@ -29,9 +29,9 @@ class PersonaConfigTests(unittest.TestCase):
         cls.schema = load_schema(ROOT / "_conf_schema.json")
         cls.manifest = build_scope_manifest(cls.schema)
 
-    def test_manifest_covers_canonical_grouped_927_leaves(self) -> None:
+    def test_manifest_covers_canonical_grouped_929_leaves(self) -> None:
         leaves = discover_grouped_schema_leaves(self.schema)
-        self.assertEqual(len(leaves), 927)
+        self.assertEqual(len(leaves), 929)
         self.assertEqual(set(leaves), set(self.manifest))
         required_fields = {
             "scope",
@@ -65,6 +65,8 @@ class PersonaConfigTests(unittest.TestCase):
         self.assertFalse(self.manifest["enable_qq_official_segmented_reply"]["default"])
         self.assertEqual(self.manifest["intercept_astrbot_group_context"]["scope"], "persona")
         self.assertTrue(self.manifest["intercept_astrbot_group_context"]["default"])
+        self.assertEqual(self.manifest["enable_group_history_injection"]["scope"], "persona")
+        self.assertTrue(self.manifest["enable_group_history_injection"]["default"])
 
     def test_missing_setting_follows_primary_but_falsy_values_are_explicit(self) -> None:
         primary = {
@@ -191,6 +193,7 @@ class PersonaConfigTests(unittest.TestCase):
         self.assertNotIn("multi_persona_ids", settings)
         self.assertIn("bot_name", settings)
         self.assertEqual(settings["bot_name"], "小星")
+        self.assertTrue(settings["enable_group_history_injection"])
         created = create_persona_settings(
             "defaults",
             bot_name="默认人格",

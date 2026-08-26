@@ -2623,6 +2623,12 @@
     "default": true,
     "invisible": true
   },
+  "enable_group_history_injection": {
+    "description": "Legacy flat config: 启用群聊历史消息注入",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
   "intercept_astrbot_group_context": {
     "description": "Legacy flat config: 拦截AstrBot群聊对话注入",
     "type": "bool",
@@ -2699,6 +2705,12 @@
     "description": "Legacy flat config: 群聊上下文消息数",
     "type": "int",
     "default": 20,
+    "invisible": true
+  },
+  "group_scene_recent_max_chars": {
+    "description": "Legacy flat config: 群聊上下文最大注入字数",
+    "type": "int",
+    "default": 4000,
     "invisible": true
   },
   "enable_group_reality_promise_guard": {
@@ -8553,10 +8565,11 @@
       "intercept_astrbot_group_context": {
         "description": "拦截AstrBot群聊对话注入",
         "type": "bool",
-        "hint": "开启后，插件成功注入群上下文后拦截 AstrBot 会话历史和官方群聊 ICL，防止相同的群聊上下文被重复注入。",
+        "hint": "开启后，插件成功注入群聊历史消息后拦截 AstrBot 会话历史和官方群聊 ICL，防止相同的群聊上下文被重复注入。",
         "default": true,
         "condition": {
-          "enable_group_context_injection": true
+          "enable_group_context_injection": true,
+          "enable_group_history_injection": true
         }
       },
       "enable_group_image_understanding": {
@@ -8746,13 +8759,36 @@
       "group_scene_recent_limit": {
         "description": "群聊上下文消息数",
         "type": "int",
-        "hint": "主对话 LLM 每轮注入的合并群聊时间线最多包含多少条用户与 Bot 消息。实际不会超过群聊最近消息保留数，并继续受字符预算限制。",
+        "hint": "主对话 LLM 每轮注入的合并群聊时间线最多包含多少条用户与 Bot 消息。实际不会超过群聊最近消息保留数，并继续受最大注入字数限制。",
         "slider": {
           "min": 2,
           "max": 100,
           "step": 1
         },
         "default": 20,
+        "condition": {
+          "enable_group_context_injection": true
+        }
+      },
+      "enable_group_history_injection": {
+        "description": "启用群聊历史消息注入",
+        "type": "bool",
+        "hint": "开启后，主对话 LLM 会接收插件整理的用户与 Bot 群聊历史时间线。关闭后不注入群聊历史消息，也不会拦截 AstrBot 会话历史和官方群聊 ICL；当前发言者、场景和群聊安全边界仍可继续注入。",
+        "default": true,
+        "condition": {
+          "enable_group_context_injection": true
+        }
+      },
+      "group_scene_recent_max_chars": {
+        "description": "群聊上下文最大注入字数",
+        "type": "int",
+        "hint": "主对话 LLM 每轮注入的群聊时间线中，用户与 Bot 的聊天正文合计最多包含多少字符。只统计实际注入的聊天内容，不统计 XML 标签、身份和时间等结构化字段。",
+        "slider": {
+          "min": 500,
+          "max": 20000,
+          "step": 500
+        },
+        "default": 4000,
         "condition": {
           "enable_group_context_injection": true
         }

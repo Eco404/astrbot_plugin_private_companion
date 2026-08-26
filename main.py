@@ -143,6 +143,7 @@ from .group_context_interception import (
     intercept_astrbot_group_context,
     restore_astrbot_group_history,
 )
+from .group_prompt_context import GROUP_HISTORY_INJECTED_ATTR
 from .persona_config import (
     PERSONA_SETTINGS_KEY,
     PERSONA_SETTINGS_REVISION_KEY,
@@ -17278,6 +17279,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if bool(getattr(event, "is_private_chat", lambda: False)()):
             return
         if not bool(runtime_persona_setting(self, "intercept_astrbot_group_context", True)):
+            return
+        if not bool(runtime_persona_setting(self, "enable_group_history_injection", True)):
+            return
+        if not bool(getattr(event, GROUP_HISTORY_INJECTED_ATTR, False)):
             return
         marker = "<!-- private_companion_group_context_v1 -->"
         if not self._request_has_managed_prompt_marker(req, marker):

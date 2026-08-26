@@ -2927,6 +2927,9 @@ class GroupObservationMixin:
     def _format_group_passive_reply_context_for_prompt(self, group: dict[str, Any], sender_id: str = "", text: str = "") -> dict[str, Any]:
         """Build the plugin-owned structured context for one group reply."""
         atmosphere = group.get("atmosphere") if isinstance(group.get("atmosphere"), dict) else {}
+        history_injection_enabled = bool(
+            _persona_value(self, "enable_group_history_injection", True)
+        )
         cleaned = _single_line(text, 260)
         current = self._resolve_group_current_message_for_prompt(group, sender_id=sender_id, text=text) or {}
         current = dict(current) if isinstance(current, dict) else {}
@@ -2983,16 +2986,26 @@ class GroupObservationMixin:
                     meaning_pairs.append({"term": term, "meaning": meaning})
         context = build_group_prompt_context(
             current_message=current,
-            recent_messages=self._filtered_group_recent_messages(group),
+            recent_messages=(
+                self._filtered_group_recent_messages(group)
+                if history_injection_enabled
+                else []
+            ),
             recent_bot_replies=(
                 group.get("recent_bot_replies")
-                if isinstance(group.get("recent_bot_replies"), list)
+                if history_injection_enabled and isinstance(group.get("recent_bot_replies"), list)
                 else []
             ),
             fromtimestamp=converter,
             is_workday=(calendar_cn.is_workday if calendar_cn is not None else None),
             limit=context_limit,
-            max_chars=4000,
+            max_chars=_safe_int(
+                _persona_value(self, "group_scene_recent_max_chars", 4000),
+                4000,
+                500,
+                20000,
+            ),
+            include_history=history_injection_enabled,
             include_current_text=False,
             bot_id=str(getattr(self, "_effective_plugin_persona_id", lambda: "bot")() or "bot"),
             bot_name=str(_persona_value(self, "bot_name", "Bot") or "Bot"),
