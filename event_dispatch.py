@@ -223,6 +223,8 @@ _SEGMENTED_WIDTH_VARIANT_GROUPS: tuple[tuple[str, ...], ...] = (
     ("_", "＿"),
 )
 
+_SEGMENTED_GENERATED_PUNCTUATION_MARKER = "\ue000"
+
 
 def _expand_segmented_width_variant_words(words: list[str]) -> list[str]:
     """Add common full-width/half-width punctuation equivalents in stable order."""
@@ -5599,7 +5601,31 @@ Bot 近期回复：
             return _normalize_cjk_chat_spaces(cleaned)
 
         def _visible_len(value: str) -> int:
-            return len(re.sub(r"\s+", "", str(value or "")))
+            visible = str(value or "").replace(
+                _SEGMENTED_GENERATED_PUNCTUATION_MARKER,
+                "",
+            )
+            return len(re.sub(r"\s+", "", visible))
+
+        def _generated_punctuation(value: str) -> str:
+            return f"{_SEGMENTED_GENERATED_PUNCTUATION_MARKER}{value}"
+
+        def _collapse_generated_repeated_punctuation(value: str) -> str:
+            result = str(value or "")
+            for punctuation in ("，", ",", "。", "！", "？", "!", "?", "…", "~", "～"):
+                marked = _generated_punctuation(punctuation)
+                result = re.sub(
+                    rf"(?:{re.escape(marked)}){{2,}}",
+                    lambda _match, token=marked: token,
+                    result,
+                )
+            return result
+
+        def _strip_generated_punctuation_markers(value: str) -> str:
+            return str(value or "").replace(
+                _SEGMENTED_GENERATED_PUNCTUATION_MARKER,
+                "",
+            )
 
         def _is_atomic_creative_excerpt(value: str) -> bool:
             stripped = str(value or "").strip()
@@ -5630,7 +5656,7 @@ Bot 近期回复：
             return expanded or [str(value or "")]
 
         def _is_soft_short_segment(value: str) -> bool:
-            cleaned = _single_line(value, 60)
+            cleaned = _single_line(_strip_generated_punctuation_markers(value), 60)
             if not cleaned:
                 return False
             body = re.sub(r"[。！？!?…~～,.，、\s]+$", "", cleaned)
@@ -5665,12 +5691,17 @@ Bot 近期回复：
                 return left
             if right.startswith(("（", "(")):
                 return _normalize_cjk_chat_spaces(f"{left}{right}")
+            visible_left = _strip_generated_punctuation_markers(left)
+            if re.fullmatch(r"(?:…+|\.{2,})", visible_left):
+                return _normalize_cjk_chat_spaces(f"{left}{right}")
             if re.search(r"[！？!?]$", left):
                 return _normalize_cjk_chat_spaces(f"{left} {right}".strip())
-            softened = re.sub(r"[。…~～]+$", "，", left)
-            softened = re.sub(r"[!?！？]+$", "，", softened)
+            generated_comma = _generated_punctuation("，")
+            softened = re.sub(r"[。…~～]+$", generated_comma, left)
+            softened = re.sub(r"[!?！？]+$", generated_comma, softened)
             if not re.search(r"[，,、\s]$", softened):
-                softened += "，"
+                softened += generated_comma
+            softened = _collapse_generated_repeated_punctuation(softened)
             return _normalize_cjk_chat_spaces(f"{softened}{right.lstrip()}")
 
         def _merge_segments(raw: list[str]) -> list[str]:
@@ -5719,7 +5750,10 @@ Bot 近期回复：
                     merged[merge_index + 1],
                 )
                 del merged[merge_index + 1]
-            return merged
+            return [
+                _strip_generated_punctuation_markers(item)
+                for item in merged
+            ]
 
         if _persona_value(self, 'segmented_proactive_split_mode', 'regex') == "words":
             split_words = [word for word in _persona_value(self, 'segmented_proactive_split_words', ['。', '？', '！', '~', '…', '“']) if word]

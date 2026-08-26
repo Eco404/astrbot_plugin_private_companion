@@ -25861,11 +25861,30 @@ function splitSegmentedWordsOutsideProtected(value, splitWords) {
 }
 
 function segmentedVisibleLen(value) {
-  return String(value || "").replace(/\s+/g, "").length;
+  return segmentedStripGeneratedPunctuationMarkers(value).replace(/\s+/g, "").length;
+}
+
+const SEGMENTED_GENERATED_PUNCTUATION_MARKER = "\uE000";
+
+function segmentedGeneratedPunctuation(value) {
+  return `${SEGMENTED_GENERATED_PUNCTUATION_MARKER}${value}`;
+}
+
+function segmentedCollapseGeneratedRepeatedPunctuation(value) {
+  let result = String(value || "");
+  ["，", ",", "。", "！", "？", "!", "?", "…", "~", "～"].forEach((punctuation) => {
+    const marked = segmentedGeneratedPunctuation(punctuation);
+    result = result.replace(new RegExp(`(?:${escapeRegex(marked)}){2,}`, "g"), marked);
+  });
+  return result;
+}
+
+function segmentedStripGeneratedPunctuationMarkers(value) {
+  return String(value || "").split(SEGMENTED_GENERATED_PUNCTUATION_MARKER).join("");
 }
 
 function segmentedIsSoftShort(value, minChars) {
-  const cleaned = String(value || "").replace(/\s+/g, " ").trim();
+  const cleaned = segmentedStripGeneratedPunctuationMarkers(value).replace(/\s+/g, " ").trim();
   if (!cleaned) return false;
   const body = cleaned.replace(/[。！？!?…~～,.，、\s]+$/g, "");
   if (segmentedVisibleLen(cleaned) <= Math.max(1, minChars)) return true;
@@ -25880,8 +25899,10 @@ function segmentedJoinPair(left, right) {
   if (!rhs) return lhs;
   if (/^(?:…+|\.{2,})$/.test(lhs)) return `${lhs}${rhs}`;
   if (/[！？!?]$/.test(lhs)) return `${lhs} ${rhs}`.trim();
-  let softened = lhs.replace(/[。…~～]+$/g, "，").replace(/[!?！？]+$/g, "，");
-  if (!/[，,、\s]$/.test(softened)) softened += "，";
+  const generatedComma = segmentedGeneratedPunctuation("，");
+  let softened = lhs.replace(/[。…~～]+$/g, generatedComma).replace(/[!?！？]+$/g, generatedComma);
+  if (!/[，,、\s]$/.test(softened)) softened += generatedComma;
+  softened = segmentedCollapseGeneratedRepeatedPunctuation(softened);
   return `${softened}${rhs.replace(/^\s+/, "")}`;
 }
 
@@ -26106,6 +26127,7 @@ function simulateSegmentedProactive(text, values) {
       segments = merged;
     }
   }
+  segments = segments.map(segmentedStripGeneratedPunctuationMarkers).filter(Boolean);
   if (!segments.length || (segments.length <= 1 && !cleanupEnabled)) {
     return { segments: [normalized], status: "当前规则没有产生有效分段，真实发送会保持一整条。" };
   }

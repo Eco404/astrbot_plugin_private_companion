@@ -140,6 +140,42 @@ class SegmentedContentReplacementTests(unittest.TestCase):
                 segments = harness._split_proactive_text(f"{prefix}被你抓到了。那次确实偷懒了。")
                 self.assertEqual(segments[0], f"{prefix}被你抓到了，那次确实偷懒了。")
 
+    def test_processing_generated_repeated_commas_are_collapsed(self) -> None:
+        harness = _SegmentReplacementHarness()
+        harness.segmented_proactive_split_mode = "words"
+        harness.segmented_proactive_split_words = ["。", "？", "！", "…"]
+        harness.segmented_proactive_match_width_variants = True
+        harness.enable_segmented_proactive_content_cleanup = True
+        harness.segmented_proactive_content_cleanup_scope = "trailing"
+        harness.segmented_proactive_content_cleanup_words = ["，", "；", "。"]
+        harness.segmented_proactive_min_segment_chars = 8
+        harness.segmented_proactive_max_segments = 3
+
+        segments = harness._split_proactive_text(
+            "测试通过。……这么郑重，我还以为你要考我呢。尾巴都快被你晃僵了。"
+        )
+
+        self.assertEqual(
+            segments,
+            ["测试通过，这么郑重，我还以为你要考我呢", "尾巴都快被你晃僵了"],
+        )
+
+    def test_original_repeated_punctuation_is_preserved(self) -> None:
+        harness = _SegmentReplacementHarness()
+        harness.segmented_proactive_split_mode = "words"
+        harness.segmented_proactive_split_words = ["。"]
+        harness.segmented_proactive_match_width_variants = True
+        harness.segmented_proactive_min_segment_chars = 1
+
+        segments = harness._split_proactive_text(
+            "这句话本来就有，，两个逗号。下一句话也足够长。"
+        )
+
+        self.assertEqual(
+            segments,
+            ["这句话本来就有，，两个逗号。", "下一句话也足够长。"],
+        )
+
     def test_configuration_and_preview_expose_replacement_controls(self) -> None:
         root = Path(__file__).resolve().parents[1]
         script = (root / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
@@ -147,6 +183,8 @@ class SegmentedContentReplacementTests(unittest.TestCase):
 
         self.assertIn('title: "内容替换"', script)
         self.assertIn("applySegmentedPreviewReplacements", script)
+        self.assertIn("SEGMENTED_GENERATED_PUNCTUATION_MARKER", script)
+        self.assertIn("segmentedCollapseGeneratedRepeatedPunctuation", script)
         self.assertIn('"enable_segmented_proactive_content_replacement"', schema)
         self.assertIn('"segmented_proactive_content_replacements"', schema)
 
