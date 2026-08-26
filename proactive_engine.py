@@ -744,11 +744,11 @@ class ProactiveEngineMixin:
         route_key = _single_line(item.get("route_dedupe_key"), 160)
         if route_key:
             return route_key
+        # motive 是模板化动机文本，不参与主题相似判定，避免不同内容被误判重复。
         return self._proactive_topic_signature(
             item.get("reason"),
             item.get("source"),
             item.get("topic"),
-            item.get("motive"),
         )
 
     def _proactive_impulse_default_window_seconds(self, reason: str, *, source: str = "") -> tuple[float, float]:
@@ -1136,9 +1136,9 @@ class ProactiveEngineMixin:
         return priority
 
     def _proactive_impulse_content_signature(self, impulse: dict[str, Any]) -> str:
+        # 只按内容（topic）比对；motive 是模板化动机文本，计入会把不同内容误判为相似而合并。
         return self._proactive_topic_signature(
             impulse.get("topic"),
-            impulse.get("motive"),
         )
 
     def _merge_proactive_impulse_timing(self, target: dict[str, Any], incoming: dict[str, Any]) -> None:
@@ -3537,9 +3537,10 @@ class ProactiveEngineMixin:
         # generic topic similarity must not suppress a new reminder or alert.
         if candidate_kind in {"transactional", "safety_event"}:
             return False
+        # 只按内容（topic）判定重复；外部分享类的 motive 是统一模板，计入签名
+        # 会让不同内容被判"主题过于相似"而误杀。
         signature = self._proactive_topic_signature(
             candidate.get("topic"),
-            candidate.get("motive"),
         )
         if not signature:
             return False
@@ -4736,9 +4737,9 @@ class ProactiveEngineMixin:
         return True, "ok"
 
     def _planned_proactive_signature(self, user: dict[str, Any]) -> str:
+        # motive 不参与计划重复判定（模板化动机文本）；source/reason 保留以区分主动类型。
         return self._proactive_topic_signature(
             user.get("planned_proactive_topic"),
-            user.get("planned_proactive_motive"),
             self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40),
             self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40),
         )
