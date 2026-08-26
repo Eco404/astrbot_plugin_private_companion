@@ -15,6 +15,7 @@ from .conversation_prompt_section import (
 )
 
 GROUP_CONTEXT_KEY = "group.context"
+GROUP_HISTORY_INJECTED_ATTR = "_private_companion_group_history_injected"
 
 _TRIGGER_LABELS = {
     "group_message": "普通群消息",
@@ -200,14 +201,11 @@ def _message_time_attrs(
     timestamp: float,
     *,
     fromtimestamp: Callable[[float], datetime],
-    reference_date: date | None,
     is_workday: Callable[[date], bool] | None,
 ) -> dict[str, Any]:
     converted = _safe_datetime(timestamp, fromtimestamp)
     if converted is None:
-        return {"time": "Unknown"}
-    if reference_date is not None and converted.date() == reference_date:
-        return {"time": converted.strftime("%H:%M")}
+        return {"datetime": "Unknown"}
     return {
         "datetime": converted.strftime("%Y-%m-%d %H:%M"),
         **_date_attrs(converted, is_workday=is_workday),
@@ -241,10 +239,7 @@ def _history_element(
     return xml_element(
         "history",
         attrs={
-            "date": date_text or None,
             "timezone": timezone or None,
-            "weekday": weekday or None,
-            "is_workday": is_workday,
             "type": "text",
         },
         children=(_message_element(item) for item in timeline),
@@ -291,17 +286,22 @@ def _fit_timeline_to_budget(
     weekday: str = "",
     is_workday: bool | None = None,
 ) -> list[dict[str, Any]]:
+    """Fit messages to a content-only character budget.
+
+    XML tags and identity/time attributes remain outside this user-facing
+    setting: the limit describes how much actual conversation text is
+    injected, while ``limit`` independently bounds structural growth.
+    """
+
     budget = max(0, int(max_chars))
     result = list(timeline)
-    wire_kwargs = {
-        "date_text": date_text,
-        "timezone": timezone,
-        "weekday": weekday,
-        "is_workday": is_workday,
-    }
-    while len(result) > 1 and len(_timeline_wire_text(result, **wire_kwargs)) > budget:
+
+    def content_chars(items: Sequence[Mapping[str, Any]]) -> int:
+        return sum(len(_clean_text(item.get("content"))) for item in items)
+
+    while len(result) > 1 and content_chars(result) > budget:
         result.pop(0)
-    if not result or len(_timeline_wire_text(result, **wire_kwargs)) <= budget:
+    if not result or content_chars(result) <= budget:
         return result
 
     item = dict(result[0])
@@ -316,7 +316,7 @@ def _fit_timeline_to_budget(
             if middle == len(original_text)
             else original_text[: max(0, middle - 3)].rstrip() + ("..." if middle else "")
         )
-        if len(_timeline_wire_text([candidate], **wire_kwargs)) <= budget:
+        if content_chars([candidate]) <= budget:
             best = candidate
             low = middle + 1
         else:
@@ -333,6 +333,7 @@ def build_group_prompt_context(
     is_workday: Callable[[date], bool] | None = None,
     limit: int = 20,
     max_chars: int = 4000,
+    include_history: bool = True,
     include_current_text: bool = True,
     bot_id: str = "bot",
     bot_name: str = "Bot",
@@ -356,7 +357,6 @@ def build_group_prompt_context(
     current_timestamp = _safe_timestamp(current.get("ts"))
     reference_timestamp = current_timestamp or max(all_timestamps, default=0.0)
     reference_datetime = _safe_datetime(reference_timestamp, fromtimestamp)
-    reference_date = reference_datetime.date() if reference_datetime is not None else None
     history_date = reference_datetime.strftime("%Y-%m-%d") if reference_datetime else ""
     history_timezone = _timezone_label(reference_datetime)
     history_date_attrs = _date_attrs(reference_datetime, is_workday=is_workday)
@@ -466,7 +466,6 @@ def build_group_prompt_context(
         message_time_attrs = _message_time_attrs(
             timestamp,
             fromtimestamp=fromtimestamp,
-            reference_date=reference_date,
             is_workday=is_workday,
         )
         event: dict[str, Any] = {
@@ -489,7 +488,6 @@ def build_group_prompt_context(
         message_time_attrs = _message_time_attrs(
             timestamp,
             fromtimestamp=fromtimestamp,
-            reference_date=reference_date,
             is_workday=is_workday,
         )
         event = {
@@ -554,17 +552,18 @@ def build_group_prompt_context(
             ),
         ),
     )
-    children: list[XmlElement] = [
-        current_element,
-        _history_element(
-            timeline,
-            date_text=history_date,
-            timezone=history_timezone,
-            weekday=history_date_attrs.get("weekday", ""),
-            is_workday=history_date_attrs.get("is_workday"),
-        ),
-        scene_element,
-    ]
+    children: list[XmlElement] = [current_element]
+    if include_history:
+        children.append(
+            _history_element(
+                timeline,
+                date_text=history_date,
+                timezone=history_timezone,
+                weekday=history_date_attrs.get("weekday", ""),
+                is_workday=history_date_attrs.get("is_workday"),
+            )
+        )
+    children.append(scene_element)
     if contextual_children:
         children.append(xml_element("context", children=contextual_children))
     children.append(constraints)
@@ -580,8 +579,24 @@ def render_group_prompt_context(context: Mapping[str, Any]) -> str:
     return render_prompt_sections([context])
 
 
+def group_prompt_context_history_count(context: Mapping[str, Any] | None) -> int:
+    """Return the number of concrete history messages in a structured section."""
+
+    if not isinstance(context, Mapping):
+        return 0
+    root = context.get("content")
+    if not isinstance(root, XmlElement) or root.tag != "group_context":
+        return 0
+    for child in root.children:
+        if child.tag == "history":
+            return sum(1 for item in child.children if item.tag == "message")
+    return 0
+
+
 __all__ = [
     "GROUP_CONTEXT_KEY",
+    "GROUP_HISTORY_INJECTED_ATTR",
     "build_group_prompt_context",
+    "group_prompt_context_history_count",
     "render_group_prompt_context",
 ]

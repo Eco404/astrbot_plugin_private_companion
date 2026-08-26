@@ -12,6 +12,10 @@ from .conversation_injection_plan import (
     get_conversation_injection_plan,
 )
 from .conversation_prompt_section import prompt_section, render_prompt_sections
+from .group_prompt_context import (
+    GROUP_HISTORY_INJECTED_ATTR,
+    group_prompt_context_history_count,
+)
 from .helpers import _now_ts, _safe_float, _single_line
 from .persona_config import runtime_persona_setting
 from .prompt_surface import PromptSurface
@@ -310,6 +314,10 @@ async def inject_humanized_state(
                         mode="group",
                         metadata={"注入位置": placement, "范围": "全局抽象表达底色"},
                     )
+        try:
+            setattr(event, GROUP_HISTORY_INJECTED_ATTR, False)
+        except Exception:
+            pass
         if runtime_persona_setting(self, "enable_group_context_injection", True) and self._feature_enabled_or_temp_unlocked("enable_group_companion"):
             if group_id and self._group_enabled_for_event(group_id):
                 if not isinstance(group, dict):
@@ -440,6 +448,11 @@ async def inject_humanized_state(
                         req.system_prompt = (
                             f"{current_prompt}\n\n{marker}\n{group_context_text}"
                         ).strip()
+                    if group_prompt_context_history_count(group_context_section) > 0:
+                        try:
+                            setattr(event, GROUP_HISTORY_INJECTED_ATTR, True)
+                        except Exception:
+                            pass
                     await self._record_request_prompt_fragment(
                         event,
                         title="群聊上下文注入",

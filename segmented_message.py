@@ -2,9 +2,115 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable, Mapping
 
 from .persona_config import runtime_persona_setting
+
+
+LLM_SEGMENT_MARKER = "<<PRIVATE_COMPANION_SPLIT>>"
+
+
+def _next_markdown_fence_state(
+    line: str,
+    state: tuple[str, int] | None,
+) -> tuple[str, int] | None:
+    """Track CommonMark-style backtick/tilde fences by marker and width."""
+    stripped = str(line or "").strip()
+    if state is None:
+        opening = re.match(r"^(`{3,}|~{3,})", stripped)
+        if opening is None:
+            return None
+        fence = opening.group(1)
+        return fence[0], len(fence)
+    marker, width = state
+    if re.fullmatch(rf"{re.escape(marker)}{{{width},}}\s*", stripped):
+        return None
+    return state
+
+
+def strip_llm_segment_marker_lines(
+    text: Any,
+    *,
+    marker: str = LLM_SEGMENT_MARKER,
+) -> str:
+    """Remove active marker lines without altering fenced code examples."""
+    normalized = str(text or "")
+    marker = str(marker or LLM_SEGMENT_MARKER).strip()
+    if not normalized or not marker:
+        return normalized.strip()
+    kept_lines: list[str] = []
+    fence_state: tuple[str, int] | None = None
+    for raw_line in normalized.splitlines():
+        line = raw_line.strip()
+        next_fence_state = _next_markdown_fence_state(line, fence_state)
+        if next_fence_state != fence_state:
+            fence_state = next_fence_state
+            kept_lines.append(raw_line)
+            continue
+        if fence_state is None and line == marker and not raw_line.lstrip().startswith(">"):
+            continue
+        kept_lines.append(raw_line)
+    return "\n".join(kept_lines).strip()
+
+
+def has_fenced_llm_segment_marker(
+    text: Any,
+    *,
+    marker: str = LLM_SEGMENT_MARKER,
+) -> bool:
+    """Return whether an exact marker line appears inside a Markdown fence."""
+    marker = str(marker or LLM_SEGMENT_MARKER).strip()
+    if not marker:
+        return False
+    fence_state: tuple[str, int] | None = None
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        next_fence_state = _next_markdown_fence_state(line, fence_state)
+        if next_fence_state != fence_state:
+            fence_state = next_fence_state
+            continue
+        if fence_state is not None and line == marker:
+            return True
+    return False
+
+
+def split_llm_controlled_text(text: Any, *, marker: str = LLM_SEGMENT_MARKER) -> tuple[list[str], bool]:
+    """Split an LLM reply on an exact standalone control-marker line.
+
+    The marker is deliberately strict: array-like variants and inline mentions
+    remain ordinary user-visible text. Code fences and quoted lines are also
+    ignored so examples or quoted instructions do not accidentally create
+    outbound message boundaries.
+    """
+    normalized = str(text or "").strip()
+    if not normalized:
+        return [], False
+    marker = str(marker or LLM_SEGMENT_MARKER).strip()
+    if not marker:
+        return [normalized], False
+    segments: list[str] = []
+    current: list[str] = []
+    fence_state: tuple[str, int] | None = None
+    found = False
+    for raw_line in normalized.splitlines():
+        line = raw_line.strip()
+        fence_state = _next_markdown_fence_state(line, fence_state)
+        is_marker = fence_state is None and line == marker and not raw_line.lstrip().startswith(">")
+        if is_marker:
+            found = True
+            body = "\n".join(current).strip()
+            if body:
+                segments.append(body)
+            current = []
+            continue
+        current.append(raw_line)
+    body = "\n".join(current).strip()
+    if body:
+        segments.append(body)
+    if not found or len(segments) < 2:
+        return [normalized], False
+    return segments, True
 
 
 COMPONENT_STRATEGIES = frozenset({"inline", "separate", "previous", "next"})

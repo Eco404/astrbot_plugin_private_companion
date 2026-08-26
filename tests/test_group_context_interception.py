@@ -25,6 +25,7 @@ from astrbot_plugin_private_companion.group_context_interception import (
     restore_astrbot_group_history,
     strip_astrbot_group_icl_parts,
 )
+from astrbot_plugin_private_companion.group_prompt_context import GROUP_HISTORY_INJECTED_ATTR
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 from astrbot_plugin_private_companion.config_migration import migrate_flat_config_into_schema_groups
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
@@ -121,26 +122,37 @@ class GroupContextInterceptionTests(unittest.TestCase):
     def test_schema_and_both_panels_expose_persona_setting_in_context_range(self) -> None:
         schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
         item = schema["group_observation_config"]["items"]["intercept_astrbot_group_context"]
+        history_item = schema["group_scene_config"]["items"]["enable_group_history_injection"]
         self.assertEqual(item["description"], "拦截AstrBot群聊对话注入")
         self.assertTrue(item["default"])
         self.assertEqual(
             item["hint"],
-            "开启后，插件成功注入群上下文后拦截 AstrBot 会话历史和官方群聊 ICL，防止相同的群聊上下文被重复注入。",
+            "开启后，插件成功注入群聊历史消息后拦截 AstrBot 会话历史和官方群聊 ICL，防止相同的群聊上下文被重复注入。",
         )
-        self.assertEqual(item["condition"], {"enable_group_context_injection": True})
+        self.assertEqual(
+            item["condition"],
+            {
+                "enable_group_context_injection": True,
+                "enable_group_history_injection": True,
+            },
+        )
+        self.assertTrue(history_item["default"])
 
         for relative in ("pages/companion-panel/app.js", "pages/陪伴面板/app.js"):
             script = (ROOT / relative).read_text(encoding="utf-8")
             self.assertIn('intercept_astrbot_group_context: "拦截AstrBot群聊对话注入"', script)
             self.assertIn(
-                'enable_group_context_injection: ["max_group_recent_messages", "group_scene_recent_limit", "intercept_astrbot_group_context"',
+                'enable_group_context_injection: ["max_group_recent_messages", "enable_group_history_injection", "group_scene_recent_limit", "group_scene_recent_max_chars", "intercept_astrbot_group_context"',
                 script,
             )
             detail_section = script.split('title: "上下文范围"', 1)[1].split("},", 1)[0]
             self.assertIn("intercept_astrbot_group_context", detail_section)
 
     def test_legacy_flat_setting_migrates_to_group_observation_config(self) -> None:
-        config = {"intercept_astrbot_group_context": False}
+        config = {
+            "intercept_astrbot_group_context": False,
+            "enable_group_history_injection": False,
+        }
 
         migrate_flat_config_into_schema_groups(
             config,
@@ -151,6 +163,9 @@ class GroupContextInterceptionTests(unittest.TestCase):
         self.assertFalse(
             config["group_observation_config"]["intercept_astrbot_group_context"]
         )
+        self.assertFalse(
+            config["group_scene_config"]["enable_group_history_injection"]
+        )
 
     def test_page_api_accepts_and_normalizes_interception_setting(self) -> None:
         api = PrivateCompanionPageApi.__new__(PrivateCompanionPageApi)
@@ -158,12 +173,21 @@ class GroupContextInterceptionTests(unittest.TestCase):
         api._schema_key_index_cache = None
 
         self.assertIn("intercept_astrbot_group_context", api._allowed_setting_keys())
+        self.assertIn("enable_group_history_injection", api._allowed_setting_keys())
         self.assertTrue(
             api._normalize_setting_value("intercept_astrbot_group_context", "true")
         )
         self.assertFalse(
             api._normalize_setting_value("intercept_astrbot_group_context", "false")
         )
+        self.assertTrue(
+            api._normalize_setting_value("enable_group_history_injection", "true")
+        )
+        self.assertFalse(
+            api._normalize_setting_value("enable_group_history_injection", "false")
+        )
+        self.assertEqual(2, api._normalize_setting_value("group_scene_recent_limit", 0))
+        self.assertEqual(20, api._normalize_setting_value("group_scene_recent_limit", "invalid"))
 
 
 class GroupContextInterceptionHookTests(unittest.IsolatedAsyncioTestCase):
@@ -185,6 +209,7 @@ class GroupContextInterceptionHookTests(unittest.IsolatedAsyncioTestCase):
             unified_msg_origin="qq_official:GroupMessage:group-1",
             is_private_chat=lambda: False,
         )
+        setattr(event, GROUP_HISTORY_INJECTED_ATTR, True)
         hook = PrivateCompanionPlugin.intercept_native_astrbot_group_context.__wrapped__
 
         await hook(plugin, event, request)
@@ -223,11 +248,39 @@ class GroupContextInterceptionHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(request.extra_user_content_parts), 1)
 
         request.system_prompt += "\n<!-- private_companion_group_context_v1 -->\n插件群上下文"
+        setattr(event, GROUP_HISTORY_INJECTED_ATTR, True)
         await hook(plugin, event, request)
 
         self.assertTrue(hasattr(event, GROUP_CONTEXT_STASH_ATTR))
         self.assertEqual(request.contexts, [])
         self.assertEqual(request.extra_user_content_parts, [])
+
+    async def test_hook_keeps_astrbot_history_when_plugin_history_is_disabled(self) -> None:
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        plugin.enabled = True
+        plugin.persona_setting = lambda key, default=None: {
+            "intercept_astrbot_group_context": True,
+            "enable_group_history_injection": False,
+        }.get(key, default)
+        request = SimpleNamespace(
+            conversation=SimpleNamespace(cid="conversation-1"),
+            contexts=[UserMessageSegment(content="旧问题").model_dump()],
+            extra_user_content_parts=[TextPart(text=GROUP_ICL_TEXT)],
+            system_prompt="群聊人格\n<!-- private_companion_group_context_v1 -->\n插件群上下文",
+            prompt="当前问题",
+        )
+        event = SimpleNamespace(
+            unified_msg_origin="qq_official:GroupMessage:group-1",
+            is_private_chat=lambda: False,
+        )
+        setattr(event, GROUP_HISTORY_INJECTED_ATTR, True)
+
+        hook = PrivateCompanionPlugin.intercept_native_astrbot_group_context.__wrapped__
+        await hook(plugin, event, request)
+
+        self.assertFalse(hasattr(event, GROUP_CONTEXT_STASH_ATTR))
+        self.assertEqual(1, len(request.contexts))
+        self.assertEqual(1, len(request.extra_user_content_parts))
 
     async def test_astrbot_core_saves_restored_history_plus_current_turn(self) -> None:
         stored_history = [

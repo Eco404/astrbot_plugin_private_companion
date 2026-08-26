@@ -1028,6 +1028,7 @@ class PageSettingNormalizerMixin:
             "group_interject_min_interval_minutes",
             "group_interject_max_daily",
             "group_scene_recent_limit",
+            "group_scene_recent_max_chars",
             "group_wakeup_cooldown_seconds",
             "group_wakeup_cold_group_idle_minutes",
             "group_wakeup_generated_keyword_limit",
@@ -1102,11 +1103,19 @@ class PageSettingNormalizerMixin:
                     return max(0, min(50, int(value)))
                 if key == "group_image_max_images":
                     return max(0, min(12, int(value)))
+                if key == "group_scene_recent_limit":
+                    return max(2, min(100, int(value)))
+                if key == "group_scene_recent_max_chars":
+                    return max(500, min(20000, int(value)))
                 parsed = max(0, int(value))
                 return parsed
             except (TypeError, ValueError):
                 if key == "group_high_intensity_max_merge_messages":
                     return 8
+                if key == "group_scene_recent_limit":
+                    return 20
+                if key == "group_scene_recent_max_chars":
+                    return 4000
                 return 0
         if key == "group_wakeup_interest_probability":
             try:
@@ -1300,6 +1309,7 @@ class PageSettingNormalizerMixin:
             "enable_cycle_state",
             "enable_worldbook_member_recognition",
             "enable_group_scene_awareness",
+            "enable_group_history_injection",
             "intercept_astrbot_group_context",
             "enable_group_reality_promise_guard",
             "enable_group_wakeup_enhancement",

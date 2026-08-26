@@ -106,6 +106,7 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .persona_config import runtime_persona_setting
 from .model_routing import CURRENT_MODEL_REPLACEMENT_SOURCES, build_rules, find_route, scope_allows
 
 _ON_WAITING_LLM_REQUEST = getattr(filter, "on_waiting_llm_request", None)
@@ -222,6 +223,8 @@ _SEGMENTED_WIDTH_VARIANT_GROUPS: tuple[tuple[str, ...], ...] = (
     ("^", "＾"),
     ("_", "＿"),
 )
+
+_SEGMENTED_GENERATED_PUNCTUATION_MARKER = "\ue000"
 
 
 def _expand_segmented_width_variant_words(words: list[str]) -> list[str]:
@@ -5192,8 +5195,24 @@ Bot 近期回复：
             return aliases[lowered]
         return trimmed.replace("\\n", "\n").replace("\\t", "\t")
 
-    def _segmented_content_replacement_pairs(self) -> list[tuple[str, str]]:
-        raw_rules = _persona_value(self, 'segmented_proactive_content_replacements', [])
+    def _segmented_content_replacement_pairs(
+        self,
+        *,
+        event: Any | None = None,
+        umo: str = "",
+        chat_type: str = "",
+    ) -> list[tuple[str, str]]:
+        setting_getter = getattr(self, "_segmented_setting", None)
+        if callable(setting_getter):
+            raw_rules = setting_getter(
+                "content_replacements",
+                event=event,
+                umo=umo,
+                chat_type=chat_type,
+                default=[],
+            )
+        else:
+            raw_rules = _persona_value(self, 'segmented_proactive_content_replacements', [])
         if isinstance(raw_rules, str):
             rules: list[Any] = [line for line in raw_rules.splitlines() if line.strip()]
         elif isinstance(raw_rules, list):
@@ -5223,13 +5242,29 @@ Bot 近期回复：
             pairs.append((old_text, new_text))
         return pairs
 
-    def _apply_segmented_content_replacements(self, text: Any) -> tuple[str, int]:
+    def _apply_segmented_content_replacements(
+        self,
+        text: Any,
+        *,
+        event: Any | None = None,
+        umo: str = "",
+        chat_type: str = "",
+    ) -> tuple[str, int]:
         original = str(text or "")
-        if not original or not bool(
-            _persona_value(self, 'enable_segmented_proactive_content_replacement', False)
-        ):
+        enabled = bool(
+            runtime_persona_setting(
+                self,
+                "enable_segmented_proactive_content_replacement",
+                False,
+            )
+        )
+        if not original or not enabled:
             return original, 0
-        pairs = self._segmented_content_replacement_pairs()
+        pairs = self._segmented_content_replacement_pairs(
+            event=event,
+            umo=umo,
+            chat_type=chat_type,
+        )
         if not pairs:
             return original, 0
         parts: list[str] = []
@@ -5263,6 +5298,9 @@ Bot 近期回复：
         event: Any | None = None,
         umo: str = "",
         chat_type: str = "",
+        max_segments_override: int | None = None,
+        force_common_transforms: bool = False,
+        common_transforms_only: bool = False,
     ) -> list[str]:
         # Media attachments are sent by the caller as separate components/messages.
         # Segment limits only apply to text, so image_path/extra_components are
@@ -5283,6 +5321,11 @@ Bot 近期回复：
             if not checker("enable_segmented_proactive_reply"):
                 return [normalized]
         elif not _persona_value(self, 'enable_segmented_proactive_reply', False):
+            return [normalized]
+        if (
+            not force_common_transforms
+            and not bool(_persona_value(self, "enable_segmented_plugin_rules", True))
+        ):
             return [normalized]
         if event is not None or umo or chat_type:
             chat_scope_checker = getattr(self, "_segmented_chat_scope_allows", None)
@@ -5310,7 +5353,12 @@ Bot 近期回复：
                 default=default,
             )
 
-        replaced_text, replacement_count = self._apply_segmented_content_replacements(normalized)
+        replaced_text, replacement_count = self._apply_segmented_content_replacements(
+            normalized,
+            event=event,
+            umo=umo,
+            chat_type=chat_type,
+        )
         if replacement_count > 0:
             candidate = replaced_text.strip()
             if candidate:
@@ -5319,21 +5367,37 @@ Bot 近期回复：
                 logger.warning("[PrivateCompanion] 主动分段内容替换会清空整条文本，已保留原文")
         threshold = max(20, _safe_int(setting("threshold", 500), 500, 20, 1024))
         min_segment_chars = max(1, _safe_int(setting("min_segment_chars", 8), 8, 1, 40))
-        max_segments = max(1, _safe_int(setting("max_segments", 3), 3, 1, 8))
-        if len(normalized) > threshold:
+        max_segments = max(
+            1,
+            _safe_int(
+                max_segments_override
+                if max_segments_override is not None
+                else setting("max_segments", 3),
+                3,
+                1,
+                8,
+            ),
+        )
+        if len(normalized) > threshold and not common_transforms_only:
             return [normalized]
 
         cleanup_pattern: re.Pattern[str] | None = None
         cleanup_words: list[str] = []
-        match_width_variants = bool(
-            _persona_value(self, 'segmented_proactive_match_width_variants', True)
+        match_width_variants = bool(setting("match_width_variants", True))
+        cleanup_enabled = bool(
+            runtime_persona_setting(
+                self,
+                "enable_segmented_proactive_content_cleanup",
+                False,
+            )
         )
-        if _persona_value(self, 'enable_segmented_proactive_content_cleanup', False):
-            if _persona_value(self, 'segmented_proactive_split_mode', 'regex') == "words":
-                configured_words = _persona_value(self, 'segmented_proactive_content_cleanup_words', [])
+        split_mode = str(setting("split_mode", "regex") or "regex")
+        if cleanup_enabled:
+            if split_mode == "words":
+                configured_words = setting("content_cleanup_words", [])
                 if isinstance(configured_words, list):
                     cleanup_words = [str(item) for item in configured_words if str(item) != ""]
-                raw_cleanup_rule = str(_persona_value(self, 'segmented_proactive_content_cleanup_rule', '[\\n]') or "")
+                raw_cleanup_rule = str(setting("content_cleanup_rule", '[\\n]') or "")
                 parsed_words: list[Any] | None = None
                 if not cleanup_words and raw_cleanup_rule:
                     try:
@@ -5347,9 +5411,9 @@ Bot 近期回复：
                     cleanup_words = [str(item) for item in parsed_words if str(item) != ""]
                 if match_width_variants:
                     cleanup_words = _expand_segmented_width_variant_words(cleanup_words)
-            elif _persona_value(self, 'segmented_proactive_content_cleanup_rule', '[\\n]'):
+            elif setting("content_cleanup_rule", '[\\n]'):
                 try:
-                    cleanup_pattern = re.compile(_persona_value(self, 'segmented_proactive_content_cleanup_rule', '[\\n]'))
+                    cleanup_pattern = re.compile(setting("content_cleanup_rule", '[\\n]'))
                 except re.error as e:
                     logger.warning("[PrivateCompanion] 主动分段内容清理正则无效,跳过清理: %s", e)
 
@@ -5548,7 +5612,7 @@ Bot 近期回复：
         def _clean_segment(segment: str) -> str:
             original = str(segment or "")
             cleaned_parts: list[str] = []
-            cleanup_scope = str(_persona_value(self, 'segmented_proactive_content_cleanup_scope', "all") or "all")
+            cleanup_scope = str(setting("content_cleanup_scope", "all") or "all")
 
             def _strip_trailing_words(value: str, words: list[str]) -> str:
                 stripped = str(value or "").rstrip()
@@ -5599,7 +5663,31 @@ Bot 近期回复：
             return _normalize_cjk_chat_spaces(cleaned)
 
         def _visible_len(value: str) -> int:
-            return len(re.sub(r"\s+", "", str(value or "")))
+            visible = str(value or "").replace(
+                _SEGMENTED_GENERATED_PUNCTUATION_MARKER,
+                "",
+            )
+            return len(re.sub(r"\s+", "", visible))
+
+        def _generated_punctuation(value: str) -> str:
+            return f"{_SEGMENTED_GENERATED_PUNCTUATION_MARKER}{value}"
+
+        def _collapse_generated_repeated_punctuation(value: str) -> str:
+            result = str(value or "")
+            for punctuation in ("，", ",", "。", "！", "？", "!", "?", "…", "~", "～"):
+                marked = _generated_punctuation(punctuation)
+                result = re.sub(
+                    rf"(?:{re.escape(marked)}){{2,}}",
+                    lambda _match, token=marked: token,
+                    result,
+                )
+            return result
+
+        def _strip_generated_punctuation_markers(value: str) -> str:
+            return str(value or "").replace(
+                _SEGMENTED_GENERATED_PUNCTUATION_MARKER,
+                "",
+            )
 
         def _is_atomic_creative_excerpt(value: str) -> bool:
             stripped = str(value or "").strip()
@@ -5629,8 +5717,12 @@ Bot 近期回复：
             push_current()
             return expanded or [str(value or "")]
 
+        if common_transforms_only:
+            cleaned = _clean_segment(normalized)
+            return [cleaned] if cleaned else []
+
         def _is_soft_short_segment(value: str) -> bool:
-            cleaned = _single_line(value, 60)
+            cleaned = _single_line(_strip_generated_punctuation_markers(value), 60)
             if not cleaned:
                 return False
             body = re.sub(r"[。！？!?…~～,.，、\s]+$", "", cleaned)
@@ -5665,12 +5757,17 @@ Bot 近期回复：
                 return left
             if right.startswith(("（", "(")):
                 return _normalize_cjk_chat_spaces(f"{left}{right}")
+            visible_left = _strip_generated_punctuation_markers(left)
+            if re.fullmatch(r"(?:…+|\.{2,})", visible_left):
+                return _normalize_cjk_chat_spaces(f"{left}{right}")
             if re.search(r"[！？!?]$", left):
                 return _normalize_cjk_chat_spaces(f"{left} {right}".strip())
-            softened = re.sub(r"[。…~～]+$", "，", left)
-            softened = re.sub(r"[!?！？]+$", "，", softened)
+            generated_comma = _generated_punctuation("，")
+            softened = re.sub(r"[。…~～]+$", generated_comma, left)
+            softened = re.sub(r"[!?！？]+$", generated_comma, softened)
             if not re.search(r"[，,、\s]$", softened):
-                softened += "，"
+                softened += generated_comma
+            softened = _collapse_generated_repeated_punctuation(softened)
             return _normalize_cjk_chat_spaces(f"{softened}{right.lstrip()}")
 
         def _merge_segments(raw: list[str]) -> list[str]:
@@ -5719,10 +5816,17 @@ Bot 近期回复：
                     merged[merge_index + 1],
                 )
                 del merged[merge_index + 1]
-            return merged
+            return [
+                _strip_generated_punctuation_markers(item)
+                for item in merged
+            ]
 
-        if _persona_value(self, 'segmented_proactive_split_mode', 'regex') == "words":
-            split_words = [word for word in _persona_value(self, 'segmented_proactive_split_words', ['。', '？', '！', '~', '…', '“']) if word]
+        if split_mode == "words":
+            configured_split_words = setting(
+                "split_words",
+                ['。', '？', '！', '~', '…', '“'],
+            )
+            split_words = [word for word in configured_split_words if word] if isinstance(configured_split_words, list) else []
             if match_width_variants:
                 split_words = _expand_segmented_width_variant_words(split_words)
             if "\n" not in split_words:
@@ -5740,11 +5844,11 @@ Bot 近期回复：
                     if cleaned:
                         segments.append(cleaned)
             segments = _merge_segments(segments)
-            return segments if segments and (len(segments) > 1 or _persona_value(self, 'enable_segmented_proactive_content_cleanup', False)) else [normalized]
+            return segments if segments and (len(segments) > 1 or cleanup_enabled) else [normalized]
 
         try:
             raw_segments = re.findall(
-                _persona_value(self, 'segmented_proactive_regex', '.*?[。？！~…\\n]+|.+$') or r".*?[。？！~…\n]+|.+$",
+                setting("regex", '.*?[。？！~…\\n]+|.+$') or r".*?[。？！~…\n]+|.+$",
                 protected_normalized,
                 re.DOTALL | re.MULTILINE,
             )
@@ -5763,7 +5867,7 @@ Bot 近期回复：
                 if cleaned:
                     segments.append(cleaned)
         segments = _merge_segments(segments)
-        return segments if segments and (len(segments) > 1 or _persona_value(self, 'enable_segmented_proactive_content_cleanup', False)) else [normalized]
+        return segments if segments and (len(segments) > 1 or cleanup_enabled) else [normalized]
 
     async def _calc_segmented_proactive_interval(
         self,

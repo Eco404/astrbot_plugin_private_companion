@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from astrbot_plugin_private_companion.group_prompt_context import (
     _timeline_wire_text,
     build_group_prompt_context,
+    group_prompt_context_history_count,
     render_group_prompt_context,
 )
 
@@ -105,16 +106,13 @@ class GroupPromptContextTests(unittest.TestCase):
         self.assertEqual("现在呢？", current_element.text)
         history_attrs, history = _history_records(group)
         self.assertEqual("CST", history_attrs["timezone"])
-        self.assertEqual("2026-08-24", history_attrs["date"])
-        self.assertEqual("Monday", history_attrs["weekday"])
-        self.assertEqual("true", history_attrs["is_workday"])
         self.assertEqual("text", history_attrs["type"])
         self.assertEqual(["前一条", "中间的回复"], [item["content"] for item in history])
         self.assertEqual(["user", "assistant"], [item["role"] for item in history])
         self.assertEqual(["QQ:10002", "璃"], [item["id"] for item in history])
         self.assertEqual(["小林", "璃"], [item["name"] for item in history])
         self.assertEqual(
-            ["time", "id", "name", "role", "content"],
+            ["datetime", "weekday", "is_workday", "id", "name", "role", "content"],
             list(history[0]),
         )
         self.assertNotIn("version", context)
@@ -151,9 +149,6 @@ class GroupPromptContextTests(unittest.TestCase):
         self.assertEqual("true", current.get("is_workday"))
         history_attrs, history = _history_records(group)
         self.assertEqual("CST", history_attrs["timezone"])
-        self.assertEqual("2026-08-24", history_attrs["date"])
-        self.assertEqual("Monday", history_attrs["weekday"])
-        self.assertEqual("true", history_attrs["is_workday"])
         self.assertEqual("text", history_attrs["type"])
         self.assertEqual(
             "2026-08-23 23:58",
@@ -162,10 +157,10 @@ class GroupPromptContextTests(unittest.TestCase):
         self.assertEqual("Sunday", history[0]["weekday"])
         self.assertEqual("false", history[0]["is_workday"])
         self.assertNotIn("time", history[0])
-        self.assertEqual("00:01", history[1]["time"])
-        self.assertNotIn("datetime", history[1])
-        self.assertNotIn("weekday", history[1])
-        self.assertNotIn("is_workday", history[1])
+        self.assertEqual("2026-08-24 00:01", history[1]["datetime"])
+        self.assertEqual("Monday", history[1]["weekday"])
+        self.assertEqual("true", history[1]["is_workday"])
+        self.assertNotIn("time", history[1])
 
     def test_workday_callback_controls_shared_and_cross_day_values(self) -> None:
         checked_dates = []
@@ -191,10 +186,10 @@ class GroupPromptContextTests(unittest.TestCase):
 
         group = _rendered_group(context)
         current = group.find("./current")
-        history_attrs, history = _history_records(group)
+        _history_attrs, history = _history_records(group)
         self.assertEqual("true", current.get("is_workday"))
-        self.assertEqual("true", history_attrs["is_workday"])
         self.assertEqual("false", history[0]["is_workday"])
+        self.assertEqual("true", history[1]["is_workday"])
         self.assertIn("2026-08-24", checked_dates)
         self.assertIn("2026-08-23", checked_dates)
 
@@ -209,7 +204,40 @@ class GroupPromptContextTests(unittest.TestCase):
         )
 
         _history_attrs, history = _history_records(_rendered_group(context))
-        self.assertEqual("Unknown", history[0]["time"])
+        self.assertEqual("Unknown", history[0]["datetime"])
+
+    def test_history_can_be_omitted_without_removing_current_scene_context(self) -> None:
+        context = build_group_prompt_context(
+            current_message={
+                "ts": _ts(2026, 8, 24, 11, 41),
+                "sender_id": "10001",
+                "text": "当前",
+                "talking_to": "bot",
+            },
+            recent_messages=[
+                {"ts": _ts(2026, 8, 24, 11, 40), "sender_id": "10002", "text": "历史"},
+            ],
+            recent_bot_replies=[],
+            fromtimestamp=_fromtimestamp,
+            include_history=False,
+            include_current_text=False,
+        )
+
+        group = _rendered_group(context)
+        self.assertIsNotNone(group.find("./current"))
+        self.assertIsNotNone(group.find("./scene"))
+        self.assertIsNone(group.find("./history"))
+        self.assertEqual(0, group_prompt_context_history_count(context))
+
+    def test_history_count_reports_only_concrete_messages(self) -> None:
+        context = build_group_prompt_context(
+            current_message={"ts": 100, "sender_id": "10001", "text": "当前"},
+            recent_messages=[{"ts": 90, "sender_id": "10002", "text": "历史"}],
+            recent_bot_replies=[{"ts": 95, "text": "回复"}],
+            fromtimestamp=_fromtimestamp,
+        )
+
+        self.assertEqual(2, group_prompt_context_history_count(context))
 
     def test_qq_official_ids_remain_real_platform_ids(self) -> None:
         opaque_id = "F05AC3C572EC7FAB4C9A552CF91C651A"
@@ -273,7 +301,7 @@ class GroupPromptContextTests(unittest.TestCase):
             payload.findtext("./group_context/current"),
         )
 
-    def test_limit_and_character_budget_remove_oldest_timeline_entries(self) -> None:
+    def test_limit_and_content_character_budget_remove_oldest_timeline_entries(self) -> None:
         recent = [
             {"ts": index + 1, "sender_id": str(10000 + index), "text": f"message-{index}-" + "x" * 80}
             for index in range(6)
@@ -288,16 +316,13 @@ class GroupPromptContextTests(unittest.TestCase):
         )
 
         group = _rendered_group(context)
-        history_attrs, history = _history_records(group)
+        _history_attrs, history = _history_records(group)
         self.assertLessEqual(len(history), 3)
         self.assertNotIn("message-0", "".join(item["content"] for item in history))
-        self.assertLessEqual(
-            len(_timeline_wire_text(history, **_history_wire_kwargs(history_attrs))),
-            220,
-        )
+        self.assertLessEqual(sum(len(item["content"]) for item in history), 220)
         self.assertEqual("当前消息不会被历史预算删除", group.findtext("./current"))
 
-    def test_xml_character_budget_counts_escaped_dynamic_text(self) -> None:
+    def test_content_character_budget_does_not_count_xml_escaping(self) -> None:
         context = build_group_prompt_context(
             current_message={"ts": 500, "sender_id": "10001", "text": "当前"},
             recent_messages=[
@@ -314,11 +339,33 @@ class GroupPromptContextTests(unittest.TestCase):
         )
 
         history_attrs, history = _history_records(_rendered_group(context))
-        self.assertLessEqual(
+        self.assertLessEqual(sum(len(item["content"]) for item in history), 700)
+        self.assertGreater(
             len(_timeline_wire_text(history, **_history_wire_kwargs(history_attrs))),
             700,
         )
         self.assertNotIn("-0", "".join(item["content"] for item in history))
+
+    def test_content_character_budget_does_not_count_structural_fields(self) -> None:
+        opaque_id = "F05AC3C572EC7FAB4C9A552CF91C651A"
+        context = build_group_prompt_context(
+            current_message={"ts": 500, "sender_id": opaque_id, "text": "当前"},
+            recent_messages=[
+                {"ts": index + 1, "sender_id": opaque_id, "name": "空雨", "text": "1234567890"}
+                for index in range(2)
+            ],
+            recent_bot_replies=[],
+            fromtimestamp=_fromtimestamp,
+            max_chars=20,
+        )
+
+        history_attrs, history = _history_records(_rendered_group(context))
+        self.assertEqual(2, len(history))
+        self.assertEqual(20, sum(len(item["content"]) for item in history))
+        self.assertGreater(
+            len(_timeline_wire_text(history, **_history_wire_kwargs(history_attrs))),
+            20,
+        )
 
     def test_builder_does_not_mutate_source_records(self) -> None:
         current = {"ts": 100, "sender_id": "opaque-current", "text": "当前"}

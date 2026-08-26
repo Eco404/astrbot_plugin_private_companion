@@ -2990,7 +2990,28 @@ TTS 朗读文本：
         if not plain_parts:
             return
         source_segments: list[str] = []
-        if len(plain_parts) > 1 and len(plain_parts) == len(chain):
+        llm_splitter = getattr(self, "_split_llm_controlled_text_for_event", None)
+        llm_allowed = getattr(self, "_llm_controlled_segmenting_allowed", None)
+        if (
+            callable(llm_splitter)
+            and callable(llm_allowed)
+            and bool(llm_allowed(event))
+        ):
+            try:
+                planned_segments = [
+                    str(item or "").strip()
+                    for item in llm_splitter(event, "".join(plain_parts))
+                    if str(item or "").strip()
+                ]
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] TTS 前自主分段解析失败: %s", _single_line(exc, 120))
+                planned_segments = []
+            if len(planned_segments) > 1:
+                source_segments = planned_segments
+                # Synthesize the visible reply without speaking the transport
+                # marker; the downstream ordered-send stage restores segments.
+                plain_parts = ["".join(planned_segments)]
+        if not source_segments and len(plain_parts) > 1 and len(plain_parts) == len(chain):
             source_limit = self._tts_complete_text_limit("".join(plain_parts), minimum=1000)
             for part in plain_parts:
                 restored_part = self._restore_protected_tts_blocks(part, event)
@@ -3614,6 +3635,13 @@ TTS 朗读文本：
                     return [chunk]
             except Exception:
                 return [chunk]
+        platform_checker = getattr(self, "_segmented_platform_allows", None)
+        if callable(platform_checker):
+            try:
+                if not platform_checker(event=event):
+                    return [chunk]
+            except Exception:
+                return [chunk]
         original_text = text
         tool_cleaner = getattr(self, "_strip_plaintext_tool_call_envelopes", None)
         if callable(tool_cleaner):
@@ -3654,12 +3682,23 @@ TTS 朗读文本：
                 )
                 return []
         splitter = getattr(self, "_split_proactive_text", None)
+        llm_splitter = getattr(self, "_split_llm_controlled_text_for_event", None)
+        llm_allowed = getattr(self, "_llm_controlled_segmenting_allowed", None)
+        if (
+            callable(llm_splitter)
+            and callable(llm_allowed)
+            and bool(llm_allowed(event))
+        ):
+            splitter = llm_splitter
         if not callable(splitter):
             visible_part = self._mark_tts_visible_plain(text) if is_tts_visible_text else Plain(text)
             return [[visible_part]] if visible_part is not None else []
         try:
             try:
-                split_result = splitter(text, event=event)
+                if splitter is llm_splitter:
+                    split_result = splitter(event, text)
+                else:
+                    split_result = splitter(text, event=event)
             except TypeError:
                 # Preserve compatibility with lightweight test/plugin overrides
                 # that still expose the original one-argument splitter contract.

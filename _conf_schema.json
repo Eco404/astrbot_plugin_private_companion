@@ -2623,6 +2623,12 @@
     "default": true,
     "invisible": true
   },
+  "enable_group_history_injection": {
+    "description": "Legacy flat config: 启用群聊历史消息注入",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
   "intercept_astrbot_group_context": {
     "description": "Legacy flat config: 拦截AstrBot群聊对话注入",
     "type": "bool",
@@ -2699,6 +2705,12 @@
     "description": "Legacy flat config: 群聊上下文消息数",
     "type": "int",
     "default": 20,
+    "invisible": true
+  },
+  "group_scene_recent_max_chars": {
+    "description": "Legacy flat config: 群聊上下文最大注入字数",
+    "type": "int",
+    "default": 4000,
     "invisible": true
   },
   "enable_group_reality_promise_guard": {
@@ -8553,10 +8565,11 @@
       "intercept_astrbot_group_context": {
         "description": "拦截AstrBot群聊对话注入",
         "type": "bool",
-        "hint": "开启后，插件成功注入群上下文后拦截 AstrBot 会话历史和官方群聊 ICL，防止相同的群聊上下文被重复注入。",
+        "hint": "开启后，插件成功注入群聊历史消息后拦截 AstrBot 会话历史和官方群聊 ICL，防止相同的群聊上下文被重复注入。",
         "default": true,
         "condition": {
-          "enable_group_context_injection": true
+          "enable_group_context_injection": true,
+          "enable_group_history_injection": true
         }
       },
       "enable_group_image_understanding": {
@@ -8746,13 +8759,36 @@
       "group_scene_recent_limit": {
         "description": "群聊上下文消息数",
         "type": "int",
-        "hint": "主对话 LLM 每轮注入的合并群聊时间线最多包含多少条用户与 Bot 消息。实际不会超过群聊最近消息保留数，并继续受字符预算限制。",
+        "hint": "主对话 LLM 每轮注入的合并群聊时间线最多包含多少条用户与 Bot 消息。实际不会超过群聊最近消息保留数，并继续受最大注入字数限制。",
         "slider": {
           "min": 2,
           "max": 100,
           "step": 1
         },
         "default": 20,
+        "condition": {
+          "enable_group_context_injection": true
+        }
+      },
+      "enable_group_history_injection": {
+        "description": "启用群聊历史消息注入",
+        "type": "bool",
+        "hint": "开启后，主对话 LLM 会接收插件整理的用户与 Bot 群聊历史时间线。关闭后不注入群聊历史消息，也不会拦截 AstrBot 会话历史和官方群聊 ICL；当前发言者、场景和群聊安全边界仍可继续注入。",
+        "default": true,
+        "condition": {
+          "enable_group_context_injection": true
+        }
+      },
+      "group_scene_recent_max_chars": {
+        "description": "群聊上下文最大注入字数",
+        "type": "int",
+        "hint": "主对话 LLM 每轮注入的群聊时间线中，用户与 Bot 的聊天正文合计最多包含多少字符。只统计实际注入的聊天内容，不统计 XML 标签、身份和时间等结构化字段。",
+        "slider": {
+          "min": 500,
+          "max": 20000,
+          "step": 500
+        },
+        "default": 4000,
         "condition": {
           "enable_group_context_injection": true
         }
@@ -13255,10 +13291,28 @@
         }
       },
       "enable_segmented_proactive_reply": {
-        "description": "主动文本分段发送",
+        "description": "分段发送",
         "type": "bool",
-        "hint": "开启后，较短的主动文本部分会按配置切分为多条短消息发送；图片、语音等媒体仍按附件或单独消息发送，不占用文本分段数。创作分享会自动保持整段，避免小说片段被拆碎。默认关闭，避免主动消息显得过于打扰。",
+        "hint": "分段发送模块总开关。开启后，再由 LLM 自主分段和插件规则分段两个子开关决定具体管线；私聊、群聊、QQ Official、组件位置、内容处理和发送间隔继续使用下方设置。默认关闭。",
         "default": false
+      },
+      "enable_llm_controlled_segmenting": {
+        "description": "LLM 自主分段",
+        "type": "bool",
+        "hint": "开启后，直接回复使用的 LLM 可以通过单独一行 <<PRIVATE_COMPANION_SPLIT>> 控制消息边界；默认输出一条消息，长文、代码、列表和引用尽量不要主动分段。",
+        "default": false,
+        "condition": {
+          "enable_segmented_proactive_reply": true
+        }
+      },
+      "enable_segmented_plugin_rules": {
+        "description": "插件规则分段",
+        "type": "bool",
+        "hint": "开启后，插件按标点、换行和配置规则继续拆分文本。默认开启；升级后总开关保持原值，因此旧版行为不会改变。",
+        "default": true,
+        "condition": {
+          "enable_segmented_proactive_reply": true
+        }
       },
       "segmented_proactive_scope": {
         "description": "分段作用范围",
@@ -13532,7 +13586,7 @@
       "segmented_proactive_max_segments": {
         "description": "主动文本最多分段数",
         "type": "int",
-        "hint": "单条主动文本最多拆成几条消息。默认 3，防止一条主动被拆成刷屏；图片、语音和附加组件不计入这个文本段数。",
+        "hint": "插件规则分段的最终文本段上限。LLM 自主分段不受此上限截断，但会先占用已有段数；只有 N 小于本值 M 时，插件规则才继续补充 M-N 个边界。图片、语音和附加组件不计入文本段数。",
         "slider": {
           "min": 1,
           "max": 8,

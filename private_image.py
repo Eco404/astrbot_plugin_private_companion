@@ -4921,9 +4921,15 @@ class PrivateImageMixin:
         should_segment: bool,
         event: AstrMessageEvent | None = None,
     ) -> list[list[Any]]:
-        split_text = (lambda text: self._split_proactive_text(text, event=event)) if should_segment else (
-            lambda text: [part.strip() for part in str(text or "").splitlines() if part.strip()]
-        )
+        llm_splitter = getattr(self, "_split_llm_controlled_text_for_event", None)
+        if should_segment and callable(llm_splitter) and bool(
+            runtime_persona_setting(self, "enable_llm_controlled_segmenting", False)
+        ):
+            split_text = lambda text: llm_splitter(event, text)
+        elif should_segment:
+            split_text = lambda text: self._split_proactive_text(text, event=event)
+        else:
+            split_text = lambda text: [part.strip() for part in str(text or "").splitlines() if part.strip()]
         chunks, _changed, _split_changed, _full_text = plan_component_chunks(
             chain,
             plain_type=Plain,
@@ -5707,6 +5713,19 @@ class PrivateImageMixin:
                 title="本轮图片回复边界",
                 priority=31,
             )
+            segmenting_injector = getattr(
+                self,
+                "inject_llm_controlled_segmenting_instruction",
+                None,
+            )
+            if callable(segmenting_injector):
+                try:
+                    await segmenting_injector(framework_event, req)
+                except Exception as exc:
+                    logger.debug(
+                        "[PrivateCompanion] 私聊单图分段说明注入失败，继续生成正文: %s",
+                        _single_line(exc, 120),
+                    )
             request_plan = get_conversation_injection_plan(req, create=False)
             if request_plan is not None:
                 request_plan.render_into(req)

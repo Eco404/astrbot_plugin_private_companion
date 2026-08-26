@@ -159,10 +159,12 @@ from .planning import (
 )
 from .scene_context import infer_companion_scene_category
 from .segmented_message import (
+    LLM_SEGMENT_MARKER,
     component_kind,
     component_order_from_owner,
     component_strategies_from_owner,
     plan_component_chunks,
+    split_llm_controlled_text,
 )
 from .token_budget import _looks_like_upstream_llm_error_response
 from .reaction_expression import (
@@ -3353,7 +3355,47 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         identity_guard = self._format_proactive_recipient_identity_guard(user, name)
         if identity_guard:
             prompt = f"{prompt.rstrip()}\n\n{identity_guard}"
+        segmenting_hint = self._proactive_llm_segmenting_instruction(
+            umo=_single_line(user.get("umo"), 240),
+        )
+        if segmenting_hint:
+            prompt = f"{prompt.rstrip()}\n\n{segmenting_hint}"
         return prompt.strip()
+
+    def _proactive_llm_segmenting_allowed(self, *, umo: str = "") -> bool:
+        if not bool(runtime_persona_setting(self, "enable_segmented_proactive_reply", False)):
+            return False
+        if not bool(runtime_persona_setting(self, "enable_llm_controlled_segmenting", False)):
+            return False
+        scope_checker = getattr(self, "_segmented_scope_allows_umo", None)
+        try:
+            if callable(scope_checker) and not bool(scope_checker(umo)):
+                return False
+        except Exception:
+            return False
+        platform_checker = getattr(self, "_segmented_platform_allows", None)
+        try:
+            if callable(platform_checker) and not bool(platform_checker(umo=umo)):
+                return False
+        except Exception:
+            return False
+        return True
+
+    def _proactive_llm_segmenting_instruction(self, *, umo: str = "") -> str:
+        """Return the marker contract only for user-visible proactive text."""
+        if not self._proactive_llm_segmenting_allowed(umo=umo):
+            return ""
+        prompt_getter = getattr(self, "_llm_controlled_segmenting_prompt", None)
+        if not callable(prompt_getter):
+            return ""
+        instruction = str(prompt_getter() or "").strip()
+        if not instruction:
+            return ""
+        return (
+            '<private_companion_context><section title="回复分段控制"><![CDATA['
+            f"{instruction}"
+            "]]></section></private_companion_context>"
+        )
 
     @staticmethod
     def _proactive_visible_text_format_hint(action: str) -> str:
@@ -4546,6 +4588,10 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
 - 如果参考意图或模型结果包含 Provider/API 报错、内容策略拒绝、敏感词提示、政策链接或内部诊断，视为本轮失败并输出空文本；不要翻译、复述或润色这类内容。
 {"- 必须保留成功/失败/等待/完成/稍后再说等状态语义，不要把失败说成成功。" if preserve_status else "- 如果只是轻轻递一句，不要补多余解释。"}
 """.strip()
+        if proactive_rewrite:
+            segmenting_hint = self._proactive_llm_segmenting_instruction(umo=umo)
+            if segmenting_hint:
+                prompt = f"{prompt.rstrip()}\n\n{segmenting_hint}"
         try:
             raw = await self._llm_call(
                 prompt,
@@ -6505,6 +6551,52 @@ Output:
         action_context: str = "",
         motive: str = "",
     ) -> tuple[str, str]:
+        controlled_segments, controlled = (
+            split_llm_controlled_text(raw_text)
+            if self._proactive_llm_segmenting_allowed(
+                umo=_single_line(user.get("umo"), 240),
+            )
+            else ([str(raw_text or "").strip()], False)
+        )
+        if controlled:
+            finalized_segments: list[str] = []
+            failure_stages: list[str] = []
+            for segment in controlled_segments:
+                finalized_segment, failure_stage = await self._finalize_proactive_generated_text(
+                    user,
+                    segment,
+                    name=name,
+                    reason=reason,
+                    action=action,
+                    action_context=action_context,
+                    motive=motive,
+                )
+                if finalized_segment:
+                    finalized_segments.append(finalized_segment)
+                elif failure_stage:
+                    failure_stages.append(failure_stage)
+            if not finalized_segments:
+                return "", "；".join(failure_stages)[:240] or "自主分段正文处理后为空"
+
+            # Preserve the previous proactive visible-text ceiling. The marker
+            # itself is transport metadata and does not consume that budget.
+            remaining = 260
+            bounded_segments: list[str] = []
+            for segment in finalized_segments:
+                if remaining <= 0:
+                    break
+                if len(segment) <= remaining:
+                    bounded_segments.append(segment)
+                    remaining -= len(segment)
+                    continue
+                truncated = self._truncate_proactive_text(segment, remaining)
+                if truncated:
+                    bounded_segments.append(truncated)
+                break
+            return (
+                f"\n{LLM_SEGMENT_MARKER}\n".join(bounded_segments),
+                "",
+            ) if bounded_segments else ("", "自主分段正文处理后为空")
         if self._looks_like_internal_provider_error_text(raw_text):
             logger.warning(
                 "[PrivateCompanion] 主动正文生成收到 Provider 错误正文，跳过清洗并进入回退: user=%s reason=%s",
@@ -14995,7 +15087,15 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         suppress_tts: bool = False,
     ) -> Plain:
         comp = Plain(text)
-        clean_full = _single_line(full_text, max(1200, len(str(full_text or "")) + 32))
+        full_source = str(full_text or "")
+        marker_cleaner = getattr(self, "_strip_llm_segment_marker_lines", None)
+        if (
+            callable(marker_cleaner)
+            and bool(runtime_persona_setting(self, "enable_segmented_proactive_reply", False))
+            and bool(runtime_persona_setting(self, "enable_llm_controlled_segmenting", False))
+        ):
+            full_source = marker_cleaner(full_source)
+        clean_full = _single_line(full_source, max(1200, len(full_source) + 32))
         if clean_full:
             try:
                 object.__setattr__(comp, "_private_companion_proactive_full_text", clean_full)
@@ -15708,6 +15808,22 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 _single_line(umo, 140),
             )
             return False
+        marker_cleaner = getattr(self, "_strip_llm_segment_marker_lines", None)
+        if (
+            callable(marker_cleaner)
+            and bool(runtime_persona_setting(self, "enable_segmented_proactive_reply", False))
+            and bool(runtime_persona_setting(self, "enable_llm_controlled_segmenting", False))
+        ):
+            cleaned_chain: list[Any] = []
+            for component in chain or []:
+                if not isinstance(component, Plain):
+                    cleaned_chain.append(component)
+                    continue
+                original = str(getattr(component, "text", "") or "")
+                cleaned = marker_cleaner(original)
+                if cleaned:
+                    cleaned_chain.append(Plain(cleaned) if cleaned != original else component)
+            chain = cleaned_chain
         chain_redactor = getattr(self, "_redact_outbound_chain_secrets", None)
         if callable(chain_redactor):
             chain, redacted = chain_redactor(chain)
@@ -16003,13 +16119,23 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                 _single_line(umo, 140),
             )
             quote_message_id = ""
-        segments = self._split_proactive_text(
-            text,
-            umo=umo,
-            image_path="",
-            extra_components=None,
-            disable_segmenting=disable_segmenting or not platform_segmented or not self._segmented_scope_allows_umo(umo),
-        )
+        splitter = getattr(self, "_split_llm_controlled_text_for_event", None)
+        if (
+            callable(splitter)
+            and bool(runtime_persona_setting(self, "enable_llm_controlled_segmenting", False))
+            and not disable_segmenting
+            and platform_segmented
+            and self._segmented_scope_allows_umo(umo)
+        ):
+            segments = splitter(None, text, umo=umo)
+        else:
+            segments = self._split_proactive_text(
+                text,
+                umo=umo,
+                image_path="",
+                extra_components=None,
+                disable_segmenting=disable_segmenting or not platform_segmented or not self._segmented_scope_allows_umo(umo),
+            )
         if len(segments) > 1:
             logger.info(
                 "[PrivateCompanion] 主动媒体文本已分段: umo=%s segments=%s lengths=%s",
@@ -16595,17 +16721,27 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             return outcome
         if text:
             await self._maybe_send_input_status(umo, text)
-        segments = self._split_proactive_text(
-            text,
-            umo=umo,
-            image_path="",
-            extra_components=None,
-            disable_segmenting=(
-                disable_segmenting
-                or not self._segmented_platform_allows(umo=umo)
-                or not self._segmented_scope_allows_umo(umo)
-            ),
-        )
+        splitter = getattr(self, "_split_llm_controlled_text_for_event", None)
+        if (
+            callable(splitter)
+            and bool(runtime_persona_setting(self, "enable_llm_controlled_segmenting", False))
+            and not disable_segmenting
+            and self._segmented_platform_allows(umo=umo)
+            and self._segmented_scope_allows_umo(umo)
+        ):
+            segments = splitter(None, text, umo=umo)
+        else:
+            segments = self._split_proactive_text(
+                text,
+                umo=umo,
+                image_path="",
+                extra_components=None,
+                disable_segmenting=(
+                    disable_segmenting
+                    or not self._segmented_platform_allows(umo=umo)
+                    or not self._segmented_scope_allows_umo(umo)
+                ),
+            )
         if len(segments) > 1:
             logger.info(
                 "[PrivateCompanion] 主动文本已分段: umo=%s segments=%s lengths=%s",
