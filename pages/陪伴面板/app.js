@@ -25549,8 +25549,7 @@ function encodeSegmentedWordToken(value) {
   if (raw === " ") return "<space>";
   if (raw === "\n") return "<newline>";
   if (raw === "\t") return "<tab>";
-  if (raw === ",") return "<comma>";
-  if (raw === "，") return "<zh_comma>";
+  if (raw === "," || raw === "，") return raw;
   return raw;
 }
 
@@ -25559,6 +25558,8 @@ function parseSegmentedWordList(value) {
     return value.map(decodeSegmentedWordToken).filter((item) => item !== "");
   }
   const raw = String(value ?? "");
+  const singleToken = raw.trim();
+  if (singleToken === "," || singleToken === "，") return [singleToken];
   const parts = raw.includes("\n") || raw.includes("\r")
     ? raw.split(/\r?\n/)
     : raw.split(/[,、]+/);

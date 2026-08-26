@@ -87,7 +87,9 @@ class SegmentedConfigSaveTests(unittest.TestCase):
 
         self.assertIn("function encodeSegmentedWordToken(value)", script)
         self.assertIn('if (raw === "\\n") return "<newline>";', script)
-        self.assertIn('if (raw === ",") return "<comma>";', script)
+        self.assertIn('if (raw === "," || raw === "，") return raw;', script)
+        self.assertIn('if (singleToken === "," || singleToken === "，") return [singleToken];', script)
+        self.assertIn('if (["<comma>", "{comma}", "[comma]", "comma", "英文逗号"].includes(lower)) return ",";', script)
         self.assertIn("return parseSegmentedWordList(input.value);", script)
         self.assertIn('return value.map(encodeSegmentedWordToken).join("\\n");', script)
         self.assertIn("function encodeSegmentedReplacementToken(value, replacement = false)", script)
