@@ -16577,9 +16577,31 @@ class PrivateCompanionPageApi(
         platform_profile = platform_profile_getter(umo=umo) if callable(platform_profile_getter) else {}
         platform_kind = self._single_line((platform_profile or {}).get("kind"), 40) or ("onebot" if is_qq_user else "generic")
         nickname = self._single_line(user.get("nickname"), 40)
-        generic_names = {"用户", "主人", "主要用户", "默认用户"}
+        generic_names = {"用户", "主人", "主要用户", "默认用户", "临时会话"}
+        profile_origin = self._single_line(user.get("profile_origin"), 40)
+        capabilities = user.get("unified_profile_capabilities") if isinstance(user.get("unified_profile_capabilities"), dict) else {}
+        grant_source = self._single_line(capabilities.get("grant_source"), 60)
+        group_observation_identity = bool(
+            profile_origin == "group_observation"
+            or user.get("observation_only")
+            or (
+                grant_source == "legacy_effective_migration"
+                and not umo
+                and not self._float(last_seen)
+            )
+        )
+        directory_scope = "group" if group_observation_identity else "private"
         if is_qq_user:
             display_name = nickname if nickname and nickname not in generic_names else user_id_text
+            if group_observation_identity:
+                resolver = getattr(self.plugin, "_group_member_identity_name", None)
+                if callable(resolver):
+                    try:
+                        resolved = self._single_line(resolver(user_id_text, nickname, limit=40), 40)
+                        if resolved and resolved != user_id_text:
+                            display_name = resolved
+                    except Exception:
+                        pass
         elif platform_kind == "qq_official":
             display_name = nickname if nickname and nickname not in generic_names else f"QQ 官方 · {user_id_text[:8]}"
         else:
@@ -16690,6 +16712,8 @@ class PrivateCompanionPageApi(
         return {
             "user_id": user_id_text,
             "display_name": display_name,
+            "directory_scope": directory_scope,
+            "observation_only": group_observation_identity,
             "is_qq_user": is_qq_user,
             "platform_kind": platform_kind,
             "platform_label": self._single_line((platform_profile or {}).get("label"), 60),

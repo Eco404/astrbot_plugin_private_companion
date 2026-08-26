@@ -96,7 +96,7 @@
       to { opacity: 1; transform: scaleX(1); transform-origin: left; }
     }
   </style>
-  <link rel="stylesheet" href="./app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1&amp;touch=reality-workspace-v4&amp;migration-notice=v2&amp;component-order=v1&amp;layout=model-routing-v2&amp;release=6.4.1" />
+  <link rel="stylesheet" href="./app.css?v=20260809-external-ability-controls-v3&amp;build=20260810-reference-upload-v1&amp;touch=reality-workspace-v4&amp;migration-notice=v2&amp;component-order=v1&amp;layout=model-routing-v2&amp;directory-nav=v2&amp;release=6.4.1" />
   <!-- Keep the structured roleplay form readable while a WebUI asset is being refreshed. -->
   <style id="roleplay-layout-fallback">
     .roleplay-form,
@@ -675,7 +675,7 @@ QQ空间 = 公开札记
         <div class="section-head">
           <div>
             <h2>用户档案</h2>
-            <p class="section-desc">统一管理私聊用户和未来接入的群聊成员；先看状态，再进入详情调整。</p>
+            <p class="section-desc">分别管理私聊用户与群聊成员；先看身份，再进入详情查看互动资料。</p>
           </div>
           <div class="user-page-actions">
             <label class="user-search-wrap"><span aria-hidden="true">⌕</span><input id="userFilter" type="search" placeholder="搜索名称、ID、别名" /></label>
@@ -683,13 +683,16 @@ QQ空间 = 公开札记
           </div>
         </div>
         <div class="user-filter-panel" id="userFilterPanel" hidden>
-          <label>来源 <select id="userScopeFilter"><option value="all">全部身份</option><option value="private">私聊用户</option><option value="group">群聊成员（即将支持）</option></select></label>
           <label>状态 <select id="userStatusFilter"><option value="all">全部状态</option><option value="enabled">已启用</option><option value="disabled">已停用</option></select></label>
           <span class="muted">筛选只影响左侧目录，不会改变用户数据。</span>
         </div>
         <div class="user-workspace">
           <aside class="user-roster" aria-label="用户目录">
             <div class="user-roster-head"><div><span class="eyebrow">PEOPLE</span><h3>成员目录</h3></div><span id="userRosterCount" class="count-pill">0</span></div>
+            <div class="user-directory-nav" role="tablist" aria-label="成员类型">
+              <button type="button" role="tab" aria-selected="true" data-directory-scope="private">私聊</button>
+              <button type="button" role="tab" aria-selected="false" data-directory-scope="group">群聊</button>
+            </div>
             <div id="userRows" class="user-roster-list"></div>
             <div class="user-roster-footer">
               <button type="button" class="secondary-button" id="addUserOpen">＋ 新增用户</button>
@@ -2148,6 +2151,6 @@ QQ空间 = 公开札记
   <!-- Loaded on demand by app.js through AstrBot's relative dynamic-import rewriting:
        ./js/panels/provider-tree.js?v=20260804-reading-archive-capability-v1&amp;manual=provider-input-v2&amp;layout=v2
        ./js/panels/qzone-panel.js?v=20260810-qzone-classic-loader-v1 -->
-  <script src="./app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2&amp;page=lazy-classic-loader-v1&amp;scope=photo-scope-quota-v1&amp;touch=reality-workspace-v4&amp;memory-source=memory-companion-v2&amp;user-create=profile-v1&amp;relationship-role-photo=pr125-v1&amp;camera-runtime-scope=v1&amp;config=multi-persona-summary-v2&amp;troubleshooting=diagnostic-category-label-v1&amp;content-visibility=v1&amp;migration-notice=v4&amp;component-order=v1&amp;layout=model-routing-v2&amp;persona-style-batch-recovery=v1&amp;preset-save=v1&amp;release=6.4.1"></script>
+  <script src="./app.js?v=20260809-proactive-tts-external-ability-photo-fixed-v1&amp;build=20260810-reference-upload-v2&amp;page=lazy-classic-loader-v1&amp;scope=photo-scope-quota-v1&amp;touch=reality-workspace-v4&amp;memory-source=memory-companion-v2&amp;user-create=profile-v1&amp;relationship-role-photo=pr125-v1&amp;camera-runtime-scope=v1&amp;config=multi-persona-summary-v2&amp;troubleshooting=diagnostic-category-label-v1&amp;content-visibility=v1&amp;migration-notice=v4&amp;component-order=v1&amp;layout=model-routing-v2&amp;persona-style-batch-recovery=v1&amp;preset-save=v1&amp;directory-nav=v2&amp;release=6.4.1"></script>
 </body>
 </html>

@@ -54,8 +54,12 @@ const state = {
   selectedUserId: "",
   userDetailCache: {},
   userDetailView: "overview",
-  userScopeFilter: "all",
+  userScopeFilter: "private",
   userStatusFilter: "all",
+  selectedDirectoryGroupId: "",
+  directoryGroupExpanded: false,
+  directoryGroupDetails: {},
+  selectedDirectoryMemberId: "",
   learningSection: "expressions",
   expressionWorkspaceView: "library",
   selectedExpressionReviewRuleId: "",
@@ -7107,7 +7111,9 @@ function applyUserGroupLists(users, groups) {
   state.users = Array.isArray(users?.items) ? users.items : [];
   state.groups = Array.isArray(groups?.items) ? groups.items : [];
   state.userGroupListError = "";
-  if (!state.selectedUserId && state.users[0]) state.selectedUserId = state.users[0].user_id;
+  if (!state.selectedUserId && state.users.find((user) => user.directory_scope !== "group")) {
+    state.selectedUserId = state.users.find((user) => user.directory_scope !== "group").user_id;
+  }
   if (!state.selectedGroupId && state.groups[0]) state.selectedGroupId = state.groups[0].group_id;
 }
 
@@ -15823,13 +15829,26 @@ function renderLearning() {
 
 function renderUsers() {
   const keyword = ($("#userFilter")?.value || "").trim().toLowerCase();
-  state.userScopeFilter = $("#userScopeFilter")?.value || state.userScopeFilter || "all";
+  state.userScopeFilter = state.userScopeFilter === "group" ? "group" : "private";
   state.userStatusFilter = $("#userStatusFilter")?.value || state.userStatusFilter || "all";
+  document.querySelectorAll("[data-directory-scope]").forEach((button) => {
+    const active = button.dataset.directoryScope === state.userScopeFilter;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  if (state.userScopeFilter === "group") {
+    $("#addUserOpen")?.setAttribute("hidden", "");
+    $("#aliasManageOpen")?.setAttribute("hidden", "");
+    renderGroupDirectory(keyword);
+    return;
+  }
+  $("#addUserOpen")?.removeAttribute("hidden");
+  $("#aliasManageOpen")?.removeAttribute("hidden");
   const rows = state.users.filter((user) => {
     const aliases = Array.isArray(user.alias_user_ids) ? user.alias_user_ids.join(" ") : "";
     const text = `${user.user_id} ${user.nickname} ${user.umo} ${aliases}`.toLowerCase();
     const matchesKeyword = !keyword || text.includes(keyword);
-    const matchesScope = state.userScopeFilter === "all" || state.userScopeFilter === "private";
+    const matchesScope = user.directory_scope !== "group";
     const matchesStatus = state.userStatusFilter === "all"
       || (state.userStatusFilter === "enabled" && user.proactive_private_enabled)
       || (state.userStatusFilter === "disabled" && !user.proactive_private_enabled);
@@ -15851,7 +15870,7 @@ function renderUsers() {
         </div>
       </article>
     `).join("")
-    : `<div class="user-roster-empty"><strong>${state.userScopeFilter === "group" ? "群聊成员即将接入" : "没有匹配的用户"}</strong><span>${state.userScopeFilter === "group" ? "目录结构已经预留，后续可以直接合并群成员数据。" : "尝试清除筛选条件或新增用户。"}</span></div>`;
+    : `<div class="user-roster-empty"><strong>没有匹配的私聊用户</strong><span>尝试清除筛选条件或切换到群聊目录。</span></div>`;
   document.querySelectorAll("[data-user-id]").forEach((row) => {
     row.addEventListener("click", async () => {
       state.selectedUserId = row.dataset.userId;
@@ -15866,6 +15885,98 @@ function renderUsers() {
     });
   });
   renderUserDetail();
+}
+
+function directoryMemberName(id, member) {
+  const item = member && typeof member === "object" ? member : {};
+  return String(item.identity_name || item.card || item.name || item.display_name || item.nickname || id || "未知成员").trim();
+}
+
+function renderGroupDirectory(keyword) {
+  const groups = (Array.isArray(state.groups) ? state.groups : []).filter((group) => {
+    const text = [group.group_id, group.name, group.group_name, group.display_name].join(" ").toLowerCase();
+    return !keyword || text.includes(keyword);
+  });
+  if (state.directoryGroupExpanded && !groups.some((group) => String(group.group_id) === String(state.selectedDirectoryGroupId))) {
+    state.selectedDirectoryGroupId = groups[0]?.group_id || "";
+    state.selectedDirectoryMemberId = "";
+  }
+  const selected = state.directoryGroupExpanded
+    ? groups.find((group) => String(group.group_id) === String(state.selectedDirectoryGroupId))
+    : null;
+  const detail = selected && state.directoryGroupDetails[String(state.selectedDirectoryGroupId)] || null;
+  const members = detail?.members && typeof detail.members === "object" ? detail.members : {};
+  const memberEntries = Object.entries(members)
+    .filter(([id, member]) => {
+      const text = `${id} ${directoryMemberName(id, member)}`.toLowerCase();
+      return !keyword || text.includes(keyword);
+    })
+    .sort(([leftId, left], [rightId, right]) => {
+      const leftCount = Number(left?.count || left?.message_count || 0);
+      const rightCount = Number(right?.count || right?.message_count || 0);
+      if (rightCount !== leftCount) return rightCount - leftCount;
+      const leftSeen = Number(left?.last_seen || left?.last_seen_ts || 0);
+      const rightSeen = Number(right?.last_seen || right?.last_seen_ts || 0);
+      if (rightSeen !== leftSeen) return rightSeen - leftSeen;
+      return directoryMemberName(leftId, left).localeCompare(directoryMemberName(rightId, right), "zh-CN");
+    });
+  const count = $("#userRosterCount");
+  if (count) count.textContent = selected ? `${memberEntries.length} 群友` : `${groups.length} 个群`;
+  $("#userRows").innerHTML = groups.length
+    ? groups.map((group) => {
+      const active = state.directoryGroupExpanded && String(group.group_id) === String(state.selectedDirectoryGroupId);
+      const groupDetail = state.directoryGroupDetails[String(group.group_id)];
+      const groupMembers = groupDetail?.members && typeof groupDetail.members === "object" ? groupDetail.members : {};
+      return `<article role="button" tabindex="0" data-directory-group-id="${escapeHtml(group.group_id)}" class="user-roster-item directory-group-item ${active ? "is-selected" : ""}" aria-current="${active ? "true" : "false"}">
+        <div class="user-avatar" aria-hidden="true">群</div><div class="user-roster-main"><div class="user-roster-name"><strong>${escapeHtml(groupDisplayName(group))}</strong></div><span class="user-roster-id mono">${escapeHtml(groupIdText(group))}</span><div class="user-roster-meta"><span>${Object.keys(groupMembers).length || group.member_count || 0} 位成员</span><span>${escapeHtml(group.last_seen || "暂无活跃")}</span></div></div><span class="directory-group-chevron" aria-hidden="true">${active ? "⌃" : "⌄"}</span>
+      </article>${active && detail ? `<div class="directory-member-list">${memberEntries.length ? memberEntries.map(([id, member]) => `<button type="button" data-directory-member-id="${escapeHtml(id)}" class="directory-member-row ${String(id) === String(state.selectedDirectoryMemberId) ? "is-selected" : ""}"><span class="user-avatar" aria-hidden="true">${escapeHtml(shortName(directoryMemberName(id, member), 2))}</span><span><strong>${escapeHtml(directoryMemberName(id, member))}</strong><small class="mono">${escapeHtml(id)}</small></span></button>`).join("") : `<div class="user-roster-empty"><strong>暂无群成员</strong><span>该群尚未记录可展示的成员。</span></div>`}</div>` : ""}`;
+    }).join("")
+    : `<div class="user-roster-empty"><strong>暂无群聊</strong><span>加载到群聊观测后会显示在这里。</span></div>`;
+  document.querySelectorAll("[data-directory-group-id]").forEach((row) => row.addEventListener("click", async () => {
+    const groupId = row.dataset.directoryGroupId;
+    const isExpandedGroup = state.directoryGroupExpanded && String(state.selectedDirectoryGroupId) === String(groupId);
+    if (isExpandedGroup) {
+      state.directoryGroupExpanded = false;
+      state.selectedDirectoryMemberId = "";
+      renderUsers();
+      return;
+    }
+    state.directoryGroupExpanded = true;
+    state.selectedDirectoryGroupId = groupId;
+    state.selectedDirectoryMemberId = "";
+    renderUsers();
+    if (!state.directoryGroupDetails[groupId]) {
+      try {
+        state.directoryGroupDetails[groupId] = await fetchJson(`/group?group_id=${encodeURIComponent(groupId)}`);
+        if (state.directoryGroupExpanded && String(state.selectedDirectoryGroupId) === String(groupId)) renderUsers();
+      } catch (error) {
+        showToast(`群成员读取失败：${error.message}`, "error");
+      }
+    }
+  }));
+  document.querySelectorAll("[data-directory-group-id]").forEach((row) => row.addEventListener("keydown", (event) => {
+    if (!["Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    row.click();
+  }));
+  document.querySelectorAll("[data-directory-member-id]").forEach((row) => row.addEventListener("click", (event) => {
+    event.stopPropagation();
+    state.selectedDirectoryMemberId = row.dataset.directoryMemberId;
+    renderUsers();
+  }));
+  renderDirectoryMemberDetail(detail, selected);
+}
+
+function renderDirectoryMemberDetail(detail, group) {
+  const box = $("#userDetail");
+  if (!box) return;
+  const member = detail?.members?.[state.selectedDirectoryMemberId];
+  if (!member || !group) {
+    box.innerHTML = `<div class="user-detail-empty"><span class="eyebrow">GROUP DIRECTORY</span><h3>选择一个群聊成员</h3><p>从左侧群聊导航中选择群，再查看群名片和互动资料。</p></div>`;
+    return;
+  }
+  const name = directoryMemberName(state.selectedDirectoryMemberId, member);
+  box.innerHTML = `<div class="user-detail-header"><div class="user-detail-identity"><div class="user-detail-avatar">${escapeHtml(shortName(name, 2))}</div><div><span class="eyebrow">群聊成员</span><h2>${escapeHtml(name)}</h2><p class="muted mono">${escapeHtml(state.selectedDirectoryMemberId)} · ${escapeHtml(groupDisplayName(group))}</p></div></div></div><div class="detail-grid"><section class="detail-card"><h3>成员资料</h3><dl class="definition-list"><div><dt>群名片</dt><dd>${escapeHtml(member.card || member.name || "未记录")}</dd></div><div><dt>显示昵称</dt><dd>${escapeHtml(member.display_name || member.nickname || "未记录")}</dd></div><div><dt>消息数</dt><dd>${escapeHtml(member.count || member.message_count || 0)}</dd></div></dl></section></div>`;
 }
 
 const RELATIONSHIP_INTERACTION_BANDS = [
@@ -39520,8 +39631,13 @@ $("#memoEditorForm")?.addEventListener("submit", async (event) => {
   }, state.memoEditorId ? "便签已更新" : "便签已保存", submit, { reload: false });
 });
 $("#userFilter").addEventListener("input", renderUsers);
-$("#userScopeFilter")?.addEventListener("change", renderUsers);
 $("#userStatusFilter")?.addEventListener("change", renderUsers);
+document.querySelectorAll("[data-directory-scope]").forEach((button) => {
+  button.addEventListener("click", () => {
+    state.userScopeFilter = button.dataset.directoryScope === "group" ? "group" : "private";
+    renderUsers();
+  });
+});
 $("#userFilterToggle")?.addEventListener("click", (event) => {
   const panel = $("#userFilterPanel");
   if (!panel) return;
