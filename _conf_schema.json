@@ -2623,6 +2623,12 @@
     "default": true,
     "invisible": true
   },
+  "intercept_astrbot_group_context": {
+    "description": "Legacy flat config: 拦截AstrBot群聊对话注入",
+    "type": "bool",
+    "default": true,
+    "invisible": true
+  },
   "enable_group_injection_guard": {
     "description": "Legacy flat config: 群聊防注入",
     "type": "bool",
@@ -2690,9 +2696,9 @@
     "invisible": true
   },
   "group_scene_recent_limit": {
-    "description": "Legacy flat config: 场景感知最近消息数",
+    "description": "Legacy flat config: 群聊上下文消息数",
     "type": "int",
-    "default": 5,
+    "default": 20,
     "invisible": true
   },
   "enable_group_reality_promise_guard": {
@@ -8544,6 +8550,15 @@
           "enable_group_companion": true
         }
       },
+      "intercept_astrbot_group_context": {
+        "description": "拦截AstrBot群聊对话注入",
+        "type": "bool",
+        "hint": "开启后，插件成功注入群上下文后拦截 AstrBot 会话历史和官方群聊 ICL，防止相同的群聊上下文被重复注入。",
+        "default": true,
+        "condition": {
+          "enable_group_context_injection": true
+        }
+      },
       "enable_group_image_understanding": {
         "description": "群聊图片理解增强",
         "type": "bool",
@@ -8729,17 +8744,17 @@
         }
       },
       "group_scene_recent_limit": {
-        "description": "场景感知最近消息数",
+        "description": "群聊上下文消息数",
         "type": "int",
-        "hint": "scene 中 recent_flow 最多包含多少条最近群聊消息。越大越清楚，但会增加上下文长度。",
+        "hint": "主对话 LLM 每轮注入的合并群聊时间线最多包含多少条用户与 Bot 消息。实际不会超过群聊最近消息保留数，并继续受字符预算限制。",
         "slider": {
           "min": 2,
-          "max": 12,
+          "max": 100,
           "step": 1
         },
-        "default": 5,
+        "default": 20,
         "condition": {
-          "enable_group_scene_awareness": true
+          "enable_group_context_injection": true
         }
       },
       "enable_group_reality_promise_guard": {

@@ -1583,6 +1583,7 @@ class CoreStoreMixin:
         if not isinstance(groups, dict):
             return {}
         removed_messages = 0
+        removed_bot_replies = 0
         removed_phrases = 0
         for group in groups.values():
             if not isinstance(group, dict):
@@ -1597,6 +1598,13 @@ class CoreStoreMixin:
                     item.pop("image_vision", None)
                 removed_messages += max(0, len(recent) - len(keep))
                 group["recent_messages"] = keep
+            recent_bot = group.get("recent_bot_replies")
+            if isinstance(recent_bot, list) and recent_bot:
+                keep_bot = [item for item in recent_bot[-12:] if isinstance(item, dict)]
+                for item in keep_bot:
+                    item["text"] = _single_line(item.get("text"), 500)
+                removed_bot_replies += max(0, len(recent_bot) - len(keep_bot))
+                group["recent_bot_replies"] = keep_bot
             members = group.get("members")
             if not isinstance(members, dict):
                 continue
@@ -1611,6 +1619,8 @@ class CoreStoreMixin:
         changed: dict[str, int] = {}
         if removed_messages:
             changed["group_recent_messages"] = removed_messages
+        if removed_bot_replies:
+            changed["group_recent_bot_replies"] = removed_bot_replies
         if removed_phrases:
             changed["group_member_recent_phrases"] = removed_phrases
         return changed
@@ -1946,8 +1956,8 @@ class CoreStoreMixin:
         self._compact_store_history_inplace(data)
         if manager is not None:
             with self._data_save_io_lock():
-                manager.save_snapshot(data)
                 if getattr(self, "storage_backend", "json") == "sqlite":
+                    manager.save_snapshot(data)
                     try:
                         mirror = deepcopy(data)
                         self._strip_ephemeral_group_transcripts_inplace(mirror)
@@ -1957,6 +1967,14 @@ class CoreStoreMixin:
                             "[PrivateCompanion] SQLite 快照镜像 JSON 写出失败: %s",
                             _single_line(exc, 160),
                         )
+                else:
+                    # The primary JSON is a restart-compatible projection. Keep
+                    # the full in-memory window for the live process, but write
+                    # only its bounded tail. Secondary persona SQLite stores
+                    # never pass through this primary projection path.
+                    mirror = deepcopy(data)
+                    self._strip_ephemeral_group_transcripts_inplace(mirror)
+                    manager.save_snapshot(mirror)
                 self._refresh_data_save_revision_from_manager()
                 if advance_generation:
                     self._advance_data_save_write_generation()
@@ -2637,7 +2655,9 @@ class CoreStoreMixin:
                     if batch["write_generation"] != self._current_data_save_write_generation():
                         superseded = True
                     elif manager is not None:
-                        manager.save_snapshot(snapshot)
+                        primary_snapshot = deepcopy(snapshot)
+                        self._strip_ephemeral_group_transcripts_inplace(primary_snapshot)
+                        manager.save_snapshot(primary_snapshot)
                     else:
                         # Keep the compatibility path behind the overridable
                         # snapshot writer used by JSON/test harnesses.
@@ -3587,6 +3607,7 @@ class CoreStoreMixin:
             "topic_threads": ("signature", "topic_id", "id"),
             "slang_terms": ("term", "text", "id"),
             "recent_messages": ("message_id", "id"),
+            "recent_bot_replies": ("message_id", "delivery_id", "id"),
             "pending_atrelay_tasks": ("task_id", "id"),
             "group_wakeup_logs": ("trace_id", "id"),
         }.get(field, ("id", "event_id", "trace_id"))
@@ -3600,6 +3621,14 @@ class CoreStoreMixin:
                 "message",
                 str(item.get("ts") or ""),
                 str(item.get("sender_id") or ""),
+                str(item.get("text") or ""),
+            )
+        if field == "recent_bot_replies":
+            return (
+                "bot_message",
+                str(item.get("ts") or ""),
+                str(item.get("reply_to_id") or item.get("sender_id") or ""),
+                str(item.get("kind") or ""),
                 str(item.get("text") or ""),
             )
         try:
