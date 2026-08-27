@@ -112,3 +112,18 @@ def test_reality_feature_flag_uses_external_plugin_state() -> None:
     api._screen_companion_available = lambda: False
 
     assert api._feature_flags()["enable_experimental_bluetooth_wakeup"] is True
+
+
+def test_reality_mihome_snapshot_compatibility_normalizes_legacy_action_payload() -> None:
+    legacy = {
+        "mihome": {
+            "auth": {"logged_in": False},
+            "login": {"status": "starting"},
+        }
+    }
+    normalized = PrivateCompanionPageApi._normalize_reality_touch_snapshot(legacy)
+
+    assert normalized["mihome"]["available"] is True
+
+    unavailable = {"mihome": {"available": False, "auth": {}}}
+    assert PrivateCompanionPageApi._normalize_reality_touch_snapshot(unavailable)["mihome"]["available"] is False

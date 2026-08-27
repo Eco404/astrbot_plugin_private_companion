@@ -10848,9 +10848,11 @@ class DailyStateMixin(DailyStateTickMixin):
                 try:
                     specific_getter = getattr(manager, "get_persona", None)
                     if callable(specific_getter):
-                        result = specific_getter(specific_id)
-                        if inspect.isawaitable(result):
-                            result = await asyncio.wait_for(result, timeout=2.0)
+                        result = await self._await_framework_db_query(
+                            f"persona:{specific_id}",
+                            lambda: specific_getter(specific_id),
+                            timeout=2.0,
+                        )
                         prompt = self._extract_default_persona_prompt(result)
                         if prompt:
                             return self._store_persona_prompt_for_scope(prompt, umo=umo, specific_id=specific_id)
@@ -10877,15 +10879,20 @@ class DailyStateMixin(DailyStateTickMixin):
             getter = getattr(manager, "get_default_persona_v3", None) if manager else None
             if not callable(getter):
                 return cached or self._get_default_persona_prompt(umo)
-            try:
-                result = getter(umo=umo)
-            except TypeError:
+            def _read_default_persona() -> Any:
                 try:
-                    result = getter(umo)
+                    return getter(umo=umo)
                 except TypeError:
-                    result = getter()
-            if inspect.isawaitable(result):
-                result = await asyncio.wait_for(result, timeout=2.0)
+                    try:
+                        return getter(umo)
+                    except TypeError:
+                        return getter()
+
+            result = await self._await_framework_db_query(
+                f"default_persona:{umo}",
+                _read_default_persona,
+                timeout=2.0,
+            )
             prompt = self._extract_default_persona_prompt(result)
             if prompt:
                 return self._store_persona_prompt_for_scope(prompt, umo=umo, specific_id="")
@@ -10903,6 +10910,39 @@ class DailyStateMixin(DailyStateTickMixin):
         except Exception as e:
             logger.warning(f"[PrivateCompanion] 读取 AstrBot 默认人格失败: {e}")
         return self._get_default_persona_prompt(umo)
+
+    async def _await_framework_db_query(
+        self,
+        key: str,
+        factory: Any,
+        *,
+        timeout: float,
+    ) -> Any:
+        """Bound a core DB read without cancelling its aiosqlite connection."""
+        tasks = getattr(self, "_framework_db_query_tasks", None)
+        if not isinstance(tasks, dict):
+            tasks = {}
+            self._framework_db_query_tasks = tasks
+        task = tasks.get(key)
+        if not isinstance(task, asyncio.Task) or task.done():
+            result = factory()
+            if not inspect.isawaitable(result):
+                return result
+            task = asyncio.create_task(result, name=f"private-companion-db:{key[:80]}")
+            tasks[key] = task
+
+            def _cleanup(done: asyncio.Task, *, query_key: str = key) -> None:
+                if tasks.get(query_key) is done:
+                    tasks.pop(query_key, None)
+                if done.cancelled():
+                    return
+                try:
+                    done.exception()
+                except Exception:
+                    pass
+
+            task.add_done_callback(_cleanup)
+        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
 
     def _schedule_default_persona_prompt_refresh(self, umo: str = "") -> None:
         specific_id = str(getattr(self, "_effective_plugin_persona_id", lambda: getattr(self, "plugin_specific_persona_id", ""))() or "").strip()

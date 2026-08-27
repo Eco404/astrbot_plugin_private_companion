@@ -34447,7 +34447,7 @@ function renderRealityTouchHomeHealthPanel() {
   const userOptions = Array.from(userMap.values()).map((item) => `<option value="${escapeHtml(item.user_id || "")}" ${String(item.user_id) === String(selectedId) ? "selected" : ""}>${escapeHtml(item.label || item.user_id || "未命名用户")}</option>`).join("");
   const actionResult = data.action_result && typeof data.action_result === "object" ? data.action_result : null;
   const mihome = data.mihome && typeof data.mihome === "object" ? data.mihome : {};
-  const mihomeAvailable = mihome.available === true;
+  const mihomeAvailable = mihome.available === true || (mihome.available !== false && ["auth", "login", "devices", "mappings", "tool_settings"].some((key) => Object.prototype.hasOwnProperty.call(mihome, key)));
   const mihomeAuth = mihome.auth && typeof mihome.auth === "object" ? mihome.auth : {};
   const mihomeLogin = mihome.login && typeof mihome.login === "object" ? mihome.login : {};
   const mihomeLoginDetail = String(

@@ -66,7 +66,6 @@ from astrbot.core.platform.platform import PlatformStatus
 from astrbot.core.platform.platform_metadata import PlatformMetadata
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
 from astrbot.core.provider.entities import LLMResponse
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 try:
     import chinese_calendar as calendar_cn
@@ -5243,22 +5242,39 @@ class PrivateCompanionPlugin(
         }
 
     def _sqlite_wal_candidate_paths(self) -> list[Path]:
-        data_root = Path(get_astrbot_data_path())
-        candidates = [
-            data_root / "data_v4.db",
-            data_root / "plugin_data" / "astrbot_plugin_livingmemory" / "conversations.db",
-            data_root / "plugin_data" / "astrbot_plugin_livingmemory" / "livingmemory.db",
-            data_root / "plugin_data" / "astrbot_plugin_livingmemory" / "livingmemory_graph_documents.db",
-            data_root / "knowledge_base" / "kb.db",
-        ]
-        effective_store = Path(
-            str(getattr(self, "storage_sqlite_effective_path", "") or "")
-        )
-        if effective_store:
-            candidates.append(effective_store)
-        profiles_dir = Path(str(getattr(self, "_persona_profiles_dir", "") or ""))
-        if profiles_dir.is_dir():
+        # AstrBot 4.27.x configures its own database and knowledge-base engines.
+        # A plugin must not change PRAGMAs for those shared connections: doing so
+        # races the async pool and the 4.27.4 synchronous preference reader.
+        candidates: list[Path] = []
+        effective_store_text = str(
+            getattr(self, "storage_sqlite_effective_path", "") or ""
+        ).strip()
+        if effective_store_text:
+            candidates.append(Path(effective_store_text))
+        profiles_dir_text = str(getattr(self, "_persona_profiles_dir", "") or "").strip()
+        profiles_dir = Path(profiles_dir_text) if profiles_dir_text else None
+        if profiles_dir is not None and profiles_dir.is_dir():
             candidates.extend(sorted(profiles_dir.glob("*.db")))
+        data_dir_text = str(getattr(self, "data_dir", "") or "").strip()
+        protected: set[str] = set()
+        if data_dir_text:
+            data_root = Path(data_dir_text).resolve().parent.parent
+            protected.update(
+                {
+                    str((data_root / "data_v4.db").resolve()),
+                    str((data_root / "knowledge_base" / "kb.db").resolve()),
+                }
+            )
+            plugin_data = data_root / "plugin_data"
+            if plugin_data.is_dir():
+                protected.update(
+                    str(path.resolve())
+                    for path in plugin_data.glob("astrbot_plugin_*/**/*.db")
+                    if path.is_file()
+                    and not str(path.resolve()).startswith(
+                        str(Path(data_dir_text).resolve()) + "\\"
+                    )
+                )
         seen: set[str] = set()
         paths: list[Path] = []
         for path in candidates:
@@ -5266,7 +5282,7 @@ class PrivateCompanionPlugin(
                 resolved = str(path.resolve())
             except Exception:
                 resolved = str(path)
-            if resolved in seen or not path.exists() or not path.is_file():
+            if resolved in seen or resolved in protected or not path.exists() or not path.is_file():
                 continue
             seen.add(resolved)
             paths.append(path)
@@ -5285,95 +5301,6 @@ class PrivateCompanionPlugin(
         finally:
             conn.close()
 
-    def _apply_sqlite_pragmas_to_dbapi_connection(self, dbapi_connection: Any) -> None:
-        try:
-            cursor = dbapi_connection.cursor()
-            try:
-                cursor.execute("PRAGMA busy_timeout=15000")
-                cursor.execute("PRAGMA journal_mode=WAL")
-                cursor.execute("PRAGMA synchronous=NORMAL")
-                cursor.execute("PRAGMA wal_autocheckpoint=1000")
-            finally:
-                cursor.close()
-        except Exception:
-            try:
-                dbapi_connection.execute("PRAGMA busy_timeout=15000")
-                dbapi_connection.execute("PRAGMA journal_mode=WAL")
-                dbapi_connection.execute("PRAGMA synchronous=NORMAL")
-                dbapi_connection.execute("PRAGMA wal_autocheckpoint=1000")
-            except Exception:
-                pass
-
-    def _iter_possible_sqlalchemy_engines(self) -> list[Any]:
-        roots = [
-            getattr(self, "context", None),
-            getattr(getattr(self, "context", None), "conversation_manager", None),
-        ]
-        engines: list[Any] = []
-        seen_objects: set[int] = set()
-
-        def _visit(obj: Any, depth: int = 0) -> None:
-            if obj is None or depth > 3:
-                return
-            obj_id = id(obj)
-            if obj_id in seen_objects:
-                return
-            seen_objects.add(obj_id)
-            cls_name = obj.__class__.__name__.lower()
-            module_name = str(getattr(obj.__class__, "__module__", "")).lower()
-            if "sqlalchemy" in module_name and "engine" in cls_name:
-                engines.append(obj)
-            for attr in (
-                "engine", "_engine", "async_engine", "_async_engine", "sync_engine",
-                "db", "_db", "store", "_store", "session_maker", "_session_maker",
-                "conversation_manager",
-            ):
-                try:
-                    child = getattr(obj, attr, None)
-                except Exception:
-                    continue
-                if child is not None and child is not obj:
-                    _visit(child, depth + 1)
-
-        for root in roots:
-            _visit(root)
-        unique: list[Any] = []
-        seen_engines: set[int] = set()
-        for engine in engines:
-            target = getattr(engine, "sync_engine", engine)
-            if id(target) in seen_engines:
-                continue
-            seen_engines.add(id(target))
-            unique.append(target)
-        return unique
-
-    def _install_sqlite_wal_engine_hooks(self) -> int:
-        try:
-            from sqlalchemy import event as sqlalchemy_event
-        except Exception:
-            return 0
-        installed = 0
-        for engine in self._iter_possible_sqlalchemy_engines():
-            if bool(getattr(engine, "_private_companion_sqlite_wal_hooked", False)):
-                continue
-            try:
-                url = str(getattr(engine, "url", "") or "").lower()
-                if url and "sqlite" not in url:
-                    continue
-            except Exception:
-                pass
-
-            def _on_connect(dbapi_connection, _connection_record, plugin_self=self):
-                plugin_self._apply_sqlite_pragmas_to_dbapi_connection(dbapi_connection)
-
-            try:
-                sqlalchemy_event.listen(engine, "connect", _on_connect)
-                setattr(engine, "_private_companion_sqlite_wal_hooked", True)
-                installed += 1
-            except Exception as exc:
-                logger.debug("[PrivateCompanion] SQLite WAL engine hook 安装失败: %s", _single_line(exc, 120))
-        return installed
-
     async def _apply_sqlite_wal_optimizations(self) -> None:
         applied: list[str] = []
         failed: list[str] = []
@@ -5383,12 +5310,10 @@ class PrivateCompanionPlugin(
                 applied.append(f"{path.name}:{mode or 'unknown'}")
             except Exception as exc:
                 failed.append(f"{path.name}:{_single_line(exc, 80)}")
-        hooks = self._install_sqlite_wal_engine_hooks()
-        if applied or hooks:
+        if applied:
             logger.info(
-                "[PrivateCompanion] SQLite WAL 并发优化已应用: files=%s engine_hooks=%s",
-                "，".join(applied) or "无",
-                hooks,
+                "[PrivateCompanion] 插件自有 SQLite WAL 优化已应用: files=%s",
+                "，".join(applied),
             )
         if failed:
             logger.warning("[PrivateCompanion] SQLite WAL 并发优化部分失败: %s", "；".join(failed))
@@ -10751,7 +10676,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "日常对话、聊天 等需要短句输出的情景鼓励经常使用；"
             "长文、教程、代码 等连续性较高的表述尽量少用分段。"
             f"\n使用方法：需要分段时必须完整输出 {LLM_SEGMENT_MARKER}，并让它单独占一行，不能添加引号，也不能把它放进代码块。"
-            f"\n示例：\"第一段发送内容\n{LLM_SEGMENT_MARKER}\n第二段发送内容\n{LLM_SEGMENT_MARKER}\n第三段发送内容\""
+            f"\n示例：第一段内容\n{LLM_SEGMENT_MARKER}\n第二段内容（仅在确有必要时使用）。"
         )
 
     @filter.on_llm_request(priority=-253000)
