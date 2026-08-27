@@ -340,6 +340,8 @@ def _initialize_core_and_relationship_config(self: Any, c: Any) -> None:
         self._cfg_str(c, "proactive_intensity_preset", "off", "off")
     )
     self.proactive_preempt_queue_enabled = self._cfg_bool(c, "proactive_preempt_queue_enabled", False)
+    self.proactive_preempt_queue_expire_hours = self._cfg_int(c, "proactive_preempt_queue_expire_hours", 2, 1, 24)
+    self.proactive_share_priority = self._cfg_int(c, "proactive_share_priority", 48, 0, 100)
     self.enable_experimental_motivation_model = self._cfg_bool(c, "enable_experimental_motivation_model", False)
     self.check_interval_seconds = self._cfg_int(c, "check_interval_seconds", 60, 30)
     self.idle_minutes = self._cfg_int(c, "idle_minutes", 60, 5)

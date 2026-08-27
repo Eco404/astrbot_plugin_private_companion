@@ -1133,6 +1133,24 @@ class ProactiveEngineMixin:
             priority = max(priority, 72)
         elif reason == "quiet_care":
             priority = max(priority, 74)
+        # 外部分享类（content_share 路线）优先级可配：默认 48 与硬编码一致，
+        # 调高后（如 72~78 与饭点关心同档）这类内容在活跃时段更容易被选中发出，
+        # 但仍受免打扰/冷却/日上限等闸门约束。
+        if reason in {
+            "news_share",
+            "bili_video_share",
+            "web_exploration_share",
+            "creative_share",
+            "group_share",
+            "reading_archive_recommendation_request",
+            "game_invite",
+        }:
+            priority = _safe_int(
+                runtime_persona_setting(self, "proactive_share_priority", 48),
+                48,
+                0,
+                100,
+            )
         return priority
 
     def _proactive_impulse_content_signature(self, impulse: dict[str, Any]) -> str:
@@ -3759,9 +3777,16 @@ class ProactiveEngineMixin:
                         queued_impulse["state"] = "deferred"
                         queued_impulse["last_note"] = "已有更早主动候选，挤占入池排队"
                         queued_impulse["updated_ts"] = now
-                        # 入池时把窗口整体后移：保证 expire_at 至少到入池时刻 +2h，
+                        # 入池时把窗口整体后移：保证 expire_at 至少到入池时刻 +
+                        # 配置小时数（proactive_preempt_queue_expire_hours，默认 2h），
                         # 避免排队等待期间窗口过期被 _cleanup_proactive_impulses 清掉。
-                        min_expire = now + 2 * 3600
+                        preempt_expire_hours = _safe_int(
+                            runtime_persona_setting(self, "proactive_preempt_queue_expire_hours", 2),
+                            2,
+                            1,
+                            24,
+                        )
+                        min_expire = now + preempt_expire_hours * 3600
                         shift = max(0.0, min_expire - _safe_float(queued_impulse.get("expire_at"), 0))
                         if shift > 0:
                             for key in ("window_start_at", "preferred_ts", "best_until_at", "expire_at"):
