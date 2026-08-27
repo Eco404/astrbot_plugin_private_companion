@@ -19,6 +19,7 @@ from astrbot.core.star.star_handler import EventType, star_handlers_registry
 
 from .helpers import (
     _format_history_media_marker,
+    _has_history_media_marker,
     _now_ts,
     _safe_float,
     _single_line,
@@ -782,6 +783,31 @@ class FinalResponsePersistenceMixin:
         # chat clients. Keep internal metadata out of that user-visible field.
         visible_response_text = _strip_outbound_control_blocks(response_text)
         message = getattr(event, "_private_companion_official_assistant_message", None)
+        if (
+            not visible_response_text
+            and _has_history_media_marker(response_text)
+            and message is not None
+            and str(getattr(message, "role", "") or "") == "assistant"
+            and self._message_content_text(message)
+        ):
+            try:
+                # A late decorator may replace the visible model text with a
+                # pure media chain. Preserve the original assistant text in
+                # AstrBot history instead of leaking the internal media marker
+                # or leaving the takeover flag stuck on the message.
+                message._no_save = False
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanion] 纯媒体回复恢复 AstrBot 核心保存失败: session=%s error=%s",
+                    _single_line(getattr(event, "unified_msg_origin", ""), 140),
+                    _single_line(exc, 160),
+                )
+                return False
+            logger.info(
+                "[PrivateCompanion] 纯媒体回复已保留转码前正文供 AstrBot 核心保存: %s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 140),
+            )
+            return True
         if (
             not visible_response_text
             or message is None

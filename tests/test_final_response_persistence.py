@@ -343,6 +343,45 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("实际发送的图片说明", archived)
         self.assertNotIn("pc_history_media", archived)
 
+    async def test_pure_image_restores_original_assistant_for_core_history(self):
+        harness = _Harness()
+        event = _Event()
+        run_context = SimpleNamespace(
+            messages=[
+                Message(role="user", content=[TextPart(text="请解释一下")]),
+                Message(
+                    role="assistant",
+                    content=[TextPart(text="这是稍后会被转成图片的 Markdown 正文")],
+                ),
+            ]
+        )
+        harness._prepare_final_response_persistence(
+            event,
+            run_context,
+            LLMResponse(
+                role="assistant",
+                completion_text="这是稍后会被转成图片的 Markdown 正文",
+            ),
+        )
+        assistant = run_context.messages[-1]
+        self.assertTrue(assistant._no_save)
+
+        written = await harness._finalize_passive_delivered_response(
+            event,
+            chain=[Image(file="rendered-markdown.png")],
+        )
+
+        self.assertTrue(written)
+        self.assertFalse(assistant._no_save)
+        self.assertEqual(
+            "这是稍后会被转成图片的 Markdown 正文",
+            harness._message_content_text(assistant),
+        )
+        self.assertNotIn(
+            "pc_history_media",
+            harness._message_content_text(assistant),
+        )
+
     async def test_proactive_official_history_hides_internal_media_marker(self):
         harness = _Harness()
         internal_text = harness._build_proactive_archive_assistant_text(
