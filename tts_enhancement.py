@@ -487,6 +487,9 @@ class TtsEnhancementMixin:
         ) / 100.0
         self.tts_private_trigger_probability = self._cfg_int(config, "tts_private_trigger_probability", -1, -1, 100) / 100.0
         self.tts_group_trigger_probability = self._cfg_int(config, "tts_group_trigger_probability", -1, -1, 100) / 100.0
+        self.tts_trigger_keywords = self._normalize_tts_trigger_keywords(
+            self._cfg_raw(config, "tts_trigger_keywords", "")
+        )
         self.auto_voice_enabled = self._cfg_bool(config, "auto_voice_enabled", self._cfg_bool(config, "auto_japanese_voice_enabled", False))
         legacy_full_conversion = self._cfg_bool(
             config,
@@ -1886,6 +1889,43 @@ class TtsEnhancementMixin:
     def _event_explicitly_requests_tts(self, event: Any) -> bool:
         return self._event_tts_request_signal(event)[0] == "positive"
 
+    def _normalize_tts_trigger_keywords(self, raw: Any) -> tuple[str, ...]:
+        """Normalize the optional keyword list used to opt a turn into TTS."""
+        if isinstance(raw, (list, tuple, set)):
+            values = raw
+        else:
+            values = re.split(r"[,，;；\n\r]+", str(raw or ""))
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            keyword = str(value or "").strip()
+            if not keyword:
+                continue
+            folded = keyword.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            normalized.append(keyword[:80])
+            if len(normalized) >= 50:
+                break
+        return tuple(normalized)
+
+    def _event_tts_keyword_match(self, event: Any) -> str:
+        if event is None:
+            return ""
+        text = str(getattr(event, "message_str", "") or "")
+        if not text:
+            return ""
+        configured = self._tts_setting("tts_trigger_keywords", None)
+        keywords = self._normalize_tts_trigger_keywords(
+            configured if configured is not None else getattr(self, "tts_trigger_keywords", "")
+        )
+        folded_text = text.casefold()
+        for keyword in keywords:
+            if keyword.casefold() in folded_text:
+                return keyword
+        return ""
+
     def _tts_functional_command_reason(self, event: Any) -> str:
         """Identify command turns whose functional output should stay readable by default."""
         if event is None:
@@ -1947,6 +1987,9 @@ class TtsEnhancementMixin:
             match = re.search(pattern, compact, flags=re.IGNORECASE)
             if match:
                 return "negative", _single_line(match.group(0), 80), raw_text
+        keyword_match = self._event_tts_keyword_match(event)
+        if keyword_match:
+            return "positive", f"keyword:{_single_line(keyword_match, 80)}", raw_text
         positive_patterns = (
             r"^(?:听|听听|听一下|想听|想听听|想听一下)(?:你|妳|你的|妳的)?(?:声音|声|语音)$",
             r"(用|发|来|回|回复|说|讲).{0,10}(语音|tts|朗读|念出来|读出来)",
@@ -2326,6 +2369,13 @@ TTS 朗读文本：
         foreign_text_mode = self._tts_setting("tts_foreign_text_mode", "translation")
         conversion_scope = self._tts_setting("tts_conversion_scope", "partial")
         full_scope = conversion_scope == "full"
+        tts_signal, tts_signal_match, _ = self._event_tts_request_signal(event)
+        keyword_rule = (
+            f"用户消息命中已配置的 TTS 关键词（{_single_line(tts_signal_match[8:], 80)}）；本轮按语音请求处理，"
+            "请在回复中使用符合下方格式的语音块，同时保持内容适合朗读。"
+            if tts_signal == "positive" and tts_signal_match.startswith("keyword:")
+            else ""
+        )
         supports_emotion = self._tts_provider_allows_emotion_tags(provider_kind)
         auto_emotion = supports_emotion and not (
             provider_kind.startswith("fishaudio") and self._fishaudio_emotion_mode() == "manual"
@@ -2423,6 +2473,7 @@ TTS 朗读文本：
                 )
                 else ""
             ),
+            keyword_rule,
             first_rule,
             scope_rule,
             "自动语音概率命中只表示本轮可以考虑语音，不表示必须使用语音。功能性回复默认保持纯文字，包括指令执行结果、帮助或菜单、配置或状态、查询结果、报错或权限说明、清单、教程、代码以及主要由卡片或图片承载的结果；只有用户明确要求语音或朗读，或回复本身主要是适合听见的自然角色表达时，才考虑语音。",

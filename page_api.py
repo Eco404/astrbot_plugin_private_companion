@@ -374,10 +374,75 @@ class PrivateCompanionPageApi(
     }
     PERSONALITY_AUTO_TUNE_RECOVERY_STREAK = 3
     PERSONALITY_AUTO_TUNE_RECOVERY_MIN_SECONDS = 5 * 60
+    TROUBLESHOOTING_PROACTIVE_SUMMARY_CACHE_SECONDS = 20.0
 
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self._schema_key_index_cache: dict[str, Any] | None = None
+        self._troubleshooting_proactive_summary_lock: asyncio.Lock | None = None
+        self._troubleshooting_proactive_summary_cache: dict[str, Any] | None = None
+        self._troubleshooting_proactive_summary_cached_at = 0.0
+
+    def _troubleshooting_summary_lock(self) -> asyncio.Lock:
+        lock = self._troubleshooting_proactive_summary_lock
+        if lock is None:
+            lock = asyncio.Lock()
+            self._troubleshooting_proactive_summary_lock = lock
+        return lock
+
+    async def _cached_troubleshooting_proactive_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        now = time.monotonic()
+        cache = self._troubleshooting_proactive_summary_cache
+        ttl = max(1.0, float(self.TROUBLESHOOTING_PROACTIVE_SUMMARY_CACHE_SECONDS))
+        if cache is not None and now - self._troubleshooting_proactive_summary_cached_at < ttl:
+            return deepcopy(cache)
+        lock = self._troubleshooting_summary_lock()
+        # A diagnostics request must never queue behind a slow SQLite snapshot
+        # build when a last-good response is available.
+        if lock.locked() and cache is not None:
+            return deepcopy(cache)
+        async with lock:
+            now = time.monotonic()
+            cache = self._troubleshooting_proactive_summary_cache
+            if cache is not None and now - self._troubleshooting_proactive_summary_cached_at < ttl:
+                return deepcopy(cache)
+            try:
+                result = await asyncio.to_thread(self._build_troubleshooting_proactive_summary, data)
+            except Exception as exc:
+                if cache is not None:
+                    logger.warning("[PrivateCompanionPage] 排障主动摘要刷新失败，返回最近成功缓存: %s", exc)
+                    return deepcopy(cache)
+                raise
+            self._troubleshooting_proactive_summary_cache = deepcopy(result)
+            self._troubleshooting_proactive_summary_cached_at = time.monotonic()
+            return result
+
+    def _build_troubleshooting_proactive_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        users = data.get("users") if isinstance(data.get("users"), dict) else {}
+        # Resolve each relationship snapshot once for this request.  The marker
+        # is request-local and lets downstream summary helpers reuse it without
+        # opening another synchronous REQ-041 SQLite transaction.
+        resolved_users: dict[str, Any] = {}
+        for user_id, raw_user in users.items():
+            if not isinstance(raw_user, dict):
+                resolved_users[user_id] = raw_user
+                continue
+            user = dict(raw_user)
+            try:
+                snapshot_getter = getattr(self.plugin, "_req041_relationship_snapshot_view", None)
+                snapshot = snapshot_getter(
+                    user,
+                    source="troubleshooting_summary",
+                ) if callable(snapshot_getter) else user
+                if isinstance(snapshot, dict):
+                    user = dict(snapshot)
+            except Exception:
+                user = dict(raw_user)
+            user["_req041_relationship_snapshot_resolved"] = True
+            resolved_users[user_id] = user
+        scoped = dict(data)
+        scoped["users"] = resolved_users
+        return self._proactive_task_summary(scoped)
 
     @staticmethod
     def _p4_page_status_projection() -> dict[str, Any]:
@@ -6149,7 +6214,7 @@ class PrivateCompanionPageApi(
                 all_diagnostics.append(tune_item)
             all_diagnostics = self._troubleshooting_diagnostics_with_types(all_diagnostics)
             diagnostics = self._filter_suppressed_troubleshooting_warnings(all_diagnostics, suppressed_keys)
-            proactive_tasks = self._proactive_task_summary(data)
+            proactive_tasks = await self._cached_troubleshooting_proactive_summary(data)
             proactive_candidates = self._proactive_candidate_summary(data)
             token_stats = self._token_stats_payload(data.get("token_usage", {}))
             cache = self._cache_summary(data)
@@ -22054,6 +22119,7 @@ class PrivateCompanionPageApi(
             "tts_conversion_scope",
             "tts_conversion_provider_id",
             "tts_extra_prompt",
+            "tts_trigger_keywords",
             "tts_frequency_control_mode",
             "tts_constraint_mode",
             "tts_session_min_interval_seconds",
@@ -24520,6 +24586,7 @@ class PrivateCompanionPageApi(
             "tts_conversion_scope",
             "tts_conversion_provider_id",
             "tts_extra_prompt",
+            "tts_trigger_keywords",
             "tts_frequency_control_mode",
             "tts_constraint_mode",
             "tts_session_min_interval_seconds",
@@ -25324,6 +25391,7 @@ class PrivateCompanionPageApi(
             "tts_conversion_scope",
             "tts_conversion_provider_id",
             "tts_extra_prompt",
+            "tts_trigger_keywords",
             "tts_frequency_control_mode",
             "tts_constraint_mode",
             "tts_session_min_interval_seconds",

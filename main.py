@@ -6792,6 +6792,8 @@ class PrivateCompanionPlugin(
         """Take one short-lived private relationship view for background decisions."""
         if not isinstance(user, dict):
             return user
+        if user.get("_req041_relationship_snapshot_resolved") is True:
+            return user
         relationship_view = user
         router = getattr(self, "req041_relationship_read_router", None)
         if router is not None and user.get("req041_read_generation") != "new":
@@ -13222,6 +13224,73 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return
         logger.info(
             "[PrivateCompanion] 已清理请求历史里的插件动态注入残留: session=%s contexts_changed=%s",
+            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            changed,
+        )
+
+    def _neutralize_stale_reaction_feedback_in_history(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+    ) -> None:
+        """Remove leaked internal reaction tags from provider history.
+
+        Reaction-expression tags are transport metadata, not conversation text.
+        A failed/older response may leave them in ``req.contexts``; stripping
+        only those tags keeps the surrounding user feedback intact and avoids
+        teaching the model to emit the internal protocol on a later turn.
+        """
+        contexts = getattr(req, "contexts", None)
+        if not isinstance(contexts, list) or not contexts:
+            return
+        tag_pattern = re.compile(
+            r"(?:<|&lt;|\\<)\s*/?\s*pc[_-]?reaction[_-]?expression\b[^>]*?(?:>|&gt;|\\>)"
+            r".*?"
+            r"(?:<|&lt;|\\<)\s*/\s*pc[_-]?reaction[_-]?expression\s*(?:>|&gt;|\\>)",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        changed = 0
+
+        def clean(value: Any) -> tuple[Any, bool]:
+            if isinstance(value, str):
+                updated = tag_pattern.sub("", value)
+                updated = re.sub(r"\n{3,}", "\n\n", updated).strip()
+                return updated, updated != value
+            if isinstance(value, dict):
+                updated = dict(value)
+                dirty = False
+                for key in ("content", "text", "value"):
+                    if key not in updated:
+                        continue
+                    cleaned, item_dirty = clean(updated.get(key))
+                    if item_dirty:
+                        updated[key] = cleaned
+                        dirty = True
+                return updated, dirty
+            if isinstance(value, list):
+                items: list[Any] = []
+                dirty = False
+                for item in value:
+                    cleaned, item_dirty = clean(item)
+                    items.append(cleaned)
+                    dirty = dirty or item_dirty
+                return items, dirty
+            return value, False
+
+        sanitized: list[Any] = []
+        for item in contexts:
+            cleaned, item_changed = clean(item)
+            sanitized.append(cleaned)
+            if item_changed:
+                changed += 1
+        if changed <= 0:
+            return
+        try:
+            req.contexts = sanitized
+        except Exception:
+            return
+        logger.info(
+            "[PrivateCompanion] 已清理请求历史里的残留反应协议标签: session=%s contexts_changed=%s",
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
             changed,
         )

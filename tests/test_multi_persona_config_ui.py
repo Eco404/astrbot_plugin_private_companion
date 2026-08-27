@@ -93,6 +93,15 @@ class MultiPersonaConfigUiTests(unittest.TestCase):
         self.assertNotIn("预览固化内容", script)
         self.assertNotIn(" · 版本 ${escapeHtml(state.personaConfigState.revision", script)
 
+    def test_detach_apply_uses_visible_second_click_confirmation(self) -> None:
+        script = (PRIMARY / "app.js").read_text(encoding="utf-8")
+        self.assertIn('data-persona-detach-apply ${state.personaDetachPreview ? "" : "disabled"}', script)
+        self.assertIn("const personaDetachConfirmTimers = new WeakMap();", script)
+        self.assertIn("function consumePersonaDetachConfirmation(button)", script)
+        self.assertIn('button.textContent = "再次点击确认";', script)
+        self.assertIn('if (!consumePersonaDetachConfirmation(event.currentTarget)) return;', script)
+        self.assertNotIn("window.confirm(`确认将", script)
+
     def test_window_binding_crud_is_absent_and_legacy_notice_is_read_only(self) -> None:
         script = (PRIMARY / "app.js").read_text(encoding="utf-8")
         for marker in (

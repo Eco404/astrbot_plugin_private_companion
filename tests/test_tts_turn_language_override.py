@@ -80,6 +80,29 @@ class TtsTurnLanguageOverrideTests(unittest.TestCase):
                 event = SimpleNamespace(message_str=message)
                 self.assertEqual(expected, harness._ensure_turn_tts_voice_language(event))
 
+    def test_configured_tts_keyword_triggers_voice_request(self) -> None:
+        harness = _Harness()
+        harness.tts_trigger_keywords = "讲故事, 唤醒词\nvoice me"
+
+        signal = harness._event_tts_request_signal(
+            SimpleNamespace(message_str="今天给我讲故事吧")
+        )
+
+        self.assertEqual("positive", signal[0])
+        self.assertIn("讲故事", signal[1])
+        prompt = harness._build_tts_rule_prompt("edge", event=SimpleNamespace(message_str="今天给我讲故事吧"))
+        self.assertIn("已配置的 TTS 关键词", prompt)
+
+    def test_tts_keyword_does_not_override_explicit_negative_request(self) -> None:
+        harness = _Harness()
+        harness.tts_trigger_keywords = "语音"
+
+        signal = harness._event_tts_request_signal(
+            SimpleNamespace(message_str="不要语音，直接打字")
+        )
+
+        self.assertEqual("negative", signal[0])
+
     def test_questions_negations_and_persistent_command_are_not_overridden(self) -> None:
         harness = _Harness()
         for message in (

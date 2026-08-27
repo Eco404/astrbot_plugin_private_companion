@@ -312,6 +312,26 @@ class RelationshipAccountStoreTests(unittest.TestCase):
                 **{**kwargs, "event_id": "legacy-event-2", "score_before": 10, "score_after": 11, "applied_delta": 1},
             )
 
+    def test_schedule_adjustment_legacy_event_is_replayable(self) -> None:
+        self._create(score=20)
+        kwargs = {
+            "event_id": "legacy-schedule-adjustment-1",
+            "reason_code": "schedule_adjustment",
+            "requested_delta": 2,
+            "applied_delta": 2,
+            "score_before": 20,
+            "score_after": 22,
+            "relationship_role": "friend",
+            "relationship_mode": "normal",
+            "positive_stage_cap_key": "close",
+            "daily_totals": {"day": "2026-08-10", "positive": 2, "negative": 0},
+            "last_effective_at": 1_700_000_000,
+        }
+        first = self.store.replay_legacy_event(_context(), **kwargs)
+        replay = self.store.replay_legacy_event(_context(), **kwargs)
+        self.assertEqual(first, replay)
+        self.assertEqual(22, self.store.account(_context())["relationship_score"])
+
     def test_legacy_snapshot_replay_preserves_owner_mode_runtime_and_revision(self) -> None:
         self._create(score=12)
         kwargs = {

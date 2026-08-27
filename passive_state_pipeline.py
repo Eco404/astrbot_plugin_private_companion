@@ -67,7 +67,18 @@ async def inject_humanized_state(
     self._sanitize_request_context_new_conversation_boundary(event, req)
     self._repair_incomplete_tool_context_groups(event, req)
     self._sanitize_private_companion_prompt_artifacts_in_request(event, req)
-    self._neutralize_stale_reaction_feedback_in_history(event, req)
+    reaction_history_neutralizer = getattr(
+        self, "_neutralize_stale_reaction_feedback_in_history", None
+    )
+    if callable(reaction_history_neutralizer):
+        try:
+            reaction_history_neutralizer(event, req)
+        except Exception as exc:
+            # Historical cleanup must never prevent the provider request itself.
+            logger.debug(
+                "[PrivateCompanion] 清理历史反应标签失败: %s",
+                _single_line(exc, 120),
+            )
     self._append_deepseek_tool_protocol_guard(event, req)
     self._append_passive_reply_tool_boundary(event, req)
     self._remember_external_llm_request_for_token_stats(event, req)

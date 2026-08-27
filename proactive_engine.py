@@ -866,6 +866,32 @@ class ProactiveEngineMixin:
         prepared["origin_event_id"] = origin_event_id
         if origin_event_id and not _single_line(candidate.get("origin_event_id"), 80):
             candidate["origin_event_id"] = origin_event_id
+        effective_timezone = _single_line(
+            getattr(self, "environment_perception_timezone", ""), 64
+        ) or _single_line(getattr(self, "environment_perception_timezone_setting", ""), 64)
+        stored_timezone = _single_line(
+            prepared.get("window_timezone") or candidate.get("window_timezone"), 64
+        )
+        weather_window = reason == "weather_alert" or source in {
+            "weather_alert",
+            "environment_change",
+        }
+        # Window timestamps are derived from local calendar boundaries. When the
+        # effective timezone changes, discard only the derived weather window and
+        # rebuild it from the stable source event instead of mixing two calendars.
+        if weather_window and stored_timezone and effective_timezone and stored_timezone != effective_timezone:
+            for key in (
+                "window_start_at",
+                "preferred_ts",
+                "best_until_at",
+                "expire_at",
+                "scheduled_ts",
+                "_scheduled_ts",
+            ):
+                prepared.pop(key, None)
+            prepared["timezone_rebased_from"] = stored_timezone
+        if effective_timezone:
+            prepared["window_timezone"] = effective_timezone
         window_start_at = _safe_float(prepared.get("window_start_at"), 0)
         preferred_ts = _safe_float(prepared.get("preferred_ts"), 0)
         best_until_at = _safe_float(prepared.get("best_until_at"), 0)
@@ -3111,7 +3137,28 @@ class ProactiveEngineMixin:
                 impulse["last_note"] = "免打扰覆盖整个有效窗口"
                 impulse["updated_ts"] = check_now
             self._clear_pending_proactive_plan(user)
-            self._schedule_next_proactive(user, now=quiet_end, delay_hours=(0.08, 0.35))
+            # Do not let the generic scheduler put a weather event immediately
+            # back into the same window.  Respect the quiet-hours boundary,
+            # the user's normal proactive interval, and the weather cooldown.
+            floor = quiet_end + 2 * 60
+            last_sent = max(
+                _safe_float(user.get("last_proactive_sent_at"), 0),
+                _safe_float(user.get("last_proactive_message_at"), 0),
+            )
+            if last_sent > check_now:
+                last_sent = 0.0
+            min_interval_getter = getattr(self, "_effective_min_interval_seconds", None)
+            if callable(min_interval_getter):
+                try:
+                    floor = max(floor, last_sent + max(0, int(min_interval_getter(user))))
+                except Exception:
+                    pass
+            if source in {"weather_alert", "weather_context", "environment_change"}:
+                floor = max(floor, _safe_float(user.get("weather_proactive_last_at"), 0) + 6 * 3600)
+            delay_hours = max(0.08, (floor - check_now) / 3600.0)
+            self._schedule_next_proactive(user, now=check_now, delay_hours=(delay_hours, delay_hours))
+            if _safe_float(user.get("next_proactive_at"), 0) < floor:
+                user["next_proactive_at"] = floor
             return True, "有效窗口被免打扰覆盖，已跳过并在免打扰结束后重排"
 
         old_start = _safe_float(user.get("planned_proactive_window_start_at"), check_now)
@@ -3605,6 +3652,14 @@ class ProactiveEngineMixin:
         # not ordinary weather chatter.
         if source in {"weather_alert", "environment_change"} and score >= 90:
             return ""
+        origin_event_id = self._proactive_origin_event_id(candidate, source=source)
+        blocked_events = user.get("weather_proactive_blocked_events")
+        if isinstance(blocked_events, dict) and origin_event_id:
+            blocked_until = _safe_float(blocked_events.get(origin_event_id), 0)
+            if blocked_until > now:
+                return "天气事件重试冷却中"
+            if origin_event_id in blocked_events:
+                blocked_events.pop(origin_event_id, None)
         day = _today_key()
         if _single_line(user.get("weather_proactive_budget_day"), 16) != day:
             user["weather_proactive_budget_day"] = day
@@ -3615,10 +3670,42 @@ class ProactiveEngineMixin:
         if count >= cap:
             return "天气主动日配额已用尽"
         last_at = _safe_float(user.get("weather_proactive_last_at"), 0)
+        if last_at > now:
+            # Wall-clock rollback or a stale persisted timestamp must not turn
+            # the negative interval into an effectively permanent cooldown.
+            user["weather_proactive_last_at"] = 0
+            last_at = 0.0
         cooldown = 6 * 3600 if source in {"weather_context", "weather_alert"} else 4 * 3600
         if last_at > 0 and now - last_at < cooldown:
             return "天气主动仍在冷却期"
         return ""
+
+    def _remember_weather_proactive_block(
+        self,
+        user: dict[str, Any],
+        candidate: dict[str, Any],
+        *,
+        now: float,
+        reason: str,
+    ) -> None:
+        source = _single_line(candidate.get("source"), 40).lower()
+        if source not in {"weather_alert", "environment_change", "weather_context"} and not bool(candidate.get("weather_linked")):
+            return
+        event_id = self._proactive_origin_event_id(candidate, source=source)
+        if not event_id:
+            return
+        blocked_until = now + (6 * 3600 if source in {"weather_alert", "weather_context"} else 4 * 3600)
+        raw = user.get("weather_proactive_blocked_events")
+        events = dict(raw) if isinstance(raw, dict) else {}
+        events[event_id] = blocked_until
+        # Keep the state bounded and discard stale entries while touching it.
+        events = {
+            key: value for key, value in events.items()
+            if _safe_float(value, 0) > now
+        }
+        if len(events) > 32:
+            events = dict(sorted(events.items(), key=lambda item: _safe_float(item[1], 0), reverse=True)[:32])
+        user["weather_proactive_blocked_events"] = events
 
     def _remember_weather_proactive_accept(
         self,
@@ -3654,6 +3741,13 @@ class ProactiveEngineMixin:
             now=now,
         )
         if not isinstance(prepared, dict):
+            if invalid_window_reason == "免打扰覆盖整个有效窗口":
+                self._remember_weather_proactive_block(
+                    user,
+                    candidate,
+                    now=now,
+                    reason=invalid_window_reason,
+                )
             logger.info(
                 "[PrivateCompanion] 主动来源在入队前终止: user=%s source=%s reason=%s note=%s",
                 _single_line(user_id, 40),
@@ -3744,6 +3838,21 @@ class ProactiveEngineMixin:
         if weather_block:
             self._record_proactive_candidate(user_id, candidate, status="blocked", note=weather_block, user=user)
             return False
+        planned_source = self._normalize_legacy_proactive_text(
+            user.get("planned_proactive_source"), limit=40
+        ).lower()
+        planned_timezone = _single_line(user.get("planned_proactive_window_timezone"), 64)
+        candidate_timezone = _single_line(candidate.get("window_timezone"), 64)
+        if (
+            candidate_timezone
+            and planned_timezone
+            and planned_timezone != candidate_timezone
+            and source in {"weather_alert", "environment_change", "weather_context"}
+            and planned_source in {"weather_alert", "environment_change", "weather_context"}
+        ):
+            # The candidate was rebased to a new effective timezone; discard
+            # the old planned timestamp before comparing scheduling priority.
+            self._clear_pending_proactive_plan(user)
         silence_reason_getter = getattr(self, "_friend_unanswered_silence_reason", None)
         silence_reason = silence_reason_getter(user, now=now) if callable(silence_reason_getter) else ""
         if silence_reason and source not in {"timer", "troubleshooting", "simulation"}:
@@ -3844,6 +3953,7 @@ class ProactiveEngineMixin:
         user["planned_proactive_reason"] = self._normalize_legacy_proactive_text(candidate.get("reason"), limit=40) or "check_in"
         user["planned_proactive_action"] = self._normalize_legacy_proactive_text(action, limit=40) or "message"
         user["planned_proactive_source"] = self._normalize_legacy_proactive_text(source, limit=40) or "proactive"
+        user["planned_proactive_window_timezone"] = _single_line(candidate.get("window_timezone"), 64)
         user["planned_proactive_kind"] = _single_line(impulse.get("kind"), 40) or self._proactive_message_kind(
             reason=candidate.get("reason"),
             source=source,

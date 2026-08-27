@@ -427,6 +427,8 @@ class PageSettingNormalizerMixin:
             return mode if mode in {"partial", "full"} else "partial"
         if key in {"tts_extra_prompt", "main_user_mention_voice_prompt"}:
             return str(value or "").strip()[:1200]
+        if key == "tts_trigger_keywords":
+            return str(value or "").strip()[:2000]
         if key in {
             "natural_language_photo_extra_prompt",
             "photo_generation_fixed_prompt",

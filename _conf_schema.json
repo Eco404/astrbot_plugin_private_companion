@@ -4115,6 +4115,12 @@
     "default": "",
     "invisible": true
   },
+  "tts_trigger_keywords": {
+    "description": "Legacy flat config: TTS关键词触发",
+    "type": "text",
+    "default": "",
+    "invisible": true
+  },
   "tts_frequency_control_mode": {
     "description": "Legacy flat config: TTS频率控制模式",
     "type": "string",
@@ -11832,6 +11838,15 @@
         "type": "text",
         "default": "",
         "hint": "只填写本人格或声线的额外要求。基础 <pc_tts> 格式、目标语种和 provider 情绪标签适配规则会自动生成，留空最稳。",
+        "condition": {
+          "enable_tts_enhancement": true
+        }
+      },
+      "tts_trigger_keywords": {
+        "description": "关键词触发TTS",
+        "type": "text",
+        "default": "",
+        "hint": "可选。填写一个或多个关键词，使用逗号、分号或换行分隔；用户消息包含任一关键词时，本轮按明确语音请求处理并跳过触发概率抽签，但仍遵守会话冷却、Provider 可用性和安全降级。留空关闭。",
         "condition": {
           "enable_tts_enhancement": true
         }

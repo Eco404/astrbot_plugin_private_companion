@@ -2000,6 +2000,7 @@ const configLabels = {
   tts_session_min_interval_seconds: "TTS会话最小间隔秒数",
   tts_private_min_interval_seconds: "私聊TTS最小间隔秒数",
   tts_group_min_interval_seconds: "群聊TTS最小间隔秒数",
+  tts_trigger_keywords: "TTS关键词触发",
   tts_trigger_probability: "TTS全局触发概率(%)",
   tts_private_trigger_probability: "私聊TTS触发概率(%)",
   tts_group_trigger_probability: "群聊TTS触发概率(%)",
@@ -2807,6 +2808,7 @@ const configDescriptions = {
   tts_conversion_scope: "统一控制快速标签自动语音和后处理路径。局部转换只朗读最适合听的一段；全量转换要求朗读整条回复的全部有效内容。",
   tts_conversion_provider_id: "用于后处理判断+翻译、快速标签自动语音、语种修正和中文释义补全的文本模型，不是语音合成模型。转换时会参考当前 AstrBot 人格的语气、称呼和距离感；留空时后处理模式会保持纯文本，显式标签仍可由插件处理。",
   tts_extra_prompt: "只填写本人格或声线的额外要求。基础 <pc_tts> 格式、目标语种和 provider 情绪标签适配规则会自动生成，留空最稳。",
+  tts_trigger_keywords: "可选。用户消息包含任一关键词时按明确语音请求处理；支持逗号、分号或换行分隔，留空关闭。仍遵守会话冷却、Provider 可用性和安全降级。",
   tts_frequency_control_mode: "选择频率规则。全局频控：用概率影响快速标签模式下 LLM 是否倾向输出 TTS，并控制后处理模式是否进入判断+翻译；弱约束下显式 <pc_tts>/<tts> 不再被概率剥离，只受 provider 和会话间隔保护；强约束下按约束强度硬拦。",
   tts_constraint_mode: "仅快速标签模式 + 全局频控生效。弱约束只在概率命中时注入语音规则；强约束会在冷却内反向提示本轮禁止语音，并在发送前阻止语音生成。后处理模式不使用该项。",
   tts_session_min_interval_seconds: "仅全局频控生效。私聊/群聊未单独覆盖时使用的默认最小间隔；0 表示不限制。",
@@ -3411,7 +3413,7 @@ const featureSettingGroups = {
   enable_reading_archive_preference_influence: ["reading_archive_preference_min_ratings", "reading_archive_preference_max_terms"],
   enable_unanswered_screen_peek_followup: ["unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_goodnight_screen_check: ["goodnight_screen_check_delay_minutes"],
-  enable_tts_enhancement: ["tts_delivery_mode", "tts_voice_language", "tts_fishaudio_model", "tts_fishaudio_emotion_mode", "tts_foreign_text_mode", "tts_message_scope", "tts_conversion_scope", "tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt", "tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability", "enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
+  enable_tts_enhancement: ["tts_delivery_mode", "tts_voice_language", "tts_fishaudio_model", "tts_fishaudio_emotion_mode", "tts_foreign_text_mode", "tts_message_scope", "tts_conversion_scope", "tts_generation_mode", "tts_conversion_provider_id", "tts_extra_prompt", "tts_trigger_keywords", "tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability", "enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
   enable_tts_local_playback: ["enable_tts_local_playback_live_only", "tts_local_playback_volume", "tts_local_playback_min_interval_seconds"],
   enable_creative_writing: ["enable_creative_work_read_guard", "creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects", "creative_direction_prompt"],
   creative_hidden_mode: ["creative_share_probability"],
@@ -4195,7 +4197,7 @@ const featureSettingSections = {
     {
       title: "4. 触发概率",
       note: "全局频控用默认概率和间隔控制双路径；私聊/群聊覆盖项填 -1 则继承默认值。",
-      keys: ["tts_frequency_control_mode", "tts_constraint_mode", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability"],
+      keys: ["tts_frequency_control_mode", "tts_constraint_mode", "tts_trigger_keywords", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability"],
     },
     {
       title: "5. 会话间隔",
@@ -23789,7 +23791,7 @@ function renderPersonaConfigManagement() {
         <label><span>目标人格</span><select name="persona_id">${detachOptions || '<option value="">暂无独立人格配置</option>'}</select></label>
         <div class="persona-config-detach-actions">
           <button type="button" data-persona-detach-preview ${detachOptions ? "" : "disabled"}>统计变更</button>
-          <button type="button" class="feature-param-save" data-persona-detach-apply disabled>确认脱离</button>
+          <button type="button" class="feature-param-save" data-persona-detach-apply ${state.personaDetachPreview ? "" : "disabled"}>确认脱离</button>
         </div>
         <div class="persona-config-detach-preview" data-persona-detach-result>${state.personaDetachPreview ? personaDetachPreviewHtml(state.personaDetachPreview) : "尚未统计变更。"}</div>
       </form>
@@ -24024,7 +24026,7 @@ function bindPersonaManagementActions(root) {
     const preview = state.personaDetachPreview;
     const personaId = String(detachSelect?.value || "").trim();
     if (!preview || !personaId) return showToast("请先统计变更", "error");
-    if (!window.confirm(`确认将“${personaDisplayLabel(personaId)}”原本跟随主人格的配置项以当前值写入自身配置吗？`)) return;
+    if (!consumePersonaDetachConfirmation(event.currentTarget)) return;
     const saved = await runAction(() => postJson("/persona/config/detach-apply", {
       persona_id: personaId,
       expected_revision: preview.revision ?? preview.persona_settings_revision ?? 0,
@@ -24035,6 +24037,41 @@ function bindPersonaManagementActions(root) {
     await loadRoleplayPersonas(true).catch(() => {});
     renderConfig();
   });
+}
+
+const personaDetachConfirmTimers = new WeakMap();
+
+function resetPersonaDetachConfirmation(button) {
+  if (!button) return;
+  const timer = personaDetachConfirmTimers.get(button);
+  if (timer) window.clearTimeout(timer);
+  personaDetachConfirmTimers.delete(button);
+  delete button.dataset.detachConfirmArmed;
+  button.classList.remove("is-confirming");
+  button.textContent = "确认脱离";
+  button.title = "将跟随主人格的配置写入当前人格；3 秒内再次点击确认";
+  button.removeAttribute("aria-pressed");
+}
+
+function consumePersonaDetachConfirmation(button) {
+  if (!button) return false;
+  if (button.dataset.detachConfirmArmed === "1") {
+    resetPersonaDetachConfirmation(button);
+    return true;
+  }
+  button.dataset.detachConfirmArmed = "1";
+  button.classList.add("is-confirming");
+  button.textContent = "再次点击确认";
+  button.title = "再次点击确认脱离主人格跟随";
+  button.setAttribute("aria-pressed", "true");
+  personaDetachConfirmTimers.set(
+    button,
+    window.setTimeout(() => {
+      resetPersonaDetachConfirmation(button);
+    }, 3000),
+  );
+  showToast("请再次点击确认脱离", "warning");
+  return false;
 }
 
 function personaDetachPreviewHtml(preview) {
@@ -27689,6 +27726,7 @@ function featureRelatedSettings(key) {
       tts_conversion_scope: "partial",
       tts_conversion_provider_id: "",
       tts_extra_prompt: "",
+      tts_trigger_keywords: "",
       tts_frequency_control_mode: "global",
       tts_constraint_mode: "weak",
       tts_session_min_interval_seconds: 120,
@@ -31862,6 +31900,7 @@ const ttsStrategyMeta = [
   { key: "tts_fishaudio_model", label: "Fish Audio 回退模型", type: "select", default: "auto", group: "content", options: [["auto", "自动识别"], ["s2.1-pro-free", "S2.1 Pro Free"], ["s2.1-pro", "S2.1 Pro"], ["s2-pro", "S2 Pro"], ["s1", "S1 旧版"]], hint: "仅当前语种没有专用 Provider 时使用；已绑定语种始终采用其 Provider 内的模型。" },
   { key: "tts_fishaudio_emotion_mode", label: "Fish Audio 情绪控制", type: "select", default: "balanced", group: "content", options: [["balanced", "自然平衡"], ["expressive", "更有表现力"], ["manual", "手动控制"]], hint: "自动情绪标签只送入 TTS，不会显示在聊天正文中。" },
   { key: "tts_extra_prompt", label: "TTS 补充规则", type: "textarea", default: "", group: "content", hint: "只填写人格或声线的额外要求；基础格式和语种规则会自动生成。" },
+  { key: "tts_trigger_keywords", label: "关键词触发 TTS", type: "textarea", default: "", group: "frequency", hint: "可选。用逗号、分号或换行分隔多个关键词；用户消息包含任一关键词时按明确语音请求处理并跳过概率抽签，但仍遵守会话冷却和安全降级。留空关闭。" },
   { key: "tts_frequency_control_mode", label: "频率控制", type: "select", default: "global", group: "frequency", options: [["global", "全局频控"], ["legacy", "旧版行为"]], hint: "全局频控统一约束快速标签和后处理路径。" },
   { key: "tts_constraint_mode", label: "约束强度", type: "select", default: "weak", group: "frequency", options: [["weak", "弱约束：提示词引导"], ["strong", "强约束：发送前拦截"]], hint: "弱约束保留模型决定权；强约束会在冷却或概率未命中时阻止语音。" },
   { key: "tts_session_min_interval_seconds", label: "会话最小间隔（秒）", type: "number", default: 90, min: 0, group: "frequency" },

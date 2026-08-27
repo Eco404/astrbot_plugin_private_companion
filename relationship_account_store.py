@@ -59,6 +59,7 @@ PRIVATE_EVENT_REASONS = frozenset({
     "relationship_violation",
     "relationship_violation_clawback",
     "relationship_violation_recovery",
+    "schedule_adjustment",
     "support",
     "warmth",
 })
