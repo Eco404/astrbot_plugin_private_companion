@@ -28017,7 +28017,22 @@ class PrivateCompanionPageApi(
                 else getattr(self.plugin, "max_daily_messages", 0)
             )
             next_for_state = self._float(user.get("next_proactive_at"))
-            if bool(user.get("enabled", True)):
+            proactive_gate = getattr(self.plugin, "_user_enabled_for_proactive", None)
+            if callable(proactive_gate):
+                try:
+                    proactive_enabled = bool(proactive_gate(str(user_id), user))
+                except Exception:
+                    proactive_enabled = False
+            else:
+                capabilities = user.get("unified_profile_capabilities")
+                proactive_enabled = bool(
+                    user.get("proactive_private_enabled") is True
+                    or (
+                        isinstance(capabilities, dict)
+                        and capabilities.get("proactive_private_enabled") is True
+                    )
+                )
+            if bool(user.get("enabled", True)) and proactive_enabled:
                 if should_show_user_state(
                     str(user_id),
                     user,

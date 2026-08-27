@@ -34320,6 +34320,8 @@ function renderRealityTouchHomeHealthPanel() {
   const mihomeAvailable = mihome.available === true;
   const mihomeAuth = mihome.auth && typeof mihome.auth === "object" ? mihome.auth : {};
   const mihomeLogin = mihome.login && typeof mihome.login === "object" ? mihome.login : {};
+  const mihomeLoginDetail = String(mihomeLogin.detail || (mihomeLogin.status === "error" ? mihomeAuth.last_login_error : "") || "").trim();
+  const mihomeArc4Failure = /(?:ARC4|pycryptodome)/i.test(mihomeLoginDetail);
   const mihomeMappings = Array.isArray(mihome.mappings) ? mihome.mappings : [];
   const mihomeDevices = Array.isArray(mihome.devices) ? mihome.devices.filter((item) => item && item.configured && Array.isArray(item.aliases) && item.aliases.length) : [];
   const mihomeDeviceRows = mihomeDevices.slice(0, 24).map((item) => item.aliases.map((alias) => `<div class="reality-mihome-device"><span>${escapeHtml(alias)}<small>${escapeHtml(item.name || item.model || item.did || "米家设备")}</small></span><button type="button" class="soft" data-mihome-power="${escapeHtml(alias)}" data-mihome-power-value="true">开</button><button type="button" class="soft" data-mihome-power="${escapeHtml(alias)}" data-mihome-power-value="false">关</button></div>`).join("")).join("");
@@ -34339,14 +34341,15 @@ function renderRealityTouchHomeHealthPanel() {
       </form>
       <section id="reality-mihome" class="reality-mihome-panel">
         <div class="reality-touch-section-head"><div><span>米家联动</span><h3>米家扫码与设备控制</h3></div><span class="reality-audio-backend ${mihomeAuth.logged_in ? "ready" : "limited"}">${mihomeAuth.logged_in ? "已登录" : "未登录"}</span></div>
-        <p class="reality-device-intro">扫码登录由米家插件完成，凭证仍由米家插件保管；这里仅调用已配置别名的设备。</p>
-        <div class="reality-mihome-actions"><button type="button" class="primary" data-mihome-login ${mihomeAvailable ? "" : "disabled"}>${mihomeAvailable ? (mihomeAuth.logged_in ? "已登录" : "扫码登录米家") : "未安装米家插件"}</button><button type="button" class="soft" data-mihome-sync ${mihomeAvailable && mihomeAuth.logged_in ? "" : "disabled"}>同步设备</button><button type="button" class="soft danger" data-mihome-logout ${mihomeAvailable && mihomeAuth.logged_in ? "" : "disabled"}>退出米家</button></div>
+        <p class="reality-device-intro">扫码登录由现实触及拓展插件完成，凭证由该拓展保管；陪伴插件只显示结果并调用已配置别名的设备。</p>
+        <div class="reality-mihome-actions"><button type="button" class="primary" data-mihome-login ${mihomeAvailable ? "" : "disabled"}>${mihomeAvailable ? (mihomeAuth.logged_in ? "已登录" : "扫码登录米家") : "现实触及运行时不可用"}</button><button type="button" class="soft" data-mihome-sync ${mihomeAvailable && mihomeAuth.logged_in ? "" : "disabled"}>同步设备</button><button type="button" class="soft danger" data-mihome-logout ${mihomeAvailable && mihomeAuth.logged_in ? "" : "disabled"}>退出米家</button></div>
         ${mihomeLogin.qr_image ? `<div class="reality-mihome-qr"><img alt="米家登录二维码" src="${escapeHtml(mihomeLogin.qr_image)}"><span>${escapeHtml(mihomeLogin.message || "请使用米家或小米账号扫一扫")}</span></div>` : mihomeLogin.message && mihomeLogin.status !== "idle" ? `<div class="reality-device-status"><b>${escapeHtml(mihomeLogin.message)}</b></div>` : ""}
-        <div class="reality-mihome-devices">${mihomeDeviceRows || `<small>${mihomeAvailable ? (mihomeAuth.logged_in ? "请先同步设备并配置设备别名" : "登录后可在此扫码登录米家") : "现实触及内置米家运行时暂不可用"}</small>`}</div>
+        ${mihomeLoginDetail ? `<div class="reality-device-status ${mihomeLogin.status === "error" ? "is-error" : ""}"><b>${escapeHtml(mihomeLoginDetail)}</b>${mihomeArc4Failure ? "<small>请在 AstrBot 当前使用的 Python 环境中确认 pycryptodome==3.23.0，并重启现实触及拓展。</small>" : ""}</div>` : ""}
+        <div class="reality-mihome-devices">${mihomeDeviceRows || `<small>${mihomeAvailable ? (mihomeAuth.logged_in ? "请先同步设备并配置设备别名" : "点击扫码登录米家") : "现实触及拓展尚未准备好米家运行时"}</small>`}</div>
       </section>
       <section class="reality-mihome-mapping-panel">
         <div class="reality-touch-section-head"><div><span>米家配置</span><h3>设备别名与控制白名单</h3></div></div>
-        <p class="reality-device-intro">主陪伴插件可以直接管理设备别名；账号凭证仍由现实触及内置米家运行时保管。</p>
+        <p class="reality-device-intro">账号凭证和登录进程由现实触及拓展插件保管；这里仅管理陪伴侧可调用的设备映射。</p>
         <div class="reality-mihome-mapping-list" data-mihome-mapping-list>${mihomeMappings.length ? mihomeMappings.map((item) => `<div class="reality-mihome-mapping-row"><input data-mihome-alias value="${escapeHtml(item.alias || "")}" placeholder="客厅灯"><input data-mihome-did value="${escapeHtml(item.did || "")}" placeholder="设备 DID"><button type="button" class="soft danger" data-mihome-remove-mapping>移除</button></div>`).join("") : ""}</div>
         <div class="reality-mihome-mapping-actions"><button type="button" class="soft" data-mihome-add-mapping>新增设备</button><button type="button" class="primary" data-mihome-save-mappings ${mihomeAvailable ? "" : "disabled"}>保存设备映射</button></div>
       </section>
@@ -37539,31 +37542,17 @@ function bindRealityTouchActions(root) {
     if (result) {
       state.realityTouch = result;
       renderRealityTouchPage();
-      if (payload.action === "mihome_start_login") {
-        pollMiHomeLogin(result.mihome?.login?.qr_revision || "");
-      }
+      if (payload.action === "mihome_start_login") pollMiHomeLogin(result.mihome?.login?.qr_revision || "");
     }
   };
   root.querySelector("[data-mihome-login]")?.addEventListener("click", () => runMiHomeAction({ action: "mihome_start_login" }, "米家登录流程已启动"));
   root.querySelector("[data-mihome-sync]")?.addEventListener("click", () => runMiHomeAction({ action: "mihome_sync_devices" }, "米家设备已同步"));
   root.querySelector("[data-mihome-logout]")?.addEventListener("click", () => runMiHomeAction({ action: "mihome_logout" }, "米家已退出"));
-  root.querySelectorAll("[data-mihome-power]").forEach((button) => {
-    button.addEventListener("click", () => runMiHomeAction({
-      action: "mihome_control_power",
-      alias: button.dataset.mihomePower || "",
-      is_on: button.dataset.mihomePowerValue === "true",
-    }, "米家设备控制请求已返回", button));
-  });
-  root.querySelector("[data-mihome-add-mapping]")?.addEventListener("click", () => {
-    root.querySelector("[data-mihome-mapping-list]")?.insertAdjacentHTML("beforeend", `<div class="reality-mihome-mapping-row"><input data-mihome-alias placeholder="客厅灯"><input data-mihome-did placeholder="设备 DID"><button type="button" class="soft danger" data-mihome-remove-mapping>移除</button></div>`);
-  });
+  root.querySelectorAll("[data-mihome-power]").forEach((button) => button.addEventListener("click", () => runMiHomeAction({ action: "mihome_control_power", alias: button.dataset.mihomePower || "", is_on: button.dataset.mihomePowerValue === "true" }, "米家设备控制请求已返回", button)));
+  root.querySelector("[data-mihome-add-mapping]")?.addEventListener("click", () => root.querySelector("[data-mihome-mapping-list]")?.insertAdjacentHTML("beforeend", `<div class="reality-mihome-mapping-row"><input data-mihome-alias placeholder="客厅灯"><input data-mihome-did placeholder="设备 DID"><button type="button" class="soft danger" data-mihome-remove-mapping>移除</button></div>`));
   root.querySelectorAll("[data-mihome-remove-mapping]").forEach((button) => button.addEventListener("click", () => button.closest(".reality-mihome-mapping-row")?.remove()));
   root.querySelector("[data-mihome-save-mappings]")?.addEventListener("click", async (event) => {
-    const mappings = [...root.querySelectorAll(".reality-mihome-mapping-row")].map((row) => ({
-      alias: row.querySelector("[data-mihome-alias]")?.value.trim() || "",
-      did: row.querySelector("[data-mihome-did]")?.value.trim() || "",
-      category: "none",
-    })).filter((item) => item.alias || item.did);
+    const mappings = [...root.querySelectorAll(".reality-mihome-mapping-row")].map((row) => ({ alias: row.querySelector("[data-mihome-alias]")?.value.trim() || "", did: row.querySelector("[data-mihome-did]")?.value.trim() || "", category: "none" })).filter((item) => item.alias || item.did);
     await runMiHomeAction({ action: "mihome_save_mappings", mappings }, "米家设备映射已保存", event.currentTarget);
   });
   root.querySelector("[data-reality-mobile-observation-user]")?.addEventListener("change", (event) => {

@@ -61,6 +61,7 @@ def test_image_workspace_api_proxies_extension_status() -> None:
 
 def test_reality_workspace_exposes_mobile_gateway_without_owning_implementation() -> None:
     script = (PANEL_ROOTS[0] / "app.js").read_text(encoding="utf-8")
+    css = (PANEL_ROOTS[0] / "app.css").read_text(encoding="utf-8")
 
     assert 'data-reality-mobile-config' in script
     assert 'action: "save_global_config"' in script
@@ -95,6 +96,9 @@ def test_reality_workspace_exposes_mobile_gateway_without_owning_implementation(
     assert 'action_result' in script
     assert 'href="#reality-mobile-data"' in script
     assert 'href="#reality-home-health"' in script
+    assert "mihomeLogin.detail || (mihomeLogin.status === \"error\" ? mihomeAuth.last_login_error : \"\")" in script
+    assert "mihomeArc4Failure" in script
+    assert "pycryptodome==3.23.0" in script
     assert "syncRealityTouchOverviewState(result)" in script
     assert ".reality-global-toggle input:checked + .feature-toggle-visual" in css
     assert ".reality-global-toggle input:checked + .feature-toggle-visual::after" in css

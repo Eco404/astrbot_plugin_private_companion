@@ -34263,67 +34263,79 @@ function renderRealityTouchMobilePanel() {
   const port = Number(mobile.bound_port || mobile.port || 6322);
   const endpoint = `http://${clientHost}:${port}`;
   return `
-    <article id="reality-connect" class="exp-detail-card reality-mobile-card reality-workspace-card">
-      <div class="reality-touch-section-head">
-        <div><span>移动连接</span><h3>手机陪伴终端</h3></div>
-        <span class="reality-audio-backend ${mobile.running ? "ready" : "limited"}">${mobile.running ? "网关运行中" : (mobile.enabled ? "等待重启绑定" : "未启用")}</span>
+    <article id="reality-connect" class="rt2-sec" data-component="Mobile Connection">
+      <div class="rt2-sec-head">
+        <span class="rt2-sec-index">01</span>
+        <div class="rt2-sec-title"><span>移动连接</span><h3>手机陪伴终端</h3></div>
+        <span class="rt2-state ${mobile.running ? "ok" : (mobile.enabled ? "warn" : "idle")}">${mobile.running ? "网关运行中" : (mobile.enabled ? "等待重启绑定" : "未启用")}</span>
       </div>
-      <div class="reality-mobile-summary">
-        <div><span>终端地址</span><b>${escapeHtml(endpoint)}</b></div>
-        <div><span>网关版本</span><b>v${escapeHtml(mobile.gateway_version || "0.2.7")}</b></div>
-        <div><span>终端兼容 API</span><b>v${escapeHtml(mobile.api_version || "1.0")}</b></div>
-        <div><span>配对令牌</span><b>${mobile.pairing_token_configured ? "已配置" : "待生成"}</b></div>
-      </div>
-      <form class="reality-mobile-config" data-reality-mobile-config>
-        <label class="reality-enable-field">
-          <input type="checkbox" name="mobile_enabled" ${mobile.enabled ? "checked" : ""}>
-          <span><b>启用手机陪伴终端网关</b><small>保存后由现实触及扩展重新绑定独立移动端端口。</small></span>
-        </label>
-        <label><span>监听 / 组网地址</span><input name="mobile_host" value="${escapeHtml(serverHost)}" placeholder="例如 100.66.1.4"></label>
-        <label><span>端口</span><input name="mobile_port" type="number" min="1" max="65535" value="${Number(mobile.port || 6322)}"></label>
-        <label><span>公网访问地址（可选）</span><input name="mobile_public_base_url" type="url" value="${escapeHtml(mobile.public_base_url || "")}" placeholder="https://example.com/mobile"><small>反向代理或公网访问时用于生成手机房间链接。</small></label>
-        <label><span>允许配对的用户 ID</span><input name="mobile_allowed_user_id" value="${escapeHtml(mobile.allowed_user_id || "")}" placeholder="主要用户 ID"></label>
-        <label><span>会话有效期（小时）</span><input name="mobile_session_ttl_hours" type="number" min="1" max="720" value="${Number(mobile.session_ttl_hours || 168)}"></label>
-        <label><span>位置上下文有效期（秒）</span><input name="mobile_location_ttl_seconds" type="number" min="60" max="86400" value="${Number(mobile.location_ttl_seconds || 900)}"></label>
-        <label class="reality-enable-field">
-          <input type="checkbox" name="mobile_amap_reverse_geocode_enabled" ${mobile.amap_reverse_geocode_enabled ? "checked" : ""}>
-          <span><b>启用高德区域识别</b><small>将手机位置转换为城市/城区背景，用于通勤、天气和生活场景；不把精确地址交给陪伴模型。</small></span>
-        </label>
-        <label><span>高德 Web 服务 Key</span><input name="mobile_amap_api_key" type="password" autocomplete="new-password" placeholder="${mobile.amap_api_key_configured ? "已配置，留空保持原值" : "粘贴高德控制台生成的 Key"}"></label>
-        <div class="reality-mobile-inline-fields">
-          <label><span>区域缓存（秒）</span><input name="mobile_amap_cache_ttl_seconds" type="number" min="60" max="604800" step="60" value="${Number(mobile.amap_cache_ttl_seconds || 1800)}"></label>
-          <label><span>请求超时（秒）</span><input name="mobile_amap_request_timeout_seconds" type="number" min="1" max="20" step="1" value="${Number(mobile.amap_request_timeout_seconds || 5)}"></label>
+      <div class="rt2-sec-body">
+        <div class="rt2-kv">
+          <div><span>终端地址</span><b><code>${escapeHtml(endpoint)}</code></b></div>
+          <div><span>网关版本</span><b>v${escapeHtml(mobile.gateway_version || "0.2.7")}</b></div>
+          <div><span>终端兼容 API</span><b>v${escapeHtml(mobile.api_version || "1.0")}</b></div>
+          <div><span>配对令牌</span><b>${mobile.pairing_token_configured ? "已配置" : "待生成"}</b></div>
         </div>
-        <label class="reality-enable-field reality-mobile-proxy-field">
-          <input type="checkbox" name="mobile_proxy_rooms" ${mobile.proxy_rooms !== false ? "checked" : ""}>
-          <span><b>统一代理一起 / 游戏 / 协同房间</b><small>手机只访问移动网关，由网关转发页面、接口、媒体和 WebSocket；推荐保持开启。</small></span>
-        </label>
-        <label><span>新配对令牌（可选）</span><input name="mobile_pairing_token" type="password" autocomplete="new-password" placeholder="留空保留现有令牌"></label>
-        <button type="submit" class="primary">保存手机终端连接</button>
-      </form>
-      <div class="reality-mobile-methods">
-        <section>
-          <b>版本与协议</b>
-          <p>当前网关 v${escapeHtml(mobile.gateway_version || "0.2.7")}，手机陪伴终端兼容 API v${escapeHtml(mobile.api_version || "1.0")}。网关升级后建议重新打开连接。</p>
-        </section>
-        <section>
-          <b>怎么连接</b>
+        <form class="rt2-form" data-reality-mobile-config>
+          <fieldset class="rt2-group">
+            <legend>连接配置</legend>
+            <div class="rt2-switch-row">
+              <input type="checkbox" id="rt2-mobile-enabled" name="mobile_enabled" ${mobile.enabled ? "checked" : ""}>
+              <label class="rt2-switch" for="rt2-mobile-enabled"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+              <label for="rt2-mobile-enabled"><b>启用手机陪伴终端网关</b><small>保存后由现实触及扩展重新绑定独立移动端端口。</small></label>
+            </div>
+            <div class="rt2-row">
+              <label><span>监听 / 组网地址</span><input name="mobile_host" value="${escapeHtml(serverHost)}" placeholder="例如 100.66.1.4"></label>
+              <label><span>端口</span><input name="mobile_port" type="number" min="1" max="65535" value="${Number(mobile.port || 6322)}"></label>
+              <label><span>公网访问地址（可选）</span><input name="mobile_public_base_url" type="url" value="${escapeHtml(mobile.public_base_url || "")}" placeholder="https://example.com/mobile"><small>反向代理或公网访问时用于生成手机房间链接。</small></label>
+              <label><span>允许配对的用户 ID</span><input name="mobile_allowed_user_id" value="${escapeHtml(mobile.allowed_user_id || "")}" placeholder="主要用户 ID"></label>
+            </div>
+            <div class="rt2-row cols2">
+              <label><span>会话有效期</span><input name="mobile_session_ttl_hours" type="number" min="1" max="720" value="${Number(mobile.session_ttl_hours || 168)}"><small>小时</small></label>
+              <label><span>位置上下文有效期</span><input name="mobile_location_ttl_seconds" type="number" min="60" max="86400" value="${Number(mobile.location_ttl_seconds || 900)}"><small>秒</small></label>
+            </div>
+            <div class="rt2-switch-row">
+              <input type="checkbox" id="rt2-proxy-rooms" name="mobile_proxy_rooms" ${mobile.proxy_rooms !== false ? "checked" : ""}>
+              <label class="rt2-switch" for="rt2-proxy-rooms"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+              <label for="rt2-proxy-rooms"><b>统一代理一起 / 游戏 / 协同房间</b><small>手机只访问移动网关，由网关转发页面、接口、媒体和 WebSocket；推荐保持开启。</small></label>
+            </div>
+            <label><span>新配对令牌（可选）</span><input name="mobile_pairing_token" type="password" autocomplete="new-password" placeholder="留空保留现有令牌"></label>
+          </fieldset>
+          <fieldset class="rt2-group">
+            <legend>高德区域识别</legend>
+            <div class="rt2-switch-row">
+              <input type="checkbox" id="rt2-amap" name="mobile_amap_reverse_geocode_enabled" ${mobile.amap_reverse_geocode_enabled ? "checked" : ""}>
+              <label class="rt2-switch" for="rt2-amap"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+              <label for="rt2-amap"><b>启用高德区域识别</b><small>将手机位置转换为城市/城区背景，用于通勤、天气和生活场景；不把精确地址交给陪伴模型。</small></label>
+            </div>
+            <div class="rt2-row">
+              <label><span>高德 Web 服务 Key</span><input name="mobile_amap_api_key" type="password" autocomplete="new-password" placeholder="${mobile.amap_api_key_configured ? "已配置，留空保持原值" : "粘贴高德控制台生成的 Key"}"></label>
+            </div>
+            <div class="rt2-row cols2">
+              <label><span>区域缓存（秒）</span><input name="mobile_amap_cache_ttl_seconds" type="number" min="60" max="604800" step="60" value="${Number(mobile.amap_cache_ttl_seconds || 1800)}"></label>
+              <label><span>请求超时（秒）</span><input name="mobile_amap_request_timeout_seconds" type="number" min="1" max="20" step="1" value="${Number(mobile.amap_request_timeout_seconds || 5)}"></label>
+            </div>
+          </fieldset>
+          <div class="rt2-actions"><button type="submit" class="primary">保存手机终端连接</button></div>
+        </form>
+        <div class="rt2-guide">
+          <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>怎么连接</h4>
           <ul>
             <li><strong>同一局域网 / Tailscale、ZeroTier 等组网：</strong>手机填写 <code>http://电脑组网 IP:${port}</code>，不要填写 127.0.0.1、localhost 或 0.0.0.0。</li>
             <li><strong>跨网络或公网：</strong>给移动网关配置 HTTPS 反向代理或安全隧道，再把 HTTPS 地址填入终端；浏览器房间不要使用公网纯 HTTP。</li>
             <li><strong>仅本机测试：</strong>只在电脑本机访问 <code>http://127.0.0.1:${port}</code>，手机无法访问这个地址。</li>
           </ul>
-          <p class="reality-mobile-guide-line">保存配置后，在与 Bot 的私聊发送“现实触及 配对令牌”，再用令牌完成配对。</p>
-        </section>
-        <section class="reality-mobile-troubleshooting">
-          <b>一起功能一直连接中</b>
+          <p>保存配置后，在与 Bot 的私聊发送“现实触及 配对令牌”，再用令牌完成配对。</p>
+        </div>
+        <div class="rt2-guide trouble">
+          <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2.5 20h19L12 3z"/><path d="M12 10v4M12 17h.01"/></svg>一起功能一直连接中</h4>
           <ul>
             <li>确认上方“统一代理一起 / 游戏 / 协同房间”已开启。</li>
             <li>确认手机打开的是移动网关端口 <code>:${port}</code>，不是 Together 直连端口（常见为 <code>:6321</code>）。</li>
             <li>确认“一起”房间服务已启用、正在运行，并已配置实时共处对话模型。</li>
             <li>修改端口或代理模式后保存并重启现实触及（或重启 AstrBot），再重新打开房间链接。</li>
           </ul>
-        </section>
+        </div>
       </div>
     </article>
     ${renderRealityTouchMobileDataPanel()}
@@ -34351,60 +34363,67 @@ function renderRealityTouchMobileDataPanel() {
     no_recent_device_status: "手机尚未上报设备状态",
   }[reason] || fallback);
   const ageText = (value) => Number.isFinite(Number(value)) && Number(value) >= 0 ? `${Math.round(Number(value))} 秒前` : "时间未知";
-  const activityStatus = activity.available
-    ? `最近上报 ${ageText(activity.age_seconds)}`
-    : reasonLabel(activity.reason, "暂无活动摘要");
-  const telemetryStatus = telemetry.available
-    ? `最近上报 ${ageText(telemetry.age_seconds)}`
-    : reasonLabel(telemetry.reason, "暂无健康数据");
+  const activityStatus = activity.available ? `最近上报 ${ageText(activity.age_seconds)}` : reasonLabel(activity.reason, "暂无活动摘要");
+  const telemetryStatus = telemetry.available ? `最近上报 ${ageText(telemetry.age_seconds)}` : reasonLabel(telemetry.reason, "暂无健康数据");
   const measurementRows = (Array.isArray(telemetry.measurements) ? telemetry.measurements : []).slice(0, 8).map((item) => `
     <div><span>${escapeHtml(item.type || "测量")}</span><b>${escapeHtml(String(item.value ?? "-"))} ${escapeHtml(item.unit || "")}</b></div>
   `).join("");
   return `
-    <article id="reality-mobile-data" class="exp-detail-card reality-mobile-data-card reality-workspace-card">
-      <div class="reality-touch-section-head">
-        <div><span>手机数据</span><h3>终端上报能力</h3></div>
+    <article id="reality-mobile-data" class="rt2-sec" data-component="Mobile Data">
+      <div class="rt2-sec-head">
+        <span class="rt2-sec-index">02</span>
+        <div class="rt2-sec-title"><span>手机数据</span><h3>终端上报能力</h3></div>
         <button type="button" class="soft" data-reality-touch-refresh>刷新接收状态</button>
       </div>
-      <p class="reality-device-intro">这里显示手机网关实际收到的短期数据，不是“已打开开关”的假状态。选择用户后可看到最近上报时间、过期原因和当前摘要。</p>
-      <label class="reality-mobile-observation-user"><span>查看用户</span><select data-reality-mobile-observation-user>${observations.map((item) => `<option value="${escapeHtml(item.user_id || "")}" ${String(item.user_id) === String(selectedId) ? "selected" : ""}>${escapeHtml(item.label || item.user_id || "未命名用户")}</option>`).join("") || '<option value="">暂无已配对用户</option>'}</select></label>
-      <div class="reality-mobile-feedback-grid">
-        <section class="reality-mobile-feedback-card ${activity.available ? "is-positive" : "is-muted"}">
-          <div class="reality-capability-title"><b>手机活动摘要</b><span>${escapeHtml(activityStatus)}</span></div>
-          <strong>${activity.available ? escapeHtml(activity.app_label || activity.display_title || "其他应用") : "暂无可用摘要"}</strong>
-          <small>${activity.available ? `类别：${escapeHtml(activity.category || "other")} · ${ageText(activity.age_seconds)}` : escapeHtml(reasonLabel(activity.reason, "等待手机上报"))}</small>
-        </section>
-        <section class="reality-mobile-feedback-card ${telemetry.available ? "is-positive" : "is-muted"}">
-          <div class="reality-capability-title"><b>健康 / 身体数据</b><span>${escapeHtml(telemetryStatus)}</span></div>
-          <strong>${telemetry.available ? escapeHtml(telemetry.summary || "已收到结构化数据") : "暂无可用数据"}</strong>
-          <small>${telemetry.available ? `来源：${escapeHtml(telemetry.source || "手机端")} · ${ageText(telemetry.age_seconds)}` : escapeHtml(reasonLabel(telemetry.reason, "等待手机上报"))}</small>
-        </section>
-        <section class="reality-mobile-feedback-card ${device.online ? "is-positive" : "is-muted"}">
-          <div class="reality-capability-title"><b>手机连接反馈</b><span>${device.online ? "在线" : "离线或无状态"}</span></div>
-          <strong>${device.available ? `${escapeHtml(device.device_name || "Android 设备")} · ${device.battery_percent == null ? "电量未知" : `${Number(device.battery_percent)}%`}` : "暂无设备状态"}</strong>
-          <small>${device.available ? `${device.charging ? "充电中" : "未充电"} · 最近上报 ${ageText(device.age_seconds)}` : escapeHtml(reasonLabel(device.reason, "等待手机上报"))}</small>
-        </section>
-      </div>
-      ${measurementRows ? `<div class="reality-mobile-measurements"><h4>最近测量值</h4><div>${measurementRows}</div></div>` : ""}
-      <form class="reality-mobile-data-config" data-reality-mobile-data-config>
-        <div class="reality-mobile-capability-grid">
-          <label class="reality-enable-field">
-            <input type="checkbox" name="mobile_activity_enabled" ${mobile.activity_enabled === true ? "checked" : ""}>
-            <span><b>启用手机活动摘要</b><small>仅接收前台应用类别和脱敏名称，用于伪窥屏与陪伴上下文；不接收截图、窗口标题或消息内容。</small></span>
-          </label>
-          <label class="reality-mobile-ttl-field"><span>活动摘要有效期（秒）</span><input name="mobile_activity_ttl_seconds" type="number" min="60" max="86400" step="60" value="${Number(mobile.activity_ttl_seconds || 900)}"><small>过期后页面和模型都显示暂无可用摘要。</small></label>
-          <label class="reality-enable-field">
-            <input type="checkbox" name="mobile_telemetry_enabled" ${mobile.telemetry_enabled === true ? "checked" : ""}>
-            <span><b>接收健康 / 身体数据</b><small>只接收手机端主动上报的结构化数值和活动状态，不会自动读取手机健康数据。</small></span>
-          </label>
-          <label class="reality-mobile-ttl-field"><span>健康数据有效期（秒）</span><input name="mobile_telemetry_ttl_seconds" type="number" min="60" max="604800" step="60" value="${Number(mobile.telemetry_ttl_seconds || 3600)}"><small>过期后健康摘要会自动隐藏。</small></label>
-          <label class="reality-enable-field">
-            <input type="checkbox" name="mobile_screen_upload_enabled" ${mobile.screen_upload_enabled !== false ? "checked" : ""}>
-            <span><b>接收终端屏幕共享状态</b><small>只同步是否正在共享及连接状态，实际画面仍由屏幕扩展处理。</small></span>
-          </label>
+      <div class="rt2-sec-body">
+        <p class="rt2-intro">这里显示手机网关实际收到的短期数据，不是“已打开开关”的假状态。选择用户后可看到最近上报时间、过期原因和当前摘要。</p>
+        <label class="rt2-user-pick"><span>查看用户</span><select data-reality-mobile-observation-user>${observations.map((item) => `<option value="${escapeHtml(item.user_id || "")}" ${String(item.user_id) === String(selectedId) ? "selected" : ""}>${escapeHtml(item.label || item.user_id || "未命名用户")}</option>`).join("") || '<option value="">暂无已配对用户</option>'}</select></label>
+        <div class="rt2-fb-grid">
+          <section class="rt2-fb ${activity.available ? "pos" : "mut"}">
+            <div class="rt2-fb-head"><b>手机活动摘要</b><span>${escapeHtml(activityStatus)}</span></div>
+            <strong>${activity.available ? escapeHtml(activity.app_label || activity.display_title || "其他应用") : "暂无可用摘要"}</strong>
+            <small>${activity.available ? `类别：${escapeHtml(activity.category || "other")} · ${ageText(activity.age_seconds)}` : escapeHtml(reasonLabel(activity.reason, "等待手机上报"))}</small>
+          </section>
+          <section class="rt2-fb ${telemetry.available ? "pos" : "mut"}">
+            <div class="rt2-fb-head"><b>健康 / 身体数据</b><span>${escapeHtml(telemetryStatus)}</span></div>
+            <strong>${telemetry.available ? escapeHtml(telemetry.summary || "已收到结构化数据") : "暂无可用数据"}</strong>
+            <small>${telemetry.available ? `来源：${escapeHtml(telemetry.source || "手机端")} · ${ageText(telemetry.age_seconds)}` : escapeHtml(reasonLabel(telemetry.reason, "等待手机上报"))}</small>
+          </section>
+          <section class="rt2-fb ${device.online ? "pos" : "mut"}">
+            <div class="rt2-fb-head"><b>手机连接反馈</b><span>${device.online ? "在线" : "离线或无状态"}</span></div>
+            <strong>${device.available ? `${escapeHtml(device.device_name || "Android 设备")} · ${device.battery_percent == null ? "电量未知" : `${Number(device.battery_percent)}%`}` : "暂无设备状态"}</strong>
+            <small>${device.available ? `${device.charging ? "充电中" : "未充电"} · 最近上报 ${ageText(device.age_seconds)}` : escapeHtml(reasonLabel(device.reason, "等待手机上报"))}</small>
+          </section>
         </div>
-        <button type="submit" class="primary">保存手机数据设置</button>
-      </form>
+        ${measurementRows ? `<div class="rt2-measures"><h4>最近测量值</h4><div>${measurementRows}</div></div>` : ""}
+        <form class="rt2-form" data-reality-mobile-data-config>
+          <fieldset class="rt2-group">
+            <legend>接收策略</legend>
+            <div class="rt2-row">
+              <div class="rt2-switch-row">
+                <input type="checkbox" id="rt2-activity" name="mobile_activity_enabled" ${mobile.activity_enabled === true ? "checked" : ""}>
+                <label class="rt2-switch" for="rt2-activity"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+                <label for="rt2-activity"><b>启用手机活动摘要</b><small>仅接收前台应用类别和脱敏名称，用于伪窥屏与陪伴上下文；不接收截图、窗口标题或消息内容。</small></label>
+              </div>
+              <div class="rt2-switch-row">
+                <input type="checkbox" id="rt2-telemetry" name="mobile_telemetry_enabled" ${mobile.telemetry_enabled === true ? "checked" : ""}>
+                <label class="rt2-switch" for="rt2-telemetry"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+                <label for="rt2-telemetry"><b>接收健康 / 身体数据</b><small>只接收手机端主动上报的结构化数值和活动状态，不会自动读取手机健康数据。</small></label>
+              </div>
+            </div>
+            <div class="rt2-row cols2">
+              <label><span>活动摘要有效期（秒）</span><input name="mobile_activity_ttl_seconds" type="number" min="60" max="86400" step="60" value="${Number(mobile.activity_ttl_seconds || 900)}"><small>过期后页面和模型都显示暂无可用摘要。</small></label>
+              <label><span>健康数据有效期（秒）</span><input name="mobile_telemetry_ttl_seconds" type="number" min="60" max="604800" step="60" value="${Number(mobile.telemetry_ttl_seconds || 3600)}"><small>过期后健康摘要会自动隐藏。</small></label>
+            </div>
+            <div class="rt2-switch-row">
+              <input type="checkbox" id="rt2-screen-upload" name="mobile_screen_upload_enabled" ${mobile.screen_upload_enabled !== false ? "checked" : ""}>
+              <label class="rt2-switch" for="rt2-screen-upload"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+              <label for="rt2-screen-upload"><b>接收终端屏幕共享状态</b><small>只同步是否正在共享及连接状态，实际画面仍由屏幕扩展处理。</small></label>
+            </div>
+          </fieldset>
+          <div class="rt2-actions"><button type="submit" class="primary">保存手机数据设置</button></div>
+        </form>
+      </div>
     </article>
   `;
 }
@@ -34431,47 +34450,94 @@ function renderRealityTouchHomeHealthPanel() {
   const mihomeAvailable = mihome.available === true;
   const mihomeAuth = mihome.auth && typeof mihome.auth === "object" ? mihome.auth : {};
   const mihomeLogin = mihome.login && typeof mihome.login === "object" ? mihome.login : {};
+  const mihomeLoginDetail = String(
+    mihomeLogin.detail || (mihomeLogin.status === "error" ? mihomeAuth.last_login_error : "") || "",
+  ).trim();
+  const mihomeArc4Failure = /(?:ARC4|pycryptodome)/i.test(mihomeLoginDetail);
   const mihomeMappings = Array.isArray(mihome.mappings) ? mihome.mappings : [];
   const mihomeDevices = Array.isArray(mihome.devices) ? mihome.devices.filter((item) => item && item.configured && Array.isArray(item.aliases) && item.aliases.length) : [];
-  const mihomeDeviceRows = mihomeDevices.slice(0, 24).map((item) => item.aliases.map((alias) => `<div class="reality-mihome-device"><span>${escapeHtml(alias)}<small>${escapeHtml(item.name || item.model || item.did || "米家设备")}</small></span><button type="button" class="soft" data-mihome-power="${escapeHtml(alias)}" data-mihome-power-value="true">开</button><button type="button" class="soft" data-mihome-power="${escapeHtml(alias)}" data-mihome-power-value="false">关</button></div>`).join("")).join("");
+  const mihomeDeviceRows = mihomeDevices.slice(0, 24).map((item) => item.aliases.map((alias) => `<div class="rt2-mi-device"><span><b>${escapeHtml(alias)}</b><small>${escapeHtml(item.name || item.model || item.did || "米家设备")}</small></span><button type="button" class="soft" data-mihome-power="${escapeHtml(alias)}" data-mihome-power-value="true">开</button><button type="button" class="soft" data-mihome-power="${escapeHtml(alias)}" data-mihome-power-value="false">关</button></div>`).join("")).join("");
   return `
-    <article id="reality-home-health" class="exp-detail-card reality-touch-card reality-workspace-card">
-      <div class="reality-touch-section-head">
-        <div><span>独立模块</span><h3>家居控制</h3></div>
-        <span class="reality-audio-backend ${home.available ? "ready" : "limited"}">${home.available ? "已配置" : "未配置"}</span>
+    <article id="reality-home" class="rt2-sec" data-component="Home Control">
+      <span id="reality-home-health" class="rt2-anchor-alias" aria-hidden="true"></span>
+      <div class="rt2-sec-head">
+        <span class="rt2-sec-index">03</span>
+        <div class="rt2-sec-title"><span>独立模块</span><h3>家居控制</h3></div>
+        <span class="rt2-state ${home.available ? "ok" : "idle"}">${home.available ? "已配置" : "未配置"}</span>
       </div>
-      <p class="reality-device-intro">家居控制与健康数据分开管理。家居模块只保存服务地址和令牌，未配置时不会发起设备请求。</p>
-      <form class="reality-home-config" data-reality-home-config>
-        <label class="reality-enable-field"><input type="checkbox" name="home_enabled" ${home.enabled ? "checked" : ""}><span><b>启用家居模块</b><small>支持 Home Assistant REST 兼容服务；米家可先通过 Home Assistant 暴露。</small></span></label>
-        <label><span>服务地址</span><input name="home_base_url" value="${escapeHtml(home.base_url || "")}" placeholder="http://127.0.0.1:8123"></label>
-        <label><span>访问令牌</span><input name="home_access_token" type="password" autocomplete="new-password" placeholder="${home.access_token_configured ? "已配置，留空保持" : "粘贴长期访问令牌"}"></label>
-        <div class="reality-mobile-inline-fields"><label><span>默认区域</span><input name="home_default_area" value="${escapeHtml(home.default_area || "")}" placeholder="客厅"></label><label><span>请求超时（秒）</span><input name="home_request_timeout_seconds" type="number" min="1" max="30" value="${Number(home.request_timeout_seconds || 5)}"></label></div>
-        <button type="submit" class="primary">保存家居配置</button>
-      </form>
-      <section id="reality-mihome" class="reality-mihome-panel">
-        <div class="reality-touch-section-head"><div><span>米家联动</span><h3>米家扫码与设备控制</h3></div><span class="reality-audio-backend ${mihomeAuth.logged_in ? "ready" : "limited"}">${mihomeAuth.logged_in ? "已登录" : "未登录"}</span></div>
-        <p class="reality-device-intro">扫码登录由米家插件完成，凭证仍由米家插件保管；这里仅调用已配置别名的设备。</p>
-        <div class="reality-mihome-actions"><button type="button" class="primary" data-mihome-login ${mihomeAvailable ? "" : "disabled"}>${mihomeAvailable ? (mihomeAuth.logged_in ? "已登录" : "扫码登录米家") : "未安装米家插件"}</button><button type="button" class="soft" data-mihome-sync ${mihomeAvailable && mihomeAuth.logged_in ? "" : "disabled"}>同步设备</button><button type="button" class="soft danger" data-mihome-logout ${mihomeAvailable && mihomeAuth.logged_in ? "" : "disabled"}>退出米家</button></div>
-        ${mihomeLogin.qr_image ? `<div class="reality-mihome-qr"><img alt="米家登录二维码" src="${escapeHtml(mihomeLogin.qr_image)}"><span>${escapeHtml(mihomeLogin.message || "请使用米家或小米账号扫一扫")}</span></div>` : mihomeLogin.message && mihomeLogin.status !== "idle" ? `<div class="reality-device-status"><b>${escapeHtml(mihomeLogin.message)}</b></div>` : ""}
-        <div class="reality-mihome-devices">${mihomeDeviceRows || `<small>${mihomeAvailable ? (mihomeAuth.logged_in ? "请先同步设备并配置设备别名" : "登录后可在此扫码登录米家") : "现实触及内置米家运行时暂不可用"}</small>`}</div>
-      </section>
-      <section class="reality-mihome-mapping-panel">
-        <div class="reality-touch-section-head"><div><span>米家配置</span><h3>设备别名与控制白名单</h3></div></div>
-        <p class="reality-device-intro">主陪伴插件可以直接管理设备别名；账号凭证仍由现实触及内置米家运行时保管。</p>
-        <div class="reality-mihome-mapping-list" data-mihome-mapping-list>${mihomeMappings.length ? mihomeMappings.map((item) => `<div class="reality-mihome-mapping-row"><input data-mihome-alias value="${escapeHtml(item.alias || "")}" placeholder="客厅灯"><input data-mihome-did value="${escapeHtml(item.did || "")}" placeholder="设备 DID"><button type="button" class="soft danger" data-mihome-remove-mapping>移除</button></div>`).join("") : ""}</div>
-        <div class="reality-mihome-mapping-actions"><button type="button" class="soft" data-mihome-add-mapping>新增设备</button><button type="button" class="primary" data-mihome-save-mappings ${mihomeAvailable ? "" : "disabled"}>保存设备映射</button></div>
-      </section>
-      <form class="reality-home-health-action" data-reality-home-action>
-        <label><span>请求用户</span><select name="home_user_id">${userOptions || '<option value="">暂无可用用户</option>'}</select></label>
-        <label class="reality-home-health-request"><span>家居请求</span><textarea name="home_request" rows="2" maxlength="500" placeholder="例如：打开客厅灯"></textarea></label>
-        <button type="submit" class="primary" ${userOptions ? "" : "disabled"}>提交请求</button>
-      </form>
-      <div class="reality-home-health-result ${actionResult ? "has-result" : ""}">
-        <b>${actionResult ? escapeHtml(actionResult.summary || actionResult.message || actionResult.reason || "请求已返回") : "尚未提交请求"}</b>
-        <small>家居控制只处理明确的打开或关闭请求；复杂场景请在家居服务中配置。</small>
+      <div class="rt2-sec-body">
+        <p class="rt2-intro">家居控制与健康数据分开管理。家居模块只保存服务地址和令牌，未配置时不会发起设备请求。</p>
+        <form class="rt2-form" data-reality-home-config>
+          <fieldset class="rt2-group">
+            <legend>Home Assistant 接入</legend>
+            <div class="rt2-switch-row">
+              <input type="checkbox" id="rt2-home-enabled" name="home_enabled" ${home.enabled ? "checked" : ""}>
+              <label class="rt2-switch" for="rt2-home-enabled"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+              <label for="rt2-home-enabled"><b>启用家居模块</b><small>支持 Home Assistant REST 兼容服务；米家可先通过 Home Assistant 暴露。</small></label>
+            </div>
+            <div class="rt2-row">
+              <label><span>服务地址</span><input name="home_base_url" value="${escapeHtml(home.base_url || "")}" placeholder="http://127.0.0.1:8123"></label>
+              <label><span>访问令牌</span><input name="home_access_token" type="password" autocomplete="new-password" placeholder="${home.access_token_configured ? "已配置，留空保持" : "粘贴长期访问令牌"}"></label>
+            </div>
+            <div class="rt2-row cols2">
+              <label><span>默认区域</span><input name="home_default_area" value="${escapeHtml(home.default_area || "")}" placeholder="客厅"></label>
+              <label><span>请求超时（秒）</span><input name="home_request_timeout_seconds" type="number" min="1" max="30" value="${Number(home.request_timeout_seconds || 5)}"></label>
+            </div>
+          </fieldset>
+          <div class="rt2-actions"><button type="submit" class="primary">保存家居配置</button></div>
+        </form>
+        <section id="reality-mihome" class="rt2-nested">
+          <div class="rt2-nested-head">
+            <div><span>米家联动</span><h4>米家扫码与设备控制</h4></div>
+            <span class="rt2-state ${mihomeAuth.logged_in ? "ok" : "idle"}">${mihomeAuth.logged_in ? "已登录" : "未登录"}</span>
+          </div>
+          <p class="rt2-intro">扫码登录由现实触及拓展插件完成，凭证由该拓展保管；陪伴插件只显示结果并调用已配置别名的设备。</p>
+          <div class="rt2-mi-actions"><button type="button" class="primary" data-mihome-login ${mihomeAvailable ? "" : "disabled"}>${mihomeAvailable ? (mihomeAuth.logged_in ? "已登录" : "扫码登录米家") : "现实触及运行时不可用"}</button><button type="button" class="soft" data-mihome-sync ${mihomeAvailable && mihomeAuth.logged_in ? "" : "disabled"}>同步设备</button><button type="button" class="soft danger" data-mihome-logout ${mihomeAvailable && mihomeAuth.logged_in ? "" : "disabled"}>退出米家</button></div>
+          ${mihomeLogin.qr_image ? `<div class="rt2-mi-qr"><img alt="米家登录二维码" src="${escapeHtml(mihomeLogin.qr_image)}"><span>${escapeHtml(mihomeLogin.message || "请使用米家或小米账号扫一扫")}</span></div>` : mihomeLogin.message && mihomeLogin.status !== "idle" ? `<div class="rt2-result"><b>${escapeHtml(mihomeLogin.message)}</b></div>` : ""}
+          ${mihomeLoginDetail ? `<div class="rt2-result ${mihomeLogin.status === "error" ? "err" : ""}"><b>${escapeHtml(mihomeLoginDetail)}</b>${mihomeArc4Failure ? "<small>请在 AstrBot 当前使用的 Python 环境中确认 pycryptodome==3.23.0，并重启现实触及拓展。</small>" : ""}</div>` : ""}
+          <div class="rt2-mi-devices">${mihomeDeviceRows || `<small>${mihomeAvailable ? (mihomeAuth.logged_in ? "请先同步设备并配置设备别名" : "点击扫码登录米家") : "现实触及拓展尚未准备好米家运行时"}</small>`}</div>
+        </section>
+        <section class="rt2-nested">
+          <div class="rt2-nested-head"><div><span>米家配置</span><h4>设备别名与控制白名单</h4></div></div>
+          <p class="rt2-intro">账号凭证和登录进程由现实触及拓展插件保管；这里仅管理陪伴侧可调用的设备映射。</p>
+          <div class="rt2-mi-mapping-list" data-mihome-mapping-list>${mihomeMappings.length ? mihomeMappings.map((item) => `<div class="rt2-mi-mapping-row"><input data-mihome-alias value="${escapeHtml(item.alias || "")}" placeholder="客厅灯" aria-label="设备别名"><input data-mihome-did value="${escapeHtml(item.did || "")}" placeholder="设备 DID" aria-label="设备 DID"><button type="button" class="soft danger" data-mihome-remove-mapping>移除</button></div>`).join("") : ""}</div>
+          <div class="rt2-actions"><button type="button" class="soft" data-mihome-add-mapping>新增设备</button><button type="button" class="primary" data-mihome-save-mappings ${mihomeAvailable ? "" : "disabled"}>保存设备映射</button></div>
+        </section>
+        <form class="rt2-form" data-reality-home-action>
+          <fieldset class="rt2-group">
+            <legend>家居请求测试</legend>
+            <div class="rt2-row">
+              <label><span>请求用户</span><select name="home_user_id">${userOptions || '<option value="">暂无可用用户</option>'}</select></label>
+              <label><span>家居请求</span><textarea name="home_request" rows="2" maxlength="500" placeholder="例如：打开客厅灯"></textarea></label>
+            </div>
+          </fieldset>
+          <div class="rt2-actions"><button type="submit" class="primary" ${userOptions ? "" : "disabled"}>提交请求</button></div>
+        </form>
+        <div class="rt2-result ${actionResult ? "has" : ""}">
+          <b>${actionResult ? escapeHtml(actionResult.summary || actionResult.message || actionResult.reason || "请求已返回") : "尚未提交请求"}</b>
+          <small>家居控制只处理明确的打开或关闭请求；复杂场景请在家居服务中配置。</small>
+        </div>
       </div>
-      <div id="reality-health" class="reality-touch-section-head"><div><span>独立模块</span><h3>健康数据接收</h3></div><span class="reality-audio-backend ${health.enabled ? "ready" : "limited"}">${health.enabled ? "已开启" : "未开启"}</span></div>
-      <form class="reality-health-config" data-reality-health-config><label class="reality-enable-field"><input type="checkbox" name="health_enabled" ${health.enabled ? "checked" : ""}><span><b>接收健康数据</b><small>只接收手机端主动上报的结构化数据，不读取手机健康应用。</small></span></label><label><span>数据有效期（秒）</span><input name="health_ttl_seconds" type="number" min="60" max="604800" step="60" value="${Number(health.ttl_seconds || 3600)}"></label><button type="submit" class="primary">保存健康配置</button></form>
+    </article>
+    <article id="reality-health" class="rt2-sec" data-component="Health Data">
+      <div class="rt2-sec-head">
+        <span class="rt2-sec-index">04</span>
+        <div class="rt2-sec-title"><span>独立模块</span><h3>健康数据接收</h3></div>
+        <span class="rt2-state ${health.enabled ? "ok" : "idle"}">${health.enabled ? "已开启" : "未开启"}</span>
+      </div>
+      <div class="rt2-sec-body">
+        <form class="rt2-form" data-reality-health-config>
+          <div class="rt2-switch-row">
+            <input type="checkbox" id="rt2-health-enabled" name="health_enabled" ${health.enabled ? "checked" : ""}>
+            <label class="rt2-switch" for="rt2-health-enabled"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+            <label for="rt2-health-enabled"><b>接收健康数据</b><small>只接收手机端主动上报的结构化数据，不读取手机健康应用。</small></label>
+          </div>
+          <div class="rt2-row">
+            <label><span>数据有效期（秒）</span><input name="health_ttl_seconds" type="number" min="60" max="604800" step="60" value="${Number(health.ttl_seconds || 3600)}"></label>
+          </div>
+          <div class="rt2-actions"><button type="submit" class="primary">保存健康配置</button></div>
+        </form>
+      </div>
     </article>
   `;
 }
@@ -34484,67 +34550,135 @@ function renderRealityTouchPage() {
   const enabled = Boolean(data?.global_enabled ?? status.enabled);
   const canToggle = Boolean(data && !state.realityTouchLoading && !state.realityTouchError);
   const counts = data?.counts || {};
+  const mobileRunning = Boolean(data?.configuration?.mobile?.running);
+  const pendingReminders = Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0);
   root.innerHTML = `
-    <div class="reality-touch-page ${enabled ? "on" : "off"}">
-      <header class="reality-page-head">
-        <div class="reality-page-head-copy">
-          <span class="module-badge">陪伴扩展</span>
-          <h2>现实触及</h2>
+    <div class="rt2-page ${enabled ? "on" : "off"}">
+      <header class="rt2-hero" data-component="Hero Header">
+        <span class="module-badge rt2-badge"><i></i>陪伴扩展</span>
+        <div class="rt2-hero-copy">
+          <h1>现实触及<small>REALITY TOUCH</small></h1>
           <p>集中管理手机终端、电脑设备、用户授权与现实提醒。能力实现和授权数据仍由“我会来到你身边”维护。</p>
         </div>
-        <div class="reality-page-actions">
-          <label class="feature-detail-toggle reality-global-toggle">
+        <div class="rt2-hero-actions">
+          <label class="rt2-global-toggle reality-global-toggle">
             <input type="checkbox" data-reality-global-toggle ${enabled ? "checked" : ""} ${canToggle ? "" : "disabled"}>
-            <span class="feature-toggle-visual"></span>
+            <span class="rt2-switch-track lg" aria-hidden="true"></span>
             <b>${canToggle ? (enabled ? "已开启" : "未开启") : "读取中"}</b>
           </label>
-          <button type="button" data-reality-touch-refresh>${state.realityTouchLoading ? "正在刷新" : "刷新状态"}</button>
+          <button type="button" class="soft" data-reality-touch-refresh>${state.realityTouchLoading ? "正在刷新" : "刷新状态"}</button>
         </div>
       </header>
-      <div class="reality-page-status-grid">
-        <article class="${enabled ? "is-positive" : "is-muted"}"><span>扩展状态</span><b>${enabled ? "已启用" : "已安装 · 未启用"}</b><small>${status.available === false ? "当前不可用" : "已连接陪伴面板"}</small></article>
-        <article class="${data?.configuration?.mobile?.running ? "is-positive" : "is-muted"}"><span>手机终端</span><b>${data?.configuration?.mobile?.running ? "已连接网关" : (data?.configuration?.mobile?.enabled ? "等待绑定" : "未启用")}</b><small>${Number(data?.configuration?.mobile?.active_sessions || 0)} 个活动会话</small></article>
-        <article class="is-info"><span>现实授权</span><b>${Number(counts.consented || 0)} 人</b><small>摄像头授权 ${Number(counts.camera_consented || 0)} 人</small></article>
-        <article class="${Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0) ? "is-warm" : "is-muted"}"><span>待执行提醒</span><b>${Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0)}</b><small>官方任务与计划场景</small></article>
+      <div class="rt2-overview" data-component="Status Overview">
+        <article class="rt2-stat ${enabled ? "ok" : "idle"}"><span class="rt2-dot"></span><span>扩展状态</span><b>${enabled ? "已启用" : "已安装 · 未启用"}</b><small>${status.available === false ? "当前不可用" : "已连接陪伴面板"}</small></article>
+        <article class="rt2-stat ${mobileRunning ? "ok" : "idle"}"><span class="rt2-dot"></span><span>手机终端</span><b>${mobileRunning ? "已连接网关" : (data?.configuration?.mobile?.enabled ? "等待绑定" : "未启用")}</b><small>${Number(data?.configuration?.mobile?.active_sessions || 0)} 个活动会话</small></article>
+        <article class="rt2-stat info"><span class="rt2-dot"></span><span>现实授权</span><b>${Number(counts.consented || 0)} 人</b><small>摄像头授权 ${Number(counts.camera_consented || 0)} 人</small></article>
+        <article class="rt2-stat ${pendingReminders ? "warn" : "idle"}"><span class="rt2-dot"></span><span>待执行提醒</span><b>${pendingReminders}</b><small>官方任务与计划场景</small></article>
       </div>
-      <form class="reality-global-config" data-reality-global-config>
-        <div class="reality-touch-section-head"><div><span>基础配置</span><h3>现实触及运行参数</h3></div></div>
-        <div class="reality-mobile-inline-fields">
+      <form class="rt2-base" data-reality-global-config>
+        <div class="rt2-base-head"><span>基础配置</span><h3>现实触及运行参数</h3></div>
+        <div class="rt2-row">
           <label><span>视觉模型 Provider ID</span><input name="vision_provider_id" value="${escapeHtml(data?.configuration?.vision_provider_id || "")}" placeholder="留空则只使用本地画面信息"></label>
           <label><span>提醒时区</span><input name="timezone" value="${escapeHtml(data?.configuration?.timezone || "Asia/Shanghai")}" placeholder="Asia/Shanghai"></label>
-          <label><span>默认播放音量</span><input name="audio_default_playback_volume" type="number" min="0" max="100" value="${Number(data?.configuration?.audio_default_playback_volume ?? 35)}"></label>
+          <label><span>默认播放音量（0-100）</span><input name="audio_default_playback_volume" type="number" min="0" max="100" value="${Number(data?.configuration?.audio_default_playback_volume ?? 35)}"></label>
         </div>
         <label><span>现实触及授权用户 ID</span><textarea name="authorized_user_ids" rows="2" placeholder="每行一个用户 ID">${escapeHtml((data?.configuration?.authorized_user_ids || []).join("\n"))}</textarea><small>仅限制可配置现实触及的用户，不替代用户本人对音频或摄像头的知情确认。</small></label>
-        <button type="submit" class="primary">保存基础配置</button>
+        <div class="rt2-actions"><button type="submit" class="primary">保存基础配置</button></div>
       </form>
-      <nav class="reality-section-nav" aria-label="现实触及页面分区">
-        <a href="#reality-connect"><span>01</span>手机连接</a>
-        <a href="#reality-mobile-data"><span>02</span>手机数据</a>
-        <a href="#reality-home-health"><span>03</span>家居控制</a>
-        <a href="#reality-health"><span>04</span>健康数据</a>
-        <a href="#reality-mihome"><span>05</span>米家联动</a>
-        <a href="#reality-audio"><span>06</span>本机音频</a>
-        <a href="#reality-camera"><span>07</span>本机摄像头</a>
-        <a href="#reality-automation"><span>08</span>用户与提醒</a>
-        <a href="#reality-runtime"><span>09</span>运行状态</a>
+      <nav class="rt2-nav" aria-label="现实触及页面分区" data-component="Section Nav">
+        <span class="rt2-nav-cap">页面分区</span>
+        <a href="#reality-connect" data-rt2-nav="reality-connect"><i>01</i>手机连接</a>
+        <a href="#reality-mobile-data" data-rt2-nav="reality-mobile-data"><i>02</i>手机数据</a>
+        <a href="#reality-home-health" data-rt2-nav="reality-home"><i>03</i>家居控制</a>
+        <a href="#reality-health" data-rt2-nav="reality-health"><i>04</i>健康数据</a>
+        <a href="#reality-mihome" data-rt2-nav="reality-mihome"><i>05</i>米家联动</a>
+        <a href="#reality-audio" data-rt2-nav="reality-audio"><i>06</i>本机音频</a>
+        <a href="#reality-camera" data-rt2-nav="reality-camera"><i>07</i>本机摄像头</a>
+        <a href="#reality-automation" data-rt2-nav="reality-automation"><i>08</i>用户与提醒</a>
+        <a href="#reality-runtime" data-rt2-nav="reality-runtime"><i>09</i>运行状态</a>
+        <p class="rt2-nav-foot">保存后由现实触及扩展即时生效，无需重启面板。</p>
       </nav>
-      <div class="reality-console-layout">
-        <main class="reality-console-main">
+      <div class="rt2-shell">
+        <main class="rt2-main">
           ${renderRealityTouchMobilePanel()}
           ${renderRealityTouchHomeHealthPanel()}
           ${renderRealityTouchDevicePanel()}
           ${renderRealityTouchSettings()}
         </main>
-        <aside class="reality-console-aside" aria-label="现实触及运行摘要">
+        <aside class="rt2-aside" aria-label="现实触及运行摘要">
           ${renderRealityTouchRuntime()}
         </aside>
       </div>
     </div>
   `;
   bindRealityTouchActions(root);
+  bindRealityTouchPageMotion(root);
   if (!state.realityTouch && !state.realityTouchLoading && realityCompanionInstalled()) {
     loadRealityTouch().catch((error) => showToast(`读取现实触及状态失败：${error.message}`, "error"));
   }
+}
+
+let rt2MotionTeardown = null;
+
+function bindRealityTouchPageMotion(root) {
+  // 清理上一次渲染留下的滚动监听与观察器，避免重渲染后监听器不断累积
+  if (typeof rt2MotionTeardown === "function") {
+    rt2MotionTeardown();
+    rt2MotionTeardown = null;
+  }
+  // 入场动画只在首次挂载播放；后续重渲染直接可见，避免每次保存/轮询整页闪烁淡入
+  const firstMount = root.dataset.rt2MotionMounted !== "1";
+  if (firstMount && window.IntersectionObserver) {
+    root.dataset.rt2MotionMounted = "1";
+    root.classList.add("anim");
+    const revealEls = root.querySelectorAll(".rt2-sec, .rt2-run-card, .rt2-fb");
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("rt2-in");
+          io.unobserve(entry.target);
+        }
+      });
+    }, { rootMargin: "0px 0px -6% 0px", threshold: 0.05 });
+    revealEls.forEach((el) => io.observe(el));
+    rt2MotionTeardown = () => io.disconnect();
+  } else {
+    root.classList.remove("anim");
+  }
+  const navLinks = Array.from(root.querySelectorAll("[data-rt2-nav]"));
+  const navTargets = navLinks
+    .map((link) => root.querySelector(`#${CSS.escape(link.dataset.rt2Nav || "")}`))
+    .filter(Boolean);
+  if (!navLinks.length) return;
+  let navActive = false;
+  const onScroll = () => {
+    if (navActive) return;
+    navActive = true;
+    requestAnimationFrame(() => {
+      navActive = false;
+      if (!document.body.contains(root) || root.offsetParent === null) return;
+      const probe = window.scrollY + window.innerHeight * 0.3;
+      const pageRect = root.getBoundingClientRect();
+      const base = window.scrollY - pageRect.top;
+      let activeId = navTargets.length ? navTargets[0].id : "";
+      navTargets.forEach((target) => {
+        const offset = base + target.offsetTop;
+        if (offset <= probe) activeId = target.id;
+      });
+      navLinks.forEach((link) => {
+        if (document.body.contains(link)) {
+          link.classList.toggle("active", (link.dataset.rt2Nav || "") === activeId);
+        }
+      });
+    });
+  };
+  window.addEventListener("scroll", onScroll, { passive: true });
+  const prevTeardown = rt2MotionTeardown;
+  rt2MotionTeardown = () => {
+    if (typeof prevTeardown === "function") prevTeardown();
+    window.removeEventListener("scroll", onScroll);
+  };
+  onScroll();
 }
 
 function realityGlobalConfigPayload(root, enabledOverride) {
@@ -36699,67 +36833,88 @@ function renderRealityTouchDevicePanel() {
     : null;
   const canTestCamera = Boolean(data.global_enabled && camera.global_enabled && cameraState.eligible && cameraState.consented && cameraState.enabled && cameraBackend.available);
   return `
-    <article id="reality-audio" class="exp-detail-card reality-device-card reality-workspace-card">
-      <div class="reality-touch-section-head">
-        <div><span>能力出口</span><h3>音频输出</h3></div>
-        <span class="reality-audio-backend ${audio.backend_available ? "ready" : "limited"}">${audio.backend_available ? "设备直连可用" : "仅系统默认"}</span>
+    <article id="reality-audio" class="rt2-sec" data-component="Local Audio">
+      <div class="rt2-sec-head">
+        <span class="rt2-sec-index">06</span>
+        <div class="rt2-sec-title"><span>能力出口</span><h3>音频输出</h3></div>
+        <span class="rt2-state ${audio.backend_available ? "ok" : "warn"}">${audio.backend_available ? "设备直连可用" : "仅系统默认"}</span>
       </div>
-      <p class="reality-device-intro">选择现实触及实际播放到的电脑输出端点。蓝牙音响需要先由 Windows 完成连接；插件不负责配对。</p>
-      <div class="reality-device-controls">
-        <label>
-          <span>输出设备</span>
-          <select data-reality-touch-device>${options || '<option value="system_default">跟随系统默认输出</option>'}</select>
+      <div class="rt2-sec-body">
+        <p class="rt2-intro">选择现实触及实际播放到的电脑输出端点。蓝牙音响需要先由 Windows 完成连接；插件不负责配对。</p>
+        <div class="rt2-row">
+          <label><span>输出设备</span><select data-reality-touch-device>${options || '<option value="system_default">跟随系统默认输出</option>'}</select></label>
+        </div>
+        <label class="rt2-slider">
+          <span class="rt2-slider-head"><b>现实触及播放音量</b><output data-reality-touch-volume-output>${Number(audio.playback_volume ?? 35)}%</output></span>
+          <input type="range" data-reality-touch-volume min="0" max="100" step="1" value="${Number(audio.playback_volume ?? 35)}">
+          <small>仅影响现实触及的本机播放，不修改普通聊天 TTS 音量。</small>
         </label>
-        <button type="button" class="primary" data-reality-touch-device-save>保存设备与音量</button>
-        <button type="button" data-reality-touch-refresh>刷新列表</button>
-        <button type="button" data-reality-touch-test data-reality-touch-test-kind="device" ${canTest ? "" : "disabled"}>播放固定测试音频</button>
-      </div>
-      <label class="reality-device-volume">
-        <span>现实触及播放音量 <output data-reality-touch-volume-output>${Number(audio.playback_volume ?? 35)}%</output></span>
-        <input type="range" data-reality-touch-volume min="0" max="100" step="1" value="${Number(audio.playback_volume ?? 35)}">
-        <small>仅影响现实触及的本机播放，不修改普通聊天 TTS 音量。</small>
-      </label>
-      <div class="reality-device-status ${audio.selected_device_missing ? "error" : ""}">
-        <b>${audio.selected_device_missing ? "所选设备当前离线" : `当前路由：${escapeHtml(audio.label || "跟随系统默认输出")}`}</b>
-        <span>${escapeHtml(audio.error || (audio.backend_available ? "指定设备离线或播放失败时，会自动回退到系统默认输出并记录诊断。" : "安装音频路由依赖并重载插件后，可选择具体耳机、扬声器或蓝牙音响。"))}</span>
+        <div class="rt2-actions">
+          <button type="button" class="primary" data-reality-touch-device-save>保存设备与音量</button>
+          <button type="button" class="soft" data-reality-touch-refresh>刷新列表</button>
+          <button type="button" class="soft" data-reality-touch-test data-reality-touch-test-kind="device" ${canTest ? "" : "disabled"}>播放固定测试音频</button>
+        </div>
+        <div class="rt2-result ${audio.selected_device_missing ? "err" : ""}">
+          <b>${audio.selected_device_missing ? "所选设备当前离线" : `当前路由：${escapeHtml(audio.label || "跟随系统默认输出")}`}</b>
+          <span>${escapeHtml(audio.error || (audio.backend_available ? "指定设备离线或播放失败时，会自动回退到系统默认输出并记录诊断。" : "安装音频路由依赖并重载插件后，可选择具体耳机、扬声器或蓝牙音响。"))}</span>
+        </div>
       </div>
     </article>
-    <article id="reality-camera" class="exp-detail-card reality-device-card reality-workspace-card">
-      <div class="reality-touch-section-head">
-        <div><span>环境感知</span><h3>摄像头</h3></div>
-        <span class="reality-audio-backend ${cameraBackend.available ? "ready" : "limited"}">${cameraBackend.available ? "单帧后端可用" : "后端不可用"}</span>
+    <article id="reality-camera" class="rt2-sec" data-component="Local Camera">
+      <div class="rt2-sec-head">
+        <span class="rt2-sec-index">07</span>
+        <div class="rt2-sec-title"><span>环境感知</span><h3>摄像头</h3></div>
+        <span class="rt2-state ${cameraBackend.available ? "ok" : "warn"}">${cameraBackend.available ? "单帧后端可用" : "后端不可用"}</span>
       </div>
-      <p class="reality-device-intro">页面不会自动扫描。点击“扫描摄像头”只读取设备名称和 OpenCV 索引，不采集画面；真正可用性由授权后的单帧测试确认。</p>
-      <form class="reality-device-controls" data-reality-touch-camera-config>
-        <label class="reality-enable-field">
-          <input type="checkbox" name="camera_enabled" ${camera.global_enabled ? "checked" : ""}>
-          <span><b>启用摄像头能力总开关</b><small>仍需当前用户单独授权并开启用户策略。</small></span>
-        </label>
-        <label class="reality-enable-field">
-          <input type="checkbox" name="proactive_curiosity_enabled" ${camera.proactive_curiosity_enabled ? "checked" : ""}>
-          <span><b>启用主动视觉好奇链路</b><small>作为独立候选交给主动 Agent 按语义判断，不按吃饭、穿搭等关键词硬触发。</small></span>
-        </label>
-        <label><span>摄像头设备</span><select name="camera_index">${cameraIndexKnown ? "" : `<option value="${currentCameraIndex}" selected>当前手动索引 ${currentCameraIndex}</option>`}${cameraIndexOptions || `<option value="${currentCameraIndex}">尚未扫描 · 当前索引 ${currentCameraIndex}</option>`}</select></label>
-        <label><span>最小读取间隔</span><input type="number" name="min_interval_seconds" min="10" max="3600" step="10" value="${Number(camera.min_interval_seconds ?? 60)}"></label>
-        <label><span>读取超时</span><input type="number" name="capture_timeout_seconds" min="2" max="20" step="1" value="${Number(camera.capture_timeout_seconds ?? 5)}"></label>
-        <label><span>视觉分析超时</span><input type="number" name="analysis_timeout_seconds" min="5" max="90" step="5" value="${Number(camera.analysis_timeout_seconds ?? 25)}"></label>
-        <label><span>允许直看的最低主动档</span><select name="proactive_min_tier">${[[1, "L1 克制"], [2, "L2 轻陪伴"], [3, "L3 稳定陪伴"], [4, "L4 亲密陪伴"], [5, "L5 持续在线"]].map(([value, label]) => `<option value="${value}" ${Number(camera.proactive_min_tier ?? 4) === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
-        <label><span>主动单帧每日上限</span><input type="number" name="proactive_max_daily" min="0" max="10" step="1" value="${Number(camera.proactive_max_daily ?? 1)}"><small>0 表示只可询问</small></label>
-        <label><span>主动单帧行为冷却</span><input type="number" name="proactive_cooldown_minutes" min="10" max="1440" step="10" value="${Number(camera.proactive_cooldown_minutes ?? 240)}"><small>分钟</small></label>
-        <button type="submit" class="primary">保存摄像头配置</button>
-        <button type="button" data-reality-touch-camera-scan ${cameraBackend.enumerator_available ? "" : "disabled"}>扫描摄像头</button>
-        <button type="button" data-reality-touch-camera-test ${canTestCamera ? "" : "disabled"}>读取并预览单帧</button>
-      </form>
-      <div class="reality-device-status ${cameraBackend.available ? "" : "error"}">
-        <b>${camera.global_enabled ? `当前使用摄像头索引 ${Number(camera.camera_index ?? 0)}` : "摄像头能力总开关关闭"}</b>
-        <span>${escapeHtml(camera.devices_error || cameraBackend.error || (camera.devices_scanned_at ? `上次扫描发现 ${cameraDevices.length} 个入口；同一实体摄像头可能因 DirectShow/Media Foundation 显示多个索引。` : "尚未扫描设备。扫描不会采集画面。"))}</span>
+      <div class="rt2-sec-body">
+        <p class="rt2-intro">页面不会自动扫描。点击“扫描摄像头”只读取设备名称和 OpenCV 索引，不采集画面；真正可用性由授权后的单帧测试确认。</p>
+        <form class="rt2-form" data-reality-touch-camera-config>
+          <fieldset class="rt2-group">
+            <legend>能力开关</legend>
+            <div class="rt2-row">
+              <div class="rt2-switch-row">
+                <input type="checkbox" id="rt2-camera-enabled" name="camera_enabled" ${camera.global_enabled ? "checked" : ""}>
+                <label class="rt2-switch" for="rt2-camera-enabled"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+                <label for="rt2-camera-enabled"><b>启用摄像头能力总开关</b><small>仍需当前用户单独授权并开启用户策略。</small></label>
+              </div>
+              <div class="rt2-switch-row">
+                <input type="checkbox" id="rt2-curiosity" name="proactive_curiosity_enabled" ${camera.proactive_curiosity_enabled ? "checked" : ""}>
+                <label class="rt2-switch" for="rt2-curiosity"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+                <label for="rt2-curiosity"><b>启用主动视觉好奇链路</b><small>作为独立候选交给主动 Agent 按语义判断，不按吃饭、穿搭等关键词硬触发。</small></label>
+              </div>
+            </div>
+          </fieldset>
+          <fieldset class="rt2-group">
+            <legend>读取参数</legend>
+            <div class="rt2-row">
+              <label><span>摄像头设备</span><select name="camera_index">${cameraIndexKnown ? "" : `<option value="${currentCameraIndex}" selected>当前手动索引 ${currentCameraIndex}</option>`}${cameraIndexOptions || `<option value="${currentCameraIndex}">尚未扫描 · 当前索引 ${currentCameraIndex}</option>`}</select></label>
+              <label><span>允许直看的最低主动档</span><select name="proactive_min_tier">${[[1, "L1 克制"], [2, "L2 轻陪伴"], [3, "L3 稳定陪伴"], [4, "L4 亲密陪伴"], [5, "L5 持续在线"]].map(([value, label]) => `<option value="${value}" ${Number(camera.proactive_min_tier ?? 4) === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+            </div>
+            <div class="rt2-row cols2">
+              <label><span>最小读取间隔（秒）</span><input type="number" name="min_interval_seconds" min="10" max="3600" step="10" value="${Number(camera.min_interval_seconds ?? 60)}"></label>
+              <label><span>读取超时（秒）</span><input type="number" name="capture_timeout_seconds" min="2" max="20" step="1" value="${Number(camera.capture_timeout_seconds ?? 5)}"></label>
+              <label><span>视觉分析超时（秒）</span><input type="number" name="analysis_timeout_seconds" min="5" max="90" step="5" value="${Number(camera.analysis_timeout_seconds ?? 25)}"></label>
+              <label><span>主动单帧每日上限</span><input type="number" name="proactive_max_daily" min="0" max="10" step="1" value="${Number(camera.proactive_max_daily ?? 1)}"><small>0 表示只可询问</small></label>
+              <label><span>主动单帧行为冷却（分）</span><input type="number" name="proactive_cooldown_minutes" min="10" max="1440" step="10" value="${Number(camera.proactive_cooldown_minutes ?? 240)}"></label>
+            </div>
+          </fieldset>
+          <div class="rt2-actions">
+            <button type="submit" class="primary">保存摄像头配置</button>
+            <button type="button" class="soft" data-reality-touch-camera-scan ${cameraBackend.enumerator_available ? "" : "disabled"}>扫描摄像头</button>
+            <button type="button" class="soft" data-reality-touch-camera-test ${canTestCamera ? "" : "disabled"}>读取并预览单帧</button>
+          </div>
+        </form>
+        <div class="rt2-result ${cameraBackend.available ? "" : "err"}">
+          <b>${camera.global_enabled ? `当前使用摄像头索引 ${Number(camera.camera_index ?? 0)}` : "摄像头能力总开关关闭"}</b>
+          <span>${escapeHtml(camera.devices_error || cameraBackend.error || (camera.devices_scanned_at ? `上次扫描发现 ${cameraDevices.length} 个入口；同一实体摄像头可能因 DirectShow/Media Foundation 显示多个索引。` : "尚未扫描设备。扫描不会采集画面。"))}</span>
+        </div>
+        ${cameraPreview ? `
+          <figure class="rt2-cam-preview">
+            <img src="${escapeHtml(cameraPreview.data_url)}" alt="本次摄像头单帧临时预览">
+            <figcaption><b>本次临时预览</b><span>仅保留在当前页面内存中；刷新或离开页面即消失，不写入插件数据和磁盘。</span></figcaption>
+          </figure>
+        ` : ""}
       </div>
-      ${cameraPreview ? `
-        <figure class="reality-camera-preview">
-          <img src="${escapeHtml(cameraPreview.data_url)}" alt="本次摄像头单帧临时预览">
-          <figcaption><b>本次临时预览</b><span>仅保留在当前页面内存中；刷新或离开页面即消失，不写入插件数据和磁盘。</span></figcaption>
-        </figure>
-      ` : ""}
     </article>
   `;
 }
@@ -36771,12 +36926,13 @@ function renderRealityTouchSettings() {
   const user = selectedRealityTouchUser();
   if (!user) {
     return `
-      <article id="reality-automation" class="exp-detail-card reality-touch-card reality-workspace-card">
-        <div class="reality-touch-section-head">
-          <div><span>用户与场景</span><h3>主动语音扩展</h3></div>
+      <article id="reality-automation" class="rt2-sec" data-component="Users and Reminders">
+        <div class="rt2-sec-head">
+          <span class="rt2-sec-index">08</span>
+          <div class="rt2-sec-title"><span>用户与场景</span><h3>主动语音扩展</h3></div>
           <button type="button" class="soft" data-reality-touch-refresh>刷新</button>
         </div>
-        <div class="exp-settings-empty">还没有可配置的私聊用户。请先让用户与 Bot 建立一次私聊，再刷新本页。</div>
+        <div class="rt2-sec-body"><div class="rt2-empty">还没有可配置的私聊用户。请先让用户与 Bot 建立一次私聊，再刷新本页。</div></div>
       </article>
     `;
   }
@@ -36798,7 +36954,7 @@ function renderRealityTouchSettings() {
   const dayLabels = ["一", "二", "三", "四", "五", "六", "日"];
   const activeDays = new Set(Array.isArray(alarm.days) ? alarm.days.map(Number) : [0, 1, 2, 3, 4, 5, 6]);
   const dayChecks = dayLabels.map((label, index) => `
-    <label class="reality-day-check">
+    <label class="rt2-day">
       <input type="checkbox" name="reality_day" value="${index}" ${activeDays.has(index) ? "checked" : ""} ${confirmed ? "" : "disabled"}>
       <span>周${label}</span>
     </label>
@@ -36806,156 +36962,139 @@ function renderRealityTouchSettings() {
   const formDisabled = confirmed ? "" : "disabled";
   const testDisabled = data.global_enabled && confirmed && alarm.time ? "" : "disabled";
   return `
-    <article id="reality-automation" class="exp-detail-card reality-touch-card reality-workspace-card">
-      <div class="reality-touch-section-head">
-        <div><span>用户与场景</span><h3>主动语音扩展</h3></div>
+    <article id="reality-automation" class="rt2-sec" data-component="Users and Reminders">
+      <div class="rt2-sec-head">
+        <span class="rt2-sec-index">08</span>
+        <div class="rt2-sec-title"><span>用户与场景</span><h3>主动语音扩展</h3></div>
         <button type="button" class="soft" data-reality-touch-refresh>刷新状态</button>
       </div>
-      <label class="reality-user-select">
-        <span>配置对象</span>
-        <select data-reality-touch-user>${options}</select>
-      </label>
-      <section class="reality-consent-strip ${confirmed ? "ok" : "pending"}">
-        <div>
-          <b>${confirmed ? "用户已完成知情确认" : "等待用户本人确认"}</b>
-          <span>${confirmed ? `仅授权本机音频 · 协议 v${escapeHtml(String(consent.version || data.consent_version || 1))}` : "页面不能代替用户授权。请让该用户在与 Bot 的私聊中手动发送下方完整命令。"}</span>
-        </div>
-        ${confirmed ? `<span class="reality-consent-time">${consent.confirmed_at ? escapeHtml(formatDailyReviewTime(consent.confirmed_at)) : "已记录"}</span>` : `<button type="button" data-reality-touch-copy>复制确认命令</button>`}
-      </section>
-      ${confirmed ? "" : `<div class="reality-command-box"><code>${escapeHtml(command)}</code></div>`}
-      <section class="reality-consent-strip ${cameraConfirmed ? "ok" : "pending"}">
-        <div>
-          <b>${!cameraEligible ? "该用户不能访问主机摄像头" : cameraConfirmed ? "主机管理用户已授权摄像头单帧" : "摄像头仍需主机管理用户独立确认"}</b>
-          <span>${!cameraEligible ? "摄像头观察的是运行 AstrBot 的主机环境，只允许 AstrBot 管理员或关系角色明确设为 owner 的主要用户使用。普通私聊、目标用户名单与主动权限均不会授予摄像头访问。" : cameraConfirmed ? `仅授权 camera_single_frame · 协议 v${escapeHtml(String(cameraState.consent_version || 1))}` : "音频授权不会自动开放摄像头。请由主机管理用户在自己的私聊中发起确认。"}</span>
-        </div>
-        ${!cameraEligible ? "" : cameraConfirmed ? `<span class="reality-consent-time">${cameraState.confirmed_at ? escapeHtml(formatDailyReviewTime(cameraState.confirmed_at)) : "已记录"}</span>` : `<button type="button" data-reality-touch-camera-copy>复制摄像头确认命令</button>`}
-      </section>
-      ${cameraEligible && !cameraConfirmed ? `<div class="reality-command-box"><code>${escapeHtml(cameraCommand)}</code></div>` : ""}
-      <form class="reality-policy-form" data-reality-touch-camera-policy-form>
-        <label class="reality-enable-field">
-          <input type="checkbox" name="reality_camera_enabled" ${cameraState.enabled ? "checked" : ""} ${cameraEligible && cameraConfirmed ? "" : "disabled"}>
-          <span><b>允许该主机管理用户的明确任务读取单帧</b><small>普通私聊用户不能获得此能力；仍受摄像头总开关、读取冷却和任务目的约束。</small></span>
-        </label>
-        <label class="reality-field">
-          <span>主动视觉策略</span>
-          <select name="reality_camera_proactive_mode" ${cameraEligible && cameraConfirmed ? "" : "disabled"}>
-            <option value="off" ${String(cameraState.proactive_mode || "off") === "off" ? "selected" : ""}>关闭主动视觉好奇</option>
-            <option value="ask" ${String(cameraState.proactive_mode || "off") === "ask" ? "selected" : ""}>有价值时先自然询问</option>
-            <option value="auto" ${String(cameraState.proactive_mode || "off") === "auto" ? "selected" : ""}>达到强度后可主动单帧</option>
-          </select>
-          <small>低于全局最低档时，auto 会自动降级为 ask。</small>
-        </label>
-        <label class="reality-field">
-          <span>该用户主动单帧日额度</span>
-          <input type="number" name="reality_camera_proactive_max_daily" min="-1" max="10" step="1" value="${Number(cameraState.proactive_max_daily ?? -1)}" ${cameraEligible && cameraConfirmed ? "" : "disabled"}>
-          <small>-1 继承全局，0 禁止直接主动读取。</small>
-        </label>
-        <button type="submit" ${cameraEligible && cameraConfirmed ? "" : "disabled"}>保存摄像头用户策略</button>
-      </form>
-      <form class="reality-policy-form" data-reality-touch-policy-form>
-        <label class="reality-enable-field">
-          <input type="checkbox" name="reality_proactive_voice" ${user.policy?.proactive_voice_enabled ? "checked" : ""} ${formDisabled}>
-          <span><b>将 Bot 的主动语音同步到所选设备</b><small>仅当主动引擎本轮选择 voice 动作时播放；仍受主动频率、免打扰和用户授权约束。</small></span>
-        </label>
-        <label class="reality-device-volume compact">
-          <span>主动语音播放音量 <output data-reality-touch-proactive-volume-output>${Number(user.policy?.playback_volume ?? data.audio_output?.playback_volume ?? 35)}%</output></span>
-          <input type="range" name="reality_proactive_volume" data-reality-touch-proactive-volume min="0" max="100" step="1" value="${Number(user.policy?.playback_volume ?? data.audio_output?.playback_volume ?? 35)}" ${formDisabled}>
-          <small>仅影响主动陪伴语音同步，不影响闹钟和固定测试音频。</small>
-        </label>
-        <button type="submit" ${formDisabled}>保存主动语音策略</button>
-      </form>
-      <div class="reality-scenario-head">
-        <div><span>计划模板</span><h4>起床提醒</h4></div>
-        <small>这是现实触及的一个使用示例，不是该能力的全部用途。</small>
+      <div class="rt2-sec-body">
+        <label class="rt2-user-pick"><span>配置对象</span><select data-reality-touch-user>${options}</select></label>
+        <section class="rt2-consent ${confirmed ? "ok" : "pending"}">
+          <span class="rt2-consent-icon" aria-hidden="true"></span>
+          <div>
+            <b>${confirmed ? "用户已完成知情确认" : "等待用户本人确认"}</b>
+            <span>${confirmed ? `仅授权本机音频 · 协议 v${escapeHtml(String(consent.version || data.consent_version || 1))}` : "页面不能代替用户授权。请让该用户在与 Bot 的私聊中手动发送下方完整命令。"}</span>
+          </div>
+          ${confirmed ? `<time>${consent.confirmed_at ? escapeHtml(formatDailyReviewTime(consent.confirmed_at)) : "已记录"}</time>` : `<button type="button" class="soft" data-reality-touch-copy>复制确认命令</button>`}
+        </section>
+        ${confirmed ? "" : `<div class="rt2-cmd"><code>${escapeHtml(command)}</code></div>`}
+        <section class="rt2-consent ${cameraConfirmed ? "ok" : "pending"}">
+          <span class="rt2-consent-icon" aria-hidden="true"></span>
+          <div>
+            <b>${!cameraEligible ? "该用户不能访问主机摄像头" : cameraConfirmed ? "主机管理用户已授权摄像头单帧" : "摄像头仍需主机管理用户独立确认"}</b>
+            <span>${!cameraEligible ? "摄像头观察的是运行 AstrBot 的主机环境，只允许 AstrBot 管理员或关系角色明确设为 owner 的主要用户使用。普通私聊、目标用户名单与主动权限均不会授予摄像头访问。" : cameraConfirmed ? `仅授权 camera_single_frame · 协议 v${escapeHtml(String(cameraState.consent_version || 1))}` : "音频授权不会自动开放摄像头。请由主机管理用户在自己的私聊中发起确认。"}</span>
+          </div>
+          ${!cameraEligible ? "" : cameraConfirmed ? `<time>${cameraState.confirmed_at ? escapeHtml(formatDailyReviewTime(cameraState.confirmed_at)) : "已记录"}</time>` : `<button type="button" class="soft" data-reality-touch-camera-copy>复制摄像头确认命令</button>`}
+        </section>
+        ${cameraEligible && !cameraConfirmed ? `<div class="rt2-cmd"><code>${escapeHtml(cameraCommand)}</code></div>` : ""}
+        <form class="rt2-form" data-reality-touch-camera-policy-form>
+          <fieldset class="rt2-group">
+            <legend>摄像头用户策略</legend>
+            <div class="rt2-switch-row">
+              <input type="checkbox" id="rt2-user-camera" name="reality_camera_enabled" ${cameraState.enabled ? "checked" : ""} ${cameraEligible && cameraConfirmed ? "" : "disabled"}>
+              <label class="rt2-switch" for="rt2-user-camera"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+              <label for="rt2-user-camera"><b>允许该主机管理用户的明确任务读取单帧</b><small>普通私聊用户不能获得此能力；仍受摄像头总开关、读取冷却和任务目的约束。</small></label>
+            </div>
+            <div class="rt2-row">
+              <label><span>主动视觉策略</span>
+                <select name="reality_camera_proactive_mode" ${cameraEligible && cameraConfirmed ? "" : "disabled"}>
+                  <option value="off" ${String(cameraState.proactive_mode || "off") === "off" ? "selected" : ""}>关闭主动视觉好奇</option>
+                  <option value="ask" ${String(cameraState.proactive_mode || "off") === "ask" ? "selected" : ""}>有价值时先自然询问</option>
+                  <option value="auto" ${String(cameraState.proactive_mode || "off") === "auto" ? "selected" : ""}>达到强度后可主动单帧</option>
+                </select>
+                <small>低于全局最低档时，auto 会自动降级为 ask。</small>
+              </label>
+              <label><span>该用户主动单帧日额度</span>
+                <input type="number" name="reality_camera_proactive_max_daily" min="-1" max="10" step="1" value="${Number(cameraState.proactive_max_daily ?? -1)}" ${cameraEligible && cameraConfirmed ? "" : "disabled"}>
+                <small>-1 继承全局，0 禁止直接主动读取。</small>
+              </label>
+            </div>
+          </fieldset>
+          <div class="rt2-actions"><button type="submit" class="primary" ${cameraEligible && cameraConfirmed ? "" : "disabled"}>保存摄像头用户策略</button></div>
+        </form>
+        <form class="rt2-form" data-reality-touch-policy-form>
+          <fieldset class="rt2-group">
+            <legend>主动语音策略</legend>
+            <div class="rt2-switch-row">
+              <input type="checkbox" id="rt2-proactive-voice" name="reality_proactive_voice" ${user.policy?.proactive_voice_enabled ? "checked" : ""} ${formDisabled}>
+              <label class="rt2-switch" for="rt2-proactive-voice"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+              <label for="rt2-proactive-voice"><b>将 Bot 的主动语音同步到所选设备</b><small>仅当主动引擎本轮选择 voice 动作时播放；仍受主动频率、免打扰和用户授权约束。</small></label>
+            </div>
+            <label class="rt2-slider">
+              <span class="rt2-slider-head"><b>主动语音播放音量</b><output data-reality-touch-proactive-volume-output>${Number(user.policy?.playback_volume ?? data.audio_output?.playback_volume ?? 35)}%</output></span>
+              <input type="range" name="reality_proactive_volume" data-reality-touch-proactive-volume min="0" max="100" step="1" value="${Number(user.policy?.playback_volume ?? data.audio_output?.playback_volume ?? 35)}" ${formDisabled}>
+              <small>仅影响主动陪伴语音同步，不影响闹钟和固定测试音频。</small>
+            </label>
+          </fieldset>
+          <div class="rt2-actions"><button type="submit" class="primary" ${formDisabled}>保存主动语音策略</button></div>
+        </form>
+        <form class="rt2-form" data-reality-touch-form>
+          <fieldset class="rt2-group">
+            <legend>起床提醒 · 计划模板</legend>
+            <small class="rt2-legend-note">这是现实触及的一个使用示例，不是该能力的全部用途。</small>
+            <div class="rt2-row">
+              <label><span>起床时间</span><input type="time" name="reality_time" value="${escapeHtml(alarm.time || "07:30")}" ${formDisabled} required></label>
+              <label><span>最多触达</span>
+                <select name="reality_repeat_count" ${formDisabled}>
+                  ${[1, 2, 3, 4, 5, 6].map((count) => `<option value="${count}" ${Number(alarm.repeat_count || 1) === count ? "selected" : ""}>${count} 次</option>`).join("")}
+                </select>
+              </label>
+              <label><span>确认等待（5-300 秒）</span><input type="number" name="reality_repeat_interval" min="5" max="300" step="5" value="${escapeHtml(String(alarm.repeat_interval_seconds || 20))}" ${formDisabled}></label>
+              <label><span>稍后再叫（分钟）</span><input type="number" name="reality_snooze_minutes" min="1" max="120" step="1" value="${escapeHtml(String(alarm.snooze_minutes || 10))}" ${formDisabled}></label>
+            </div>
+            <div class="rt2-row cols2">
+              <label><span>起始音量（0-100%）</span><input type="number" name="reality_playback_volume" min="0" max="100" step="1" value="${escapeHtml(String(alarm.playback_volume ?? data.audio_output?.playback_volume ?? 35))}" ${formDisabled}></label>
+              <label><span>每轮增量（%）</span><input type="number" name="reality_volume_step" min="0" max="30" step="1" value="${escapeHtml(String(alarm.volume_step ?? 8))}" ${formDisabled}></label>
+              <label><span>最高音量（%）</span><input type="number" name="reality_max_volume" min="0" max="100" step="1" value="${escapeHtml(String(alarm.max_volume ?? 70))}" ${formDisabled}></label>
+              <label><span>淡入时间（毫秒）</span><input type="number" name="reality_fade_in_ms" min="0" max="5000" step="100" value="${escapeHtml(String(alarm.fade_in_ms ?? 800))}" ${formDisabled}></label>
+              <label><span>聊天触达</span>
+                <select name="reality_delivery_mode" ${formDisabled}>
+                  <option value="chat_on_failure" ${alarm.delivery_mode === "chat_on_failure" ? "selected" : ""}>音频失败时发消息</option>
+                  <option value="audio_only" ${alarm.delivery_mode === "audio_only" ? "selected" : ""}>仅本机音频</option>
+                  <option value="audio_and_chat" ${alarm.delivery_mode === "audio_and_chat" ? "selected" : ""}>音频和消息都发送</option>
+                </select>
+              </label>
+            </div>
+            <div class="rt2-row">
+              <div class="rt2-switch-row">
+                <input type="checkbox" id="rt2-alarm-enabled" name="reality_enabled" ${alarm.enabled ? "checked" : ""} ${formDisabled}>
+                <label class="rt2-switch" for="rt2-alarm-enabled"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+                <label for="rt2-alarm-enabled"><b>启用该用户的起床语音</b><small>总开关关闭时保留设置但不会触发</small></label>
+              </div>
+              <div class="rt2-switch-row">
+                <input type="checkbox" id="rt2-ack" name="reality_require_ack" ${alarm.require_acknowledgement !== false ? "checked" : ""} ${formDisabled}>
+                <label class="rt2-switch" for="rt2-ack"><span class="rt2-switch-track" aria-hidden="true"></span></label>
+                <label for="rt2-ack"><b>等待用户确认醒来</b><small>用户回复“醒了”会停止后续触达，也可要求稍后再叫</small></label>
+              </div>
+            </div>
+            <fieldset class="rt2-group" ${formDisabled}><legend>重复日期</legend>
+              <div class="rt2-days">${dayChecks}</div>
+            </fieldset>
+            <label><span>叫醒偏好（可选）</span>
+              <textarea name="reality_message" rows="3" maxlength="240" placeholder="例如：温柔一点，提醒我上午有课" ${formDisabled}>${escapeHtml(alarm.message || "")}</textarea>
+              <small>${escapeHtml(data.dynamic_message_hint || "每次触发时按人格、关系与当天语境动态生成")}；这里的内容只作为补充要求，不会固定复读。</small>
+            </label>
+          </fieldset>
+          <div class="rt2-actions">
+            <button type="submit" class="primary" ${formDisabled}>保存起床设置</button>
+            <button type="button" class="soft" data-reality-touch-test data-reality-touch-test-kind="scenario" ${testDisabled}>生成并试听</button>
+            <button type="button" class="soft danger" data-reality-touch-disable ${alarm.enabled ? "" : "disabled"}>关闭该用户闹钟</button>
+          </div>
+        </form>
+        <section class="rt2-nested">
+          <div class="rt2-nested-head"><div><span>官方 Cron</span><h4>自定义现实触及提醒</h4></div></div>
+          <small class="rt2-legend-note">在私聊中明确说“用现实触及提醒我……”即可创建；时间由 AstrBot 官方任务管理。</small>
+          ${customReminders.length ? `<div class="rt2-reminders">${customReminders.map((item) => {
+            const active = ["registering", "scheduled", "triggered"].includes(String(item.status || ""));
+            const statusText = ({ registering: "登记中", scheduled: "等待触发", triggered: "准备执行", delivering: "正在交付", completed: "已完成", delivery_failed: "交付失败", completed_without_delivery: "未执行", cancelled: "已取消", failed: "登记失败" })[String(item.status || "")] || String(item.status || "未知");
+            return `<div class="rt2-reminder-row">
+              <div><b>${escapeHtml(item.topic || "未命名提醒")}</b><span>${escapeHtml(item.scheduled_text || "-")} · ${escapeHtml(statusText)} · ${escapeHtml(String(item.playback_volume ?? "-"))}%</span></div>
+              ${active ? `<button type="button" class="soft danger" data-reality-touch-reminder-cancel="${escapeHtml(item.id || "")}">取消</button>` : ""}
+            </div>`;
+          }).join("")}</div>` : `<div class="rt2-empty">暂无自定义现实触及提醒。</div>`}
+        </section>
       </div>
-      <form class="reality-alarm-form" data-reality-touch-form>
-        <div class="reality-form-grid">
-          <label class="reality-field">
-            <span>起床时间</span>
-            <input type="time" name="reality_time" value="${escapeHtml(alarm.time || "07:30")}" ${formDisabled} required>
-          </label>
-          <label class="reality-field">
-            <span>最多触达</span>
-            <select name="reality_repeat_count" ${formDisabled}>
-              ${[1, 2, 3, 4, 5, 6].map((count) => `<option value="${count}" ${Number(alarm.repeat_count || 1) === count ? "selected" : ""}>${count} 次</option>`).join("")}
-            </select>
-          </label>
-          <label class="reality-field">
-            <span>确认等待</span>
-            <input type="number" name="reality_repeat_interval" min="5" max="300" step="5" value="${escapeHtml(String(alarm.repeat_interval_seconds || 20))}" ${formDisabled}>
-            <small>5-300 秒</small>
-          </label>
-          <label class="reality-field">
-            <span>稍后再叫</span>
-            <input type="number" name="reality_snooze_minutes" min="1" max="120" step="1" value="${escapeHtml(String(alarm.snooze_minutes || 10))}" ${formDisabled}>
-            <small>默认分钟数</small>
-          </label>
-          <label class="reality-field">
-            <span>起始音量</span>
-            <input type="number" name="reality_playback_volume" min="0" max="100" step="1" value="${escapeHtml(String(alarm.playback_volume ?? data.audio_output?.playback_volume ?? 35))}" ${formDisabled}>
-            <small>0-100%</small>
-          </label>
-          <label class="reality-field">
-            <span>每轮增量</span>
-            <input type="number" name="reality_volume_step" min="0" max="30" step="1" value="${escapeHtml(String(alarm.volume_step ?? 8))}" ${formDisabled}>
-            <small>每次增加百分比</small>
-          </label>
-          <label class="reality-field">
-            <span>最高音量</span>
-            <input type="number" name="reality_max_volume" min="0" max="100" step="1" value="${escapeHtml(String(alarm.max_volume ?? 70))}" ${formDisabled}>
-            <small>不会超过此值</small>
-          </label>
-          <label class="reality-field">
-            <span>淡入时间</span>
-            <input type="number" name="reality_fade_in_ms" min="0" max="5000" step="100" value="${escapeHtml(String(alarm.fade_in_ms ?? 800))}" ${formDisabled}>
-            <small>毫秒，0 表示关闭</small>
-          </label>
-          <label class="reality-field">
-            <span>聊天触达</span>
-            <select name="reality_delivery_mode" ${formDisabled}>
-              <option value="chat_on_failure" ${alarm.delivery_mode === "chat_on_failure" ? "selected" : ""}>音频失败时发消息</option>
-              <option value="audio_only" ${alarm.delivery_mode === "audio_only" ? "selected" : ""}>仅本机音频</option>
-              <option value="audio_and_chat" ${alarm.delivery_mode === "audio_and_chat" ? "selected" : ""}>音频和消息都发送</option>
-            </select>
-          </label>
-          <label class="reality-enable-field">
-            <input type="checkbox" name="reality_enabled" ${alarm.enabled ? "checked" : ""} ${formDisabled}>
-            <span><b>启用该用户的起床语音</b><small>总开关关闭时保留设置但不会触发</small></span>
-          </label>
-          <label class="reality-enable-field">
-            <input type="checkbox" name="reality_require_ack" ${alarm.require_acknowledgement !== false ? "checked" : ""} ${formDisabled}>
-            <span><b>等待用户确认醒来</b><small>用户回复“醒了”会停止后续触达，也可要求稍后再叫</small></span>
-          </label>
-        </div>
-        <fieldset class="reality-days" ${formDisabled}>
-          <legend>重复日期</legend>
-          <div>${dayChecks}</div>
-        </fieldset>
-        <label class="reality-message-field">
-          <span>叫醒偏好（可选）</span>
-          <textarea name="reality_message" rows="3" maxlength="240" placeholder="例如：温柔一点，提醒我上午有课" ${formDisabled}>${escapeHtml(alarm.message || "")}</textarea>
-          <small>${escapeHtml(data.dynamic_message_hint || "每次触发时按人格、关系与当天语境动态生成")}；这里的内容只作为补充要求，不会固定复读。</small>
-        </label>
-        <div class="reality-form-actions">
-          <button type="submit" class="primary" ${formDisabled}>保存起床设置</button>
-          <button type="button" data-reality-touch-test data-reality-touch-test-kind="scenario" ${testDisabled}>生成并试听</button>
-          <button type="button" class="danger soft" data-reality-touch-disable ${alarm.enabled ? "" : "disabled"}>关闭该用户闹钟</button>
-        </div>
-      </form>
-      <section class="reality-custom-reminders">
-        <div class="reality-scenario-head">
-          <div><span>官方 Cron</span><h4>自定义现实触及提醒</h4></div>
-          <small>在私聊中明确说“用现实触及提醒我……”即可创建；时间由 AstrBot 官方任务管理。</small>
-        </div>
-        ${customReminders.length ? `<div class="reality-reminder-list">${customReminders.map((item) => {
-          const active = ["registering", "scheduled", "triggered"].includes(String(item.status || ""));
-          const statusText = ({ registering: "登记中", scheduled: "等待触发", triggered: "准备执行", delivering: "正在交付", completed: "已完成", delivery_failed: "交付失败", completed_without_delivery: "未执行", cancelled: "已取消", failed: "登记失败" })[String(item.status || "")] || String(item.status || "未知");
-          return `<div class="reality-reminder-row">
-            <div><b>${escapeHtml(item.topic || "未命名提醒")}</b><span>${escapeHtml(item.scheduled_text || "-")} · ${escapeHtml(statusText)} · ${escapeHtml(String(item.playback_volume ?? "-"))}%</span></div>
-            ${active ? `<button type="button" class="danger soft" data-reality-touch-reminder-cancel="${escapeHtml(item.id || "")}">取消</button>` : ""}
-          </div>`;
-        }).join("")}</div>` : `<div class="exp-settings-empty">暂无自定义现实触及提醒。</div>`}
-      </section>
     </article>
   `;
 }
@@ -36992,40 +37131,42 @@ function renderRealityTouchRuntime() {
     ? "每天"
     : (Array.isArray(alarm.days) ? `周${alarm.days.map((day) => dayLabels[Number(day)]).filter(Boolean).join("、")}` : "-");
   return `
-    <article id="reality-runtime" class="exp-detail-card reality-touch-card reality-runtime-card">
-      <div class="reality-touch-section-head">
+    <section id="reality-runtime" class="rt2-run-card" data-component="Runtime Sidebar">
+      <div class="rt2-run-head">
         <div><span>实时摘要</span><h3>运行状态</h3></div>
-        <span class="reality-global-state ${data.global_enabled ? "on" : "off"}">${data.global_enabled ? "总开关已开启" : "总开关已关闭"}</span>
+        <span class="rt2-run-state ${data.global_enabled ? "on" : "off"}">${data.global_enabled ? "总开关已开启" : "总开关已关闭"}</span>
       </div>
-      <div class="reality-runtime-stats">
-        <div><span>可配置私聊用户</span><b>${escapeHtml(String(counts.users || 0))}</b></div>
-        <div><span>音频已授权</span><b>${escapeHtml(String(counts.consented || 0))}</b></div>
-        <div><span>摄像头已授权</span><b>${escapeHtml(String(counts.camera_consented || 0))}</b></div>
-        <div><span>待执行提醒</span><b>${escapeHtml(String(Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0)))}</b></div>
+      <div class="rt2-run-body">
+        <div class="rt2-run-stats">
+          <div><span>可配置私聊用户</span><b>${escapeHtml(String(counts.users || 0))}</b></div>
+          <div><span>音频已授权</span><b>${escapeHtml(String(counts.consented || 0))}</b></div>
+          <div><span>摄像头已授权</span><b>${escapeHtml(String(counts.camera_consented || 0))}</b></div>
+          <div><span>待执行提醒</span><b>${escapeHtml(String(Number(counts.scheduled || 0) + Number(counts.custom_scheduled || 0)))}</b></div>
+        </div>
+        ${user ? `
+          <dl class="rt2-run-list">
+            <div><dt>当前用户</dt><dd>${escapeHtml(user.label || user.user_id || "-")}</dd></div>
+            <div><dt>音频授权</dt><dd>${consent.local_audio ? "已授权 local_audio" : "未授权"}</dd></div>
+            <div><dt>主动语音</dt><dd>${user.policy?.proactive_voice_enabled ? "同步到现实设备" : "未开放"}</dd></div>
+            <div><dt>摄像头资格</dt><dd class="${cameraState.eligible ? "" : "dim"}">${cameraState.eligible ? "主机管理用户" : "普通私聊用户，不开放主机摄像头"}</dd></div>
+            <div><dt>摄像头授权</dt><dd class="${cameraState.consented ? "" : "dim"}">${cameraState.consented ? "已授权 camera_single_frame" : "未授权，且不会继承音频或主动权限"}</dd></div>
+            <div><dt>摄像头策略</dt><dd>${cameraState.eligible && cameraState.enabled ? `明确任务可用 · 主动视觉 ${escapeHtml(cameraProactiveStatus)} · 今日 ${escapeHtml(String(cameraProactive.used_today || 0))}/${escapeHtml(String(cameraProactive.daily_limit || 0))}${cameraProactiveReason ? ` · ${escapeHtml(cameraProactiveReason)}` : ""}` : "关闭"}</dd></div>
+            <div><dt>最近单帧观察</dt><dd>${cameraObservation.at ? `${cameraObservation.success ? "成功" : "失败"} · ${escapeHtml(cameraObservation.summary || cameraObservation.error || "已记录")}` : "暂无记录"}</dd></div>
+            <div><dt>播放目标</dt><dd>${escapeHtml(data.audio_output?.label || "跟随系统默认输出")}</dd></div>
+            <div><dt>起床提醒模板</dt><dd>${alarm.time ? `${escapeHtml(alarm.time)} · ${escapeHtml(dayText)}` : "未设置"}</dd></div>
+            <div><dt>下次触发</dt><dd>${escapeHtml(alarm.next_trigger_text || (alarm.enabled ? "等待调度刷新" : "闹钟已关闭"))}</dd></div>
+            <div><dt>最近触发</dt><dd>${escapeHtml(alarm.last_trigger_key || "暂无记录")}</dd></div>
+            <div><dt>本轮触达</dt><dd>${contact.status ? `${escapeHtml(contactStatusText)} · ${escapeHtml(String(contact.attempt || 0))}/${escapeHtml(String(contact.max_attempts || 0))} · ${escapeHtml(String(contact.last_volume || 0))}%` : "暂无会话"}</dd></div>
+            <div><dt>最近播放</dt><dd>${playback.at ? `${playback.success ? "成功" : "失败"} · ${escapeHtml(playback.device_name || playback.device_id || "未知设备")} · ${escapeHtml(String(playback.volume ?? "-"))}%${playback.fallback_from ? " · 已回退默认输出" : ""}` : "暂无记录"}</dd></div>
+          </dl>
+          ${["pending", "playing", "snoozed"].includes(String(contact.status || "")) ? `<button type="button" class="soft danger rt2-run-stop" data-reality-touch-stop-session>停止当前这轮触达</button>` : ""}
+        ` : `<div class="rt2-empty">暂无用户运行态。</div>`}
+        <div class="rt2-boundary">
+          <b>设备边界</b>
+          <span>音频由操作系统管理设备连接。摄像头只在明确任务下读取一帧并立即释放，可能发送给已配置视觉模型做有限状态分析，插件默认不保存原图；不做人脸识别、身份比对、情绪读脸、OCR 或后台持续监控。</span>
+        </div>
       </div>
-      ${user ? `
-        <dl class="reality-runtime-detail">
-          <div><dt>当前用户</dt><dd>${escapeHtml(user.label || user.user_id || "-")}</dd></div>
-          <div><dt>音频授权</dt><dd>${consent.local_audio ? "已授权 local_audio" : "未授权"}</dd></div>
-          <div><dt>主动语音</dt><dd>${user.policy?.proactive_voice_enabled ? "同步到现实设备" : "未开放"}</dd></div>
-          <div><dt>摄像头资格</dt><dd class="${cameraState.eligible ? "" : "denied"}">${cameraState.eligible ? "主机管理用户" : "普通私聊用户，不开放主机摄像头"}</dd></div>
-          <div><dt>摄像头授权</dt><dd class="${cameraState.consented ? "" : "denied"}">${cameraState.consented ? "已授权 camera_single_frame" : "未授权，且不会继承音频或主动权限"}</dd></div>
-          <div><dt>摄像头策略</dt><dd>${cameraState.eligible && cameraState.enabled ? `明确任务可用 · 主动视觉 ${escapeHtml(cameraProactiveStatus)} · 今日 ${escapeHtml(String(cameraProactive.used_today || 0))}/${escapeHtml(String(cameraProactive.daily_limit || 0))}${cameraProactiveReason ? ` · ${escapeHtml(cameraProactiveReason)}` : ""}` : "关闭"}</dd></div>
-          <div><dt>最近单帧观察</dt><dd>${cameraObservation.at ? `${cameraObservation.success ? "成功" : "失败"} · ${escapeHtml(cameraObservation.summary || cameraObservation.error || "已记录")}` : "暂无记录"}</dd></div>
-          <div><dt>播放目标</dt><dd>${escapeHtml(data.audio_output?.label || "跟随系统默认输出")}</dd></div>
-          <div><dt>起床提醒模板</dt><dd>${alarm.time ? `${escapeHtml(alarm.time)} · ${escapeHtml(dayText)}` : "未设置"}</dd></div>
-          <div><dt>下次触发</dt><dd>${escapeHtml(alarm.next_trigger_text || (alarm.enabled ? "等待调度刷新" : "闹钟已关闭"))}</dd></div>
-          <div><dt>最近触发</dt><dd>${escapeHtml(alarm.last_trigger_key || "暂无记录")}</dd></div>
-          <div><dt>本轮触达</dt><dd>${contact.status ? `${escapeHtml(contactStatusText)} · ${escapeHtml(String(contact.attempt || 0))}/${escapeHtml(String(contact.max_attempts || 0))} · ${escapeHtml(String(contact.last_volume || 0))}%` : "暂无会话"}</dd></div>
-          <div><dt>最近播放</dt><dd>${playback.at ? `${playback.success ? "成功" : "失败"} · ${escapeHtml(playback.device_name || playback.device_id || "未知设备")} · ${escapeHtml(String(playback.volume ?? "-"))}%${playback.fallback_from ? " · 已回退默认输出" : ""}` : "暂无记录"}</dd></div>
-        </dl>
-        ${["pending", "playing", "snoozed"].includes(String(contact.status || "")) ? `<button type="button" class="danger soft" data-reality-touch-stop-session>停止当前这轮触达</button>` : ""}
-      ` : `<div class="exp-settings-empty">暂无用户运行态。</div>`}
-      <div class="reality-boundary-note">
-        <b>设备边界</b>
-        <span>音频由操作系统管理设备连接。摄像头只在明确任务下读取一帧并立即释放，可能发送给已配置视觉模型做有限状态分析，插件默认不保存原图；不做人脸识别、身份比对、情绪读脸、OCR 或后台持续监控。</span>
-      </div>
-    </article>
+    </section>
   `;
 }
 
@@ -37650,9 +37791,7 @@ function bindRealityTouchActions(root) {
     if (result) {
       state.realityTouch = result;
       renderRealityTouchPage();
-      if (payload.action === "mihome_start_login") {
-        pollMiHomeLogin(result.mihome?.login?.qr_revision || "");
-      }
+      if (payload.action === "mihome_start_login") pollMiHomeLogin(result.mihome?.login?.qr_revision || "");
     }
   };
   root.querySelector("[data-mihome-login]")?.addEventListener("click", () => runMiHomeAction({ action: "mihome_start_login" }, "米家登录流程已启动"));
@@ -37666,11 +37805,11 @@ function bindRealityTouchActions(root) {
     }, "米家设备控制请求已返回", button));
   });
   root.querySelector("[data-mihome-add-mapping]")?.addEventListener("click", () => {
-    root.querySelector("[data-mihome-mapping-list]")?.insertAdjacentHTML("beforeend", `<div class="reality-mihome-mapping-row"><input data-mihome-alias placeholder="客厅灯"><input data-mihome-did placeholder="设备 DID"><button type="button" class="soft danger" data-mihome-remove-mapping>移除</button></div>`);
+    root.querySelector("[data-mihome-mapping-list]")?.insertAdjacentHTML("beforeend", `<div class="rt2-mi-mapping-row"><input data-mihome-alias placeholder="客厅灯"><input data-mihome-did placeholder="设备 DID"><button type="button" class="soft danger" data-mihome-remove-mapping>移除</button></div>`);
   });
-  root.querySelectorAll("[data-mihome-remove-mapping]").forEach((button) => button.addEventListener("click", () => button.closest(".reality-mihome-mapping-row")?.remove()));
+  root.querySelectorAll("[data-mihome-remove-mapping]").forEach((button) => button.addEventListener("click", () => button.closest(".rt2-mi-mapping-row")?.remove()));
   root.querySelector("[data-mihome-save-mappings]")?.addEventListener("click", async (event) => {
-    const mappings = [...root.querySelectorAll(".reality-mihome-mapping-row")].map((row) => ({
+    const mappings = [...root.querySelectorAll(".rt2-mi-mapping-row")].map((row) => ({
       alias: row.querySelector("[data-mihome-alias]")?.value.trim() || "",
       did: row.querySelector("[data-mihome-did]")?.value.trim() || "",
       category: "none",
