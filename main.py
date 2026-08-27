@@ -143,7 +143,6 @@ from .group_context_interception import (
     intercept_astrbot_group_context,
     restore_astrbot_group_history,
 )
-from .group_prompt_context import GROUP_HISTORY_INJECTED_ATTR
 from .persona_config import (
     PERSONA_SETTINGS_KEY,
     PERSONA_SETTINGS_REVISION_KEY,
@@ -10747,11 +10746,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     def _llm_controlled_segmenting_prompt() -> str:
         """Compact instruction for the user-facing conversation model only."""
         return (
-            "你可以使用标记将消息分成多段发送，这个功能可以方便你进行表达，不要过度使用避免消息刷屏；"
-            "长文、说明、教程、代码、列表、引用和连续叙述尽量不要分段，不要为了使用标记而拆分。"
-            f"需要分段时必须逐字输出 {LLM_SEGMENT_MARKER}，并让它单独占一行。"
-            f"唯一有效的控制标记是 {LLM_SEGMENT_MARKER}；不能省略或改写其中任何字符，"
-            "不能添加引号，也不能把它放进代码块。没有必要分段时不要输出控制标记。"
+            "你可以使用标记将回复内容拆分成多个消息发送；"
+            "方便你进行表达、短句拆分发送，以及实现连续发送多句的效果；"
+            "日常对话、聊天 等需要短句输出的情景鼓励经常使用；"
+            "长文、教程、代码 等连续性较高的表述尽量少用分段。"
+            f"\n使用方法：需要分段时必须完整输出 {LLM_SEGMENT_MARKER}，并让它单独占一行，不能添加引号，也不能把它放进代码块。"
+            f"\n示例：\"第一段发送内容\n{LLM_SEGMENT_MARKER}\n第二段发送内容\n{LLM_SEGMENT_MARKER}\n第三段发送内容\""
         )
 
     @filter.on_llm_request(priority=-253000)
@@ -17594,8 +17594,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if not bool(runtime_persona_setting(self, "intercept_astrbot_group_context", True)):
             return
         if not bool(runtime_persona_setting(self, "enable_group_history_injection", True)):
-            return
-        if not bool(getattr(event, GROUP_HISTORY_INJECTED_ATTR, False)):
             return
         marker = "<!-- private_companion_group_context_v1 -->"
         if not self._request_has_managed_prompt_marker(req, marker):
