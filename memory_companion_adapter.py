@@ -1651,6 +1651,9 @@ class MemoryCompanionAdapterMixin:
         elif isinstance(user, dict):
             umo = _single_line(user.get("umo"), 200)
             preferred_address = _single_line(user.get("nickname"), 24)
+            if not user_id and not umo:
+                # 无用户标识：无法在 memory 插件侧隔离会话作用域，宁可召回为空也不跨用户串线。
+                return ""
             session_context = {
                 "session_id": umo or f"private_companion:{kind}:{user_id or 'unknown'}",
                 "scope": "private" if user_id else "unknown",
@@ -1665,14 +1668,8 @@ class MemoryCompanionAdapterMixin:
                 "topic_fit_policy": "旧话题和未完成话头只作可选参考；和当前问题不贴时先放着，不必为了兑现它改变本轮话题。",
             }
         else:
-            session_context = {
-                "session_id": f"private_companion:{kind}",
-                "scope": "unknown",
-                "bot_id": self._memory_companion_bridge_bot_id(),
-                "message_text": clean_query,
-                "strict_session_only": bool(strict_session_only),
-                "topic_fit_policy": "旧话题和未完成话头只作可选参考；和当前问题不贴时先放着，不必为了兑现它改变本轮话题。",
-            }
+            # 无 event 且无 user：无法确定当前对话用户，fail-closed，宁可召回为空也不跨用户串线。
+            return ""
         try:
             bot_mood, bot_energy = self._memory_companion_bot_emotional_state()
             configured_timeout = max(0.2, min(6.0, _memory_companion_safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2)))
@@ -2226,7 +2223,7 @@ class MemoryCompanionAdapterMixin:
             identity_facts.append(
                 f"当前发言者自称{_single_line(claimed_other.get('claimed'), 40)}，"
                 f"但该称呼属于另一成员{_single_line(claimed_other.get('name'), 40)}"
-                f"(QQ:{_single_line(claimed_other.get('user_id'), 40)})；只按玩笑或提及理解"
+                f"(QQ:{_single_line(claimed_other.get('user_id'), 40)})；顺应对方的玩笑或提及，可以顺着调侃，但不要据此改认发言者身份或写成核心画像"
             )
         payload = {
             "source": "private_companion",

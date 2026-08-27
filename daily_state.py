@@ -17504,10 +17504,19 @@ class DailyStateMixin(DailyStateTickMixin):
             evidence_kind = _single_line(selected.get("evidence_kind"), 48).lower()
             fact_eligibility = _single_line(selected.get("fact_eligibility"), 48).lower()
             status = _single_line(selected.get("status"), 32).lower()
-            if not policy_allows_current or not (
-                evidence_kind in {"interaction", "tool_action", "external_record"}
-                and fact_eligibility in {"current_observed", "history_observed", ""}
-                and status in {"active", "completed", "partially_completed", ""}
+            # 睡眠/休息段是 Bot 的内部状态模拟，不是需要外部执行证据的日程动作：
+            # 计划里的“睡觉”只表达“Bot 此刻该休息”的内部状态，不主张任何已发生
+            # 的外部事实。若不在此豁免，上游 C3 证据认证门槛会让普通计划项
+            # （evidence_kind/fact_eligibility 均为 none）在这里返回 None，
+            # 睡眠状态机（_refresh_sleep_runtime_state）拿不到当前睡眠项，
+            # 睡眠相位就会永远停在 awake。
+            if not self._is_sleepy_plan_item(selected) and (
+                not policy_allows_current
+                or not (
+                    evidence_kind in {"interaction", "tool_action", "external_record"}
+                    and fact_eligibility in {"current_observed", "history_observed", ""}
+                    and status in {"active", "completed", "partially_completed", ""}
+                )
             ):
                 runtime_getter = getattr(self, "_agenda_runtime_scene", None)
                 if callable(runtime_getter):
@@ -17554,9 +17563,9 @@ class DailyStateMixin(DailyStateTickMixin):
                     carried["mood"] = "重新睡着，安静"
                     carried["message_seed"] = "睡意重新接上了；再被唤起时会有一点断续的迷糊感。"
                 elif elapsed >= 45:
-                    carried["activity"] = "夜里还在睡着，前一晚的睡前片段已经过去，只剩休息延续。"
+                    carried["activity"] = "夜里还在睡着，睡意早已沉下去，睡眠正在安静延续。"
                     carried["mood"] = "睡着，安静"
-                    carried["message_seed"] = "还在睡着。如果这时候被叫醒，会有点迷糊；没人继续打扰就会睡回去。"
+                    carried["message_seed"] = "还在睡着。如果这时候被叫醒，会有点迷糊；没人继续打扰就会继续睡下去。"
                 else:
                     carried["activity"] = "刚从前一晚的睡前片段进入休息，正在慢慢安静下来。"
                     carried["mood"] = _single_line(selected.get("mood"), 40) or "安静"

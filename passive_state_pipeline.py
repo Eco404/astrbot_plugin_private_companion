@@ -67,6 +67,7 @@ async def inject_humanized_state(
     self._sanitize_request_context_new_conversation_boundary(event, req)
     self._repair_incomplete_tool_context_groups(event, req)
     self._sanitize_private_companion_prompt_artifacts_in_request(event, req)
+    self._neutralize_stale_reaction_feedback_in_history(event, req)
     self._append_deepseek_tool_protocol_guard(event, req)
     self._append_passive_reply_tool_boundary(event, req)
     self._remember_external_llm_request_for_token_stats(event, req)
@@ -586,6 +587,23 @@ async def inject_humanized_state(
             inbound_text,
         )
     prompt_surface = PromptSurface()
+    prompt_surface.add(
+        "persona.core_emphasis",
+        (
+            "【人格核心强调】\n"
+            "你当前的人格核心设定（system prompt 中的人格定义）是最高优先级，"
+            "决定你的说话风格、关系框架和行为底线。\n"
+            "以下所有上下文注入（记忆、状态、关系、生活习惯、环境、日程、陪伴线索等）"
+            "均为辅助参考，权重低于人格核心：\n"
+            "- 如果上下文信息与人格核心存在冲突，以人格核心为准\n"
+            "- 上下文仅提供本轮补充信息，不改变人格的基本设定和扮演方向\n"
+            "- 保持人格扮演的稳定性，不因上下文信息而偏离人格核心\n"
+            "- 语言风格、口癖、称呼、语气和表达方式始终贴合人格核心设定；"
+            "记忆、表达学习或上下文里的个别措辞只能作参考，不得把与人格设定不符的称呼、口癖或腔调带进回复"
+        ),
+        priority=8,
+        source="persona_core",
+    )
     reply_style_section = self._format_reply_style_prompt_section()
     reply_style_prompt = str(reply_style_section.get("content") or "")
     if reply_style_prompt:

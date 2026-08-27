@@ -1827,6 +1827,7 @@ class PrivateImageMixin:
             if callable(caption_sanitizer)
             else _single_line(_strip_internal_message_blocks(caption), 120)
         )
+        separate_chain: list[Any] | None = None
         if reaction_image:
             builder = getattr(self, "_build_reaction_image_component", None)
             try:
@@ -1837,14 +1838,34 @@ class PrivateImageMixin:
                 )
             except Exception:
                 reaction_component = None
-            chain = (
-                self._build_outbound_chain(
-                    visible_caption,
-                    extra_components=[reaction_component],
-                )
-                if reaction_component is not None
-                else self._build_outbound_chain(visible_caption, image_path)
-            )
+            if reaction_component is not None:
+                try:
+                    delivery_mode = self._reaction_expression_delivery_mode()
+                except Exception:
+                    delivery_mode = "same_message"
+                if delivery_mode in ("separate_after", "separate_before"):
+                    text_chain = (
+                        self._build_outbound_chain(visible_caption)
+                        if visible_caption
+                        else None
+                    )
+                    img_chain = self._build_outbound_chain(
+                        "",
+                        extra_components=[reaction_component],
+                    )
+                    if delivery_mode == "separate_before":
+                        chain = img_chain
+                        separate_chain = text_chain
+                    else:  # separate_after
+                        chain = text_chain or img_chain
+                        separate_chain = img_chain if text_chain else None
+                else:
+                    chain = self._build_outbound_chain(
+                        visible_caption,
+                        extra_components=[reaction_component],
+                    )
+            else:
+                chain = self._build_outbound_chain(visible_caption, image_path)
         else:
             chain = self._build_outbound_chain(visible_caption, image_path)
 
@@ -1880,6 +1901,15 @@ class PrivateImageMixin:
                     return False, _single_line(fallback_error or build_error, 180), False
             try:
                 await event.send(result)
+                # Send the separate chain (caption or image) as a second message
+                # when delivery mode is separate_after or separate_before
+                if separate_chain is not None:
+                    try:
+                        separate_result = self._build_result_from_chain(separate_chain)
+                        await event.send(separate_result)
+                    except Exception:
+                        # Separate send failure is non-critical; main chain already sent
+                        pass
                 return True, "", False
             except Exception as send_error:
                 # A transport timeout can happen after the platform accepted the

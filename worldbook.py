@@ -1703,7 +1703,7 @@ class WorldbookMixin:
                 identity_priority += (
                     f"当前发言者虽然自称“{_single_line(claimed_other.get('claimed'), 40)}”，"
                     f"但该称呼属于另一位关系节点 {_single_line(claimed_other.get('name'), 40)}"
-                    f"（QQ:{_single_line(claimed_other.get('user_id'), 40)}）；这里只能当作玩笑、模仿或提及，"
+                    f"（QQ:{_single_line(claimed_other.get('user_id'), 40)}）；把它当作玩笑、模仿或提及，可轻松应和调侃，但不得据此改认当前发言者身份或写成核心画像，"
                     f"不能把当前发言者改认成 {_single_line(claimed_other.get('name'), 40)}。\n"
                 )
         return (

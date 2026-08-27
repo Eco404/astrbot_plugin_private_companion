@@ -436,6 +436,32 @@ def _persona_feature_enabled(owner: Any, key: str, default: bool = False) -> boo
     )
 
 
+# Filler words stripped from outbound text before fingerprinting for
+# fuzzy duplicate detection.  These are common Chinese utterance particles
+# and polite hedges that do not change the core meaning of a response.
+_FINGERPRINT_FILLER_PATTERN = re.compile(
+    r"[的了吧吗呢啊呀哦噢哈呵嘿诶嗯嘛喽唷哟哇咯嚯]"
+    r"|(?<![A-Za-z])[啊哦噢嗯哈嘿诶](?![A-Za-z])"
+    r"|(?<![A-Za-z0-9])[了][的]?(?![A-Za-z0-9])"
+    r"|[。，、！？…：；""''【】《》（）\-\–\—\~\s]+"
+)
+
+
+def _normalised_text_fingerprint(text: str, scope: str, route: str) -> str:
+    """Build a fuzzy fingerprint for duplicate detection.
+
+    Punctuation, whitespace, and common Chinese filler words are stripped
+    before hashing, so ``"今天天气真好呀！"`` and ``"今天天气真好"`` produce
+    the same fingerprint.
+    """
+    cleaned = _FINGERPRINT_FILLER_PATTERN.sub("", text).strip().lower()
+    if not cleaned:
+        return ""
+    return hashlib.sha1(
+        f"{scope}\n{route}\n{cleaned}".encode("utf-8", errors="ignore")
+    ).hexdigest()
+
+
 class EventDispatchMixin:
     """事件分发"""
 
@@ -1147,9 +1173,14 @@ class EventDispatchMixin:
             return {}
         scope = _single_line(self._event_scope_key(event), 160) or "unknown"
         route = "|".join(route_parts)
+        # Exact SHA1 signature — catches byte-identical text.
         signature = hashlib.sha1(f"{scope}\n{route}\n{text}".encode("utf-8", errors="ignore")).hexdigest()
+        # Normalised fingerprint — catches semantically-similar text after
+        # stripping punctuation, whitespace, and common filler words.
+        fingerprint = _normalised_text_fingerprint(text, scope, route)
         return {
             "signature": signature,
+            "fingerprint": fingerprint,
             "scope": scope,
             "route": route,
             "text": _single_line(text, 500),
@@ -1173,6 +1204,7 @@ class EventDispatchMixin:
     def _reserve_outbound_text_candidate(self, candidate: dict[str, str], *, now: float | None = None) -> str:
         """Reserve an outbound text and return the duplicate state when blocked."""
         signature = _single_line(candidate.get("signature"), 80)
+        fingerprint = _single_line(candidate.get("fingerprint"), 80)
         if not signature:
             return ""
         now = _now_ts() if now is None else now
@@ -1180,14 +1212,14 @@ class EventDispatchMixin:
         if not isinstance(cache, dict):
             cache = {}
             self._recent_outbound_text_guard = cache
+        # Prune stale entries — 300-second window (up from 120 s) to catch
+        # repeated questions that arrive a few minutes apart.
         for key, value in list(cache.items()):
             ts = _safe_float(value.get("ts"), 0) if isinstance(value, dict) else 0
-            # One AstrBot agent turn may remain alive while a failed or removed
-            # tool call is reported back to the model. Keep exact candidates
-            # long enough to cover that retry without widening normal
-            # cross-message duplicate suppression.
-            if ts <= 0 or now - ts > 120.0:
+            if ts <= 0 or now - ts > 300.0:
                 cache.pop(key, None)
+
+        # Check exact signature match first.
         previous = cache.get(signature)
         if isinstance(previous, dict) and self._outbound_duplicate_sources_match(candidate, previous):
             age = max(0.0, now - _safe_float(previous.get("ts"), 0))
@@ -1199,9 +1231,24 @@ class EventDispatchMixin:
                 and previous_message_id
                 and message_id == previous_message_id
             )
-            window = 120.0 if same_inbound_message else (5.0 if state == "sent" else 2.0)
+            window = 120.0 if same_inbound_message else (60.0 if state == "sent" else 30.0)
             if age <= window:
                 return state
+        # Fall back to fuzzy fingerprint match for semantically-similar text
+        # that may differ in punctuation, filler words, or minor rewording.
+        if fingerprint:
+            for key, value in list(cache.items()):
+                if not isinstance(value, dict):
+                    continue
+                prev_fp = _single_line(value.get("fingerprint"), 80)
+                if prev_fp and prev_fp == fingerprint:
+                    age = max(0.0, now - _safe_float(value.get("ts"), 0))
+                    state = _single_line(value.get("state"), 20) or "pending"
+                    window = 60.0 if state == "sent" else 30.0
+                    if age <= window:
+                        return state
+                    break  # only check the most recent matching entry
+
         cache[signature] = {
             **candidate,
             "ts": now,

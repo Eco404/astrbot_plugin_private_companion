@@ -25,6 +25,7 @@ from .helpers import (
     _strip_internal_message_blocks,
     _strip_outbound_control_blocks,
 )
+from .llm_tool_actions import PHOTO_TOOL_SILENT_SENTINEL
 from .persona_config import runtime_persona_setting
 
 
@@ -190,7 +191,11 @@ class FinalResponsePersistenceCoordinator:
 
     def install_send_tracking(self, event: AstrMessageEvent) -> None:
         if not bool(getattr(event, "_private_companion_persistence_managed", False)):
-            return
+            logger.info(
+                "[PrivateCompanion][SendTracking] _private_companion_persistence_managed not set, calling begin_passive: event=%s",
+                id(event),
+            )
+            self.begin_passive(event)
         ledger = self._event_ledger(event) or self.begin_passive(event)
         try:
             result = event.get_result()
@@ -204,16 +209,46 @@ class FinalResponsePersistenceCoordinator:
             original_send = getattr(event, "send", None)
             if callable(original_send):
                 async def tracked_send(message: Any, *args: Any, **kwargs: Any):
+                    # Strip [[PC_PHOTO_SENT_NO_FOLLOWUP]] from Plain/TextPart
+                    # components or from bare string messages BEFORE sending
+                    # to the adapter.  In streaming mode the on_llm_response
+                    # handler runs after the stream has already been dispatched,
+                    # so the marker must be removed here to prevent it from
+                    # reaching the chat client.
+                    sent_chain = getattr(message, "chain", None)
+                    if isinstance(sent_chain, (list, tuple)) and sent_chain:
+                        for component in sent_chain:
+                            if isinstance(component, (Plain, TextPart)):
+                                text = str(getattr(component, "text", "") or "")
+                                if PHOTO_TOOL_SILENT_SENTINEL in text:
+                                    logger.info(
+                                        "[PrivateCompanion][SendTracking] tracked_send STRIPPING chain: event=%s text_len=%d",
+                                        id(event),
+                                        len(text),
+                                    )
+                                    try:
+                                        component.text = text.replace(PHOTO_TOOL_SILENT_SENTINEL, "")
+                                    except Exception:
+                                        pass
+                    elif isinstance(message, str) and PHOTO_TOOL_SILENT_SENTINEL in message:
+                        logger.info(
+                            "[PrivateCompanion][SendTracking] tracked_send STRIPPING str: event=%s text_len=%d",
+                            id(event),
+                            len(message),
+                        )
+                        message = message.replace(PHOTO_TOOL_SILENT_SENTINEL, "")
                     send_result = await original_send(message, *args, **kwargs)
-                    if send_result is not False:
-                        sent_chain = getattr(message, "chain", None)
-                        if isinstance(sent_chain, (list, tuple)) and sent_chain:
-                            self._append_confirmation(ledger, list(sent_chain))
+                    if send_result is not False and isinstance(sent_chain, (list, tuple)) and sent_chain:
+                        self._append_confirmation(ledger, list(sent_chain))
                     return send_result
 
                 ledger.original_send = original_send
                 setattr(event, "_private_companion_original_send", original_send)
                 event.send = tracked_send
+                logger.info(
+                    "[PrivateCompanion][SendTracking] send wrapper installed: event=%s",
+                    id(event),
+                )
 
         if not callable(ledger.original_send_streaming):
             original_streaming = getattr(event, "send_streaming", None)
@@ -229,7 +264,45 @@ class FinalResponsePersistenceCoordinator:
                         async for message in generator:
                             sent_chain = getattr(message, "chain", None)
                             if isinstance(sent_chain, (list, tuple)) and sent_chain:
+                                # Strip [[PC_PHOTO_SENT_NO_FOLLOWUP]] from streamed
+                                # Plain/TextPart components before they reach the
+                                # adapter.  In streaming mode, on_llm_response
+                                # handlers run after the stream has already been
+                                # sent, so the safety net in
+                                # normalize_tts_enhancement_response cannot
+                                # intercept the marker.  Stripping here covers
+                                # all streaming paths unconditionally.
+                                for component in sent_chain:
+                                    if isinstance(component, (Plain, TextPart)):
+                                        text = str(getattr(component, "text", "") or "")
+                                        if PHOTO_TOOL_SILENT_SENTINEL in text:
+                                            logger.info(
+                                                "[PrivateCompanion][SendTracking] tracked_send_streaming STRIPPING chain: event=%s text_len=%d",
+                                                id(event),
+                                                len(text),
+                                            )
+                                            try:
+                                                component.text = text.replace(PHOTO_TOOL_SILENT_SENTINEL, "")
+                                            except Exception:
+                                                pass
                                 captured.append(list(sent_chain))
+                            else:
+                                # Also check AssistantMessageSegment.content
+                                # for sentinel text (no chain attribute).
+                                content = str(getattr(message, "content", "") or "")
+                                if PHOTO_TOOL_SILENT_SENTINEL in content:
+                                    logger.info(
+                                        "[PrivateCompanion][SendTracking] tracked_send_streaming STRIPPING content: event=%s text_len=%d",
+                                        id(event),
+                                        len(content),
+                                    )
+                                    try:
+                                        stripped = content.replace(PHOTO_TOOL_SILENT_SENTINEL, "")
+                                        message.content = stripped
+                                    except Exception:
+                                        pass
+                                    if stripped.strip():
+                                        captured.append([Plain(stripped)])
                             yield message
 
                     send_result = await original_streaming(
@@ -245,6 +318,10 @@ class FinalResponsePersistenceCoordinator:
 
                 ledger.original_send_streaming = original_streaming
                 event.send_streaming = tracked_send_streaming
+                logger.info(
+                    "[PrivateCompanion][SendTracking] send_streaming wrapper installed: event=%s",
+                    id(event),
+                )
 
         setattr(
             event,

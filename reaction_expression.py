@@ -694,6 +694,7 @@ _EXPLICIT_REACTION_REQUEST_PATTERNS = (
     rf"^要(?:个|一个|一张|张|点|些).{{0,8}}{_REACTION_EXPRESSION_ASSET_TERM}(?:吧|呗|呀|啊|嘛|吗)?$",
     rf"{_REACTION_EXPRESSION_ASSET_TERM}.{{0,6}}(?:给我)?(?:来|发|找|整|搞)(?!了|过|的|来的)(?:个|一个|一张|张|点|些)?(?:吧|呗|呀|啊|嘛|吗)?$",
     rf"(?:请|帮我|给我|直接)?(?:用|拿)(?!了|过|的|来的).{{0,8}}{_REACTION_EXPRESSION_ASSET_TERM}.{{0,8}}(?:回复|回应|回|接)(?:一下)?(?:吧|呗|呀|啊|嘛|吗)?$",
+    rf"^{_REACTION_EXPRESSION_ASSET_TERM}(?:吧|呗|呀|啊|嘛|吗|看看)?$",
 )
 _HISTORICAL_REACTION_MENTION_PATTERNS = (
     rf"(?:刚才|刚刚|之前|上次|此前|先前|前面|过去|已经|曾经|方才|为什么|怎么还|怎么又).{{0,24}}{_REACTION_EXPRESSION_ASSET_TERM}",

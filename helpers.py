@@ -570,14 +570,64 @@ def _strip_internal_message_blocks(text: Any) -> str:
     normalized = str(text or "")
     normalized = _strip_personality_sync_blocks(normalized)
     normalized = _strip_group_member_safety_markers(normalized)
+    # Strip reasoning/thinking chain content BEFORE _strip_history_media_markers,
+    # because that function strips <> brackets from tags, which would destroy
+    # the  thinking marking that these regexes need to match.
+    normalized = re.sub(r"<thinking[^>]*>.*?</thinking>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
+    # Malformed HTML: <thinking content</thinking> (no > delimiter after tag name)
+    normalized = re.sub(r"<thinking[^>]*</thinking>", "", normalized, flags=re.IGNORECASE)
+    # HTML-style: <think...> ... </response|/think> or  /response|  /think
+    normalized = re.sub(
+        r"<think[^>]*>.*?(?:</?(?:response|think)\b[^>]*>|  /?response|  /think)",
+        "",
+        normalized,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Malformed HTML: <think content</response> (no > delimiter after tag name)
+    normalized = re.sub(
+        r"<think[^>]*</?(?:response|think)[^>]*>",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    # DeepSeek R1 space-based multi-line:   thinking \n...\n</response> or  /response or  /think or  response
+    normalized = re.sub(
+        r"^[ \t]*thinking.*?(?:\n[ \t]*</response>|\n[ \t]*/\s*response|\n[ \t]*response|\n[ \t]*/\s*think)",
+        "",
+        normalized,
+        flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    # Mid-text (non-anchored) multi-line: matches the same pattern anywhere in the
+    # text, not just at the start of a line.  This handles cases where the thinking
+    # chain is preceded by other text on the same line (e.g. when the chain is
+    # constructed by joining Plain components with different content).
+    normalized = re.sub(
+        r"[ \t]{2,}thinking\b.*?(?:\n[ \t]*</response>|\n[ \t]*/\s*response|\n[ \t]*response|\n[ \t]*/\s*think)",
+        "",
+        normalized,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Same-line:   thinking...  /response or   thinking...  /think (closing on same line)
+    normalized = re.sub(
+        r"^[ \t]*thinking[^\n]*?(?:</?response[^>]*>|  /?response|  /think)",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    # Mid-text (non-anchored) same-line: same pattern anywhere in the text.
+    normalized = re.sub(
+        r"[ \t]{2,}thinking\b[^\n]*?(?:</?response[^>]*>|  /?response|  /think)",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(r"<reasoning\b[^>]*>.*?</reasoning>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
     normalized = _strip_history_media_markers(normalized)
     normalized = _PHOTO_TOOL_SILENT_SENTINEL_PATTERN.sub("", normalized)
     normalized = re.sub(r"\[\[TTSBLOCK:[^\]]*\]\]", "", normalized)
     normalized = re.sub(r"\[\[PCTTS:[^\]]*\]\]", "", normalized)
     normalized = re.sub(r"<timer\b[^>]*>.*?</timer>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
     normalized = re.sub(r"<tts\b[^>]*>.*?</tts>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
-    normalized = re.sub(r"<think\b[^>]*>.*?</think>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
-    normalized = re.sub(r"<reasoning\b[^>]*>.*?</reasoning>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
     normalized = _strip_nonstandard_chat_control_tags(normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
@@ -737,6 +787,56 @@ def _strip_outbound_control_blocks(
     normalized = str(text or "")
     normalized = _strip_personality_sync_blocks(normalized)
     normalized = _strip_group_member_safety_markers(normalized)
+    # Strip reasoning/thinking chain content BEFORE _strip_history_media_markers,
+    # because that function strips <> brackets from tags, which would destroy
+    # the  thinking marking that these regexes need to match.
+    normalized = re.sub(r"<thinking[^>]*>.*?</thinking>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
+    # Malformed HTML: <thinking content</thinking> (no > delimiter after tag name)
+    normalized = re.sub(r"<thinking[^>]*</thinking>", "", normalized, flags=re.IGNORECASE)
+    # HTML-style: <think...> ... </response|/think> or  /response|  /think
+    normalized = re.sub(
+        r"<think[^>]*>.*?(?:</?(?:response|think)\b[^>]*>|  /?response|  /think)",
+        "",
+        normalized,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Malformed HTML: <think content</response> (no > delimiter after tag name)
+    normalized = re.sub(
+        r"<think[^>]*</?(?:response|think)[^>]*>",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    # DeepSeek R1 space-based multi-line:   thinking \n...\n</response> or  /response or  /think or  response
+    normalized = re.sub(
+        r"^[ \t]*thinking.*?(?:\n[ \t]*</response>|\n[ \t]*/\s*response|\n[ \t]*response|\n[ \t]*/\s*think)",
+        "",
+        normalized,
+        flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    # Mid-text (non-anchored) multi-line: matches the same pattern anywhere in the
+    # text, not just at the start of a line.
+    normalized = re.sub(
+        r"[ \t]{2,}thinking\b.*?(?:\n[ \t]*</response>|\n[ \t]*/\s*response|\n[ \t]*response|\n[ \t]*/\s*think)",
+        "",
+        normalized,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Same-line:   thinking...  /response or   thinking...  /think (closing on same line)
+    normalized = re.sub(
+        r"^[ \t]*thinking[^\n]*?(?:</?response[^>]*>|  /?response|  /think)",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    # Mid-text (non-anchored) same-line: same pattern anywhere in the text.
+    normalized = re.sub(
+        r"[ \t]{2,}thinking\b[^\n]*?(?:</?response[^>]*>|  /?response|  /think)",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(r"<reasoning[^>]*>.*?</reasoning>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
     normalized = _strip_history_media_markers(normalized)
     normalized = _PHOTO_TOOL_SILENT_SENTINEL_PATTERN.sub("", normalized)
     normalized = re.sub(r"\[\[TTSBLOCK:[^\]]*\]\]", "", normalized)
@@ -751,8 +851,6 @@ def _strip_outbound_control_blocks(
     elif not preserve_private_tts_tokens:
         normalized = re.sub(r"\[\[PCTTS:[^\]]*\]\]", "", normalized)
     normalized = re.sub(r"<timer\b[^>]*>.*?</timer>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
-    normalized = re.sub(r"<think\b[^>]*>.*?</think>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
-    normalized = re.sub(r"<reasoning\b[^>]*>.*?</reasoning>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
     normalized = _strip_nonstandard_chat_control_tags(normalized)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
     return normalized

@@ -12,6 +12,8 @@ for outbound proactive timing.
 """
 from __future__ import annotations
 
+import datetime
+import random
 import re
 from typing import Any
 
@@ -349,3 +351,49 @@ class ChronotypeMixin:
             factor = max(0.4, min(1.6, 0.4 + 0.6 * share))
             blended.append(max(0.05, min(2.0, float(base_weight) * factor)))
         return blended
+
+    def _is_currently_active(
+        self, user: dict[str, Any] | None = None, *, now: float | None = None
+    ) -> bool:
+        """Check if the current time falls within the user's active window."""
+        profile = self._user_chronotype(user, now=now)
+        wake_minute = profile.get("wake_minute", _DEFAULT_WAKE_MINUTE)
+        sleep_minute = profile.get("sleep_minute", _DEFAULT_SLEEP_MINUTE)
+        now_getter = getattr(self, "_now_ts", None)
+        now_ts = now if now is not None else (now_getter() if callable(now_getter) else 0.0)
+        if now_ts <= 0:
+            now_ts = datetime.datetime.now().timestamp()
+        dt_getter = getattr(self, "_environment_fromtimestamp", None)
+        try:
+            local = dt_getter(now_ts) if callable(dt_getter) else datetime.datetime.fromtimestamp(now_ts)
+            current_minute = local.hour * 60 + local.minute
+        except Exception:
+            return True
+        if wake_minute <= sleep_minute:
+            return wake_minute <= current_minute <= sleep_minute
+        # Overnight sleep: active from wake_minute through midnight, then midnight to sleep_minute
+        return current_minute >= wake_minute or current_minute <= sleep_minute
+
+    def _swing_probability(
+        self,
+        base_probability: float,
+        *,
+        swing_factor: float = 0.15,
+        active_boost: float = 0.25,
+        user: dict[str, Any] | None = None,
+        now: float | None = None,
+    ) -> float:
+        """Apply random swing and active-hour boost to a probability.
+
+        - ``swing_factor`` controls the random oscillation range (default ±15%).
+        - ``active_boost`` adds a multiplicative boost during active hours (default +25%).
+        - The result is clamped to [0.0, 1.0].
+        """
+        prob = float(base_probability)
+        # Random swing
+        swing = 1.0 + random.uniform(-swing_factor, swing_factor)
+        prob *= swing
+        # Active-hour boost
+        if self._is_currently_active(user, now=now):
+            prob *= 1.0 + active_boost
+        return max(0.0, min(1.0, prob))

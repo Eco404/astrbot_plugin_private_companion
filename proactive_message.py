@@ -17181,6 +17181,8 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
 
     def _sanitize_proactive_text(self, text: str) -> str:
         cleaned = str(text or "").strip()
+        # Strip reasoning/thinking chain content first, before any other sanitization
+        cleaned = _strip_internal_message_blocks(cleaned)
         cleaned = re.sub(r"<img\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"</img>", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"<[^>\n]{0,200}>", "", cleaned)

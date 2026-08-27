@@ -841,7 +841,7 @@ class LlmToolActionsMixin:
         photo_enabled = bool(runtime_persona_setting(self, 'enable_photo_text_action', False))
         mode = _single_line(runtime_persona_setting(self, 'natural_language_photo_generation_mode', "tool_first"), 40).lower()
         photo_enabled = photo_enabled and mode != "off" and not spontaneous_only
-        if not reaction_enabled and not photo_enabled:
+        if not reaction_enabled and not photo_enabled and spontaneous_only:
             return ""
         if spontaneous_only:
             high_frequency_hint = (
@@ -852,31 +852,53 @@ class LlmToolActionsMixin:
                 )
                 else "- 轻松闲聊、玩笑、安慰、撒娇、庆祝、惊讶、接梗或轻吐槽等能自然补充语气的场景，通常应在完整回复末尾追加内部标签。只有纯事实答复、严肃或敏感情境，或确实没有合适情绪时才省略。"
             )
-            lines = [
+            return "\n".join(
+                [
+                    "【实验性表情表达】",
                     "- 先完成一条正常、完整、可以独立发送的文字回复。表情图片只能作为文字后的补充，绝对不能替代文字回复。",
                     "- 本轮已经由插件完成概率抽样并获得一次表情表达机会；不要再次按概率决定，也不要因为‘不确定’而默认省略标签。",
                     high_frequency_hint,
-                    '- 最小标签格式为 `<pc_reaction_expression>{"purpose":"轻吐槽","emotion":"无语","intensity":2}</pc_reaction_expression>`。',
+                    '-最小标签格式为 `<pc_reaction_expression>{"purpose":"轻吐槽","emotion":"无语","intensity":2}</pc_reaction_expression>`。',
                     "- `purpose` 写沟通用途，`emotion` 写希望传达的情绪，`intensity` 为 0-5；需要帮助检索时可选填 `candidate_queries`，提供 1-3 个简短说法。不要填写图片路径。",
                     "- 每轮最多写一个标签，必须放在全部可见文字和 TTS 标签之后；不要使用 Markdown 代码块，不要解释标签，也不要调用图片或生图工具。",
                     "- 即使图库最终没有匹配、图片重复或发送失败，前面的完整文字也必须仍然自然成立。",
-            ]
-            if include_heading:
-                lines.insert(0, "【实验性表情表达】")
-            return "\n".join(lines).strip()
-        lines: list[str] = []
-        if include_heading:
-            lines.append("【实验性表情表达工具】" if spontaneous_only else "【图库表情与生图工具】")
-        if reaction_enabled:
-            if not spontaneous_only:
-                lines.extend(
-                    [
-                        "- 用户要“找/发/来一张已有表情包”、要用现成反应图回应当前语境时，优先使用 `pc_find_reaction_image`，把需求和当前语境写进 `query/search_context`。",
-                        "- `pc_find_reaction_image` 在 `send=true` 时必须填写 `caption`，内容应是一条完整、自然、可独立成立的正文；图片只能追加在正文后，不能替代、缩短或省略正文。",
-                        "- 决定调用 `pc_find_reaction_image` 时，把可见正文只放进 `caption` 参数；发起工具调用的同一轮不要再额外输出正文或声称图片已经发送。拿到工具结果后再按结果完成最终回复。",
-                        "- 图库未匹配时可以自然改用文字回应，不要擅自声称已发图。",
-                    ]
+                ]
+            ).strip()
+        lines = ["【实验性表情表达工具】" if spontaneous_only else "【图库表情与生图工具】"]
+        # pc_find_reaction_image 工具始终注册，所以指令应始终注入（与 reaction_enabled 解耦）
+        if not spontaneous_only:
+            reaction_availability = (
+                "- 表情包素材库当前已有可用素材，用户请求现成表情包或反应图时可直接调用 `pc_find_reaction_image` 检索。"
+                if reaction_enabled
+                else "- 表情包素材库可能暂无可用的现成素材，用户仍可尝试调用 `pc_find_reaction_image` 检索；库为空时工具会返回对应提示。"
+            )
+            raw_probability = runtime_persona_setting(
+                self, 'reaction_expression_trigger_probability', 0.2
+            )
+            if reaction_expression_high_frequency(raw_probability):
+                spontaneous_hint = (
+                    "- 自动追加表情包目前为高频触发：对轻松、社交或有明确情绪的动作/表情描述回复"
+                    "（如[委屈巴巴地缩了缩脖子]、[开心地蹦跶了两下]），默认在正文后调用 `pc_find_reaction_image` "
+                    "追加一个匹配表情包；纯事实、严肃、敏感或明确边界场景仍只发文字，不追加。"
                 )
+            else:
+                chance = reaction_expression_normalize_probability(raw_probability, 0.2)
+                spontaneous_hint = (
+                    f"- 自动追加表情包是低概率点缀而非每轮默认动作：当前配置下约 {int(round(chance * 100))}% 的情境才自然带一个匹配表情包。"
+                    "若回复中出现动作或表情描述（如[委屈巴巴地缩了缩脖子]、[开心地蹦跶了两下]），是典型的追加时机，"
+                    "但请按上述概率自然把握：不要每轮都加，也不要因偶尔没加而向用户解释。"
+                )
+            lines.extend(
+                [
+                    reaction_availability,
+                    "- 用户要“找/发/来一张已有表情包”、要用现成反应图回应当前语境时，优先使用 `pc_find_reaction_image`，把需求和当前语境写进 `query/search_context`。",
+                    "- `pc_find_reaction_image` 在 `send=true` 时必须填写 `caption`，内容应是一条完整、自然、可独立成立的正文；图片只能追加在正文后，不能替代、缩短或省略正文。",
+                    "- 决定调用 `pc_find_reaction_image` 时，把可见正文只放进 `caption` 参数；发起工具调用的同一轮不要再额外输出正文或声称图片已经发送。拿到工具结果后再按结果完成最终回复。",
+                    "- 图库未匹配时可以自然改用文字回应，不要擅自声称已发图。",
+                    spontaneous_hint,
+                ]
+            )
+        if reaction_enabled:
             experiment_enabled = bool(
                 runtime_persona_setting(self, 'enable_reaction_expression_experiment', False)
             )
@@ -893,10 +915,9 @@ class LlmToolActionsMixin:
                     ]
                 )
         if photo_enabled:
-            if reaction_enabled:
-                lines.append(
-                    "- 只有用户明确要求“生成/画/制作”新的角色表情包或贴纸时，才使用 `pc_generate_photo(kind=\"sticker\")`。不要把普通的现成表情包请求误当成生图。"
-                )
+            lines.append(
+                "- 只有用户明确要求“生成/画/制作”新的角色表情包或贴纸时，才使用 `pc_generate_photo(kind=\"sticker\")`。不要把普通的现成表情包请求误当成生图。"
+            )
             lines.extend(
                 [
                     "- 用户明确要求生成图片、画图、出图、自拍、拍照、头像，或要求基于参考图改图时，可以使用 `pc_generate_photo`。",
@@ -2343,8 +2364,9 @@ class LlmToolActionsMixin:
         # caused another tool to produce a local image in this same turn.
         blocked = {"pc_send_current_media"}
         if reaction_evaluated:
-            # The authorization now enables an internal response tag, not a
-            # tool call. Removing both tools prevents a second model turn.
+            # Once the spontaneous offer gate has been evaluated, keep the
+            # model on the single-pass path. Explicit media requests bypass
+            # this function via ``explicit_media_request=True``.
             blocked.update({"pc_generate_photo", "pc_find_reaction_image"})
         tool_set = getattr(req, "func_tool", None)
         if tool_set is None:
@@ -4918,6 +4940,9 @@ class LlmToolActionsMixin:
             probability = reaction_expression_effective_probability(
                 state, configured_probability
             )
+            swing_probability = getattr(self, "_swing_probability", None)
+            if callable(swing_probability):
+                probability = swing_probability(probability, user=user)
             trigger = self._reaction_expression_local_trigger(
                 event,
                 user,
@@ -5156,10 +5181,11 @@ class LlmToolActionsMixin:
                 pass
         saver = getattr(self, "_save_data_sync", None)
         if callable(saver):
-            saver(
-                sections=sections
-                or {"users", "reaction_expression_group_states"}
-            )
+            requested = sections or {"users", "reaction_expression_group_states"}
+            try:
+                saver(sections=requested)
+            except TypeError:
+                saver()
 
     @staticmethod
     def _is_reaction_embedding_provider(provider: Any) -> bool:
@@ -6781,7 +6807,7 @@ class LlmToolActionsMixin:
                             "embedding_query": embedding_query,
                             "embedding_provider_id": embedding_provider_id,
                             "embedding_score_threshold": runtime_persona_setting(self, 'reaction_expression_embedding_score_threshold', 0.42),
-                            "embedding_weight": runtime_persona_setting(self, 'reaction_expression_embedding_weight', 0.55),
+                            "embedding_weight": runtime_persona_setting(self, 'reaction_expression_embedding_weight', 0.7),
                             "embedding_candidate_limit": runtime_persona_setting(self, 'reaction_expression_embedding_candidate_limit', 1200),
                         }
                     )
@@ -6965,7 +6991,12 @@ class LlmToolActionsMixin:
                         reason="reaction_library_image",
                         subject_owner="unknown",
                     )
-                    self._save_data_sync(sections={"users"})
+                    try:
+                        self._save_data_sync(sections={"users"})
+                    except TypeError:
+                        # Keep lightweight hosts/test doubles compatible with
+                        # the historical no-argument persistence hook.
+                        self._save_data_sync()
 
         if sent:
             self._mark_reaction_asset_used(lookup.get("image_id"), event=event)

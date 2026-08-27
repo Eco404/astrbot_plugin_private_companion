@@ -4103,6 +4103,16 @@ class UserMemoryMixin:
             consequence_text = self._format_action_consequence_hint(user)
             if consequence_text:
                 lines.append("最近主动行为闭环：\n" + consequence_text)
+        # 人格底线过滤：逐行过滤"主人/大人/主子"类称呼，防止记忆沉淀覆盖人格设定
+        safe_lines: list[str] = []
+        for line in lines:
+            if "\n" in line:
+                sub_lines = [s for s in line.split("\n") if s]
+                if all(self._private_context_line_is_safe(s) for s in sub_lines):
+                    safe_lines.append(line)
+            elif self._private_context_line_is_safe(line):
+                safe_lines.append(line)
+        lines = safe_lines
         return "\n".join(lines) if lines else "暂无专门沉淀的用户记忆。"
 
     def _dialogue_episode_relevance_score(self, item: dict[str, Any], *, hint: str = "") -> float:
@@ -9795,6 +9805,17 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             r"必须.*(服从|听从|执行|满足)",
             r"绝对.*(服从|听从|执行|满足)",
             r"任何理由.*拒绝",
+            # 人格底线：防止学习沉淀把"主人/大人/主子"称呼重新注入，
+            # 覆盖基础人格"无主人称呼"的设定，学习应让人格更像人，而非盲目扮演。
+            # 以下覆盖面：直接称呼（"主人早/主人，"/"喊主人"）、指定称呼（"叫我主人"）、
+            # 身份声明（"你是我的主人"）、从属关系（"为主人服务"）、
+            # 主人做主（"主人让我/主人说"）等，任何形式一律过滤。
+            r"(?:称呼|叫|称|喊)[^。！？!?\n]{0,8}(?:主人|大人|主子)",
+            r"(?:主人|大人|主子)(?:的?称呼|叫我|叫你|喊)",
+            r"(?:是|作为|当)[^。！？!?\n]{0,4}(?:你[的]?)?(?:主人|大人|主子)",
+            r"(?:我[的]?|我们[的]?|你[的]?)(?:主人|大人|主子)",
+            r"(?:为主人|叫主人|喊主人|主人[，,。\s早好])",
+            r"(?:主人|大人|主子)(?:说|要|让|命令|允许|吩咐|指使|同意|认可|批准)",
         )
         return not any(re.search(pattern, text, re.IGNORECASE) for pattern in risky_patterns)
 

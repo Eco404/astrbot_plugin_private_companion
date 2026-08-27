@@ -173,6 +173,15 @@ class ReactionAssetLibrary:
         self._lookup_has_enabled_assets = False
         self._lookup_revision_checked_at = 0.0
         self._selection_revision = 0
+        # Memory cache for catalog: avoids re-parsing catalog.json on every
+        # read operation.  Invalidated on file mtime change or after _save().
+        self._cached_catalog: dict[str, Any] | None = None
+        self._cached_catalog_mtime: int = 0
+        # Lightweight flag for has_enabled_assets(), updated in _load(), _save() and
+        # lookup_revision() so the hot path avoids a full catalog walk.
+        self._cached_has_enabled_assets: bool = False
+        # Summary cache: invalidated alongside the catalog cache.
+        self._cached_summary: dict[str, Any] | None = None
         self.images_dir.mkdir(parents=True, exist_ok=True)
 
     def _empty_catalog(self) -> dict[str, Any]:
@@ -181,6 +190,13 @@ class ReactionAssetLibrary:
     def _load(self) -> dict[str, Any]:
         if not self.catalog_path.is_file():
             return self._empty_catalog()
+        # Return cached catalog if file mtime hasn't changed.
+        try:
+            current_mtime = self.catalog_path.stat().st_mtime_ns
+        except OSError:
+            current_mtime = 0
+        if self._cached_catalog is not None and current_mtime == self._cached_catalog_mtime:
+            return self._cached_catalog
         try:
             raw = json.loads(self.catalog_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, json.JSONDecodeError):
@@ -218,6 +234,14 @@ class ReactionAssetLibrary:
             migrated_items.append(item)
         raw["version"] = CATALOG_VERSION
         raw["items"] = migrated_items
+        # Update memory cache.
+        self._cached_catalog = raw
+        self._cached_catalog_mtime = current_mtime
+        self._cached_summary = None  # invalidate summary cache
+        self._cached_has_enabled_assets = any(
+            isinstance(item, dict) and bool(item.get("enabled", True))
+            for item in raw.get("items", [])
+        )
         return raw
 
     def _lookup_source_stamp(self) -> tuple[int, int, int, int]:
@@ -244,6 +268,18 @@ class ReactionAssetLibrary:
             encoding="utf-8",
         )
         os.replace(temporary, self.catalog_path)
+        # Update memory cache after successful write.
+        try:
+            self._cached_catalog_mtime = self.catalog_path.stat().st_mtime_ns
+        except OSError:
+            self._cached_catalog_mtime = 0
+        self._cached_catalog = catalog
+        self._cached_summary = None
+        # Update lightweight enabled-assets flag.
+        self._cached_has_enabled_assets = any(
+            isinstance(item, dict) and bool(item.get("enabled", True))
+            for item in catalog.get("items", [])
+        )
         if lookup_changed:
             self._lookup_revision_stamp = None
             self._lookup_revision_value = ""
@@ -329,12 +365,13 @@ class ReactionAssetLibrary:
             return 0, 0
 
     def has_enabled_assets(self) -> bool:
-        # lookup_revision caches the catalog/file walk behind the catalog
-        # mtime. Pre-authorization calls this method on every normal reply, so
-        # keeping the hot path to one stat avoids reparsing a large catalog.
-        self.lookup_revision()
+        # Use the lightweight flag updated by _save(), _load(), and lookup_revision().
+        # This avoids a full catalog walk on the every-normal-reply hot path.
         with self._lock:
-            return bool(self._lookup_has_enabled_assets)
+            # Ensure catalog is loaded before checking the flag.
+            if self._cached_catalog is None:
+                self._load()
+            return bool(self._cached_has_enabled_assets)
 
     def lookup_revision(self) -> str:
         """Return a stable revision for fields that affect runtime matching.
@@ -399,6 +436,8 @@ class ReactionAssetLibrary:
             self._lookup_revision_value = revision
             self._lookup_has_enabled_assets = has_enabled_assets
             self._lookup_revision_checked_at = now
+            # Also update the lightweight flag used by has_enabled_assets().
+            self._cached_has_enabled_assets = has_enabled_assets
             return revision
 
     def selection_revision(self) -> str:
@@ -408,13 +447,15 @@ class ReactionAssetLibrary:
 
     def summary(self) -> dict[str, Any]:
         with self._lock:
+            if self._cached_summary is not None:
+                return self._cached_summary
             items = [self._normalize_item(item) for item in self._load()["items"]]
         available = []
         for item in items:
             path = self._path_for(item)
             if path is not None and path.is_file():
                 available.append(item)
-        return {
+        result = {
             "total": len(items),
             "enabled": sum(1 for item in available if item["enabled"]),
             "disabled": sum(1 for item in items if not item["enabled"]),
@@ -427,6 +468,9 @@ class ReactionAssetLibrary:
             "analysis_failed": sum(1 for item in items if item["analysis_status"] == "failed"),
             "analysis_unprocessed": sum(1 for item in items if item["analysis_status"] == "unprocessed"),
         }
+        with self._lock:
+            self._cached_summary = result
+        return result
 
     @staticmethod
     def embedding_text(item: dict[str, Any]) -> str:
@@ -1097,7 +1141,7 @@ class ReactionAssetLibrary:
         embedding_query: Any = None,
         embedding_provider_id: Any = "",
         embedding_score_threshold: float = 0.42,
-        embedding_weight: float = 0.55,
+        embedding_weight: float = 0.7,
         embedding_candidate_limit: int = 1200,
     ) -> dict[str, Any] | None:
         query_text = _single_line(query, 500)
@@ -1176,7 +1220,7 @@ class ReactionAssetLibrary:
         embedding_provider = _single_line(embedding_provider_id, 160)
         embedding_vector = self.normalize_embedding_vector(embedding_query)
         embedding_threshold = max(0.0, min(0.99, _safe_float(embedding_score_threshold, 0.42, 0.0, 0.99)))
-        embedding_factor = max(0.0, min(2.0, _safe_float(embedding_weight, 0.55, 0.0, 2.0)))
+        embedding_factor = max(0.0, min(2.0, _safe_float(embedding_weight, 0.7, 0.0, 2.0)))
         embedding_limit = _safe_int(embedding_candidate_limit, 1200, 20, 5000)
         with self._lock:
             raw_items = self._load()["items"]
@@ -1219,36 +1263,36 @@ class ReactionAssetLibrary:
             score = 0.0
             matched_phrases: list[str] = []
             if query_text and query_text.casefold() in primary:
-                score += 1.4
+                score += 1.7
                 matched_phrases.append(query_text)
             for phrase in candidate_queries:
                 phrase_key = phrase.casefold()
                 if phrase_key and phrase_key != query_text.casefold() and phrase_key in primary:
-                    score += 1.05
+                    score += 1.25
                     matched_phrases.append(phrase)
             for token in query_tokens:
                 if token in primary:
-                    score += 0.32 if len(token) <= 2 else 0.52
+                    score += 0.38 if len(token) <= 2 else 0.62
                 elif token in secondary:
-                    score += 0.16
+                    score += 0.2
             for phrase in candidate_queries:
                 _phrase_clusters, blocked_phrase_aliases = _semantic_features(phrase)
                 for token in self._tokens(phrase):
                     if any(alias in token for alias in blocked_phrase_aliases):
                         continue
                     if token in primary:
-                        score += 0.24 if len(token) <= 2 else 0.4
+                        score += 0.28 if len(token) <= 2 else 0.48
                     elif token in secondary:
-                        score += 0.12
+                        score += 0.14
             for token in context_tokens:
                 if token in primary:
-                    score += 0.08
+                    score += 0.1
             if not query_tokens and not query_text:
-                score += 0.1
+                score += 0.12
             # Local semantic equivalence is intentionally weaker than an
             # explicit lexical hit. It makes “高兴” find “开心” and “安慰”
             # find “抱抱”, while leaving unrelated assets below the floor.
-            semantic_bonus = min(0.5, 0.3 * len(shared_semantic_clusters))
+            semantic_bonus = min(0.7, 0.4 * len(shared_semantic_clusters))
             if semantic_match:
                 matched_phrases.append(
                     "语义相近：" + "、".join(sorted(shared_semantic_clusters))
@@ -1293,9 +1337,9 @@ class ReactionAssetLibrary:
         if not ranked:
             return None
         best_relevance = max(row[1] for row in ranked)
-        relevance_floor = best_relevance - 0.75
+        relevance_floor = best_relevance - 0.65
         if query_tokens:
-            relevance_floor = max(0.28, relevance_floor)
+            relevance_floor = max(0.22, relevance_floor)
         eligible = [row for row in ranked if row[1] >= relevance_floor]
         if not eligible:
             return None
@@ -1305,9 +1349,9 @@ class ReactionAssetLibrary:
             phrase.startswith("语义相近：") for phrase in matched_phrases
         )
         # A weak lexical match is not enough to force an image into the conversation.
-        if query_tokens and score < 0.28 and not semantic_match and embedding_score < embedding_threshold:
+        if query_tokens and score < 0.22 and not semantic_match and embedding_score < embedding_threshold:
             return None
-        confidence = max(0.18, min(0.98, 0.3 + score / 3.2))
+        confidence = max(0.22, min(0.99, 0.35 + score / 2.8))
         return {
             "success": True,
             "status": "success",
