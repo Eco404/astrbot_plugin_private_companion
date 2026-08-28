@@ -123,6 +123,38 @@ class GroupPromptContextTests(unittest.TestCase):
         self.assertEqual("明确 @ Bot", scene.get("trigger"))
         self.assertEqual("明确 @ Bot", scene.get("reason"))
 
+    def test_renders_llm_segments_inside_one_assistant_message(self) -> None:
+        kwargs = dict(
+            current_message={"ts": 100, "sender_id": "1", "text": "继续"},
+            recent_messages=[],
+            recent_bot_replies=[
+                {
+                    "ts": 95,
+                    "text": "第一段 第二段",
+                    "llm_segments": ["第一段", "第二段"],
+                }
+            ],
+            fromtimestamp=_fromtimestamp,
+            limit=20,
+            max_chars=4000,
+            bot_id="璃",
+            bot_name="璃",
+        )
+
+        group = _rendered_group(build_group_prompt_context(**kwargs))
+        messages = group.findall("./history/message")
+        self.assertEqual(1, len(messages))
+        self.assertEqual("assistant", messages[0].get("role"))
+        self.assertEqual(["第一段", "第二段"], [seg.text for seg in messages[0].findall("./seg")])
+
+        flat_group = _rendered_group(
+            build_group_prompt_context(**kwargs, render_llm_segments=False)
+        )
+        flat_message = flat_group.find("./history/message")
+        self.assertIsNotNone(flat_message)
+        self.assertEqual("第一段 第二段", flat_message.text)
+        self.assertEqual([], flat_message.findall("./seg"))
+
     def test_formats_same_day_and_cross_day_times_in_configured_timezone(self) -> None:
         context = build_group_prompt_context(
             current_message={
@@ -366,6 +398,26 @@ class GroupPromptContextTests(unittest.TestCase):
             len(_timeline_wire_text(history, **_history_wire_kwargs(history_attrs))),
             20,
         )
+
+    def test_truncated_message_drops_nested_segments_to_enforce_budget(self) -> None:
+        context = build_group_prompt_context(
+            current_message={"ts": 500, "sender_id": "1", "text": "当前"},
+            recent_messages=[],
+            recent_bot_replies=[
+                {
+                    "ts": 95,
+                    "text": "第一段第二段第三段",
+                    "llm_segments": ["第一段", "第二段第三段"],
+                }
+            ],
+            fromtimestamp=_fromtimestamp,
+            max_chars=6,
+        )
+
+        message = _rendered_group(context).find("./history/message")
+        self.assertIsNotNone(message)
+        self.assertEqual([], message.findall("./seg"))
+        self.assertLessEqual(len(message.text or ""), 6)
 
     def test_builder_does_not_mutate_source_records(self) -> None:
         current = {"ts": 100, "sender_id": "opaque-current", "text": "当前"}

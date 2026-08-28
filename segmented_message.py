@@ -3,12 +3,55 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from .persona_config import runtime_persona_setting
 
 
 LLM_SEGMENT_MARKER = "<<PRIVATE_COMPANION_SPLIT>>"
+LLM_SEGMENT_PLACEHOLDER = "{{split_marker}}"
+
+_ESCAPED_LLM_SEGMENT_MARKER_PATTERN = re.compile(
+    r"(?:&lt;|&#0*60;){2}\s*PRIVATE_COMPANION_SPLIT\s*(?:&gt;|&#0*62;){2}",
+    flags=re.IGNORECASE,
+)
+_MARKDOWN_ESCAPED_LLM_SEGMENT_MARKER_PATTERN = re.compile(
+    r"\\<\\<\s*PRIVATE\s*_\s*COMPANION\s*_\s*SPLIT\s*\\>\\>",
+    flags=re.IGNORECASE,
+)
+_PLACEHOLDER_PATTERN = re.compile(
+    r"\{\{\s*split_marker\s*\}\}",
+    flags=re.IGNORECASE,
+)
+_SPACED_LLM_SEGMENT_MARKER_PATTERN = re.compile(
+    r"<<\s*PRIVATE\s*_\s*COMPANION\s*_\s*SPLIT\s*>>",
+    flags=re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class LlmSegmentParseResult:
+    """One scan of an LLM reply's reserved segmentation protocol."""
+
+    segments: tuple[str, ...]
+    sanitized_text: str
+    boundary_kinds: tuple[str, ...]
+    exact_boundary_count: int = 0
+    recovered_boundary_count: int = 0
+    cleaned_only_count: int = 0
+    fenced_token_count: int = 0
+    quoted_token_count: int = 0
+    escaped_token_count: int = 0
+    placeholder_token_count: int = 0
+
+    @property
+    def controlled(self) -> bool:
+        return len(self.segments) >= 2 and bool(self.boundary_kinds)
+
+    @property
+    def suppress_plugin_rule_split(self) -> bool:
+        return self.fenced_token_count > 0
 
 
 def _next_markdown_fence_state(
@@ -34,24 +77,8 @@ def strip_llm_segment_marker_lines(
     *,
     marker: str = LLM_SEGMENT_MARKER,
 ) -> str:
-    """Remove active marker lines without altering fenced code examples."""
-    normalized = str(text or "")
-    marker = str(marker or LLM_SEGMENT_MARKER).strip()
-    if not normalized or not marker:
-        return normalized.strip()
-    kept_lines: list[str] = []
-    fence_state: tuple[str, int] | None = None
-    for raw_line in normalized.splitlines():
-        line = raw_line.strip()
-        next_fence_state = _next_markdown_fence_state(line, fence_state)
-        if next_fence_state != fence_state:
-            fence_state = next_fence_state
-            kept_lines.append(raw_line)
-            continue
-        if fence_state is None and line == marker and not raw_line.lstrip().startswith(">"):
-            continue
-        kept_lines.append(raw_line)
-    return "\n".join(kept_lines).strip()
+    """Compatibility wrapper that removes every reserved control token."""
+    return sanitize_llm_segment_control_tokens(text, marker=marker)
 
 
 def has_fenced_llm_segment_marker(
@@ -83,34 +110,166 @@ def split_llm_controlled_text(text: Any, *, marker: str = LLM_SEGMENT_MARKER) ->
     ignored so examples or quoted instructions do not accidentally create
     outbound message boundaries.
     """
-    normalized = str(text or "").strip()
-    if not normalized:
+    result = parse_llm_segment_control(text, marker=marker)
+    if not result.sanitized_text:
         return [], False
+    if not result.controlled:
+        return [result.sanitized_text], False
+    return list(result.segments), True
+
+
+def _replace_reserved_tokens(value: str, *, marker: str) -> tuple[str, dict[str, int]]:
+    counts = {"escaped": 0, "placeholder": 0, "marker": 0}
+
+    def replace(pattern: re.Pattern[str], key: str, source: str) -> str:
+        def repl(_match: re.Match[str]) -> str:
+            counts[key] += 1
+            return " "
+
+        return pattern.sub(repl, source)
+
+    cleaned = replace(_ESCAPED_LLM_SEGMENT_MARKER_PATTERN, "escaped", value)
+    cleaned = replace(
+        _MARKDOWN_ESCAPED_LLM_SEGMENT_MARKER_PATTERN,
+        "escaped",
+        cleaned,
+    )
+    cleaned = replace(_PLACEHOLDER_PATTERN, "placeholder", cleaned)
+    marker_pattern = (
+        _SPACED_LLM_SEGMENT_MARKER_PATTERN
+        if marker == LLM_SEGMENT_MARKER
+        else re.compile(re.escape(marker), flags=re.IGNORECASE)
+    )
+    cleaned = replace(marker_pattern, "marker", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned, counts
+
+
+def parse_llm_segment_control(
+    text: Any,
+    *,
+    marker: str = LLM_SEGMENT_MARKER,
+) -> LlmSegmentParseResult:
+    """Parse high-confidence boundaries while removing all reserved tokens.
+
+    An exact standalone marker is a boundary. A marker attached to text on only
+    one side of its line is recovered as a boundary. Fully inline, quoted,
+    fenced, escaped and placeholder forms are cleanup-only.
+    """
+
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     marker = str(marker or LLM_SEGMENT_MARKER).strip()
-    if not marker:
-        return [normalized], False
+    if not normalized or not marker:
+        cleaned = normalized.strip()
+        return LlmSegmentParseResult(
+            segments=(cleaned,) if cleaned else (),
+            sanitized_text=cleaned,
+            boundary_kinds=(),
+        )
+
     segments: list[str] = []
+    boundary_kinds: list[str] = []
     current: list[str] = []
+    pending_boundary: str | None = None
+    exact_count = 0
+    recovered_count = 0
+    cleaned_only_count = 0
+    fenced_count = 0
+    quoted_count = 0
+    escaped_count = 0
+    placeholder_count = 0
     fence_state: tuple[str, int] | None = None
-    found = False
-    for raw_line in normalized.splitlines():
-        line = raw_line.strip()
-        fence_state = _next_markdown_fence_state(line, fence_state)
-        is_marker = fence_state is None and line == marker and not raw_line.lstrip().startswith(">")
-        if is_marker:
-            found = True
-            body = "\n".join(current).strip()
-            if body:
-                segments.append(body)
-            current = []
-            continue
-        current.append(raw_line)
-    body = "\n".join(current).strip()
-    if body:
+
+    def append_current() -> bool:
+        nonlocal pending_boundary, exact_count, recovered_count
+        body = "\n".join(current).strip()
+        current.clear()
+        if not body:
+            return False
+        if segments and pending_boundary:
+            boundary_kinds.append(pending_boundary)
+            if pending_boundary == "exact":
+                exact_count += 1
+            else:
+                recovered_count += 1
         segments.append(body)
-    if not found or len(segments) < 2:
-        return [normalized], False
-    return segments, True
+        pending_boundary = None
+        return True
+
+    for raw_line in normalized.split("\n"):
+        stripped = raw_line.strip()
+        next_fence_state = _next_markdown_fence_state(stripped, fence_state)
+        fence_transition = next_fence_state != fence_state
+        inside_fence = fence_state is not None or (
+            fence_transition and next_fence_state is not None
+        )
+        quoted = raw_line.lstrip().startswith(">")
+
+        if not inside_fence and not quoted and raw_line.count(marker) == 1:
+            left, right = raw_line.split(marker, 1)
+            left_has_text = bool(left.strip())
+            right_has_text = bool(right.strip())
+            if not (left_has_text and right_has_text):
+                if left_has_text:
+                    current.append(left.rstrip())
+                boundary_kind = "exact" if not left_has_text and not right_has_text else "recovered"
+                if append_current():
+                    pending_boundary = boundary_kind
+                else:
+                    cleaned_only_count += 1
+                if right_has_text:
+                    current.append(right.lstrip())
+                fence_state = next_fence_state
+                continue
+
+        cleaned, counts = _replace_reserved_tokens(raw_line, marker=marker)
+        token_count = counts["escaped"] + counts["placeholder"] + counts["marker"]
+        escaped_count += counts["escaped"]
+        placeholder_count += counts["placeholder"]
+        cleaned_only_count += token_count
+        if inside_fence:
+            fenced_count += token_count
+        if quoted:
+            quoted_count += token_count
+            if token_count and not cleaned.lstrip("> ").strip():
+                cleaned = ""
+        current.append(cleaned.rstrip())
+        fence_state = next_fence_state
+
+    appended_final = append_current()
+    if not appended_final and pending_boundary:
+        cleaned_only_count += 1
+        pending_boundary = None
+    controlled = len(segments) >= 2 and len(boundary_kinds) == len(segments) - 1
+    if not controlled:
+        cleaned_only_count += exact_count + recovered_count
+        exact_count = 0
+        recovered_count = 0
+        boundary_kinds = []
+
+    sanitized = "\n".join(segments).strip()
+    sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
+    return LlmSegmentParseResult(
+        segments=tuple(segments) if controlled else ((sanitized,) if sanitized else ()),
+        sanitized_text=sanitized,
+        boundary_kinds=tuple(boundary_kinds),
+        exact_boundary_count=exact_count,
+        recovered_boundary_count=recovered_count,
+        cleaned_only_count=cleaned_only_count,
+        fenced_token_count=fenced_count,
+        quoted_token_count=quoted_count,
+        escaped_token_count=escaped_count,
+        placeholder_token_count=placeholder_count,
+    )
+
+
+def sanitize_llm_segment_control_tokens(
+    text: Any,
+    *,
+    marker: str = LLM_SEGMENT_MARKER,
+) -> str:
+    """Remove reserved segmentation tokens without making send boundaries."""
+    return parse_llm_segment_control(text, marker=marker).sanitized_text
 
 
 COMPONENT_STRATEGIES = frozenset({"inline", "separate", "previous", "next"})

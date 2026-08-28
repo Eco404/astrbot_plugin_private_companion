@@ -164,6 +164,7 @@ from .segmented_message import (
     component_order_from_owner,
     component_strategies_from_owner,
     plan_component_chunks,
+    sanitize_llm_segment_control_tokens,
     split_llm_controlled_text,
 )
 from .token_budget import _looks_like_upstream_llm_error_response
@@ -3391,9 +3392,10 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         instruction = str(prompt_getter() or "").strip()
         if not instruction:
             return ""
+        safe_instruction = instruction.replace("]]>", "]]]]><![CDATA[>")
         return (
             '<private_companion_context><section title="回复分段控制"><![CDATA['
-            f"{instruction}"
+            f"{safe_instruction}"
             "]]></section></private_companion_context>"
         )
 
@@ -15123,11 +15125,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         comp = Plain(text)
         full_source = str(full_text or "")
         marker_cleaner = getattr(self, "_strip_llm_segment_marker_lines", None)
-        if (
-            callable(marker_cleaner)
-            and bool(runtime_persona_setting(self, "enable_segmented_proactive_reply", False))
-            and bool(runtime_persona_setting(self, "enable_llm_controlled_segmenting", False))
-        ):
+        if callable(marker_cleaner):
             full_source = marker_cleaner(full_source)
         clean_full = _single_line(full_source, max(1200, len(full_source) + 32))
         if clean_full:
@@ -15843,11 +15841,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             )
             return False
         marker_cleaner = getattr(self, "_strip_llm_segment_marker_lines", None)
-        if (
-            callable(marker_cleaner)
-            and bool(runtime_persona_setting(self, "enable_segmented_proactive_reply", False))
-            and bool(runtime_persona_setting(self, "enable_llm_controlled_segmenting", False))
-        ):
+        if callable(marker_cleaner):
             cleaned_chain: list[Any] = []
             for component in chain or []:
                 if not isinstance(component, Plain):
@@ -16992,7 +16986,9 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         photo_subject_owner: str = "",
     ) -> str:
         original_is_receipt = self._is_proactive_delivery_receipt_text(text)
-        message_text = self._visible_text_without_tts_reading(text, limit=1000)
+        message_text = sanitize_llm_segment_control_tokens(
+            self._visible_text_without_tts_reading(text, limit=1000)
+        )
         attachment_notes: list[str] = []
         history_image_count = 0
         history_record_count = 0
@@ -17062,7 +17058,9 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         umo = str(umo or user.get("umo") or "").strip()
         if not umo or not assistant_response:
             return False
-        visible_assistant_response = _strip_outbound_control_blocks(assistant_response)
+        visible_assistant_response = sanitize_llm_segment_control_tokens(
+            _strip_outbound_control_blocks(assistant_response)
+        )
         if not visible_assistant_response:
             return False
         for attempt in range(4):

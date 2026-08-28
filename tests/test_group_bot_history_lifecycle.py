@@ -137,6 +137,24 @@ class GroupBotHistoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
             record,
         )
 
+    def test_bot_record_keeps_llm_segments_inside_one_history_turn(self) -> None:
+        harness = _HistoryHarness()
+        group: dict = {}
+
+        record = harness._record_group_bot_reply(
+            group,
+            text="第一段 第二段",
+            kind="passive_reply",
+            llm_segments=[
+                "第一段",
+                "第二段<<PRIVATE_COMPANION_SPLIT>>",
+            ],
+        )
+
+        self.assertEqual(1, len(group["recent_bot_replies"]))
+        self.assertEqual(["第一段", "第二段"], record["llm_segments"])
+        self.assertNotIn("PRIVATE_COMPANION_SPLIT", str(record))
+
     def test_air_guard_filter_is_a_pure_time_window_view(self) -> None:
         harness = _HistoryHarness()
         group = {

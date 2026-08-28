@@ -123,6 +123,7 @@ from .conversation_prompt_section import prompt_section
 from .group_prompt_context import (
     build_group_prompt_context,
 )
+from .segmented_message import sanitize_llm_segment_control_tokens
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -846,8 +847,9 @@ class GroupObservationMixin:
         ts: float | None = None,
         message_id: Any = "",
         delivery_id: Any = "",
+        llm_segments: Any = None,
     ) -> dict[str, Any] | None:
-        cleaned = _single_line(text, 500)
+        cleaned = _single_line(sanitize_llm_segment_control_tokens(text), 500)
         if not cleaned:
             return None
         allowed_kinds = {
@@ -876,6 +878,22 @@ class GroupObservationMixin:
             record["message_id"] = clean_message_id
         if clean_delivery_id:
             record["delivery_id"] = clean_delivery_id
+        if isinstance(llm_segments, (list, tuple)):
+            clean_segments: list[str] = []
+            remaining = 500
+            for raw_segment in llm_segments:
+                segment = _single_line(
+                    sanitize_llm_segment_control_tokens(raw_segment),
+                    remaining,
+                )
+                if not segment:
+                    continue
+                clean_segments.append(segment)
+                remaining = max(0, remaining - len(segment))
+                if remaining <= 0:
+                    break
+            if len(clean_segments) >= 2:
+                record["llm_segments"] = clean_segments
         recent.append(record)
         self._trim_group_history_lists(group)
         return record
@@ -3006,6 +3024,10 @@ class GroupObservationMixin:
                 20000,
             ),
             include_history=history_injection_enabled,
+            render_llm_segments=bool(
+                _persona_value(self, "enable_segmented_proactive_reply", False)
+                and _persona_value(self, "enable_llm_controlled_segmenting", False)
+            ),
             include_current_text=False,
             bot_id=str(getattr(self, "_effective_plugin_persona_id", lambda: "bot")() or "bot"),
             bot_name=str(_persona_value(self, "bot_name", "Bot") or "Bot"),

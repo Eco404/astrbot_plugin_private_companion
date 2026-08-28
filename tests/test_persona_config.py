@@ -29,10 +29,10 @@ class PersonaConfigTests(unittest.TestCase):
         cls.schema = load_schema(ROOT / "_conf_schema.json")
         cls.manifest = build_scope_manifest(cls.schema)
 
-    def test_manifest_covers_canonical_grouped_928_leaves(self) -> None:
+    def test_manifest_covers_canonical_grouped_932_leaves(self) -> None:
         self.assertEqual(4, PERSONA_SETTINGS_SCHEMA_VERSION)
         leaves = discover_grouped_schema_leaves(self.schema)
-        self.assertEqual(len(leaves), 928)
+        self.assertEqual(len(leaves), 932)
         self.assertEqual(set(leaves), set(self.manifest))
         required_fields = {
             "scope",
@@ -53,6 +53,38 @@ class PersonaConfigTests(unittest.TestCase):
         self.assertEqual(self.manifest["bot_name"]["scope"], "persona")
         self.assertTrue(self.manifest["bot_name"]["identity"])
         self.assertFalse(self.manifest["bot_name"]["inherit_primary"])
+        prompt_entry = self.manifest["llm_controlled_segmenting_prompt"]
+        self.assertEqual("persona", prompt_entry["scope"])
+        self.assertTrue(prompt_entry["cloneable"])
+        self.assertEqual("", prompt_entry["default"])
+
+    def test_segmenting_prompt_distinguishes_follow_empty_and_custom(self) -> None:
+        primary = {"llm_controlled_segmenting_prompt": "主人格提示"}
+        self.assertEqual(
+            "",
+            default_persona_settings(
+                self.schema,
+                manifest=self.manifest,
+            )["llm_controlled_segmenting_prompt"],
+        )
+        self.assertEqual(
+            "主人格提示",
+            resolve_persona_setting(
+                "llm_controlled_segmenting_prompt",
+                {},
+                primary,
+                manifest=self.manifest,
+            ),
+        )
+        self.assertEqual(
+            "",
+            resolve_persona_setting(
+                "llm_controlled_segmenting_prompt",
+                {"llm_controlled_segmenting_prompt": ""},
+                primary,
+                manifest=self.manifest,
+            ),
+        )
         self.assertEqual(self.manifest["storage_backend"]["scope"], "common")
         self.assertEqual(self.manifest["plugin_specific_persona_id"]["scope"], "common")
         self.assertFalse(self.manifest["plugin_specific_persona_id"]["cloneable"])

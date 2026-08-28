@@ -13,6 +13,7 @@ from .conversation_prompt_section import (
     render_prompt_sections,
     xml_element,
 )
+from .segmented_message import sanitize_llm_segment_control_tokens
 
 GROUP_CONTEXT_KEY = "group.context"
 GROUP_HISTORY_INJECTED_ATTR = "_private_companion_group_history_injected"
@@ -213,6 +214,16 @@ def _message_time_attrs(
 
 
 def _message_element(item: Mapping[str, Any]) -> XmlElement:
+    segments = item.get("segments")
+    segment_children = (
+        tuple(
+            xml_element("seg", text=segment)
+            for segment in segments
+            if _clean_text(segment)
+        )
+        if isinstance(segments, (list, tuple))
+        else ()
+    )
     return xml_element(
         "message",
         attrs={
@@ -224,7 +235,8 @@ def _message_element(item: Mapping[str, Any]) -> XmlElement:
             "name": item.get("name") or "群成员",
             "role": item.get("role") or "user",
         },
-        text=item.get("content") or "",
+        text=None if len(segment_children) >= 2 else item.get("content") or "",
+        children=segment_children if len(segment_children) >= 2 else (),
     )
 
 
@@ -316,6 +328,7 @@ def _fit_timeline_to_budget(
             if middle == len(original_text)
             else original_text[: max(0, middle - 3)].rstrip() + ("..." if middle else "")
         )
+        candidate.pop("segments", None)
         if content_chars([candidate]) <= budget:
             best = candidate
             low = middle + 1
@@ -334,6 +347,7 @@ def build_group_prompt_context(
     limit: int = 20,
     max_chars: int = 4000,
     include_history: bool = True,
+    render_llm_segments: bool = True,
     include_current_text: bool = True,
     bot_id: str = "bot",
     bot_name: str = "Bot",
@@ -481,7 +495,10 @@ def build_group_prompt_context(
 
     member_count = len(member_records)
     for index, item in enumerate(bot_records):
-        text = _clean_text(item.get("text"), limit=2000)
+        text = _clean_text(
+            sanitize_llm_segment_control_tokens(item.get("text")),
+            limit=2000,
+        )
         if not text:
             continue
         timestamp = _safe_timestamp(item.get("ts"))
@@ -497,6 +514,18 @@ def build_group_prompt_context(
             "role": "assistant",
             "content": text,
         }
+        raw_segments = item.get("llm_segments")
+        if render_llm_segments and isinstance(raw_segments, (list, tuple)):
+            segments = [
+                _clean_text(
+                    sanitize_llm_segment_control_tokens(segment),
+                    limit=2000,
+                )
+                for segment in raw_segments
+            ]
+            segments = [segment for segment in segments if segment]
+            if len(segments) >= 2:
+                event["segments"] = segments
         timeline_with_sort.append((timestamp, member_count + index, event))
 
     timeline_with_sort.sort(key=lambda entry: (entry[0], entry[1]))

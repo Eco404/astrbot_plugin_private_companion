@@ -222,6 +222,15 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('<pc_history_media images="1" />', archived)
         self.assertNotIn("随消息发送了一张图片", archived)
 
+    def test_proactive_archive_removes_segment_control_tokens(self):
+        harness = _Harness()
+
+        archived = harness._build_proactive_archive_assistant_text(
+            text="第一段<<PRIVATE_COMPANION_SPLIT>>第二段",
+        )
+
+        self.assertEqual("第一段 第二段", archived)
+
     def test_private_image_history_text_hides_internal_media_marker(self):
         harness = PrivateImageMixin.__new__(PrivateImageMixin)
 
@@ -401,6 +410,53 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
         archived = harness.conversation_manager.history[-1]["content"]
         self.assertIn("主动发送的图片说明", archived)
         self.assertNotIn("pc_history_media", archived)
+
+    async def test_proactive_persistence_sinks_remove_segment_control_tokens(self):
+        captured: list[str] = []
+
+        async def livingmemory_handler(_event, response):
+            captured.append(response.completion_text)
+
+        handler = SimpleNamespace(
+            handler=livingmemory_handler,
+            handler_name="handle_memory_reflection",
+            handler_module_path=LIVING_MODULE,
+        )
+        plugins = {
+            LIVING_MODULE: SimpleNamespace(
+                name="LivingMemory", activated=True, reserved=False
+            )
+        }
+        harness = _Harness()
+        leaked = "第一段<<PRIVATE_COMPANION_SPLIT>>第二段"
+
+        with patch(
+            "astrbot_plugin_private_companion.final_response_persistence.star_handlers_registry",
+            _Registry([handler]),
+        ), patch(
+            "astrbot_plugin_private_companion.final_response_persistence.star_map",
+            plugins,
+        ):
+            self.assertTrue(
+                await harness._archive_proactive_message_to_conversation(
+                    user={"umo": UMO},
+                    user_prompt="主动承接",
+                    assistant_response=leaked,
+                )
+            )
+            self.assertTrue(
+                await harness._record_final_assistant_in_livingmemory(
+                    umo=UMO,
+                    assistant_response=leaked,
+                    delivery_id="proactive-marker-cleanup",
+                )
+            )
+
+        self.assertEqual(
+            "第一段 第二段",
+            harness.conversation_manager.history[-1]["content"],
+        )
+        self.assertEqual(["第一段 第二段"], captured)
 
     async def test_missing_memory_plugins_does_not_block_official_history(self):
         harness = _Harness()
@@ -613,6 +669,136 @@ class FinalResponsePersistenceTests(unittest.IsolatedAsyncioTestCase):
         plugin._finalize_passive_delivered_response.assert_awaited_once()
         call = plugin._finalize_passive_delivered_response.await_args
         self.assertEqual("第一段\n第二段", call.kwargs["fallback_text"])
+
+    async def test_confirmed_segment_plan_rebuilds_llm_segments_only_when_complete(self):
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        event = _SendTrackerEvent()
+        event._private_companion_llm_planned_chunk_texts = (
+            "第一段",
+            "第二段。",
+            "第三句。",
+        )
+        event._private_companion_llm_planned_segment_ids = (0, 1, 1)
+        coordinator = plugin._final_response_persistence_coordinator()
+        confirmed = [
+            [Plain("第一段")],
+            [Plain("第二段。")],
+            [Plain("第三句。")],
+        ]
+
+        self.assertEqual(
+            ("第一段", "第二段。第三句。"),
+            coordinator._confirmed_llm_history_segments(event, confirmed),
+        )
+        self.assertEqual(
+            (),
+            coordinator._confirmed_llm_history_segments(event, confirmed[:-1]),
+        )
+
+    async def test_send_tracker_persists_logical_segments_from_normal_sends(self):
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        plugin._finalize_passive_delivered_response = AsyncMock(return_value=True)
+        event = _SendTrackerEvent()
+        event._has_send_oper = False
+        run_context = SimpleNamespace(
+            messages=[Message(role="assistant", content=[TextPart(text="原始回复")])]
+        )
+
+        plugin._begin_final_response_persistence(event)
+        await plugin._prepare_final_response_after_agent(
+            event,
+            run_context,
+            LLMResponse(role="assistant", completion_text="第一段第二段。第三句。"),
+        )
+        event._private_companion_llm_planned_chunk_texts = (
+            "第一段",
+            "第二段。",
+            "第三句。",
+        )
+        event._private_companion_llm_planned_segment_ids = (0, 1, 1)
+
+        for text in event._private_companion_llm_planned_chunk_texts:
+            await event.send(SimpleNamespace(chain=[Plain(text)]))
+        await plugin.persist_confirmed_passive_reply(event)
+
+        call = plugin._finalize_passive_delivered_response.await_args
+        self.assertEqual(("第一段", "第二段。第三句。"), call.kwargs["llm_segments"])
+        deliveries = event._private_companion_delivery_ledger.confirmed_deliveries
+        self.assertEqual([(0,), (1,), (1,)], [item.logical_segment_ids for item in deliveries])
+        self.assertEqual([(0,), (1,), (2,)], [item.logical_segment_indices for item in deliveries])
+
+    async def test_send_tracker_maps_combined_forward_chain_to_logical_segments(self):
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        plugin._finalize_passive_delivered_response = AsyncMock(return_value=True)
+        event = _SendTrackerEvent()
+        event._has_send_oper = False
+        run_context = SimpleNamespace(
+            messages=[Message(role="assistant", content=[TextPart(text="原始回复")])]
+        )
+
+        plugin._begin_final_response_persistence(event)
+        await plugin._prepare_final_response_after_agent(
+            event,
+            run_context,
+            LLMResponse(role="assistant", completion_text="第一段第二段。第三句。"),
+        )
+        event._private_companion_llm_planned_chunk_texts = (
+            "第一段",
+            "第二段。",
+            "第三句。",
+        )
+        event._private_companion_llm_planned_segment_ids = (0, 1, 1)
+
+        # A OneBot merged-forward send is confirmed through the common
+        # proactive primitive as one chain containing several Plain nodes.
+        plugin._confirm_outbound_delivery(
+            "",
+            [Plain("第一段"), Plain("第二段。"), Plain("第三句。")],
+        )
+        await plugin.persist_confirmed_passive_reply(event)
+
+        call = plugin._finalize_passive_delivered_response.await_args
+        self.assertEqual(("第一段", "第二段。第三句。"), call.kwargs["llm_segments"])
+        delivery = event._private_companion_delivery_ledger.confirmed_deliveries[0]
+        self.assertEqual((0, 1, 1), delivery.logical_segment_ids)
+        self.assertEqual((0, 1, 2), delivery.logical_segment_indices)
+
+    async def test_partial_send_failure_records_only_confirmed_logical_segments(self):
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        plugin._finalize_passive_delivered_response = AsyncMock(return_value=True)
+        event = _SendTrackerEvent()
+        event._has_send_oper = False
+        run_context = SimpleNamespace(
+            messages=[Message(role="assistant", content=[TextPart(text="原始回复")])]
+        )
+
+        plugin._begin_final_response_persistence(event)
+        await plugin._prepare_final_response_after_agent(
+            event,
+            run_context,
+            LLMResponse(role="assistant", completion_text="第一段第二段第三段"),
+        )
+        event._private_companion_llm_planned_chunk_texts = (
+            "第一段",
+            "第二段",
+            "第三段",
+        )
+        event._private_companion_llm_planned_segment_ids = (0, 1, 2)
+
+        await event.send(SimpleNamespace(chain=[Plain("第一段")]))
+        await event.send(SimpleNamespace(chain=[Plain("第二段")]))
+        event.send_error = RuntimeError("第三段发送失败")
+        with self.assertRaisesRegex(RuntimeError, "第三段发送失败"):
+            await event.send(SimpleNamespace(chain=[Plain("第三段")]))
+        await plugin.persist_confirmed_passive_reply(event)
+
+        call = plugin._finalize_passive_delivered_response.await_args
+        self.assertEqual("第一段\n第二段", call.kwargs["fallback_text"])
+        self.assertEqual(("第一段", "第二段"), call.kwargs["llm_segments"])
+        self.assertEqual(
+            ["第一段", "第二段"],
+            [item.chain[0].text for item in event._private_companion_delivery_ledger.confirmed_deliveries],
+        )
 
     async def test_direct_send_that_stops_event_uses_fallback_finalizer(self):
         plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)

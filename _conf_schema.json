@@ -13336,10 +13336,20 @@
       "enable_llm_controlled_segmenting": {
         "description": "LLM 自主分段",
         "type": "bool",
-        "hint": "开启后，直接回复使用的 LLM 可以通过单独一行 <<PRIVATE_COMPANION_SPLIT>> 控制消息边界；默认输出一条消息，长文、代码、列表和引用尽量不要主动分段。",
+        "hint": "允许直接回复使用的 LLM 在适合时自主安排消息边界。",
         "default": false,
         "condition": {
           "enable_segmented_proactive_reply": true
+        }
+      },
+      "llm_controlled_segmenting_prompt": {
+        "description": "自主分段提示词",
+        "type": "text",
+        "hint": "留空使用默认提示词。可使用 {{split_marker}} 表示消息分隔标记，发送给模型前会自动替换。",
+        "default": "",
+        "condition": {
+          "enable_segmented_proactive_reply": true,
+          "enable_llm_controlled_segmenting": true
         }
       },
       "enable_segmented_plugin_rules": {

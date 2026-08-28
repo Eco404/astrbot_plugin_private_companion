@@ -47,6 +47,11 @@ class SegmentedConfigSaveTests(unittest.TestCase):
             self.assertIn('if (matched === ",")', script)
             self.assertIn('dashRun.length >= 2 && nextIsAsciiDigit(end, true)', script)
             self.assertIn('enable_segmented_proactive_chat_profiles: { type: "checkbox" }', script)
+            self.assertIn(
+                'llm_controlled_segmenting_prompt: { type: "textarea", rows: 3, maxLength: 4000 }',
+                script,
+            )
+            self.assertIn("{{split_marker}} 表示消息分隔标记", script)
             self.assertIn('segmented_proactive_private_scope: { type: "select"', script)
             self.assertIn('segmented_proactive_group_scope: { type: "select"', script)
             self.assertIn("function segmentedComponentOrderEditorHtml", script)
@@ -105,6 +110,7 @@ class SegmentedConfigSaveTests(unittest.TestCase):
             "legacy_compat_config": {
                 "enable_segmented_proactive_reply": True,
                 "enable_llm_controlled_segmenting": True,
+                "llm_controlled_segmenting_prompt": "短句之间使用 {{split_marker}}。",
                 "enable_segmented_plugin_rules": False,
                 "segmented_proactive_scope": "all_llm",
                 "segmented_proactive_chat_scope": "private",
@@ -156,6 +162,7 @@ class SegmentedConfigSaveTests(unittest.TestCase):
         expected = {
             "enable_segmented_proactive_reply": True,
             "enable_llm_controlled_segmenting": True,
+            "llm_controlled_segmenting_prompt": "短句之间使用 {{split_marker}}。",
             "enable_segmented_plugin_rules": False,
             "enable_segmented_proactive_chat_profiles": True,
             "segmented_proactive_private_enabled": True,

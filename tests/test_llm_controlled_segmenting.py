@@ -12,6 +12,8 @@ from astrbot_plugin_private_companion.proactive_message import ProactiveMessageM
 from astrbot_plugin_private_companion.segmented_message import (
     has_fenced_llm_segment_marker,
     LLM_SEGMENT_MARKER,
+    parse_llm_segment_control,
+    sanitize_llm_segment_control_tokens,
     split_llm_controlled_text,
     strip_llm_segment_marker_lines,
 )
@@ -73,24 +75,42 @@ class LlmControlledSegmentingTests(unittest.TestCase):
     def test_marker_is_strict_and_standalone(self) -> None:
         marker = LLM_SEGMENT_MARKER
         self.assertEqual((['a', 'b'], True), split_llm_controlled_text(f"a\n{marker}\nb"))
-        self.assertEqual(([f"a {marker} b"], False), split_llm_controlled_text(f"a {marker} b"))
+        self.assertEqual((["a b"], False), split_llm_controlled_text(f"a {marker} b"))
         self.assertEqual((["a\n[]\nb"], False), split_llm_controlled_text("a\n[]\nb"))
         self.assertEqual(
-            ([f"a\n```\n{marker}\n```\nb"], False),
+            (["a\n```\n\n```\nb"], False),
             split_llm_controlled_text(f"a\n```\n{marker}\n```\nb"),
         )
         four_tick_fence = f"a\n````text\n```\n{marker}\nstill code\n````\nb"
         self.assertEqual(
-            ([four_tick_fence], False),
+            ([four_tick_fence.replace(marker, "")], False),
             split_llm_controlled_text(four_tick_fence),
         )
         self.assertTrue(has_fenced_llm_segment_marker(four_tick_fence))
 
     def test_prompt_names_only_the_real_control_marker(self) -> None:
-        prompt = PrivateCompanionPlugin._llm_controlled_segmenting_prompt()
+        prompt = PrivateCompanionPlugin._llm_controlled_segmenting_prompt(_Harness())
         self.assertEqual(2, prompt.count(LLM_SEGMENT_MARKER))
         self.assertNotIn("[]", prompt)
         self.assertNotIn("[[]]", prompt)
+
+    def test_custom_prompt_replaces_placeholder_and_empty_uses_default(self) -> None:
+        harness = _Harness()
+        harness.persona_values["llm_controlled_segmenting_prompt"] = (
+            "短句之间使用 {{ split_marker }}，不要用空行代替。"
+        )
+        custom = PrivateCompanionPlugin._llm_controlled_segmenting_prompt(harness)
+        self.assertEqual(
+            f"短句之间使用 {LLM_SEGMENT_MARKER}，不要用空行代替。",
+            custom,
+        )
+        harness.persona_values["llm_controlled_segmenting_prompt"] = ""
+        self.assertEqual(
+            2,
+            PrivateCompanionPlugin._llm_controlled_segmenting_prompt(harness).count(
+                LLM_SEGMENT_MARKER
+            ),
+        )
 
     def test_plugin_rules_do_not_split_a_fenced_marker_example(self) -> None:
         harness = _Harness()
@@ -100,7 +120,7 @@ class LlmControlledSegmentingTests(unittest.TestCase):
             "still code\n````\nafter"
         )
         self.assertEqual(
-            [text],
+            [text.replace(LLM_SEGMENT_MARKER, "")],
             PrivateCompanionPlugin._split_llm_controlled_text_for_event(
                 harness,
                 _Event(),
@@ -108,18 +128,40 @@ class LlmControlledSegmentingTests(unittest.TestCase):
             ),
         )
 
-    def test_marker_cleanup_preserves_fenced_and_quoted_examples(self) -> None:
+    def test_marker_cleanup_removes_fenced_and_quoted_examples(self) -> None:
         marker = LLM_SEGMENT_MARKER
         source = f"a\n{marker}\n```text\n{marker}\n```\n> {marker}\nb"
-        self.assertEqual(
-            f"a\n```text\n{marker}\n```\n> {marker}\nb",
-            strip_llm_segment_marker_lines(source),
-        )
+        self.assertEqual("a\n```text\n\n```\n\nb", strip_llm_segment_marker_lines(source))
         four_tick_fence = f"a\n````text\n```\n{marker}\nstill code\n````\nb"
         self.assertEqual(
-            four_tick_fence,
+            four_tick_fence.replace(marker, ""),
             strip_llm_segment_marker_lines(four_tick_fence),
         )
+
+    def test_recovers_only_one_sided_newline_errors(self) -> None:
+        marker = LLM_SEGMENT_MARKER
+        for source in (f"a{marker}\nb", f"a\n{marker}b"):
+            with self.subTest(source=source):
+                parsed = parse_llm_segment_control(source)
+                self.assertTrue(parsed.controlled)
+                self.assertEqual(("a", "b"), parsed.segments)
+                self.assertEqual(1, parsed.recovered_boundary_count)
+
+        inline = parse_llm_segment_control(f"a{marker}b")
+        self.assertFalse(inline.controlled)
+        self.assertEqual("a b", inline.sanitized_text)
+        self.assertEqual(1, inline.cleaned_only_count)
+
+    def test_cleanup_removes_reserved_variants_and_is_idempotent(self) -> None:
+        source = (
+            "a {{ split_marker }} b "
+            "&lt;&lt;PRIVATE_COMPANION_SPLIT&gt;&gt; c "
+            "<< PRIVATE _ COMPANION _ SPLIT >> d "
+            r"\<\<PRIVATE_COMPANION_SPLIT\>\> e"
+        )
+        cleaned = sanitize_llm_segment_control_tokens(source)
+        self.assertEqual("a b c d e", cleaned)
+        self.assertEqual(cleaned, sanitize_llm_segment_control_tokens(cleaned))
 
     def test_legacy_persona_migration_adds_new_defaults(self) -> None:
         from astrbot_plugin_private_companion.persona_config import (
@@ -151,6 +193,10 @@ class LlmControlledSegmentingTests(unittest.TestCase):
         self.assertEqual("短段。", segments[0])
         self.assertEqual("这是最长的一段。", segments[1])
         self.assertEqual("再一段。", segments[2])
+        self.assertEqual(
+            (0, 1, 1),
+            event._private_companion_llm_planned_segment_ids,
+        )
 
     def test_llm_segments_are_not_limited_when_over_plugin_budget(self) -> None:
         harness = _Harness()
@@ -206,7 +252,7 @@ class LlmControlledSegmentingTests(unittest.TestCase):
         splitter = PrivateCompanionPlugin._split_llm_controlled_text_for_event
         event = _Event()
         text = f"一\n{LLM_SEGMENT_MARKER}\n二。三。"
-        self.assertEqual([text], splitter(harness, event, text))
+        self.assertEqual(["一\n二。三。"], splitter(harness, event, text))
 
     def test_llm_segments_still_use_shared_content_replacement(self) -> None:
         harness = _Harness()
@@ -220,14 +266,21 @@ class LlmControlledSegmentingTests(unittest.TestCase):
 
     def test_native_proactive_generation_receives_the_marker_contract(self) -> None:
         harness = _Harness()
-        harness._llm_controlled_segmenting_prompt = (
-            PrivateCompanionPlugin._llm_controlled_segmenting_prompt
+        harness._llm_controlled_segmenting_prompt = lambda: (
+            PrivateCompanionPlugin._llm_controlled_segmenting_prompt(harness)
         )
         hint = harness._proactive_llm_segmenting_instruction(
             umo="default:FriendMessage:1",
         )
         self.assertIn(LLM_SEGMENT_MARKER, hint)
         self.assertIn("<![CDATA[", hint)
+
+        harness._llm_controlled_segmenting_prompt = lambda: "前半]]>后半"
+        escaped_hint = harness._proactive_llm_segmenting_instruction(
+            umo="default:FriendMessage:1",
+        )
+        self.assertIn("前半]]]]><![CDATA[>后半", escaped_hint)
+        self.assertNotIn("<![CDATA[前半]]>后半]]>", escaped_hint)
 
         harness.enable_llm_controlled_segmenting = False
         self.assertEqual(
