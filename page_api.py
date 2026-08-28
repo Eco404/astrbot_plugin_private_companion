@@ -22604,6 +22604,7 @@ class PrivateCompanionPageApi(
         segmented_setting_keys = (
             "enable_segmented_proactive_reply",
             "enable_llm_controlled_segmenting",
+            "llm_controlled_segmenting_prompt",
             "enable_segmented_plugin_rules",
             "segmented_proactive_scope",
             "segmented_proactive_chat_scope",
@@ -25545,6 +25546,7 @@ class PrivateCompanionPageApi(
             "group_image_max_images",
             "enable_segmented_proactive_reply",
             "enable_llm_controlled_segmenting",
+            "llm_controlled_segmenting_prompt",
             "enable_segmented_plugin_rules",
             "segmented_proactive_scope",
             "segmented_proactive_chat_scope",

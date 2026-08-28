@@ -969,6 +969,12 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
         "enable_llm_controlled_segmenting",
         False,
     )
+    self.llm_controlled_segmenting_prompt = self._cfg_str(
+        c,
+        "llm_controlled_segmenting_prompt",
+        "",
+        "",
+    )[:4000]
     self.enable_segmented_plugin_rules = self._cfg_bool(
         c,
         "enable_segmented_plugin_rules",

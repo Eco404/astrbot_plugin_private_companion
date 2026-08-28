@@ -322,7 +322,9 @@ from .segmented_message import (
     has_fenced_llm_segment_marker,
     LLM_SEGMENT_MARKER,
     normalize_component_strategy,
+    parse_llm_segment_control,
     plan_component_chunks,
+    sanitize_llm_segment_control_tokens,
     split_llm_controlled_text,
     strip_llm_segment_marker_lines,
 )
@@ -9328,10 +9330,7 @@ class PrivateCompanionPlugin(
             )
             if not bool(runtime_persona_setting(self, 'enable_tts_enhancement', False)):
                 cleaned = re.sub(r"</?t{2,}s\b[^>]*>", "", cleaned, flags=re.IGNORECASE).strip()
-            if bool(runtime_persona_setting(self, "enable_segmented_proactive_reply", False)) and bool(
-                runtime_persona_setting(self, "enable_llm_controlled_segmenting", False)
-            ):
-                cleaned = self._strip_llm_segment_marker_lines(cleaned)
+            cleaned = sanitize_llm_segment_control_tokens(cleaned)
             if cleaned != original:
                 changed = True
                 try:
@@ -9380,10 +9379,7 @@ class PrivateCompanionPlugin(
             )
             if not bool(runtime_persona_setting(self, 'enable_tts_enhancement', False)):
                 cleaned = re.sub(r"</?t{2,}s\b[^>]*>", "", cleaned, flags=re.IGNORECASE).strip()
-            if bool(runtime_persona_setting(self, "enable_segmented_proactive_reply", False)) and bool(
-                runtime_persona_setting(self, "enable_llm_controlled_segmenting", False)
-            ):
-                cleaned = self._strip_llm_segment_marker_lines(cleaned)
+            cleaned = sanitize_llm_segment_control_tokens(cleaned)
             if cleaned:
                 cleaned_chain.append(Plain(cleaned) if cleaned != original else component)
             if cleaned != original:
@@ -10602,10 +10598,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
         if not bool(runtime_persona_setting(self, 'enable_tts_enhancement', False)):
             cleaned = re.sub(r"</?t{2,}s\b[^>]*>", "", cleaned, flags=re.IGNORECASE).strip()
-        if bool(runtime_persona_setting(self, "enable_segmented_proactive_reply", False)) and bool(
-            runtime_persona_setting(self, "enable_llm_controlled_segmenting", False)
-        ):
-            cleaned = self._strip_llm_segment_marker_lines(cleaned)
+        cleaned = sanitize_llm_segment_control_tokens(cleaned)
         return cleaned
 
     @staticmethod
@@ -10670,15 +10663,28 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return False
 
     @staticmethod
-    def _llm_controlled_segmenting_prompt() -> str:
-        """Compact instruction for the user-facing conversation model only."""
+    def _default_llm_controlled_segmenting_prompt() -> str:
         return (
-            "你可以使用标记将回复内容拆分成多个消息发送；"
-            "方便你进行表达、短句拆分发送，以及实现连续发送多句的效果；"
-            "日常对话、聊天 等需要短句输出的情景鼓励经常使用；"
+            "你可以自行决定是否把你的本轮回复作为多条消息发送；"
+            "日常对话、聊天 等需要短句输出的情景建议使用拆分；"
             "长文、教程、代码 等连续性较高的表述尽量少用分段。"
-            f"\n使用方法：需要分段时必须完整输出 {LLM_SEGMENT_MARKER}，并让它单独占一行，不能添加引号，也不能把它放进代码块。"
-            f"\n示例：第一段内容\n{LLM_SEGMENT_MARKER}\n第二段内容（仅在确有必要时使用）。"
+            "\n使用方法：每个消息边界都必须使用下面的完整标记： {{split_marker}}，并让它单独占一行，不能添加引号，也不能把它放进代码块。"
+            "\n示例：第一段内容\n{{split_marker}}\n第二段内容。"
+            "\n只有上述方法可以实现发送多条消息，换行和连续换行都不会作为多条消息发送。（仅在确有必要时使用）。"
+        )
+
+    def _llm_controlled_segmenting_prompt(self) -> str:
+        """Resolve the active persona's user-facing segmentation instruction."""
+        custom = str(
+            runtime_persona_setting(self, "llm_controlled_segmenting_prompt", "")
+            or ""
+        ).strip()[:4000]
+        template = custom or PrivateCompanionPlugin._default_llm_controlled_segmenting_prompt()
+        return re.sub(
+            r"\{\{\s*split_marker\s*\}\}",
+            lambda _match: LLM_SEGMENT_MARKER,
+            template,
+            flags=re.IGNORECASE,
         )
 
     @filter.on_llm_request(priority=-253000)
@@ -10703,7 +10709,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         # entities, making exact-copy behavior less reliable for some models.
         content = (
             '<private_companion_context><section title="回复分段控制"><![CDATA['
-            + self._llm_controlled_segmenting_prompt()
+            + self._llm_controlled_segmenting_prompt().replace("]]>", "]]]]><![CDATA[>")
             + "]]></section></private_companion_context>"
         )
         placement = "prompt" if self._append_turn_prompt_fragment_by_position(
@@ -10752,15 +10758,19 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         umo: str = "",
     ) -> list[list[str]]:
         """Plan LLM and plugin boundaries across every text buffer in a chain."""
-        normalized_buffers = [str(text or "").strip() for text in texts]
-        if not normalized_buffers:
+        raw_buffers = [str(text or "").strip() for text in texts]
+        if not raw_buffers:
             return []
         if not bool(runtime_persona_setting(self, "enable_segmented_proactive_reply", False)):
-            return [[text] if text else [] for text in normalized_buffers]
+            return [
+                [cleaned] if (cleaned := sanitize_llm_segment_control_tokens(text)) else []
+                for text in raw_buffers
+            ]
         if not bool(runtime_persona_setting(self, "enable_llm_controlled_segmenting", False)):
             return [
-                self._split_proactive_text(text, event=event, umo=umo) if text else []
-                for text in normalized_buffers
+                self._split_proactive_text(cleaned, event=event, umo=umo) if cleaned else []
+                for text in raw_buffers
+                for cleaned in [sanitize_llm_segment_control_tokens(text)]
             ]
         plugin_rules_enabled = bool(
             runtime_persona_setting(self, "enable_segmented_plugin_rules", True)
@@ -10778,32 +10788,80 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
         parsed_buffers: list[list[str]] = []
         controlled_buffers: list[bool] = []
-        for normalized in normalized_buffers:
-            segments, controlled = split_llm_controlled_text(normalized)
-            parsed_buffers.append(segments if controlled else ([normalized] if normalized else []))
-            controlled_buffers.append(controlled)
+        parse_results = []
+        for raw_text in raw_buffers:
+            parsed = parse_llm_segment_control(raw_text)
+            parse_results.append(parsed)
+            parsed_buffers.append(
+                list(parsed.segments)
+                if parsed.controlled
+                else ([parsed.sanitized_text] if parsed.sanitized_text else [])
+            )
+            controlled_buffers.append(parsed.controlled)
 
-        def split_uncontrolled_buffer(text: str) -> list[str]:
+        if event is not None:
+            setattr(
+                event,
+                "_private_companion_llm_segment_diagnostics",
+                {
+                    "exact": sum(item.exact_boundary_count for item in parse_results),
+                    "recovered": sum(item.recovered_boundary_count for item in parse_results),
+                    "cleaned_only": sum(item.cleaned_only_count for item in parse_results),
+                },
+            )
+            for attr_name in (
+                "_private_companion_llm_history_segments",
+                "_private_companion_llm_planned_chunk_texts",
+                "_private_companion_llm_planned_segment_ids",
+            ):
+                try:
+                    delattr(event, attr_name)
+                except AttributeError:
+                    pass
+            if len(parse_results) == 1 and parse_results[0].controlled:
+                history_segments = [
+                    cleaned
+                    for segment in parse_results[0].segments
+                    if (cleaned := apply_common_transforms(segment))
+                ]
+                if len(history_segments) >= 2:
+                    setattr(
+                        event,
+                        "_private_companion_llm_history_segments",
+                        tuple(history_segments),
+                    )
+
+        def split_uncontrolled_buffer(text: str, *, suppress_plugin_rules: bool = False) -> list[str]:
             if not text:
                 return []
-            if has_fenced_llm_segment_marker(text):
+            if suppress_plugin_rules:
                 transformed = apply_common_transforms(text)
                 return [transformed] if transformed else []
             return self._split_proactive_text(text, event=event, umo=umo)
 
         if not any(controlled_buffers):
             if plugin_rules_enabled:
-                return [split_uncontrolled_buffer(text) for text in normalized_buffers]
+                return [
+                    split_uncontrolled_buffer(
+                        parsed.sanitized_text,
+                        suppress_plugin_rules=parsed.suppress_plugin_rule_split,
+                    )
+                    for parsed in parse_results
+                ]
             return [
-                [transformed] if (transformed := apply_common_transforms(text)) else []
-                for text in normalized_buffers
+                [transformed]
+                if (transformed := apply_common_transforms(parsed.sanitized_text))
+                else []
+                for parsed in parse_results
             ]
 
         llm_count = sum(len(segments) for segments in parsed_buffers)
         if event is not None:
             setattr(event, "_private_companion_llm_segment_count", llm_count)
-        if not plugin_rules_enabled:
-            return [
+        if not plugin_rules_enabled or any(
+            item.suppress_plugin_rule_split for item in parse_results
+        ):
+            planned = [
                 [
                     cleaned
                     for segment in segments
@@ -10811,6 +10869,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 ]
                 for segments in parsed_buffers
             ]
+            if event is not None and len(planned) == 1 and len(planned[0]) >= 2:
+                setattr(
+                    event,
+                    "_private_companion_llm_planned_segment_ids",
+                    tuple(range(len(planned[0]))),
+                )
+            return planned
 
         max_segments = max(
             1,
@@ -10822,7 +10887,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             ),
         )
         if llm_count >= max_segments:
-            return [
+            planned = [
                 [
                     cleaned
                     for segment in segments
@@ -10830,6 +10895,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 ]
                 for segments in parsed_buffers
             ]
+            if event is not None and len(planned) == 1 and len(planned[0]) >= 2:
+                setattr(
+                    event,
+                    "_private_companion_llm_planned_segment_ids",
+                    tuple(range(len(planned[0]))),
+                )
+            return planned
 
         result: list[list[list[str] | str]] = [list(segments) for segments in parsed_buffers]
         rule_processed: set[tuple[int, int]] = set()
@@ -10864,15 +10936,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             remaining -= additions
 
         flattened_buffers: list[list[str]] = []
+        flattened_ids_by_buffer: list[list[int]] = []
         for buffer_index, segments in enumerate(result):
             flattened: list[str] = []
+            flattened_ids: list[int] = []
             for segment_index, item in enumerate(segments):
                 if isinstance(item, list):
-                    flattened.extend(
-                        str(part or "").strip()
-                        for part in item
-                        if str(part or "").strip()
-                    )
+                    for part in item:
+                        clean_part = str(part or "").strip()
+                        if clean_part:
+                            flattened.append(clean_part)
+                            flattened_ids.append(segment_index)
                     continue
                 transformed = (
                     str(item or "").strip()
@@ -10881,7 +10955,19 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 )
                 if transformed:
                     flattened.append(transformed)
+                    flattened_ids.append(segment_index)
             flattened_buffers.append(flattened)
+            flattened_ids_by_buffer.append(flattened_ids)
+        if (
+            event is not None
+            and len(flattened_buffers) == 1
+            and len(set(flattened_ids_by_buffer[0])) >= 2
+        ):
+            setattr(
+                event,
+                "_private_companion_llm_planned_segment_ids",
+                tuple(flattened_ids_by_buffer[0]),
+            )
         return flattened_buffers
 
     def _segment_llm_reply_chain(self, event: AstrMessageEvent, chain: list[Any]) -> tuple[list[list[Any]], bool, str]:
@@ -10950,13 +11036,44 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
         if not full_text:
             return [], False, ""
-        if bool(runtime_persona_setting(self, "enable_segmented_proactive_reply", False)) and bool(
-            runtime_persona_setting(self, "enable_llm_controlled_segmenting", False)
-        ):
-            full_text = self._strip_llm_segment_marker_lines(full_text)
-        if not changed:
-            return [chain], False, full_text
-        return self._clean_segmented_reply_chunks(event, chunks), True, full_text
+        full_text = sanitize_llm_segment_control_tokens(full_text)
+        final_chunks = self._clean_segmented_reply_chunks(event, chunks) if changed else [chain]
+        history_segments = getattr(
+            event,
+            "_private_companion_llm_history_segments",
+            (),
+        )
+        if isinstance(history_segments, tuple) and len(history_segments) >= 2:
+            planned_texts = [
+                self._plain_result_body_text(chunk)
+                for chunk in final_chunks
+            ]
+            planned_ids = getattr(
+                event,
+                "_private_companion_llm_planned_segment_ids",
+                (),
+            )
+            if (
+                planned_texts
+                and all(planned_texts)
+                and isinstance(planned_ids, tuple)
+                and len(planned_ids) == len(planned_texts)
+            ):
+                setattr(
+                    event,
+                    "_private_companion_llm_planned_chunk_texts",
+                    tuple(planned_texts),
+                )
+            else:
+                for attr_name in (
+                    "_private_companion_llm_history_segments",
+                    "_private_companion_llm_planned_segment_ids",
+                ):
+                    try:
+                        delattr(event, attr_name)
+                    except AttributeError:
+                        pass
+        return final_chunks, changed, full_text
 
     async def _send_segmented_remainder_chain(
         self,
@@ -13125,7 +13242,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
     @staticmethod
     def _strip_private_companion_prompt_artifacts(text: Any) -> str:
-        cleaned = str(text or "")
+        cleaned = sanitize_llm_segment_control_tokens(text)
         if not cleaned or "private_companion_" not in cleaned:
             return cleaned
         cleaned = re.sub(

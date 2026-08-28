@@ -41,6 +41,7 @@ from .segmented_message import (
     component_order_from_owner,
     component_strategies_from_owner,
     plan_component_chunks,
+    sanitize_llm_segment_control_tokens,
 )
 
 
@@ -5383,7 +5384,12 @@ class PrivateImageMixin:
             cleaned = re.sub(r"</?(?:pc[_-]?tts|t{2,}s)\b[^>]*>", "", str(reply or ""), flags=re.IGNORECASE).strip()
         # This text is persisted into AstrBot's user-visible conversation
         # history; remove plugin-only markers before it reaches that store.
-        return _single_line(_strip_outbound_control_blocks(cleaned or reply), 1200)
+        return _single_line(
+            sanitize_llm_segment_control_tokens(
+                _strip_outbound_control_blocks(cleaned or reply)
+            ),
+            1200,
+        )
 
     async def _archive_private_image_turn_to_conversation(
         self,

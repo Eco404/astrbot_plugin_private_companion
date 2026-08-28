@@ -28,9 +28,22 @@ from .helpers import (
 )
 from .llm_tool_actions import PHOTO_TOOL_SILENT_SENTINEL
 from .persona_config import runtime_persona_setting
+from .segmented_message import sanitize_llm_segment_control_tokens
 
 
 _DELIVERY_TASK_LABELS = frozenset({"segmented_llm_remainder"})
+
+
+@dataclass(slots=True)
+class ConfirmedDelivery:
+    """One platform-confirmed send and its optional logical segment mapping."""
+
+    chain: list[Any]
+    sent_at: float
+    logical_segment_ids: tuple[int, ...] = ()
+    # Positions in the planned chunk list make a single combined-forward
+    # confirmation unambiguous even when several chunks share one logical ID.
+    logical_segment_indices: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)
@@ -41,6 +54,7 @@ class DeliveryLedger:
     event: AstrMessageEvent | None = None
     passive: bool = False
     confirmed_chains: list[list[Any]] = field(default_factory=list)
+    confirmed_deliveries: list[ConfirmedDelivery] = field(default_factory=list)
     candidate_chain: list[Any] = field(default_factory=list)
     background_tasks: set[asyncio.Task] = field(default_factory=set)
     original_send: Any = None
@@ -51,6 +65,7 @@ class DeliveryLedger:
     final_chain_start: int | None = None
     finalized: bool = False
     finalize_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    logical_plan_cursor: int = 0
 
     @property
     def delivered_chain(self) -> list[Any]:
@@ -121,7 +136,13 @@ class FinalResponsePersistenceCoordinator:
                 updates["delivered_text"] = delivered_text
         return replace(outcome, **updates) if updates else outcome
 
-    def confirm(self, umo: str, chain: list[Any] | tuple[Any, ...]) -> None:
+    def confirm(
+        self,
+        umo: str,
+        chain: list[Any] | tuple[Any, ...],
+        *,
+        logical_segment_ids: tuple[int, ...] | list[int] | None = None,
+    ) -> None:
         components = list(chain or [])
         if not components:
             return
@@ -130,14 +151,33 @@ class FinalResponsePersistenceCoordinator:
             return
         if ledger.umo and umo and str(umo) != ledger.umo:
             return
-        self._append_confirmation(ledger, components)
+        self._append_confirmation(
+            ledger,
+            components,
+            logical_segment_ids=logical_segment_ids,
+        )
 
     def _append_confirmation(
         self,
         ledger: DeliveryLedger,
         components: list[Any],
+        *,
+        logical_segment_ids: tuple[int, ...] | list[int] | None = None,
     ) -> None:
         ledger.confirmed_chains.append(components)
+        resolved_ids, resolved_indices = self._resolve_logical_segment_metadata(
+            ledger,
+            components,
+            logical_segment_ids=logical_segment_ids,
+        )
+        ledger.confirmed_deliveries.append(
+            ConfirmedDelivery(
+                chain=components,
+                sent_at=_now_ts(),
+                logical_segment_ids=resolved_ids,
+                logical_segment_indices=resolved_indices,
+            )
+        )
         event = ledger.event
         # A normal passive turn is finalized by the after-send hook.  Only
         # schedule the delayed fallback when propagation has already stopped;
@@ -381,7 +421,22 @@ class FinalResponsePersistenceCoordinator:
                     sent_chain == ledger.candidate_chain
                     for sent_chain in ledger.confirmed_chains
                 ):
+                    candidate_ids, candidate_indices = (
+                        self._resolve_logical_segment_metadata(
+                            ledger,
+                            list(ledger.candidate_chain),
+                        )
+                    )
                     ledger.confirmed_chains.insert(0, list(ledger.candidate_chain))
+                    ledger.confirmed_deliveries.insert(
+                        0,
+                        ConfirmedDelivery(
+                            chain=list(ledger.candidate_chain),
+                            sent_at=_now_ts(),
+                            logical_segment_ids=candidate_ids,
+                            logical_segment_indices=candidate_indices,
+                        ),
+                    )
             confirmed_chains = ledger.confirmed_chains
             if ledger.final_chain_start is not None:
                 confirmed_chains = confirmed_chains[ledger.final_chain_start :]
@@ -391,6 +446,15 @@ class FinalResponsePersistenceCoordinator:
                 confirmed_chains,
                 separator="" if ledger.streaming else "\n",
             )
+            llm_segments = self._confirmed_llm_history_segments(
+                event,
+                confirmed_chains,
+                confirmed_deliveries=(
+                    ledger.confirmed_deliveries[ledger.final_chain_start :]
+                    if ledger.final_chain_start is not None
+                    else ledger.confirmed_deliveries
+                ),
+            )
             written = await self.owner._finalize_passive_delivered_response(
                 event,
                 chain=[
@@ -399,6 +463,7 @@ class FinalResponsePersistenceCoordinator:
                     for component in sent_chain
                 ],
                 fallback_text=delivered_text,
+                llm_segments=llm_segments,
                 force=True,
             )
             ledger.finalized = True
@@ -419,6 +484,197 @@ class FinalResponsePersistenceCoordinator:
             for text in [extractor(chain)]
             if text
         ).strip()
+
+    def _planned_segment_metadata(
+        self,
+        ledger: DeliveryLedger,
+    ) -> tuple[tuple[str, ...], tuple[int, ...]]:
+        event = ledger.event
+        if event is None:
+            return (), ()
+        planned = getattr(event, "_private_companion_llm_planned_chunk_texts", ())
+        segment_ids = getattr(event, "_private_companion_llm_planned_segment_ids", ())
+        if not (
+            isinstance(planned, tuple)
+            and isinstance(segment_ids, tuple)
+            and len(planned) == len(segment_ids)
+            and len(planned) >= 2
+        ):
+            return (), ()
+        normalized = tuple(
+            sanitize_llm_segment_control_tokens(str(item or "")).strip()
+            for item in planned
+        )
+        try:
+            normalized_ids = tuple(int(item) for item in segment_ids)
+        except (TypeError, ValueError):
+            return (), ()
+        if any(not text for text in normalized):
+            return (), ()
+        return normalized, normalized_ids
+
+    def _resolve_logical_segment_metadata(
+        self,
+        ledger: DeliveryLedger,
+        components: list[Any],
+        *,
+        logical_segment_ids: tuple[int, ...] | list[int] | None = None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Associate one confirmed chain with contiguous planned chunks.
+
+        The sender can confirm an individual chunk, several chunks in one
+        merged-forward chain, or a partial prefix after a later send fails.
+        Matching the actual text against the plan preserves that distinction
+        without requiring adapter-specific send metadata.
+        """
+        explicit: tuple[int, ...] = ()
+        if logical_segment_ids is not None:
+            try:
+                explicit = tuple(int(item) for item in logical_segment_ids)
+            except (TypeError, ValueError):
+                explicit = ()
+        extractor = getattr(self.owner, "_actual_text_from_delivered_chain", None)
+        if not callable(extractor):
+            return (), ()
+        try:
+            actual = sanitize_llm_segment_control_tokens(extractor(components)).strip()
+        except Exception:
+            actual = ""
+        if not actual:
+            return (), ()
+        planned, ids = self._planned_segment_metadata(ledger)
+        if not planned:
+            return (), ()
+
+        # Normal segmented sends and merged-forward sends both appear as one
+        # contiguous slice of the plan. Start at the cursor first to prevent a
+        # repeated text chunk from being attributed to an earlier chunk.
+        cursor = min(max(0, ledger.logical_plan_cursor), len(planned))
+        starts = list(range(cursor, len(planned)))
+        for start in starts:
+            combined = ""
+            for end in range(start, len(planned)):
+                combined += planned[end]
+                if combined == actual:
+                    ledger.logical_plan_cursor = max(ledger.logical_plan_cursor, end + 1)
+                    matched_indices = tuple(range(start, end + 1))
+                    matched_ids = (
+                        explicit
+                        if explicit and len(explicit) == len(matched_indices)
+                        else ids[start : end + 1]
+                    )
+                    return matched_ids, matched_indices
+                if len(combined) >= len(actual):
+                    break
+        return explicit, ()
+
+    def _confirmed_llm_history_segments(
+        self,
+        event: AstrMessageEvent,
+        confirmed_chains: list[list[Any]],
+        *,
+        confirmed_deliveries: list[ConfirmedDelivery] | None = None,
+    ) -> tuple[str, ...]:
+        """Return LLM logical segments only after the full send plan is confirmed."""
+        streaming_checker = getattr(self.owner, "_event_uses_streaming_result", None)
+        if callable(streaming_checker) and streaming_checker(event):
+            return ()
+        planned = getattr(event, "_private_companion_llm_planned_chunk_texts", ())
+        segment_ids = getattr(
+            event,
+            "_private_companion_llm_planned_segment_ids",
+            (),
+        )
+        if not (
+            isinstance(planned, tuple)
+            and isinstance(segment_ids, tuple)
+            and len(planned) >= 2
+            and len(segment_ids) == len(planned)
+            and len(set(segment_ids)) >= 2
+        ):
+            return ()
+        extractor = getattr(self.owner, "_actual_text_from_delivered_chain", None)
+        if not callable(extractor):
+            return ()
+
+        # Prefer the delivery metadata collected at confirmation time. This
+        # handles merged-forward sends and partial delivery while retaining a
+        # single assistant history turn. A metadata record without plan
+        # positions is deliberately rejected here; the exact-text fallback
+        # below is safer than guessing how a combined chain was split.
+        if confirmed_deliveries:
+            grouped: dict[int, list[str]] = {}
+            order: list[int] = []
+            metadata_valid = True
+            for delivery in confirmed_deliveries:
+                ids = tuple(delivery.logical_segment_ids or ())
+                indices = tuple(delivery.logical_segment_indices or ())
+                if not ids or len(ids) != len(indices):
+                    metadata_valid = False
+                    break
+                delivered_text = sanitize_llm_segment_control_tokens(
+                    extractor(delivery.chain)
+                ).strip()
+                if not delivered_text:
+                    metadata_valid = False
+                    break
+                expected_parts = [
+                    sanitize_llm_segment_control_tokens(str(planned[index] or "")).strip()
+                    for index in indices
+                    if 0 <= index < len(planned)
+                ]
+                if len(expected_parts) != len(indices) or "".join(expected_parts) != delivered_text:
+                    metadata_valid = False
+                    break
+                for segment_id, text in zip(ids, expected_parts):
+                    normalized_id = int(segment_id)
+                    if normalized_id not in grouped:
+                        grouped[normalized_id] = []
+                        order.append(normalized_id)
+                    grouped[normalized_id].append(text)
+            if metadata_valid:
+                cleaned = tuple(
+                    segment
+                    for segment_id in order
+                    if (
+                        segment := sanitize_llm_segment_control_tokens(
+                            "".join(grouped[segment_id])
+                        ).strip()
+                    )
+                )
+                return cleaned if len(cleaned) >= 2 else ()
+
+        delivered = tuple(
+            sanitize_llm_segment_control_tokens(extractor(chain)).strip()
+            for chain in confirmed_chains
+        )
+        expected = tuple(
+            sanitize_llm_segment_control_tokens(item).strip()
+            for item in planned
+        )
+        if delivered != expected:
+            return ()
+        grouped: dict[int, list[str]] = {}
+        order: list[int] = []
+        for segment_id, text in zip(segment_ids, delivered):
+            try:
+                normalized_id = int(segment_id)
+            except (TypeError, ValueError):
+                return ()
+            if normalized_id not in grouped:
+                grouped[normalized_id] = []
+                order.append(normalized_id)
+            grouped[normalized_id].append(text)
+        cleaned = tuple(
+            segment
+            for segment_id in order
+            if (
+                segment := sanitize_llm_segment_control_tokens(
+                    "".join(grouped[segment_id])
+                ).strip()
+            )
+        )
+        return cleaned if len(cleaned) >= 2 else ()
 
 
 def collect_proactive_delivery(
@@ -777,7 +1033,7 @@ class FinalResponsePersistenceMixin:
         event: AstrMessageEvent,
         assistant_response: str,
     ) -> bool:
-        response_text = str(assistant_response or "").strip()
+        response_text = sanitize_llm_segment_control_tokens(assistant_response)
         # Media markers are useful to the companion's private continuity state,
         # but AstrBot's official conversation history is rendered directly by
         # chat clients. Keep internal metadata out of that user-visible field.
@@ -841,7 +1097,7 @@ class FinalResponsePersistenceMixin:
         assistant_response: str,
     ) -> bool:
         umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
-        response_text = str(assistant_response or "").strip()
+        response_text = sanitize_llm_segment_control_tokens(assistant_response)
         visible_response_text = _strip_outbound_control_blocks(response_text)
         conv_mgr = getattr(getattr(self, "context", None), "conversation_manager", None)
         if not umo or not visible_response_text or conv_mgr is None:
@@ -900,7 +1156,7 @@ class FinalResponsePersistenceMixin:
         delivery_id: str,
         event: AstrMessageEvent | None = None,
     ) -> bool:
-        response_text = str(assistant_response or "").strip()
+        response_text = sanitize_llm_segment_control_tokens(assistant_response)
         umo = str(umo or "").strip()
         if not umo or not response_text:
             return False
@@ -985,7 +1241,7 @@ class FinalResponsePersistenceMixin:
         content: str,
         delivery_id: str = "",
     ) -> bool:
-        response_text = str(content or "").strip()[:2000]
+        response_text = sanitize_llm_segment_control_tokens(content)[:2000]
         session_id = _single_line(getattr(event, "unified_msg_origin", ""), 200)
         if not response_text or not session_id:
             return False
@@ -1180,9 +1436,12 @@ class FinalResponsePersistenceMixin:
         response_text: str,
         now: float,
         delivery_id: str = "",
+        llm_segments: tuple[str, ...] = (),
     ) -> set[str]:
         visible_text = _single_line(
-            _strip_internal_message_blocks(response_text),
+            _strip_internal_message_blocks(
+                sanitize_llm_segment_control_tokens(response_text)
+            ),
             500,
         )
         if not visible_text:
@@ -1264,6 +1523,7 @@ class FinalResponsePersistenceMixin:
                 talking_to_bot=talking_to_bot,
                 ts=now,
                 delivery_id=delivery_id,
+                llm_segments=llm_segments,
             )
             if isinstance(recorded, dict):
                 updated_sections.add("groups")
@@ -1292,6 +1552,7 @@ class FinalResponsePersistenceMixin:
         *,
         response_text: str,
         delivery_id: str,
+        llm_segments: tuple[str, ...] = (),
     ) -> tuple[bool, set[str]]:
         """Commit all local continuity for one confirmed delivery exactly once."""
         if not response_text:
@@ -1312,6 +1573,7 @@ class FinalResponsePersistenceMixin:
                     response_text=response_text,
                     now=now,
                     delivery_id=delivery_id,
+                    llm_segments=llm_segments,
                 )
                 sections = private_sections | group_sections
                 if sections:
@@ -1341,6 +1603,7 @@ class FinalResponsePersistenceMixin:
         *,
         chain: list[Any] | tuple[Any, ...] | None = None,
         fallback_text: str = "",
+        llm_segments: tuple[str, ...] = (),
         force: bool = False,
     ) -> bool:
         if event is None or not bool(
@@ -1365,6 +1628,7 @@ class FinalResponsePersistenceMixin:
             delivered_chain,
             fallback_text=fallback_text,
         )
+        response_text = sanitize_llm_segment_control_tokens(response_text)
         if not response_text:
             return False
 
@@ -1378,6 +1642,7 @@ class FinalResponsePersistenceMixin:
             event,
             response_text=response_text,
             delivery_id=delivery_id,
+            llm_segments=llm_segments,
         )
         if duplicate:
             setattr(event, "_private_companion_delivery_persisted", True)

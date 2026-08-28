@@ -146,6 +146,24 @@ class OverallDebugRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([], result.chain)
 
+    async def test_final_outbound_guard_removes_malformed_segment_marker_when_disabled(self) -> None:
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        plugin.enabled = True
+        plugin.enable_tts_enhancement = False
+        plugin.enable_segmented_proactive_reply = False
+        plugin.enable_llm_controlled_segmenting = False
+        result = SimpleNamespace(
+            chain=[Plain("第一段<<PRIVATE_COMPANION_SPLIT>>第二段")]
+        )
+        event = SimpleNamespace(
+            unified_msg_origin=UMO,
+            get_result=lambda: result,
+        )
+
+        await plugin.final_strip_outbound_control_blocks_before_send(event)
+
+        self.assertEqual("第一段 第二段", result.chain[0].text)
+
     def test_segmented_reply_never_keeps_history_media_marker_as_a_bubble(self) -> None:
         plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
         plugin.enable_tts_enhancement = False

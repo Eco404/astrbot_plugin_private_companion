@@ -15,6 +15,7 @@ from .helpers import (
     _strip_outbound_control_blocks,
 )
 from .persona_config import runtime_persona_setting
+from .segmented_message import sanitize_llm_segment_control_tokens
 
 
 class TtsToolSanitizerMixin:
@@ -171,7 +172,9 @@ class TtsToolSanitizerMixin:
         # Tool payloads can bypass the normal decorating-result chain. Apply
         # the same outbound control cleanup here so internal sentinels (such
         # as the photo-delivery marker) are never sent as visible text.
-        cleaned_outbound = _strip_outbound_control_blocks(text)
+        cleaned_outbound = sanitize_llm_segment_control_tokens(
+            _strip_outbound_control_blocks(text)
+        )
         if cleaned_outbound != text:
             logger.info(
                 "[PrivateCompanion] 已清理工具直发文本中的内部控制标记: before=%s after=%s",
