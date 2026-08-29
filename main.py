@@ -13494,7 +13494,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if opaque:
                 rendered = f"{marker}\n{str(content or '').strip()}".strip()
                 current = str(getattr(req, "system_prompt", "") or "")
+                if marker not in current:
                 req.system_prompt = f"{current}\n\n{rendered}".strip() if current else rendered
+                try:
                 return plan.add(
                     key=key,
                     marker=marker,
@@ -13508,6 +13510,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     opaque=True,
                     metadata=metadata,
                 ) is not None
+                except RuntimeError as exc:
+                    if plan.frozen and marker in str(getattr(req, "system_prompt", "") or ""):
+                        return False
+                    raise exc
+            try:
             return plan.materialize_system_block(
                 req,
                 key=key,
@@ -13520,6 +13527,18 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 structured=structured,
                 metadata=metadata,
             )
+            except RuntimeError as exc:
+                # AstrBot may freeze the request plan before a later hook runs.
+                # The marker is still safe to append directly once, preserving
+                # the wire prompt while avoiding a provider-facing hook failure.
+                if not plan.frozen:
+                    raise
+                current = str(getattr(req, "system_prompt", "") or "")
+                if marker in current:
+                    return False
+                rendered = f"{marker}\n{str(content or '').strip()}".strip()
+                req.system_prompt = f"{current}\n\n{rendered}".strip() if current else rendered
+                return True
         rendered = f"{marker}\n{str(content or '').strip()}".strip()
         current = str(getattr(req, "system_prompt", "") or "")
         req.system_prompt = f"{current}\n\n{rendered}".strip() if current else rendered

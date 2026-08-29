@@ -30,6 +30,46 @@ class RecordingLock:
         self.acquired = False
 
 
+class SequenceResponse:
+    def __init__(
+        self,
+        status: int,
+        payload: object,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.status = status
+        self.payload = payload
+        self.headers = dict(headers or {})
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    async def text(self) -> str:
+        if isinstance(self.payload, str):
+            return self.payload
+        return json.dumps(self.payload)
+
+
+class SequenceSession:
+    def __init__(self, responses: list[SequenceResponse], calls: list[dict[str, object]], **_kwargs) -> None:
+        self.responses = responses
+        self.calls = calls
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    def post(self, endpoint: str, **kwargs):
+        self.calls.append({"endpoint": endpoint, **kwargs})
+        return self.responses.pop(0)
+
+
 class ImageApiEndpointManagementTests(unittest.IsolatedAsyncioTestCase):
     def test_result_key_tracks_every_request_affecting_field(self) -> None:
         api = PrivateCompanionPageApi(SimpleNamespace())

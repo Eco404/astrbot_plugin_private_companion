@@ -93,5 +93,3 @@ astrbot_version: ">=4.22.0"
 pages:
   - name: companion-panel
     title: 陪伴面板
-  - name: 陪伴面板
-    title: 陪伴面板
