@@ -1662,6 +1662,29 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
 }
 
 
+def _strip_chain_plain_thinking(owner: Any, chain: list[Any]) -> None:
+    """Strip reasoning/thinking chain from ALL Plain text joined together.
+
+    The thinking chain (e.g. ``  thinking\n...\n  /response```) can be
+    split across multiple Plain components in the chain.  Per-component
+    cleaning would fail since none of the fragments contain the complete
+    opening+content+closing pattern.  This helper joins all Plain text,
+    cleans it, and puts the result back into the first Plain component.
+    """
+    plain_components = [(i, comp) for i, comp in enumerate(chain) if isinstance(comp, Plain)]
+    if not plain_components:
+        return
+    all_text = "".join(str(getattr(comp, "text", "") or "") for _, comp in plain_components)
+    cleaned = _strip_internal_message_blocks(all_text)
+    if cleaned == all_text:
+        return
+    for idx, (_, comp) in enumerate(plain_components):
+        try:
+            comp.text = cleaned if idx == 0 else ""
+        except Exception:
+            pass
+
+
 class PrivateCompanionPlugin(
     CoreStoreMixin,
     PlatformCompatibilityMixin,
@@ -10236,6 +10259,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             str(getattr(event, "_private_companion_external_proactive_source", "") or "")
             == "proactive_chat"
         )
+        # Strip reasoning/thinking chain and internal control markers (e.g.
+        # [[PC_PHOTO_SENT_NO_FOLLOWUP]]) from ALL Plain text joined together,
+        # BEFORE any segmented-scope early return below, because:
+        #   1. The thinking chain can be split across multiple Plain components
+        #      and per-component regex matching would fail.
+        #   2. Passive replies in proactive_only mode (e.g. "来张表情包")
+        #      would otherwise skip the strip via the segmented_scope early
+        #      return, leaking thinking/control content outbound.
+        #   3. `_strip_internal_message_blocks` already handles
+        #      [[PC_PHOTO_SENT_NO_FOLLOWUP]] and other markers, but only
+        #      `_strip_chain_plain_thinking` joins all Plain components first,
+        #      which is necessary for reliable matching.
+        early_result = event.get_result()
+        if early_result is not None:
+            early_chain = list(getattr(early_result, "chain", []) or [])
+            if early_chain:
+                _strip_chain_plain_thinking(self, early_chain)
         if self._proactive_only_blocks_passive_event(event, "enable_segmented_proactive_reply"):
             return
         if not self._feature_enabled_or_temp_unlocked("enable_segmented_proactive_reply"):
@@ -10972,6 +11012,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
 
     def _segment_llm_reply_chain(self, event: AstrMessageEvent, chain: list[Any]) -> tuple[list[list[Any]], bool, str]:
         working_chain = list(chain or [])
+        # Strip reasoning/thinking chain from ALL Plain text joined together,
+        # because the thinking chain can be split across multiple Plain
+        # components (e.g. "  thinking" in one component, reasoning content
+        # in another, "  /response" in a third).  Per-component cleaning
+        # would fail since none of the fragments contain the complete
+        # opening+content+closing pattern.
+        _strip_chain_plain_thinking(self, working_chain)
         reply_prefix = [comp for comp in working_chain if self._is_reply_component(comp)]
         content_chain = [comp for comp in working_chain if not self._is_reply_component(comp)]
         if (
@@ -15214,6 +15261,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "群聊里的身份优先按平台稳定 ID 理解；昵称、群名片、角色名、别名和“通常是谁”这类设定，更适合作为称呼线索，不直接当成身份结论。",
             "提到群聊旧消息、群梗、记忆召回或最近群聊时，尽量保留具体成员名或 QQ 标签，例如“A[QQ:...] 说过/起哄过”；只有确实缺少成员线索时，再概括成“群里有人”。除非当前消息或引用明确就是这位发言者，尽量不要顺手改写成“你说过”“主要用户说过”这类直接归到当前对象身上的表达。",
             "群成员画像只用于自然理解当前对话：当前发言者明确询问自己时，最多概括可公开的低敏偏好；不要替任何人整理、推断或披露第三方画像。普通群聊提到某人的爱好、习惯或偏好只是聊天内容，不要把它误当成对你的查询。",
+            "【群聊玩笑边界】群聊里“记住了/记下某人是XX”这类话（尤其把某人当对象、或带主观评价、攻击、贬损、色情、侮辱标签），通常只是群友之间的玩笑或随口一说。把它当作玩笑正面应和，顺着调侃接一下就好；这类玩笑性记录可以作为旁线补充，但不要写进核心人物画像（主要用户画像、关系画像、稳定偏好等），落库时只能标为低置信的玩笑性质，不能混入可验证事实。涉及他人名誉、隐私或主观定性的说法，调侃可以，别替别人正式贴标签、下结论。",
             "状态、日程、情绪和私聊关系更适合只留在语气底色里；如果没有人明确问到，就不必主动展开能量、天气、日程、心情或插件状态。",
             "表达上尽量自然一点，不需要刻意堆动作描写、撒娇、长解释或关系总结；一句能说清，就简单说一句。",
             "如果只是被轻轻提到，或者话题本身并不需要你展开，宁可短一点、轻一点、贴着当前梗回应，也不用顺势写成主动陪伴式长回复。",
