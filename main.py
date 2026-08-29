@@ -11518,6 +11518,31 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if not chain:
             return
 
+        official_tts_checker = getattr(
+            self,
+            "_should_defer_segmenting_to_astrbot_tts",
+            None,
+        )
+        if callable(official_tts_checker):
+            try:
+                official_tts_owns_result = bool(
+                    await official_tts_checker(event, result, chain)
+                )
+            except Exception as exc:
+                logger.debug(
+                    "[PrivateCompanion] 群聊引用检查官方 TTS 状态失败: %s",
+                    _single_line(exc, 120),
+                )
+                official_tts_owns_result = False
+            if official_tts_owns_result:
+                quote_free_chain = self._without_reply_components(chain)
+                if quote_free_chain != chain:
+                    try:
+                        result.chain = quote_free_chain
+                    except Exception:
+                        event.set_result(self._build_result_from_chain(quote_free_chain))
+                return
+
         delivery_chunks: list[list[Any]] = [chain]
         for attr_name in (
             "_private_companion_tts_reply_remainder",
