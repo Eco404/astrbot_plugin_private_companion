@@ -12588,6 +12588,25 @@ Output:
             except (ImportError, AttributeError):
                 continue
         return "", "独立生图运行时不可用"
+
+    def _external_image_download_target(self, target_url: str) -> tuple[Any, bool]:
+        """Keep signed object-storage URLs byte-for-byte compatible with aiohttp."""
+        target = str(target_url or "").strip()
+        signed_markers = (
+            "x-amz-algorithm=",
+            "x-amz-credential=",
+            "x-amz-signature=",
+            "x-oss-signature=",
+        )
+        if not any(marker in target.lower() for marker in signed_markers):
+            return target, False
+        try:
+            from yarl import URL
+
+            return URL(target, encoded=True), True
+        except Exception:
+            return target, False
+
     async def _generate_photo_image_result(self, **kwargs: Any) -> PhotoGenerationResult:
         backend, image_path, note = await self._generate_photo_image(**kwargs)
         metadata: dict[str, Any] = {}
