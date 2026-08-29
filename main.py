@@ -10263,6 +10263,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             str(getattr(event, "_private_companion_external_proactive_source", "") or "")
             == "proactive_chat"
         )
+        # Strip reasoning/thinking chain and internal control markers (e.g.
+        # [[PC_PHOTO_SENT_NO_FOLLOWUP]]) from ALL Plain text joined together,
+        # BEFORE any segmented-scope early return below, because:
+        #   1. The thinking chain can be split across multiple Plain components
+        #      and per-component regex matching would fail.
+        #   2. Passive replies in proactive_only mode (e.g. "来张表情包")
+        #      would otherwise skip the strip via the segmented_scope early
+        #      return, leaking thinking/control content outbound.
+        #   3. `_strip_internal_message_blocks` already handles
+        #      [[PC_PHOTO_SENT_NO_FOLLOWUP]] and other markers, but only
+        #      `_strip_chain_plain_thinking` joins all Plain components first,
+        #      which is necessary for reliable matching.
+        early_result = event.get_result()
+        if early_result is not None:
+            early_chain = list(getattr(early_result, "chain", []) or [])
+            if early_chain:
+                _strip_chain_plain_thinking(self, early_chain)
         if self._proactive_only_blocks_passive_event(event, "enable_segmented_proactive_reply"):
             return
         if not self._feature_enabled_or_temp_unlocked("enable_segmented_proactive_reply"):
@@ -10280,21 +10297,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         result = event.get_result()
         if result is None or not result.chain:
             return
-        # Strip reasoning/thinking chain and internal control markers (e.g.
-        # [[PC_PHOTO_SENT_NO_FOLLOWUP]]) from ALL Plain text joined together,
-        # BEFORE any segmented scope early return, because:
-        #   1. The thinking chain can be split across multiple Plain components
-        #      and per-component regex matching would fail.
-        #   2. Passive replies (e.g. "来张表情包") would skip the later call
-        #      at the end of this method due to the segmented_scope early return.
-        #   3. `_strip_internal_message_blocks` already handles `[[PC_PHOTO_SENT_NO_FOLLOWUP]]`
-        #      and other markers, but only `_strip_chain_plain_thinking` joins
-        #      all Plain components first, which is necessary for reliable matching.
-        result = event.get_result()
-        if result is not None:
-            early_chain = list(getattr(result, "chain", []) or [])
-            if early_chain:
-                _strip_chain_plain_thinking(self, early_chain)
         is_llm_result = False
         try:
             is_llm_result = bool(result.is_llm_result())

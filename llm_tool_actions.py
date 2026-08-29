@@ -2363,11 +2363,14 @@ class LlmToolActionsMixin:
         # Current-media delivery is only meaningful after an explicit request
         # caused another tool to produce a local image in this same turn.
         blocked = {"pc_send_current_media"}
-        if reaction_authorized:
-            # Only an approved spontaneous-offer turn should switch from the
-            # tool path to the internal response tag. When authorization is
-            # denied, the media tools must stay visible so the model can still
-            # serve explicit reaction-image requests through the regular path.
+        # Distinguish "not evaluated" (ordinary passive turn, keep the media
+        # tools for regular regeneration/expression use) from "evaluated":
+        # an evaluated reaction turn must hide the automatic reaction-media
+        # tools regardless of whether it was authorized. An authorized turn
+        # switches to the internal response tag, while a denied turn must not
+        # fall through the legacy media-tool path. Explicit media requests
+        # were already returned above and keep every tool visible.
+        if reaction_evaluated:
             blocked.update({"pc_generate_photo", "pc_find_reaction_image"})
         tool_set = getattr(req, "func_tool", None)
         if tool_set is None:

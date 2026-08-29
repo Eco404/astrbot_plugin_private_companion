@@ -695,6 +695,62 @@ class OfficialTtsSegmentingCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(should_defer)
 
+    async def test_plugin_strips_cross_plain_thinking_before_scope_early_returns(self) -> None:
+        from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+        cases = {
+            "proactive_only_passive_block": lambda plugin: setattr(
+                plugin, "_proactive_only_blocks_passive_event", lambda *_a: True
+            ),
+            "segmented_scope_passive_early_return": lambda plugin: setattr(
+                plugin, "_proactive_only_blocks_passive_event", lambda *_a: False
+            ),
+        }
+        for case_name, configure in cases.items():
+            with self.subTest(case=case_name):
+                plugin = object.__new__(PrivateCompanionPlugin)
+                plugin.enabled = True
+                plugin._feature_enabled_or_temp_unlocked = (
+                    lambda key: key == "enable_segmented_proactive_reply"
+                )
+                plugin._segmented_scope_allows_event = lambda _event: True
+                plugin._segmented_setting = (
+                    lambda *_a, **_k: "proactive_only"
+                )
+                configure(plugin)
+                # The thinking chain is split across Plain components, so
+                # per-component cleaning could never remove it; only joining
+                # all Plain text and stripping before the scope early return
+                # keeps it from leaking outbound on passive turns.
+                result = _llm_result(
+                    Plain("  thinking"),
+                    Plain("推理内容被拆分\n  /response"),
+                    Plain("正文可见"),
+                )
+
+                class Event:
+                    unified_msg_origin = "default:FriendMessage:10001"
+                    message_str = "普通被动回复"
+
+                    def __init__(self) -> None:
+                        self.result = result
+
+                    def get_result(self) -> MessageEventResult:
+                        return self.result
+
+                await PrivateCompanionPlugin.apply_segmented_llm_reply_scope(
+                    plugin, Event()
+                )
+
+                plain_texts = [
+                    str(getattr(component, "text", "") or "").strip()
+                    for component in result.chain
+                    if isinstance(component, Plain) and str(
+                        getattr(component, "text", "") or ""
+                    ).strip()
+                ]
+                self.assertEqual(["正文可见"], plain_texts)
+
 
 if __name__ == "__main__":
     unittest.main()
