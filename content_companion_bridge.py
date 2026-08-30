@@ -284,6 +284,7 @@ class ContentCompanionBridgeMixin:
             ),
             getter_name="get_content_companion_api",
             star_name="astrbot_plugin_content_companion",
+            prefer_module_getter=True,
         )
 
     def _content_companion_api_fresh(self) -> Any | None:
