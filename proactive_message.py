@@ -3371,16 +3371,10 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         # Optional third-party runtime material belongs to continuity context,
         # never to hard constraints or current-fact assertions.
         external_material_getter = getattr(self, "_external_schedule_material_context", None)
-        external_material_kind = "proactive"
-        if not callable(external_material_getter):
-            external_material_getter = getattr(self, "_m7a_daily_material_context", None)
-            # The existing M7A contract predates proactive prompts and accepts
-            # daily_plan/detail; detail is the closest continuity-level mode.
-            external_material_kind = "detail"
         if callable(external_material_getter):
             try:
                 external_material = await external_material_getter(
-                    kind=external_material_kind,
+                    kind="proactive",
                     max_chars=900,
                 )
                 external_material = sanitize_relationship_source(
