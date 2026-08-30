@@ -183,6 +183,45 @@ class ImageApiEndpointManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events, ["acquire", "runner", "release"])
         self.assertFalse(result["ok"])
 
+    async def test_current_contract_result_is_returned_as_unsupported_not_failure(self) -> None:
+        async def runner(_endpoint, _prompt):
+            return {
+                "ok": False,
+                "unsupported": True,
+                "code": "image_current_contract_endpoint_test_unsupported",
+                "detail": "当前配置未被判定为错误，旧式单端点测试未执行",
+                "next_step": "到排障页运行完整图片生成链路测试。",
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin = SimpleNamespace(
+                _external_image_api_runtime_lock=RecordingLock([]),
+                _normalize_external_image_api_endpoint=lambda item, index=0: dict(item),
+                _image_companion_test_endpoint=runner,
+                data_dir=temp_dir,
+            )
+            result = await PrivateCompanionPageApi(plugin)._run_image_api_endpoint_test(
+                {
+                    "endpoint_index": 0,
+                    "endpoint": {
+                        "name": "测试 API",
+                        "enabled": True,
+                        "platform": "openai",
+                        "base_url": "https://example.test/v1",
+                        "api_key": "secret-key",
+                        "model": "image-model",
+                        "size": "1024x1024",
+                        "timeout_seconds": 20,
+                    },
+                }
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["unsupported"])
+        self.assertEqual(result["test_status"], "unsupported")
+        self.assertEqual(result["code"], "image_current_contract_endpoint_test_unsupported")
+        self.assertTrue(result["next_step"])
+
     async def test_test_artifacts_are_scoped_deleted_and_pruned(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "generated_photos"

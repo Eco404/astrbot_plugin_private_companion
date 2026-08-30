@@ -239,14 +239,15 @@ def normalize_diagnostic_result(
     source = dict(result) if isinstance(result, dict) else {}
     kind = _safe_test_kind(test_type or source.get("type"))
     ok = bool(source.get("ok"))
+    unsupported = bool(source.get("unsupported"))
     pending = bool(source.get("pending")) and not ok
     raw_error = source.get("error") or source.get("detail")
-    category = "none" if (ok or pending) else classify_diagnostic_error(raw_error)
-    phase = "completed" if ok else ("scheduled" if pending else "failed")
+    category = "none" if (ok or pending or unsupported) else classify_diagnostic_error(raw_error)
+    phase = "completed" if ok or unsupported else ("scheduled" if pending else "failed")
     supplied_phase = _safe_identifier(source.get("phase"), 20)
     if supplied_phase in _VALID_PHASES and ((supplied_phase == "running" and pending) or supplied_phase == phase):
         phase = supplied_phase
-    retryable = category in {"timeout", "unavailable"}
+    retryable = category in {"timeout", "unavailable"} and not unsupported
     if category == "provider":
         retryable = any(token in str(raw_error or "").lower() for token in ("429", "rate limit", "临时", "network", "connection"))
     supplied_id = test_id or source.get("test_id")
@@ -257,17 +258,18 @@ def normalize_diagnostic_result(
     title = _PUBLIC_TITLES[kind]
     detail = "The test completed." if ok else ("The test is scheduled or running." if pending else _PUBLIC_ERROR_LABELS[category])
 
-    return {
+    envelope = {
         "diagnostic_version": _safe_label(contract_version, 60) or DIAGNOSTIC_ENVELOPE_VERSION,
         "test_id": public_id,
         "duration_ms": duration,
         "phase": phase,
         "error_category": category,
         "retryable": retryable,
-        "next_step": _NEXT_STEPS[category],
+        "next_step": _safe_label(source.get("next_step"), 600) or _NEXT_STEPS[category],
         "type": kind,
         "test_key": _safe_identifier(source.get("test_key"), 80),
         "ok": ok,
+        "unsupported": unsupported,
         "pending": pending,
         "outcome_type": _safe_identifier(source.get("outcome_type"), 40),
         "title": title,
@@ -347,3 +349,4 @@ def normalize_diagnostic_result(
         "suggestions": [],
         "sections": [],
     }
+    return envelope

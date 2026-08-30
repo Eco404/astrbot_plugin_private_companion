@@ -1714,13 +1714,21 @@ class PrivateCompanionPageApi(
             image_status = {}
         if not isinstance(image_status, dict):
             image_status = {}
+        image_contract = self._image_extension_contract_status(image_api)
+        if image_contract:
+            image_status = {**image_status, "companion_contract": image_contract}
+            if not image_contract["available"]:
+                image_status["available"] = False
+                image_status["reason"] = image_contract["reason"] or "image_contract_incompatible"
 
         nai_api_getter = getattr(self.plugin, "_nai_image_api", None)
         try:
             nai_api = nai_api_getter() if callable(nai_api_getter) else None
         except Exception:
             nai_api = None
-        nai_status_getter = getattr(nai_api, "status", None) if nai_api is not None else None
+        nai_status_getter = getattr(self.plugin, "_nai_image_status", None)
+        if not callable(nai_status_getter):
+            nai_status_getter = getattr(nai_api, "status", None) if nai_api is not None else None
         try:
             nai_status = nai_status_getter() if callable(nai_status_getter) else {}
         except Exception:
@@ -1753,6 +1761,15 @@ class PrivateCompanionPageApi(
         if not isinstance(content_status, dict):
             content_status = {}
 
+        image_summary = {
+            "installed": image_api is not None,
+            "enabled": bool(image_status.get("enabled")),
+            "available": bool(image_api is not None and image_status.get("available", True)),
+            "reason": self._single_line(image_status.get("reason"), 120),
+        }
+        if image_status.get("companion_contract"):
+            image_summary["companion_contract"] = image_status["companion_contract"]
+
         return {
             # These two capabilities are part of the companion core. Keep them
             # visible in the same status payload so the panel and diagnostics
@@ -1776,22 +1793,38 @@ class PrivateCompanionPageApi(
                     120,
                 ),
             },
-            "image": {
-                "installed": image_api is not None,
-                "enabled": bool(image_status.get("enabled")),
-                "available": bool(image_api is not None and image_status.get("available", True)),
-                "reason": self._single_line(image_status.get("reason"), 120),
-            },
+            "image": image_summary,
             "nai": {
                 "installed": nai_api is not None,
                 "enabled": bool(nai_status.get("enabled")),
-                "available": nai_api is not None,
+                "available": bool(nai_api is not None and nai_status.get("available", False)),
             },
             "reality": {
                 "installed": reality_api is not None,
                 "enabled": bool(reality_status.get("enabled")),
                 "available": bool(reality_api is not None and reality_status.get("available", True)),
             },
+        }
+
+    def _image_extension_contract_status(self, api: Any | None = None) -> dict[str, Any]:
+        """Expose the effective Companion/Image contract without invoking generation."""
+        getter = getattr(self.plugin, "_image_companion_contract", None)
+        if not callable(getter):
+            return {}
+        try:
+            mode, _current, generation, reason = getter(api=api) if api is not None else getter()
+        except TypeError:
+            try:
+                mode, _current, generation, reason = getter()
+            except Exception:
+                return {"mode": "unknown", "generation": 0, "available": False, "reason": "contract_probe_failed"}
+        except Exception:
+            return {"mode": "unknown", "generation": 0, "available": False, "reason": "contract_probe_failed"}
+        return {
+            "mode": self._single_line(mode, 30),
+            "generation": self._int(generation),
+            "available": mode in {"current", "current_compat"},
+            "reason": self._single_line(reason, 120),
         }
 
     def _req041_runtime_summary(self) -> dict[str, Any]:
@@ -6447,6 +6480,14 @@ class PrivateCompanionPageApi(
         return self._multi_line(cleaned, max(80, limit))
 
     def _classify_test_failure(self, test_type: str, result: dict[str, Any]) -> dict[str, Any]:
+        if result.get("unsupported") or result.get("test_status") in {"unsupported", "skipped"}:
+            return {
+                "error_code": self._single_line(result.get("code"), 80) or "test_not_supported",
+                "error_category": self._single_line(result.get("error_category"), 40) or "契约限制",
+                "retryable": False,
+                "suggestion": self._single_line(result.get("next_step"), 600)
+                or "请使用对应插件提供的完整链路测试。",
+            }
         if bool(result.get("ok")) or bool(result.get("pending")):
             return {
                 "error_code": "",
@@ -6586,7 +6627,7 @@ class PrivateCompanionPageApi(
             normalized_steps.append(
                 {
                     "name": "执行测试",
-                    "status": "info" if item.get("pending") else ("ok" if item.get("ok") else "error"),
+                    "status": "info" if item.get("pending") or item.get("unsupported") else ("ok" if item.get("ok") else "error"),
                     "detail": self._safe_test_diagnostic_text(summary, 800),
                     "elapsed_ms": elapsed_ms,
                 }
@@ -6599,7 +6640,10 @@ class PrivateCompanionPageApi(
         request_id = self._single_line(item.get("request_id") or item.get("trace_id"), 32) or uuid.uuid4().hex[:12]
         item["request_id"] = request_id
         item["trace_id"] = request_id
-        item["test_status"] = "pending" if item.get("pending") else ("passed" if item.get("ok") else "failed")
+        supplied_status = self._single_line(item.get("test_status"), 16).lower()
+        item["test_status"] = supplied_status if supplied_status in {"unsupported", "skipped"} else (
+            "pending" if item.get("pending") else ("passed" if item.get("ok") else "failed")
+        )
         item["started_at"] = float(started_at)
         item["finished_at"] = ended_at
         item["elapsed_ms"] = elapsed_ms
@@ -6631,7 +6675,7 @@ class PrivateCompanionPageApi(
         entries.append(
             {
                 "elapsed_ms": elapsed_ms,
-                "level": "info" if item.get("pending") else ("ok" if item.get("ok") else "error"),
+                "level": "info" if item.get("pending") or item.get("unsupported") else ("ok" if item.get("ok") else "error"),
                 "stage": "结果",
                 "message": self._safe_test_diagnostic_text(final_message, 1200),
             }
@@ -7822,6 +7866,13 @@ class PrivateCompanionPageApi(
         status.setdefault("installed", True)
         status.setdefault("available", bool(status.get("enabled")))
         status.setdefault("state", "managed")
+        image_contract = self._image_extension_contract_status(api)
+        if image_contract:
+            status["companion_contract"] = image_contract
+            if not image_contract["available"]:
+                status["available"] = False
+                status["state"] = "incompatible"
+                status["reason"] = image_contract["reason"] or "image_contract_incompatible"
         debug_summary = self._recent_photo_generation_debug(
             event_limit=240,
             summary_only=True,
@@ -8024,12 +8075,13 @@ class PrivateCompanionPageApi(
                     runner(endpoint, prompt_text),
                     timeout=test_timeout,
                 )
+                external_result = external_result if isinstance(external_result, dict) else {}
                 image_path = _path_text(
-                    external_result.get("image_path") if isinstance(external_result, dict) else "",
+                    external_result.get("image_path"),
                     1000,
                 )
                 note = self._single_line(
-                    external_result.get("message") if isinstance(external_result, dict) else "",
+                    external_result.get("message") or external_result.get("detail"),
                     500,
                 )
             except asyncio.TimeoutError:
@@ -8066,6 +8118,32 @@ class PrivateCompanionPageApi(
                 lock.release()
 
         elapsed_ms = int((time.time() - started) * 1000)
+        if external_result.get("unsupported"):
+            detail = self._redact_image_api_test_text(
+                external_result.get("detail") or note,
+                endpoint,
+                1200,
+            )
+            return {
+                **base_result,
+                "ok": False,
+                "unsupported": True,
+                "test_status": "unsupported",
+                "code": self._single_line(
+                    external_result.get("code"),
+                    80,
+                ) or "image_current_contract_endpoint_test_unsupported",
+                "error": detail or "新版 Image 扩展不支持旧式单端点测试",
+                "detail": detail or "当前配置未被判定为错误，旧式单端点测试未执行",
+                "next_step": self._single_line(
+                    external_result.get("next_step"),
+                    600,
+                ) or "到排障页运行完整图片生成链路测试。",
+                "prompt": prompt_text,
+                "timeout_seconds": test_timeout,
+                "queue_wait_ms": queue_wait_ms,
+                "elapsed_ms": elapsed_ms,
+            }
         exists = False
         file_size = 0
         if image_path:
@@ -10633,6 +10711,7 @@ class PrivateCompanionPageApi(
             ("trace_id", 32),
             ("test_status", 16),
             ("error_code", 40),
+            ("code", 80),
             ("exception_type", 120),
             ("title", 80),
             ("delivery_umo", 180),
@@ -10645,12 +10724,15 @@ class PrivateCompanionPageApi(
             ("detail", 1200),
             ("diagnostic_detail", 4000),
             ("suggestion", 600),
+            ("next_step", 600),
         ):
             if source.get(key) not in (None, ""):
                 envelope[key] = self._safe_test_diagnostic_text(source.get(key), limit)
         for key in ("generated", "delivered"):
             if key in source:
                 envelope[key] = bool(source.get(key))
+        if "unsupported" in source:
+            envelope["unsupported"] = bool(source.get("unsupported"))
 
         warnings = source.get("warnings") if isinstance(source.get("warnings"), list) else []
         envelope["warnings"] = [

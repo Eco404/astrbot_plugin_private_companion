@@ -89,6 +89,38 @@ class PageApiTestDiagnosticTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result["retryable"])
                 self.assertIn("请求 URL", result["suggestion"])
 
+    def test_unsupported_image_endpoint_test_is_neutral_and_preserves_status(self) -> None:
+        result = self.api._finalize_test_diagnostics(
+            "image_api_endpoint",
+            {
+                "ok": False,
+                "unsupported": True,
+                "test_status": "unsupported",
+                "code": "image_current_contract_endpoint_test_unsupported",
+                "detail": "当前配置未被判定为错误，旧式单端点测试未执行",
+                "next_step": "Use the complete image generation chain test.",
+            },
+            time.time() - 0.01,
+        )
+
+        self.assertEqual(result["test_status"], "unsupported")
+        self.assertEqual(
+            result["error_code"],
+            "image_current_contract_endpoint_test_unsupported",
+        )
+        self.assertFalse(result["retryable"])
+        self.assertEqual(result["steps"][0]["status"], "info")
+        sanitized = self.api._diagnostic_envelope(
+            result,
+            test_type="image_api_endpoint",
+            duration_ms=result["elapsed_ms"],
+            test_id="diag_image_api_endpoint_012345abcdef",
+        )
+        self.assertTrue(sanitized["unsupported"])
+        self.assertEqual(sanitized["error_category"], "none")
+        self.assertEqual(sanitized["phase"], "completed")
+        self.assertEqual(sanitized["next_step"], "Use the complete image generation chain test.")
+
     def test_legacy_history_gets_repeatable_request_id_and_diagnostics(self) -> None:
         data = {
             "users": {},

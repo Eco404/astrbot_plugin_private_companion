@@ -22,6 +22,7 @@ RUNTIME_FILES = (
 )
 RUNTIME_DIRECTORIES = (
     ".astrbot-plugin",
+    "companion",
     "domains",
     "pages",
     "storage",

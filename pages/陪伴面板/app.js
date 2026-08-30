@@ -4956,6 +4956,7 @@ function photoApiEndpointResult(endpoint, index) {
 function photoApiEndpointResultHtml(result, index) {
   if (!result || !(result.ran_at || result.ran_at_text || result.error || result.detail)) return "";
   const ok = Boolean(result.ok);
+  const unsupported = result.test_status === "unsupported" || result.unsupported === true;
   const meta = [
     result.ran_at_text || "",
     result.elapsed_ms ? `${result.elapsed_ms}ms` : "",
@@ -4963,8 +4964,8 @@ function photoApiEndpointResultHtml(result, index) {
     result.file_size ? formatBytes(result.file_size) : "",
   ].filter(Boolean).join(" · ");
   return `
-    <div class="image-api-test-result ${ok ? "ok" : "error"}">
-      <b>${escapeHtml(ok ? "最近测试通过" : "最近测试失败")}</b>
+    <div class="image-api-test-result ${ok ? "ok" : unsupported ? "unsupported" : "error"}">
+      <b>${escapeHtml(ok ? "最近测试通过" : unsupported ? "未执行旧式测试" : "最近测试失败")}</b>
       <span>${escapeHtml(result.error || result.detail || (ok ? "接口已返回有效图片" : "接口未返回有效图片"))}</span>
       ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
       ${result.suggestion ? `<small class="test-result-suggestion">${escapeHtml(result.suggestion)}</small>` : ""}
@@ -13188,12 +13189,13 @@ let activeTestDiagnosticTitle = "";
 
 function testDiagnosticStatus(result = {}) {
   if (result.pending || result.test_status === "pending") return "pending";
+  if (result.test_status === "unsupported" || result.unsupported === true) return "unsupported";
   if (result.ok || result.test_status === "passed") return "passed";
   return "failed";
 }
 
 function testDiagnosticStatusLabel(result = {}) {
-  return { passed: "测试通过", failed: "测试失败", pending: "等待完成" }[testDiagnosticStatus(result)] || "未知状态";
+  return { passed: "测试通过", failed: "测试失败", pending: "等待完成", unsupported: "未执行旧式测试" }[testDiagnosticStatus(result)] || "未知状态";
 }
 
 function testDiagnosticTimeText(value) {
@@ -31964,9 +31966,14 @@ function bindPhotoApiEndpointEditor(root = document) {
           },
         };
         renderImageModelConfig();
+        const unsupported = result.test_status === "unsupported" || result.unsupported === true;
         showToast(
-          result.ok ? `${endpoint.name} 测试通过` : `${endpoint.name} 测试失败：${result.error || "未返回有效图片"}`,
-          result.ok ? "success" : "error",
+          result.ok
+            ? `${endpoint.name} 测试通过`
+            : unsupported
+              ? `${endpoint.name}：${result.detail || "新版 Image 请使用完整链路测试"}`
+              : `${endpoint.name} 测试失败：${result.error || "未返回有效图片"}`,
+          result.ok || unsupported ? "ok" : "error",
         );
       } catch (error) {
         state.imageApiEndpointTestResults = {

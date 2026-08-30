@@ -59,6 +59,23 @@ def test_image_workspace_api_proxies_extension_status() -> None:
     assert result["data"]["generation_count"] == 3
 
 
+def test_image_workspace_api_reports_contract_mismatch_as_unavailable() -> None:
+    extension = type("ImageExtension", (), {"status": lambda self: {"enabled": True, "available": True}})()
+    plugin = type("Plugin", (), {
+        "_image_companion_api": lambda self: extension,
+        "_image_companion_contract": lambda self, **_kwargs: (
+            "incompatible", extension, 0, "descriptor_method_missing"
+        ),
+    })()
+
+    result = asyncio.run(PrivateCompanionPageApi(plugin).get_image_extension_status())
+
+    assert result["data"]["available"] is False
+    assert result["data"]["state"] == "incompatible"
+    assert result["data"]["reason"] == "descriptor_method_missing"
+    assert result["data"]["companion_contract"]["mode"] == "incompatible"
+
+
 def test_reality_workspace_exposes_mobile_gateway_without_owning_implementation() -> None:
     script = (PANEL_ROOTS[0] / "app.js").read_text(encoding="utf-8")
     css = (PANEL_ROOTS[0] / "app.css").read_text(encoding="utf-8")

@@ -110,6 +110,9 @@ class ImageModelConfigUiTests(unittest.TestCase):
         self.assertIn("endpoint_index: index", self.script)
         self.assertIn("endpoint,", self.script)
         self.assertIn("data-image-api-test", self.script)
+        self.assertIn('"未执行旧式测试"', self.script)
+        self.assertIn('result.test_status === "unsupported"', self.script)
+        self.assertIn('unsupported: "未执行旧式测试"', self.script)
 
     def test_saved_test_result_is_invalidated_when_the_request_draft_changes(self) -> None:
         self.assertIn("imageApiEndpointSavedFingerprints", self.script)

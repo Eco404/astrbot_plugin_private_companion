@@ -46,6 +46,14 @@ def test_plugin_package_contains_complete_runtime_tree(tmp_path: Path) -> None:
         f"{ARCHIVE_ROOT}/pages/companion-panel/index.html",
         f"{ARCHIVE_ROOT}/pages/陪伴面板/index.html",
         f"{ARCHIVE_ROOT}/storage/backend_base.py",
+        f"{ARCHIVE_ROOT}/companion/__init__.py",
+        f"{ARCHIVE_ROOT}/companion/integrations/__init__.py",
+        f"{ARCHIVE_ROOT}/companion/integrations/external_bridge_resolver.py",
+        f"{ARCHIVE_ROOT}/companion/integrations/image_companion_bridge.py",
+        f"{ARCHIVE_ROOT}/companion/integrations/reality_companion_bridge.py",
+        f"{ARCHIVE_ROOT}/companion/contracts/__init__.py",
+        f"{ARCHIVE_ROOT}/companion/contracts/calendar_contracts.py",
+        f"{ARCHIVE_ROOT}/companion/contracts/qzone_contract.py",
     }
     assert required.issubset(names)
     packaged_top_level_python = {

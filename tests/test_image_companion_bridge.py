@@ -1028,15 +1028,11 @@ def test_image_companion_status_is_unavailable_without_external_plugin() -> None
 
 
 @pytest.mark.asyncio
-async def test_endpoint_test_refreshes_stale_extension_api() -> None:
+async def test_endpoint_test_rejects_descriptorless_extension_after_refresh() -> None:
     calls = 0
 
-    class CurrentApi:
-        async def test_endpoint(self, owner, endpoint, prompt):
-            return {"ok": True, "image_path": "result.png", "message": prompt}
-
     stale_api = SimpleNamespace()
-    current_api = CurrentApi()
+    current_api = SimpleNamespace(test_endpoint=lambda *_args: None)
     harness = _BridgeHarness()
 
     def resolve_api():
@@ -1051,11 +1047,28 @@ async def test_endpoint_test_refreshes_stale_extension_api() -> None:
     )
 
     assert calls == 2
-    assert result == {
-        "ok": True,
-        "image_path": "result.png",
-        "message": "endpoint probe",
-    }
+    assert result["ok"] is False
+    assert result["unsupported"] is True
+    assert result["code"] == "image_contract_incompatible"
+
+
+@pytest.mark.asyncio
+async def test_endpoint_test_explains_current_contract_without_calling_legacy_path(
+    tmp_path: Path,
+) -> None:
+    api = _CurrentImageApi(tmp_path / "unused.png")
+    harness = _BridgeHarness()
+    harness._image_companion_api = lambda: api
+
+    result = await harness._image_companion_test_endpoint(
+        {"base_url": "https://example.test/v1"},
+        "endpoint probe",
+    )
+
+    assert result["ok"] is False
+    assert result["unsupported"] is True
+    assert result["code"] == "image_current_contract_endpoint_test_unsupported"
+    assert "未执行" in result["detail"]
 
 
 @pytest.mark.asyncio

@@ -15760,6 +15760,11 @@ html[data-bookshelf-direction="backward"]::view-transition-new(bookshelf-view) {
   background: var(--gold-soft);
 }
 
+.test-diagnostic-overview.unsupported {
+  border-color: #8a5a00;
+  background: var(--gold-soft);
+}
+
 .test-diagnostic-overview span {
   border-radius: 999px;
   padding: 4px 8px;
@@ -15771,6 +15776,10 @@ html[data-bookshelf-direction="backward"]::view-transition-new(bookshelf-view) {
 
 .test-diagnostic-overview.failed span {
   color: var(--danger);
+}
+
+.test-diagnostic-overview.unsupported span {
+  color: #8a5a00;
 }
 
 .test-diagnostic-overview b {
@@ -23510,6 +23519,10 @@ textarea {
 
 .image-api-test-result.error b {
   color: var(--danger);
+}
+
+.image-api-test-result.unsupported b {
+  color: #8a5a00;
 }
 
 .image-api-endpoint-grid {
