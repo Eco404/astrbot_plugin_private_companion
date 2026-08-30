@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 import time
 from datetime import datetime
@@ -10,6 +11,9 @@ from typing import Any
 from .constants import DEFAULT_DAILY_PLAN_ITEMS
 from .helpers import _safe_float, _safe_int, _single_line, _today_key
 from .persona_config import runtime_persona_setting
+from .logging_util import get_module_logger
+
+logger = get_module_logger(__name__)
 
 
 def split_detail_prompt_cache_sections(prompt: str) -> tuple[str, str]:
@@ -56,17 +60,16 @@ async def generate_detail_enhancement(
             state=state,
             max_chars=1100,
         )
-    # 外部插件（如 astrbot_plugin_m7a_notify）防御式扩展点：把今日小助手动态并入连续性参考
-    _m7a_getter = getattr(plugin, "_m7a_daily_material_context", None)
-    if callable(_m7a_getter):
-        try:
-            _m7a_block = await _m7a_getter(kind="detail", max_chars=900)
-            if _m7a_block:
-                memory_companion_context = (memory_companion_context or "") + (
-                    "\n\n【今日小助手实况（外部插件提供，仅作生活素材，不得视为既定事实）】\n" + _m7a_block
-                )
-        except Exception:
-            pass
+    external_material = await _external_schedule_material_context(
+        plugin,
+        kind="detail",
+        max_chars=900,
+    )
+    if external_material:
+        memory_companion_context = (memory_companion_context or "") + (
+            "\n\n【外部插件提供的今日实况（仅作生活素材，不得视为既定事实）】\n"
+            + external_material
+        )
     full_prompt = plugin._build_detail_enhancement_prompt(
         segment,
         plan,
@@ -682,17 +685,16 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
     memory_companion_context_getter = getattr(plugin, "_memory_companion_compose_schedule_context", None)
     if callable(memory_companion_context_getter):
         memory_companion_context = await memory_companion_context_getter(kind="daily_plan", max_chars=1300)
-    # 外部插件（如 astrbot_plugin_m7a_notify）防御式扩展点：把今日小助手动态并入连续性参考
-    _m7a_getter = getattr(plugin, "_m7a_daily_material_context", None)
-    if callable(_m7a_getter):
-        try:
-            _m7a_block = await _m7a_getter(kind="daily_plan", max_chars=1300)
-            if _m7a_block:
-                memory_companion_context = (memory_companion_context or "") + (
-                    "\n\n【今日小助手实况（外部插件提供，仅作生活素材，不得视为既定事实）】\n" + _m7a_block
-                )
-        except Exception:
-            pass
+    external_material = await _external_schedule_material_context(
+        plugin,
+        kind="daily_plan",
+        max_chars=1300,
+    )
+    if external_material:
+        memory_companion_context = (memory_companion_context or "") + (
+            "\n\n【外部插件提供的今日实况（仅作生活素材，不得视为既定事实）】\n"
+            + external_material
+        )
     prompt = plugin._build_daily_plan_prompt(now, memory_companion_context=memory_companion_context)
     plan_provider = plugin._task_provider(
         runtime_persona_setting(plugin, "daily_plan_provider_id", ""),
@@ -930,14 +932,66 @@ def _build_schedule_reference_sections(
     return "\n\n".join(identity_parts), "\n\n".join(behavior_parts)
 
 
-def _sanitize_relationship_generation_source(plugin, value: Any, *, source: str) -> str:
+def _sanitize_relationship_generation_source(
+    plugin,
+    value: Any,
+    *,
+    source: str,
+    max_chars: int = 0,
+) -> str:
     sanitizer = getattr(plugin, "_sanitize_generation_relationship_context", None)
     if callable(sanitizer):
         try:
-            return sanitizer(value, source=source)
+            try:
+                cleaned = sanitizer(value, source=source, max_chars=max_chars)
+            except TypeError:
+                cleaned = sanitizer(value, source=source)
+            cleaned_text = str(cleaned or "").strip()
+            return cleaned_text[:max_chars] if max_chars > 0 else cleaned_text
         except Exception:
             pass
-    return str(value or "").strip()
+    cleaned_text = str(value or "").strip()
+    return cleaned_text[:max_chars] if max_chars > 0 else cleaned_text
+
+
+async def _external_schedule_material_context(
+    plugin,
+    *,
+    kind: str,
+    max_chars: int,
+) -> str:
+    """Read optional external life material without making it a hard fact."""
+    getter = None
+    getter_name = ""
+    for candidate in ("_external_schedule_material_context", "_m7a_daily_material_context"):
+        candidate_getter = getattr(plugin, candidate, None)
+        if callable(candidate_getter):
+            getter = candidate_getter
+            getter_name = candidate
+            break
+    if getter is None:
+        return ""
+    try:
+        try:
+            value = getter(kind=kind, max_chars=max_chars)
+        except TypeError:
+            value = getter(kind=kind)
+        if inspect.isawaitable(value):
+            value = await value
+        return _sanitize_relationship_generation_source(
+            plugin,
+            value,
+            source=f"external_schedule.{kind}",
+            max_chars=max_chars,
+        )
+    except Exception as exc:
+        logger.debug(
+            "外部日程素材提供者不可用: kind=%s getter=%s error=%s",
+            kind,
+            getter_name or "unknown",
+            _single_line(exc, 160),
+        )
+        return ""
 
 
 def _relationship_authority_guard(plugin) -> str:
