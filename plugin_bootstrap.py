@@ -616,6 +616,7 @@ def _initialize_world_and_model_config(self: Any, c: Any) -> None:
     self.model_fallback_overrides = self._normalize_model_fallback_overrides(
         self._cfg_raw(c, "model_fallback_overrides", {})
     )
+    self.enable_llm_streaming = self._cfg_bool(c, "enable_llm_streaming", False)
     self.enable_deepseek_peak_replacement = self._cfg_bool(c, "enable_deepseek_peak_replacement", False)
     self.model_replacement_scope = normalize_scope(
         self._cfg_raw(c, "model_replacement_scope", "plugin"),
