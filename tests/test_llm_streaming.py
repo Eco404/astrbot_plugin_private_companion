@@ -107,6 +107,21 @@ class TestLlmStreamingAccumulation(unittest.IsolatedAsyncioTestCase):
         # The complete final response must not be duplicated with the deltas.
         self.assertEqual(resp.completion_text, "完整结果正文")
 
+    async def test_empty_final_response_uses_accumulated_chunks(self) -> None:
+        provider = _StreamProvider(
+            chunks=[_chunk("增量内容")],
+            final=_final(""),
+        )
+        owner = _Owner(_Context(_ProviderManager(provider)))
+        resp = await TokenBudgetMixin._llm_generate_streaming(
+            owner,
+            provider_id="p",
+            prompt="续写",
+            max_tokens=1000,
+        )
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp.completion_text, "增量内容")
+
     async def test_empty_stream_returns_none(self) -> None:
         provider = _StreamProvider()
         owner = _Owner(_Context(_ProviderManager(provider)))
@@ -133,6 +148,21 @@ class TestLlmStreamingAccumulation(unittest.IsolatedAsyncioTestCase):
             pass
 
         owner = _Owner(_Context(_ProviderManager(_NoStreamProvider())))
+        resp = await TokenBudgetMixin._llm_generate_streaming(
+            owner,
+            provider_id="p",
+            prompt="续写",
+            max_tokens=1000,
+        )
+        self.assertIsNone(resp)
+
+    async def test_stream_error_returns_none_for_non_streaming_fallback(self) -> None:
+        class _BrokenProvider:
+            async def text_chat_stream(self, **kwargs: Any) -> Any:
+                raise NotImplementedError("stream unsupported")
+                yield  # pragma: no cover
+
+        owner = _Owner(_Context(_ProviderManager(_BrokenProvider())))
         resp = await TokenBudgetMixin._llm_generate_streaming(
             owner,
             provider_id="p",

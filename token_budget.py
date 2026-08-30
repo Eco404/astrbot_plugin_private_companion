@@ -1635,6 +1635,8 @@ class TokenBudgetMixin:
         if not callable(getter):
             return None
         provider = await getter(provider_id)
+        if provider is None:
+            return None
         streamer = getattr(provider, "text_chat_stream", None)
         if not callable(streamer):
             return None
@@ -1647,25 +1649,58 @@ class TokenBudgetMixin:
 
         chunk_parts: list[str] = []
         final_resp: Any = None
+        last_chunk: Any = None
 
         async def _collect() -> Any:
-            nonlocal final_resp
+            nonlocal final_resp, last_chunk
             async for resp in streamer(**stream_kwargs):
+                if resp is None:
+                    continue
                 final_resp = resp
                 if getattr(resp, "is_chunk", False):
-                    text = resp.completion_text or ""
+                    last_chunk = resp
+                    text = getattr(resp, "completion_text", "")
+                    if not isinstance(text, str):
+                        text = str(text or "")
                     if text:
                         chunk_parts.append(text)
             return final_resp
 
-        if timeout_seconds is not None:
-            collected = await asyncio.wait_for(_collect(), timeout=timeout_seconds)
-        else:
-            collected = await _collect()
+        try:
+            if timeout_seconds is not None:
+                collected = await asyncio.wait_for(_collect(), timeout=timeout_seconds)
+            else:
+                collected = await _collect()
+        except asyncio.TimeoutError:
+            raise
+        except Exception as exc:
+            logger.debug(
+                "流式 Provider 调用不可用，回退非流式: provider=%s error=%s",
+                _single_line(provider_id, 120),
+                _single_line(exc, 160),
+            )
+            return None
         if collected is None:
             return None
         if not getattr(collected, "is_chunk", False):
-            # Contract-compliant providers yield the complete final response.
+            final_text = getattr(collected, "completion_text", "")
+            if not isinstance(final_text, str):
+                final_text = str(final_text or "")
+            if final_text.strip():
+                if getattr(collected, "usage", None) is None and last_chunk is not None:
+                    chunk_usage = getattr(last_chunk, "usage", None)
+                    if chunk_usage is not None:
+                        try:
+                            collected.usage = chunk_usage
+                        except Exception:
+                            pass
+                return collected
+            if not chunk_parts:
+                return None
+            try:
+                collected.completion_text = "".join(chunk_parts)
+            except Exception:
+                return None
             return collected
         accumulated = "".join(chunk_parts)
         if not accumulated:
