@@ -56,6 +56,17 @@ async def generate_detail_enhancement(
             state=state,
             max_chars=1100,
         )
+    # 外部插件（如 astrbot_plugin_m7a_notify）防御式扩展点：把今日小助手动态并入连续性参考
+    _m7a_getter = getattr(plugin, "_m7a_daily_material_context", None)
+    if callable(_m7a_getter):
+        try:
+            _m7a_block = await _m7a_getter(kind="detail", max_chars=900)
+            if _m7a_block:
+                memory_companion_context = (memory_companion_context or "") + (
+                    "\n\n【今日小助手实况（外部插件提供，仅作生活素材，不得视为既定事实）】\n" + _m7a_block
+                )
+        except Exception:
+            pass
     full_prompt = plugin._build_detail_enhancement_prompt(
         segment,
         plan,
@@ -671,6 +682,17 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
     memory_companion_context_getter = getattr(plugin, "_memory_companion_compose_schedule_context", None)
     if callable(memory_companion_context_getter):
         memory_companion_context = await memory_companion_context_getter(kind="daily_plan", max_chars=1300)
+    # 外部插件（如 astrbot_plugin_m7a_notify）防御式扩展点：把今日小助手动态并入连续性参考
+    _m7a_getter = getattr(plugin, "_m7a_daily_material_context", None)
+    if callable(_m7a_getter):
+        try:
+            _m7a_block = await _m7a_getter(kind="daily_plan", max_chars=1300)
+            if _m7a_block:
+                memory_companion_context = (memory_companion_context or "") + (
+                    "\n\n【今日小助手实况（外部插件提供，仅作生活素材，不得视为既定事实）】\n" + _m7a_block
+                )
+        except Exception:
+            pass
     prompt = plugin._build_daily_plan_prompt(now, memory_companion_context=memory_companion_context)
     plan_provider = plugin._task_provider(
         runtime_persona_setting(plugin, "daily_plan_provider_id", ""),
