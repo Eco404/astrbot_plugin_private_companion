@@ -148,6 +148,7 @@ from .final_response_persistence import (
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
+    _external_schedule_material_context,
     format_plan_for_diary,
     generate_daily_plan,
     generate_detail_enhancement,
@@ -2955,6 +2956,17 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             last_sidecar_at = _safe_float(user.get("last_group_share_life_sidecar_at"), 0)
             if last_sidecar_at > 0 and _now_ts() - last_sidecar_at < 6 * 3600:
                 current_schedule = "（最近群分享已经顺手带过生活片段，本轮只围绕群里那件事）"
+        external_material = ""
+        if not troubleshooting_hint and reason not in source_focused_reasons and reason not in {
+            "goodnight_screen_check",
+            "meal_care",
+            "meal_care_followup",
+        }:
+            external_material = await _external_schedule_material_context(
+                self,
+                kind="proactive",
+                max_chars=900,
+            )
         state_hint = self._format_state_for_framework_prompt(
             state if isinstance(state, dict) else {},
             reason=reason,
@@ -3158,6 +3170,14 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             prompt = f"{prompt.rstrip()}\n\n{future_schedule_hint}"
         if calendar_constraint_hint and "【今日有效日历约束】" not in prompt:
             prompt = f"{prompt.rstrip()}\n\n{calendar_constraint_hint}"
+        if external_material and "【外部插件提供的今日实况】" not in prompt:
+            prompt = (
+                f"{prompt.rstrip()}\n\n"
+                "【外部插件提供的今日实况（仅作生活素材，不得视为既定事实）】\n"
+                "它只是 Bot 听到或看到的外部动态；贴合当前切口时自然带过即可，不要提及来源插件名，"
+                "不要写成 Bot 亲身经历，也不要把它当成必须提起的事实。\n"
+                f"{external_material}"
+            )
         if reason == "creative_share":
             prompt = f"{prompt.rstrip()}\n\n{self._creative_share_excerpt_prompt_hint()}"
         route_prompt_getter = getattr(self, "_proactive_route_prompt", None)

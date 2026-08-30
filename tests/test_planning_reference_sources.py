@@ -156,12 +156,14 @@ class DailyPlanGenerationHarness:
         self.parsed = dict(parsed)
         self.calendar_conflict = calendar_conflict
         self.calls = []
+        self.prompt_contexts = []
         self.data = {"daily_plan": dict(previous_plan or {})}
 
     async def _ensure_weather_context(self):
         return None
 
     def _build_daily_plan_prompt(self, _now, *, memory_companion_context=""):
+        self.prompt_contexts.append(memory_companion_context)
         return "DAILY_PLAN_PROMPT"
 
     def _task_provider(self, *provider_ids):
@@ -541,6 +543,42 @@ class PlanningReferenceSourceTests(unittest.TestCase):
 
 
 class DailyPlanGenerationFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_external_material_uses_canonical_hook_and_is_sanitized(self):
+        items = [{"time": "09:00", "end": "10:00", "activity": "整理资料"}]
+        plugin = DailyPlanGenerationHarness(["valid"], {"valid": items})
+
+        async def material(*, kind, max_chars):
+            self.assertEqual(kind, "daily_plan")
+            self.assertEqual(max_chars, 1300)
+            return "外部动态：任务完成。" + ("x" * 3000)
+
+        plugin._external_schedule_material_context = material
+        with patch(
+            "astrbot_plugin_private_companion.planning.evaluate_daily_plan_quality",
+            return_value={"score": 100, "level": "good", "issues": []},
+        ):
+            await generate_daily_plan(plugin)
+
+        self.assertIn("外部插件提供的今日实况", plugin.prompt_contexts[0])
+        self.assertIn("外部动态：任务完成。", plugin.prompt_contexts[0])
+        self.assertLessEqual(len(plugin.prompt_contexts[0]), 1400)
+
+    async def test_external_material_failure_does_not_block_generation(self):
+        items = [{"time": "09:00", "end": "10:00", "activity": "整理资料"}]
+        plugin = DailyPlanGenerationHarness(["valid"], {"valid": items})
+
+        async def material(**_kwargs):
+            raise RuntimeError("provider unavailable")
+
+        plugin._external_schedule_material_context = material
+        with patch(
+            "astrbot_plugin_private_companion.planning.evaluate_daily_plan_quality",
+            return_value={"score": 100, "level": "good", "issues": []},
+        ):
+            plan = await generate_daily_plan(plugin)
+
+        self.assertEqual(plan["source"], "llm")
+
     async def test_unparseable_first_response_retries_before_fallback(self):
         items = [{"time": "09:00", "end": "10:00", "activity": "按世界观整理藏书"}]
         plugin = DailyPlanGenerationHarness(
