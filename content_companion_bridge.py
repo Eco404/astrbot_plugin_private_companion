@@ -9,6 +9,7 @@ import time
 from copy import deepcopy
 from typing import Any
 
+from astrbot.api import logger
 
 from .creative import _persona_provider_id
 from .helpers import _safe_float, _single_line

@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
+from astrbot.api import logger
 
 from .backend_base import StoreBackendBase
 from .path_generation import capture_write_ticket, replace_if_ticket_current
