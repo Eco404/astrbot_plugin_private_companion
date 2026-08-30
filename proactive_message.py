@@ -3368,29 +3368,6 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 "使用方式：只作为自然连续性和边界参考；能贴住当前切口就轻轻用,不相关就忽略。不要说“我查到/我记忆里”。"
                 f"{core_memory_section}"
             )
-        # Optional third-party runtime material belongs to continuity context,
-        # never to hard constraints or current-fact assertions.
-        external_material_getter = getattr(self, "_external_schedule_material_context", None)
-        if callable(external_material_getter):
-            try:
-                external_material = await external_material_getter(
-                    kind="proactive",
-                    max_chars=900,
-                )
-                external_material = sanitize_relationship_source(
-                    external_material,
-                    "proactive.external_material",
-                )
-                if external_material:
-                    prompt = (
-                        f"{prompt.rstrip()}\n\n"
-                        "【外部插件今日实况（仅作生活素材，不得视为既定事实）】\n"
-                        f"{external_material}"
-                        "\n使用方式：这只是 Bot 听到/看到的外部动态；只能自然承接或轻轻提及，"
-                        "不能写成 Bot 亲身经历、当前已确认事实，也不要提及来源插件名。"
-                    )
-            except Exception:
-                pass
         relationship_guard_getter = getattr(self, "_format_generation_relationship_authority_guard", None)
         if callable(relationship_guard_getter) and "关系事实权限" not in prompt:
             try:

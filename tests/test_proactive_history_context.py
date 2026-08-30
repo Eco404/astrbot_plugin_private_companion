@@ -144,6 +144,12 @@ class ProactiveHistoryContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("今日有效日历约束", generation_source)
         self.assertIn("_format_proactive_calendar_constraint_hint", runtime_source)
 
+    def test_external_material_has_one_generation_entry_and_prompt_section(self):
+        generation_source = inspect.getsource(ProactiveMessageMixin._build_framework_proactive_prompt)
+
+        self.assertEqual(1, generation_source.count("_external_schedule_material_context("))
+        self.assertEqual(1, generation_source.count("【外部插件提供的今日实况（仅作生活素材"))
+
     def test_generation_tool_boundary_allows_only_proactive_photo_tool(self):
         generation_source = inspect.getsource(ProactiveMessageMixin._build_framework_proactive_prompt)
 
