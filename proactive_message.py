@@ -3384,7 +3384,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 if external_material:
                     prompt = (
                         f"{prompt.rstrip()}\n\n"
-                        "【今日小助手实况（外部插件提供，仅作生活素材，不得视为既定事实）】\n"
+                        "【外部插件今日实况（仅作生活素材，不得视为既定事实）】\n"
                         f"{external_material}"
                         "\n使用方式：这只是 Bot 听到/看到的外部动态；只能自然承接或轻轻提及，"
                         "不能写成 Bot 亲身经历、当前已确认事实，也不要提及来源插件名。"
