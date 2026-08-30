@@ -1588,6 +1588,129 @@ class TokenBudgetMixin:
                 raise
         return None
 
+    def _llm_streaming_enabled_for_call(
+        self,
+        *,
+        task: str | None = None,
+        max_tokens: int = 0,
+    ) -> bool:
+        """Whether this plugin-internal LLM call should use streaming.
+
+        Streaming accumulates chunked responses instead of waiting for one
+        large payload, which avoids drops/truncation on OpenAI-compatible
+        relays for big outputs (creative writing, long reviews, ...).  The
+        AstrBot global "streaming response" toggle does not affect
+        plugin-internal calls (they always go through ``text_chat``), so this
+        is an independent switch.
+        """
+        if not bool(getattr(self, "enable_llm_streaming", False)):
+            return False
+        # Keep very short calls non-streaming: the extra chunked round-trips
+        # are pure overhead for small outputs.
+        min_threshold = getattr(type(self), "MODEL_TOKEN_LIMIT_MIN", 256) * 2
+        if max_tokens and 0 < max_tokens < min_threshold:
+            return False
+        return True
+
+    async def _llm_generate_streaming(
+        self,
+        *,
+        provider_id: str,
+        prompt: str,
+        system_prompt: str | None = None,
+        max_tokens: int = 0,
+        timeout_seconds: float | None = None,
+        task: str | None = None,
+    ) -> Any:
+        """Call ``provider.text_chat_stream`` and accumulate chunks.
+
+        AstrBot-compliant providers yield per-token chunks (``is_chunk=True``)
+        and finish with one complete response (``is_chunk=False``); when a
+        provider only emits chunks, the accumulated text is used instead.
+        Returns ``None`` when the provider is unavailable or the stream is
+        empty, so the caller's existing empty/fallback handling applies.
+        """
+        provider_manager = getattr(self.context, "provider_manager", None)
+        getter = getattr(provider_manager, "get_provider_by_id", None)
+        if not callable(getter):
+            return None
+        provider = await getter(provider_id)
+        if provider is None:
+            return None
+        streamer = getattr(provider, "text_chat_stream", None)
+        if not callable(streamer):
+            return None
+
+        stream_kwargs: dict[str, Any] = {"prompt": prompt}
+        if system_prompt:
+            stream_kwargs["system_prompt"] = system_prompt
+        if max_tokens and max_tokens > 0:
+            stream_kwargs["max_tokens"] = max_tokens
+
+        chunk_parts: list[str] = []
+        final_resp: Any = None
+        last_chunk: Any = None
+
+        async def _collect() -> Any:
+            nonlocal final_resp, last_chunk
+            async for resp in streamer(**stream_kwargs):
+                if resp is None:
+                    continue
+                final_resp = resp
+                if getattr(resp, "is_chunk", False):
+                    last_chunk = resp
+                    text = getattr(resp, "completion_text", "")
+                    if not isinstance(text, str):
+                        text = str(text or "")
+                    if text:
+                        chunk_parts.append(text)
+            return final_resp
+
+        try:
+            if timeout_seconds is not None:
+                collected = await asyncio.wait_for(_collect(), timeout=timeout_seconds)
+            else:
+                collected = await _collect()
+        except asyncio.TimeoutError:
+            raise
+        except Exception as exc:
+            logger.debug(
+                "流式 Provider 调用不可用，回退非流式: provider=%s error=%s",
+                _single_line(provider_id, 120),
+                _single_line(exc, 160),
+            )
+            return None
+        if collected is None:
+            return None
+        if not getattr(collected, "is_chunk", False):
+            final_text = getattr(collected, "completion_text", "")
+            if not isinstance(final_text, str):
+                final_text = str(final_text or "")
+            if final_text.strip():
+                if getattr(collected, "usage", None) is None and last_chunk is not None:
+                    chunk_usage = getattr(last_chunk, "usage", None)
+                    if chunk_usage is not None:
+                        try:
+                            collected.usage = chunk_usage
+                        except Exception:
+                            pass
+                return collected
+            if not chunk_parts:
+                return None
+            try:
+                collected.completion_text = "".join(chunk_parts)
+            except Exception:
+                return None
+            return collected
+        accumulated = "".join(chunk_parts)
+        if not accumulated:
+            return None
+        try:
+            collected.completion_text = accumulated
+        except Exception:
+            return None
+        return collected
+
     async def _llm_call(
         self,
         prompt: str,
@@ -1673,11 +1796,30 @@ class TokenBudgetMixin:
                     timeout_seconds=timeout_seconds,
                 )
                 try:
-                    request_call = self.context.llm_generate(**kwargs)
-                    if effective_timeout is not None:
-                        resp = await asyncio.wait_for(request_call, timeout=effective_timeout)
+                    if self._llm_streaming_enabled_for_call(task=task_key, max_tokens=max_tokens):
+                        resp = await self._llm_generate_streaming(
+                            provider_id=attempt_provider,
+                            prompt=prompt,
+                            system_prompt=system_prompt,
+                            max_tokens=max_tokens,
+                            timeout_seconds=effective_timeout,
+                            task=task_key,
+                        )
+                        if resp is None:
+                            # 流式路径不可用（Provider 不支持流式、流式为空或
+                            # 能力缺失）时回退到原有非流式调用，避免误判为空
+                            # 响应而触发备用模型。
+                            request_call = self.context.llm_generate(**kwargs)
+                            if effective_timeout is not None:
+                                resp = await asyncio.wait_for(request_call, timeout=effective_timeout)
+                            else:
+                                resp = await request_call
                     else:
-                        resp = await request_call
+                        request_call = self.context.llm_generate(**kwargs)
+                        if effective_timeout is not None:
+                            resp = await asyncio.wait_for(request_call, timeout=effective_timeout)
+                        else:
+                            resp = await request_call
                 except asyncio.TimeoutError as exc:
                     raise TimeoutError(f"模型任务 {task_key} 超过 {effective_timeout:.0f} 秒未返回") from exc
                 if resp and resp.completion_text:

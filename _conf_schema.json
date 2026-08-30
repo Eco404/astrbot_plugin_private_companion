@@ -4864,6 +4864,12 @@
           "精准配置"
         ]
       },
+      "enable_llm_streaming": {
+        "description": "插件内部 LLM 调用使用流式",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，插件内部 LLM 调用（私下创作、日程生成、审校分析、续写等后台任务）改为流式逐块累积，避免大输出经 OpenAI 兼容中转单次下发时丢包或截断。此开关独立于 AstrBot 全局“流式响应”，仅作用于插件自身调用；Provider 不支持流式时自动回退原有非流式路径，极短任务（max_tokens < 512）仍走非流式以节省开销。"
+      },
       "enable_deepseek_peak_replacement": {
         "description": "启用 DeepSeek 高价时段替换",
         "type": "bool",
