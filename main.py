@@ -4298,14 +4298,14 @@ class PrivateCompanionPlugin(
             # inheriting the target's active capability for another person.
             identity_candidates = {stamped_subject}
         else:
-        identity_candidates = {
-            candidate
-            for candidate in (
-                normalized_identity(user_id),
-                normalized_identity(user.get("user_id")),
-            )
-            if candidate
-        }
+            identity_candidates = {
+                candidate
+                for candidate in (
+                    normalized_identity(user_id),
+                    normalized_identity(user.get("user_id")),
+                )
+                if candidate
+            }
         # ``alias_user_ids`` are transport/history hints, never authorization
         # credentials.  Using them here allowed a renamed or migrated identity
         # to reopen active permission for another stable user.
@@ -13495,38 +13495,38 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 rendered = f"{marker}\n{str(content or '').strip()}".strip()
                 current = str(getattr(req, "system_prompt", "") or "")
                 if marker not in current:
-                req.system_prompt = f"{current}\n\n{rendered}".strip() if current else rendered
+                    req.system_prompt = f"{current}\n\n{rendered}".strip() if current else rendered
                 try:
-                return plan.add(
+                    return plan.add(
+                        key=key,
+                        marker=marker,
+                        content=content,
+                        priority=priority,
+                        source=source,
+                        title=title,
+                        placement=PLACEMENT_TOOL_CONTRACT,
+                        temporary=False,
+                        materialized=True,
+                        opaque=True,
+                        metadata=metadata,
+                    ) is not None
+                except RuntimeError as exc:
+                    if plan.frozen and marker in str(getattr(req, "system_prompt", "") or ""):
+                        return False
+                    raise exc
+            try:
+                return plan.materialize_system_block(
+                    req,
                     key=key,
                     marker=marker,
                     content=content,
                     priority=priority,
                     source=source,
                     title=title,
-                    placement=PLACEMENT_TOOL_CONTRACT,
-                    temporary=False,
-                    materialized=True,
-                    opaque=True,
+                    placement=placement,
+                    structured=structured,
                     metadata=metadata,
-                ) is not None
-                except RuntimeError as exc:
-                    if plan.frozen and marker in str(getattr(req, "system_prompt", "") or ""):
-                        return False
-                    raise exc
-            try:
-            return plan.materialize_system_block(
-                req,
-                key=key,
-                marker=marker,
-                content=content,
-                priority=priority,
-                source=source,
-                title=title,
-                placement=placement,
-                structured=structured,
-                metadata=metadata,
-            )
+                )
             except RuntimeError as exc:
                 # AstrBot may freeze the request plan before a later hook runs.
                 # The marker is still safe to append directly once, preserving

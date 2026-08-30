@@ -140,17 +140,6 @@ async def inject_humanized_state(
                 "兼容清理历史反应标签失败: %s",
                 _single_line(exc, 120),
             )
-    else:
-        # Older hot-loaded plugin objects may not carry the method even though
-        # this pipeline module has been updated. Keep the request alive and
-        # retain the same historical-tag cleanup semantics.
-        try:
-            _neutralize_stale_reaction_feedback_compat(req)
-        except Exception as exc:
-            logger.debug(
-                "[PrivateCompanion] 兼容清理历史反应标签失败: %s",
-                _single_line(exc, 120),
-            )
     self._append_deepseek_tool_protocol_guard(event, req)
     self._append_passive_reply_tool_boundary(event, req)
     self._remember_external_llm_request_for_token_stats(event, req)
