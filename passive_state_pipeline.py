@@ -1588,11 +1588,22 @@ async def inject_humanized_state(
         weather = ""
     if weather and weather != "暂无天气信息":
         state_log_parts.append(f"天气={weather}")
-    current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
-    current_schedule = self._sanitize_schedule_context_for_private_user(
-        self._format_plan_item_for_prompt(current_item),
-        current_user,
-    ) or "无当前日程"
+    schedule_material_getter = getattr(self, "_private_passive_schedule_material", None)
+    if callable(schedule_material_getter):
+        verified_schedule, planned_schedule = schedule_material_getter(current_user)
+    else:
+        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        verified_schedule = (
+            self._sanitize_schedule_context_for_private_user(
+                self._format_plan_item_for_prompt(current_item),
+                current_user,
+            )
+            if isinstance(current_item, dict)
+            else ""
+        )
+        planned_schedule = ""
+    verified_schedule_log = verified_schedule or "（暂无）"
+    planned_schedule_log = planned_schedule or "（暂无）"
     recorder = getattr(self, "_record_prompt_injection_snapshot", None)
     if callable(recorder):
         await recorder(
@@ -1607,7 +1618,12 @@ async def inject_humanized_state(
             modules=prompt_surface.rendered_fragments(),
             metadata={
                 "状态": "｜".join(state_log_parts),
-                "当前日程": current_schedule,
+                # Keep the legacy key for consumers that already read it, but
+                # make its evidence-backed meaning explicit alongside the
+                # clock-only projection.
+                "当前日程": verified_schedule_log,
+                "已核实当前活动": verified_schedule_log,
+                "当前计划时段": planned_schedule_log,
                 "注入位置": injection_placement,
                 "状态注入模式": "增量"
                 if bool(runtime_persona_setting(self, "enable_passive_state_delta_injection", True))
@@ -1619,7 +1635,7 @@ async def inject_humanized_state(
             },
         )
     logger.info(
-        "已注入被动状态提示词到 %s: mode=%s state_mode=%s reason=%s placement=%s chars=%s 状态=%s；当前日程=%s",
+        "已注入被动状态提示词到 %s: mode=%s state_mode=%s reason=%s placement=%s chars=%s 状态=%s；当前日程=%s；已核实当前活动=%s；当前计划时段=%s",
         _single_line(getattr(event, "unified_msg_origin", ""), 80) or "unknown_session",
         "light" if lightweight_passive else "full",
         "delta" if bool(runtime_persona_setting(self, "enable_passive_state_delta_injection", True)) else "legacy",
@@ -1627,5 +1643,7 @@ async def inject_humanized_state(
         injection_placement,
         len(injection),
         "｜".join(state_log_parts),
-        current_schedule,
+        verified_schedule_log,
+        verified_schedule_log,
+        planned_schedule_log,
     )

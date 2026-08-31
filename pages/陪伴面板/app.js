@@ -11639,9 +11639,10 @@ function renderDashboardLifeDesk(overview = {}) {
   const currentRoot = $("#dashboardCurrentState");
   if (currentRoot) {
     const energy = Math.max(0, Math.min(100, Number(daily.energy || 0)));
+    const currentLifecycleText = scheduleTimelineSegmentLabel(current);
     const activityMeta = [
       current.end ? `${current.time || "--:--"}-${current.end}` : current.time,
-      scheduleLifecycleLabel(current.lifecycle),
+      currentLifecycleText,
       current.mood,
     ].filter(Boolean).join(" · ");
     const states = [
@@ -11654,8 +11655,8 @@ function renderDashboardLifeDesk(overview = {}) {
     ];
     currentRoot.innerHTML = `
       <div class="life-current-activity">
-        <small>${escapeHtml(activityMeta || "当前日程")}</small>
-        <b>${escapeHtml(dashboardLifeText(current.activity, "暂无当前日程"))}</b>
+        <small>${escapeHtml(activityMeta || "当前计划时段")}</small>
+        <b>${escapeHtml(dashboardLifeText(current.activity, "暂无当前计划时段"))}</b>
         <span>${escapeHtml(dashboardLifeText(current.message_seed || daily.note, "暂无状态补充"))}</span>
       </div>
       <div class="life-energy-track" role="meter" aria-label="当前体力" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(energy)}"><i style="width:${energy}%"></i></div>
@@ -11678,8 +11679,8 @@ function renderDashboardLifeDesk(overview = {}) {
       return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 ? hour * 60 + minute : null;
     };
     const segmentIsCurrent = (segment) => {
-      const lifecycle = String(segment?.lifecycle || "").toLowerCase();
-      return lifecycle === "active"
+      const clockStatus = String(segment?.clock_status || segment?.lifecycle || "").toLowerCase();
+      return clockStatus === "active"
         || Boolean(current.time && String(segment?.window || "").startsWith(String(current.time)));
     };
     const currentSegmentIndex = segments.findIndex(segmentIsCurrent);
@@ -11724,6 +11725,7 @@ function renderDashboardLifeDesk(overview = {}) {
       const segment = entry.segment;
       const lifecycle = String(segment.lifecycle || "planned").toLowerCase();
       const isCurrent = segmentIsCurrent(segment);
+      const segmentLifecycleText = scheduleTimelineSegmentLabel(segment);
       const summary = segment.summary || segment.activity || "这一段尚未细化";
       const windowText = String(segment.window || "未定");
       const windowMatch = windowText.match(/^(\d{1,2}:\d{2})\s*[-~至]\s*(\d{1,2}:\d{2})$/);
@@ -11738,8 +11740,8 @@ function renderDashboardLifeDesk(overview = {}) {
           <div class="life-timeline-content">
             <b>${escapeHtml(summary)}</b>
             <span>${isCurrent
-              ? '<em class="life-current-marker">当前日程</em>'
-              : `<em class="life-schedule-status is-${escapeHtml(lifecycle)}">${escapeHtml(scheduleLifecycleLabel(lifecycle) || "计划中")}</em>`}</span>
+              ? `<em class="life-current-marker">${escapeHtml(segmentLifecycleText || "进行中")}</em>`
+              : `<em class="life-schedule-status is-${escapeHtml(lifecycle)}">${escapeHtml(segmentLifecycleText || "计划中")}</em>`}</span>
           </div>
         </li>
       `;
@@ -20748,8 +20750,8 @@ function renderLifeHero(daily, life) {
   $("#lifeLocation").textContent = normalizeLocationText(daily.location);
   $("#lifeWeather").textContent = daily.weather || "暂无天气";
   const current = life.current_plan || {};
-  $("#lifeCurrentActivity").textContent = current.activity || "暂无当前日程";
-  $("#lifeCurrentSeed").textContent = [current.end ? `${current.time}-${current.end}` : current.time, scheduleLifecycleLabel(current.lifecycle), current.mood, current.message_seed].filter(Boolean).join(" · ") || "暂无细化";
+  $("#lifeCurrentActivity").textContent = current.activity || "暂无当前计划时段";
+  $("#lifeCurrentSeed").textContent = [current.end ? `${current.time}-${current.end}` : current.time, scheduleTimelineSegmentLabel(current), current.mood, current.message_seed].filter(Boolean).join(" · ") || "暂无细化";
 }
 
 function roleplayEnergyLabel(value) {
@@ -23307,7 +23309,7 @@ function renderDailyTimeline() {
     const presence = segment.presence_status || {};
     const statusText = detailSegmentStatusLabel(segment);
     const presenceText = presenceLabel(presence);
-    const lifecycleText = scheduleLifecycleLabel(segment.lifecycle);
+    const lifecycleText = scheduleTimelineSegmentLabel(segment);
     const metaText = [...new Set([lifecycleText, statusText, presenceText].filter(Boolean))].join(" · ");
     const errorText = String(segment.regeneration_error || segment.error || "").trim();
     const quality = segment.quality || {};
@@ -23336,7 +23338,7 @@ function renderDailyTimeline() {
             `).join("") : `<span>暂无状态变量</span>`}
           </div>
           <ul>
-            ${events.length ? events.map((item) => `<li><span>${escapeHtml(scheduleLifecycleLabel(item.lifecycle))}</span>${escapeHtml(item.window ? `${item.window} · ${item.text}` : item.text)}</li>`).join("") : `<li>暂无细化事件</li>`}
+            ${events.length ? events.map((item) => `<li><span>${escapeHtml(scheduleStoryLifecycleLabel(item))}</span>${escapeHtml(item.window ? `${item.window} · ${item.text}` : item.text)}</li>`).join("") : `<li>暂无细化事件</li>`}
           </ul>
         </div>
       </section>
@@ -23355,9 +23357,29 @@ function scheduleLifecycleLabel(value) {
     planned: "计划中",
     active: "进行中",
     completed: "已完成",
+    partially_completed: "部分完成",
     changed: "已变更",
     cancelled: "已取消",
+    deferred: "已顺延",
+    unknown: "未核实",
   }[String(value || "").toLowerCase()] || "";
+}
+
+function scheduleTimelineSegmentLabel(segment) {
+  const evidence = String(segment?.evidence_lifecycle || "").toLowerCase();
+  const clockStatus = String(segment?.clock_status || "").toLowerCase();
+  const legacy = String(segment?.lifecycle || "").toLowerCase();
+  if (!evidence && !clockStatus && !legacy) return "";
+  if (["active", "completed", "partially_completed", "changed", "cancelled", "deferred"].includes(evidence)) {
+    return scheduleLifecycleLabel(evidence);
+  }
+  return scheduleLifecycleLabel(clockStatus || (!evidence ? legacy : "") || evidence || legacy);
+}
+
+function scheduleStoryLifecycleLabel(item) {
+  const lifecycle = String(item?.lifecycle || "").toLowerCase();
+  if (lifecycle !== "planned") return scheduleLifecycleLabel(lifecycle);
+  return scheduleLifecycleLabel(item?.clock_status || lifecycle) || "计划中";
 }
 
 function scheduleBasisLabel(value) {

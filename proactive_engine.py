@@ -612,6 +612,24 @@ class ProactiveEngineMixin:
         user["proactive_impulses"] = kept[-16:]
         return user["proactive_impulses"]
 
+    def _user_activity_question_targets_someone_else(self, text: str) -> bool:
+        raw = _single_line(text, 180)
+        if not raw:
+            return False
+        compact = re.sub(r"[\s,，。.!！?？~～…·、；;：:（）()【】\[\]\"'“”‘’]+", "", raw)
+        if not compact:
+            return False
+        # “你觉得春希现在在干什么”虽然以“你”开头，询问对象仍是春希。
+        # 这类认知/转述问句不能触发 Bot 自身状态、近期活动或状态记忆注入。
+        return bool(
+            re.search(
+                r"(?:你|bot|机器人)(?:觉得|猜|知道|认为|看看|看|问).{0,24}"
+                r"(?:干嘛|干啥|干什么|做什么|做啥|忙什么|忙啥)(?:呢|呀|啊|吗|嘛|没)?$",
+                compact,
+                flags=re.I,
+            )
+        )
+
     def _user_asks_bot_current_state_or_activity(self, text: str) -> bool:
         raw = _single_line(text, 120)
         if not raw:
@@ -621,24 +639,30 @@ class ProactiveEngineMixin:
         compact = re.sub(r"[\s,，。.!！?？~～…·、；;：:（）()【】\[\]\"'“”‘’]+", "", raw)
         if not compact or len(compact) > 80:
             return False
-        if re.search(r"(?:我|俺|咱|我们)(?:现在|这会儿|刚刚|刚才)?在?(?:干嘛|干啥|做什么|做啥|忙什么|忙啥)", compact):
+        if re.search(r"(?:我|俺|咱|我们)(?:现在|这会儿|刚刚|刚才)?在?(?:干嘛|干啥|干什么|做什么|做啥|忙什么|忙啥)", compact):
             return False
         tech_status_words = ("插件", "系统", "接口", "API", "api", "配置", "页面", "排障", "日志", "服务", "连接", "模型", "任务", "进程")
         if "状态" in compact and any(word in raw for word in tech_status_words):
             return False
         direct_patterns = (
-            r"(?:你|bot|机器人)?(?:现在|这会儿|这时候|刚才|今天)?在?(?:干嘛|干啥|做什么|做啥|忙什么|忙啥)(?:呢|呀|啊|吗|嘛|没)?$",
+            r"(?:你|bot|机器人)?(?:现在|这会儿|这时候|刚才|今天)?在?(?:干嘛|干啥|干什么|做什么|做啥|忙什么|忙啥)(?:呢|呀|啊|吗|嘛|没)?$",
             r"(?:你|bot|机器人)?(?:现在|这会儿|今天)?在(?:上课|上班|睡觉|休息|吃饭|忙|摸鱼|干活|写作业|看书)(?:吗|嘛|没|呢)?$",
             r"(?:你|bot|机器人)(?:现在|这会儿|今天)?(?:状态|情况)?(?:怎么样|咋样|如何|还好吗|还好不|累不累|困不困|忙不忙|饿不饿)$",
             r"(?:你|bot|机器人)(?:现在|这会儿)?(?:什么状态|啥状态)$",
         )
         if any(re.fullmatch(pattern, compact, flags=re.I) for pattern in direct_patterns):
             return True
+        # Do not treat a question addressed to the Bot *about somebody else*
+        # as a request for the Bot's own state.  The permissive colloquial
+        # fallback below intentionally accepts leading observations, so
+        # cognition/reporting verbs need an explicit boundary first.
+        if self._user_activity_question_targets_someone_else(compact):
+            return False
         # 私聊里常见的口语问法会带承接词或观察性前缀，例如
         # “那你现在在干啥呢”“好像你在忙的样子，忙啥呢”。
         return bool(
             re.search(
-                r"(?:你|bot|机器人).{0,16}(?:在)?(?:干嘛|干啥|做什么|做啥|忙什么|忙啥)(?:呢|呀|啊|吗|嘛|没)?$",
+                r"(?:你|bot|机器人).{0,16}(?:在)?(?:干嘛|干啥|干什么|做什么|做啥|忙什么|忙啥)(?:呢|呀|啊|吗|嘛|没)?$",
                 compact,
                 flags=re.I,
             )

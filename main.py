@@ -14181,7 +14181,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             prompt_user = dict(current_user)
             prompt_user["_game_current_umo"] = current_umo
 
-        current_state_memory_needed = bool(
+        third_party_activity_question = self._user_activity_question_targets_someone_else(inbound_text)
+        current_state_memory_needed = not third_party_activity_question and bool(
             self._user_asks_bot_current_state_or_activity(inbound_text)
             or re.search(
                 r"(你|星缘|bot|机器人).{0,8}(在干嘛|在做什么|做什么|穿什么|穿的?什么|衣服|衣服颜色|什么颜色|吃了什么|吃的?什么|几点吃|什么时候吃|吃饭|进食|在哪里|在哪儿|当前位置|今天状态|现在状态)",
@@ -14897,6 +14898,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         weather_query_detector = getattr(self, "_user_asks_current_weather", None)
         if callable(weather_query_detector) and weather_query_detector(cleaned):
             return False
+        current_activity_detector = getattr(
+            self,
+            "_user_asks_bot_current_state_or_activity",
+            None,
+        )
+        if callable(current_activity_detector) and current_activity_detector(cleaned):
+            return False
         outfit_change_detector = getattr(self, "_detect_dialogue_outfit_change", None)
         if callable(outfit_change_detector):
             try:
@@ -14907,7 +14915,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         heavy_tokens = (
             "图片", "看图", "照片", "语音", "引用", "转发", "聊天记录",
             "帮我", "怎么", "为什么", "是什么", "怎么办", "分析", "解释", "总结",
-            "日程", "状态", "近况", "在干嘛", "做什么", "忙什么",
+            "日程", "状态", "近况", "在干嘛", "干什么", "做什么", "忙什么",
             "资料柜", "夹层", "抽屉", "阅读", "读过", "看过", "素材", "资料", "漫画", "藏本",
             "创作", "作品", "写作", "写书", "写过书", "小说", "随笔", "散文", "剧本", "手稿", "草稿", "出版",
             "新闻", "说说", "空间", "发给", "转告", "@",
@@ -15002,15 +15010,73 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             return limited
         return [limited[0], flatten_component_chunks(limited[1:])]
 
+    def _private_passive_schedule_material(
+        self,
+        current_user: dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
+        """Return evidence-backed and clock-only schedule material separately."""
+
+        plan = self.data.get("daily_plan", {})
+        if not isinstance(plan, dict):
+            return "", ""
+
+        def format_item(item: Any, *, clock_projection: bool = False) -> str:
+            if not isinstance(item, dict):
+                return ""
+            if clock_projection:
+                start = _single_line(item.get("time"), 12)
+                end = _single_line(item.get("end"), 12)
+                window = f"{start}-{end}" if start and end else start
+                activity = _single_line(item.get("activity") or item.get("title"), 120)
+                mood = _single_line(item.get("mood"), 32)
+                text = "｜".join(
+                    part
+                    for part in (
+                        window,
+                        activity,
+                        f"情绪：{mood}" if mood else "",
+                    )
+                    if part
+                )
+            else:
+                text = self._format_plan_item_for_prompt(item)
+            return self._sanitize_schedule_context_for_private_user(
+                text,
+                current_user or {},
+            )
+
+        current_item = self._get_current_plan_item(plan)
+        verified_schedule = format_item(current_item)
+        clock_item = None
+        clock_getter = getattr(self, "_get_clock_plan_item_for_display", None)
+        if callable(clock_getter):
+            try:
+                clock_item = clock_getter(plan)
+            except Exception:
+                clock_item = None
+        if isinstance(clock_item, dict):
+            lifecycle = self._normalize_schedule_lifecycle_status(
+                clock_item.get("lifecycle_status") or clock_item.get("status")
+            )
+            if lifecycle not in {"", "planned", "active"}:
+                clock_item = None
+        return verified_schedule, format_item(clock_item, clock_projection=True)
+
     def _private_passive_state_fingerprint(self, state: dict[str, Any], current_user: dict[str, Any] | None = None) -> dict[str, Any]:
         now = self._environment_now()
         time_label, _ = self._current_time_period_label(now)
         energy = _safe_int(state.get("energy"), 70, 0, 100)
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
-        activity = _single_line(current_item.get("activity"), 50) if isinstance(current_item, dict) else ""
+        verified_schedule, planned_schedule = self._private_passive_schedule_material(current_user)
         detail = self._current_detail_segment_for_update()
         detail_key = _single_line(detail.get("key"), 80) if isinstance(detail, dict) else ""
-        detail_summary = _single_line(detail.get("summary"), 80) if isinstance(detail, dict) else ""
+        detail_snapshot_getter = getattr(self, "_current_detail_snapshot_for_update", None)
+        detail_snapshot = detail_snapshot_getter() if callable(detail_snapshot_getter) else None
+        detail_summary = _single_line(detail_snapshot.get("summary"), 80) if isinstance(detail_snapshot, dict) else ""
+        if detail_summary:
+            detail_summary = self._sanitize_schedule_context_for_private_user(
+                detail_summary,
+                current_user or {},
+            )
         friend_user = self._private_user_role(current_user or {}) == "friend"
         weather = "" if friend_user else _single_line(state.get("weather"), 60)
         conditions: list[str] = []
@@ -15028,8 +15094,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "time_label": time_label,
             "energy_bracket": (energy // 10) * 10,
             "mood": _single_line(state.get("mood_bias"), 18) or "平稳",
-            "activity": self._sanitize_schedule_context_for_private_user(activity, current_user or {}) if activity else "",
-            "detail": detail_key or detail_summary,
+            "activity": _single_line(verified_schedule, 100),
+            "planned_activity": _single_line(planned_schedule, 100),
+            "detail": f"{detail_key}|{detail_summary}" if detail_summary else detail_key,
             "weather": weather if weather and weather != "暂无天气信息" else "",
             "conditions": conditions[:2],
             "body_cycle": _single_line(state.get("body_cycle"), 120) if cycle_profile else "",
@@ -15051,20 +15118,30 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         pieces = [f"时间节奏：{time_label}", f"精神约 {energy}/100", f"情绪底色偏{mood}"]
         realtime_formatter = getattr(self, "_format_external_realtime_context_for_prompt", None)
         realtime_context = realtime_formatter(current_user, public=False) if callable(realtime_formatter) else ""
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
-        schedule = self._sanitize_schedule_context_for_private_user(
-            self._format_plan_item_for_prompt(current_item),
-            current_user or {},
-        )
-        if schedule and not realtime_context:
-            pieces.append(f"拟人化日程素材：{schedule}")
-        elif schedule:
-            pieces.append(f"原定日程素材（已被实时共同活动覆盖）：{schedule}")
-        detail = self._current_detail_segment_for_update()
-        if isinstance(detail, dict):
-            summary = _single_line(detail.get("summary"), 90)
+        verified_schedule, planned_schedule = self._private_passive_schedule_material(current_user)
+        if verified_schedule and not realtime_context:
+            pieces.append(f"拟人化日程素材：{verified_schedule}")
+        elif verified_schedule:
+            pieces.append(f"原定日程素材（已被实时共同活动覆盖）：{verified_schedule}")
+        elif planned_schedule and not realtime_context:
+            pieces.append(f"当前计划时段（未确认执行）：{planned_schedule}")
+        elif planned_schedule:
+            pieces.append(f"原定计划时段（未确认执行，已被实时共同活动覆盖）：{planned_schedule}")
+        detail_snapshot_getter = getattr(self, "_current_detail_snapshot_for_update", None)
+        detail_snapshot = detail_snapshot_getter() if callable(detail_snapshot_getter) else None
+        if isinstance(detail_snapshot, dict):
+            summary = _single_line(detail_snapshot.get("summary"), 90)
             if summary:
-                pieces.append(f"模拟氛围：{summary}")
+                summary = self._sanitize_schedule_context_for_private_user(
+                    summary,
+                    current_user or {},
+                )
+            if summary and not realtime_context:
+                pieces.append(f"模拟氛围（计划细化，未确认执行）：{summary}")
+            elif summary:
+                pieces.append(
+                    f"原定模拟氛围（计划细化，未确认执行，已被实时共同活动覆盖）：{summary}"
+                )
         weather = _single_line(state.get("weather"), 60)
         if self._private_user_role(current_user or {}) == "friend":
             weather = ""
@@ -15092,7 +15169,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         guidance = (
             "用户正在直接问 Bot 此刻在做什么或当前状态：先回答实时共同活动（若有），它高于固定日程、旧对话、旧记忆和临场发挥。"
             "固定日程只是原计划，若与实时共同活动冲突，必须说原计划被打断/覆盖，禁止继续声称仍在旧地点或旧动作中。"
-            "若没有实时共同活动，先正面回答拟人化日程素材中的当前活动。"
+            "若没有实时共同活动且有拟人化日程素材，先正面回答拟人化日程素材中的当前活动。"
+            "若只有‘当前计划时段（未确认执行）’，必须用‘按计划/原本安排’口径回答，不得声称已经在执行。"
             "不得另编素材未提供的动作、地点、饮食或娱乐活动。"
             "如果素材本身较笼统，就按原有粒度自然转述，例如只说正在专心处理手头的事；不要为了显得具体而补造细节。"
             if direct
@@ -15330,8 +15408,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         fingerprint = self._private_passive_state_fingerprint(state, current_user)
         previous = cache.get(session_key) if isinstance(cache.get(session_key), dict) else {}
         changed = previous.get("fingerprint") != fingerprint
-        direct_state_request = self._user_asks_bot_current_state_or_activity(inbound_text) or self._user_asks_recent_bot_activity(inbound_text) or bool(
-            re.search(r"(状态|日程|精力|心情|情绪|在干嘛|做什么|忙什么|近况)", str(inbound_text or ""))
+        third_party_activity_question = self._user_activity_question_targets_someone_else(inbound_text)
+        direct_state_request = not third_party_activity_question and (
+            self._user_asks_bot_current_state_or_activity(inbound_text)
+            or self._user_asks_recent_bot_activity(inbound_text)
+            or bool(
+                re.search(r"(状态|日程|精力|心情|情绪|在干嘛|做什么|忙什么|近况)", str(inbound_text or ""))
+            )
         )
         now_ts = _now_ts()
         cache[session_key] = {

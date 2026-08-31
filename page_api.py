@@ -29403,6 +29403,8 @@ class PrivateCompanionPageApi(
         story = data.get("daily_story_plan") if isinstance(data.get("daily_story_plan"), dict) else {}
         current_item = {}
         current_lifecycle = ""
+        current_evidence_lifecycle = ""
+        current_clock_status = ""
         try:
             current_getter = getattr(self.plugin, "_agenda_current_context_item", None)
             picked = (
@@ -29417,14 +29419,25 @@ class PrivateCompanionPageApi(
             items = plan.get("items") if isinstance(plan.get("items"), list) else []
             current_index = next((index for index, item in enumerate(items) if item is picked), -1)
             if current_item:
+                current_evidence_lifecycle = self.plugin._plan_item_runtime_status(
+                    plan,
+                    current_item,
+                    current_index,
+                )
                 display_status = getattr(self.plugin, "_plan_item_display_status", None)
-                current_lifecycle = (
+                current_clock_status = (
                     display_status(plan, current_item, current_index)
                     if callable(display_status)
-                    else self.plugin._plan_item_runtime_status(plan, current_item, current_index)
+                    else current_evidence_lifecycle
                 )
+                # Preserve the legacy display-oriented field for older page
+                # consumers while exposing the evidence/clock split to new UI.
+                current_lifecycle = current_clock_status
         except Exception:
             current_item = {}
+            current_lifecycle = ""
+            current_evidence_lifecycle = ""
+            current_clock_status = ""
 
         return {
             "dream": {
@@ -29460,6 +29473,8 @@ class PrivateCompanionPageApi(
                 "time": self._single_line(current_item.get("time"), 12),
                 "end": self._single_line(current_item.get("end"), 12),
                 "lifecycle": current_lifecycle,
+                "evidence_lifecycle": current_evidence_lifecycle,
+                "clock_status": current_clock_status,
                 "activity": self._single_line(current_item.get("activity"), 600),
                 "mood": self._single_line(current_item.get("mood"), 40),
                 "message_seed": self._single_line(current_item.get("message_seed"), 500),
@@ -29493,8 +29508,13 @@ class PrivateCompanionPageApi(
             segment = self._segment_from_key(str(key), plan, snapshot)
             seen_segment_keys.add(str(key))
             segment_item = segment.get("item") if isinstance(segment.get("item"), dict) else {}
+            evidence_lifecycle = self.plugin._plan_item_runtime_status(
+                plan,
+                segment_item,
+                self._int(segment.get("index"), -1, -1),
+            ) if segment_item else "planned"
             display_status = getattr(self.plugin, "_plan_item_display_status", None)
-            lifecycle = (
+            clock_status = (
                 display_status(plan, segment_item, self._int(segment.get("index"), -1, -1))
                 if segment_item and callable(display_status)
                 else self.plugin._plan_item_runtime_status(
@@ -29509,7 +29529,12 @@ class PrivateCompanionPageApi(
                     "window": segment.get("window", str(key)),
                     "start": segment.get("start", 99999),
                     "end": segment.get("end", 99999),
-                    "lifecycle": lifecycle,
+                    # Keep lifecycle as the legacy display field for API
+                    # compatibility; new clients should use the explicit
+                    # evidence/clock split below.
+                    "lifecycle": clock_status,
+                    "evidence_lifecycle": evidence_lifecycle,
+                    "clock_status": clock_status,
                     "activity": self._single_line(segment_item.get("activity"), 180),
                     "basis": self.plugin._normalize_schedule_basis(segment_item.get("basis"), default=["coarse_plan"]),
                     "confidence": self._float(segment_item.get("confidence"), 0.72, 0.0, 1.0),
@@ -29525,8 +29550,20 @@ class PrivateCompanionPageApi(
                     "state_variables": self._limited_state_variables(snapshot.get("state_variables")),
                     "presence_status": snapshot.get("presence_status") if isinstance(snapshot.get("presence_status"), dict) else {},
                     "interaction_updates": self._limited_interaction_updates(snapshot.get("interaction_updates")),
-                    "today_events": self._timeline_story_items(snapshot.get("today_events"), 5, str(plan.get("date") or "")),
-                    "proactive_events": self._timeline_story_items(snapshot.get("proactive_events"), 4, str(plan.get("date") or "")),
+                    "today_events": self._timeline_story_items(
+                        snapshot.get("today_events"),
+                        5,
+                        str(plan.get("date") or ""),
+                        parent_start=self._int(segment.get("start"), -1, -1),
+                        parent_end=self._int(segment.get("end"), -1, -1),
+                    ),
+                    "proactive_events": self._timeline_story_items(
+                        snapshot.get("proactive_events"),
+                        4,
+                        str(plan.get("date") or ""),
+                        parent_start=self._int(segment.get("start"), -1, -1),
+                        parent_end=self._int(segment.get("end"), -1, -1),
+                    ),
                 }
             )
         for index, item in enumerate(plan_items):
@@ -29546,17 +29583,21 @@ class PrivateCompanionPageApi(
                     if next_start is not None:
                         break
             end = self.plugin._plan_item_end_minutes(start, item, next_start=next_start)
+            evidence_lifecycle = self.plugin._plan_item_runtime_status(plan, item, index)
+            clock_status = (
+                self.plugin._plan_item_display_status(plan, item, index)
+                if callable(getattr(self.plugin, "_plan_item_display_status", None))
+                else evidence_lifecycle
+            )
             segments.append(
                 {
                     "key": key,
                     "window": f"{self.plugin._minutes_to_hhmm(start)}-{self.plugin._minutes_to_hhmm(end)}",
                     "start": start,
                     "end": end,
-                    "lifecycle": (
-                        self.plugin._plan_item_display_status(plan, item, index)
-                        if callable(getattr(self.plugin, "_plan_item_display_status", None))
-                        else self.plugin._plan_item_runtime_status(plan, item, index)
-                    ),
+                    "lifecycle": clock_status,
+                    "evidence_lifecycle": evidence_lifecycle,
+                    "clock_status": clock_status,
                     "activity": self._single_line(item.get("activity"), 180),
                     "basis": self.plugin._normalize_schedule_basis(item.get("basis"), default=["coarse_plan"]),
                     "confidence": self._float(item.get("confidence"), 0.72, 0.0, 1.0),
@@ -30207,9 +30248,37 @@ class PrivateCompanionPageApi(
             )
         return items
 
-    def _timeline_story_items(self, value: Any, limit: int, plan_date: str) -> list[dict[str, Any]]:
-        items = self._limited_story_items(value, limit)
+    def _timeline_story_items(
+        self,
+        value: Any,
+        limit: int,
+        plan_date: str,
+        *,
+        parent_start: int | None = None,
+        parent_end: int | None = None,
+    ) -> list[dict[str, Any]]:
+        items = self._limited_story_items(
+            value,
+            limit,
+            parent_start=parent_start,
+            parent_end=parent_end,
+        )
         for item in items:
+            start, end = self.plugin._parse_window_minutes(str(item.get("window") or ""))
+            if start is not None and end is not None:
+                duration = end - start
+                if duration <= 0:
+                    duration += 24 * 60
+                axis_start = self._story_item_axis_start(
+                    start,
+                    parent_start=parent_start,
+                    parent_end=parent_end,
+                )
+                item["clock_status"] = self.plugin._schedule_window_runtime_status(
+                    axis_start,
+                    axis_start + duration,
+                    plan_date=plan_date,
+                )
             # Story/detail entries are projections.  Their clock window only
             # describes when a generated scene could occur; it is not an
             # execution observation.  Never turn them into ``active`` or
@@ -30237,12 +30306,48 @@ class PrivateCompanionPageApi(
         return items
 
     @staticmethod
-    def _limited_story_items(value: Any, limit: int) -> list[dict[str, Any]]:
+    def _story_item_axis_start(
+        start: int,
+        *,
+        parent_start: int | None = None,
+        parent_end: int | None = None,
+    ) -> int:
+        if start < 0 or start >= 24 * 60:
+            return start
+        axis_start = start
+        if parent_start is None or parent_start < 0:
+            return axis_start
+        parent_day_start = (parent_start // (24 * 60)) * (24 * 60)
+        axis_start += parent_day_start
+        if (
+            parent_end is not None
+            and parent_end > parent_day_start + 24 * 60
+            and axis_start < parent_start
+        ):
+            axis_start += 24 * 60
+        return axis_start
+
+    @staticmethod
+    def _limited_story_items(
+        value: Any,
+        limit: int,
+        *,
+        parent_start: int | None = None,
+        parent_end: int | None = None,
+    ) -> list[dict[str, Any]]:
         if not isinstance(value, list):
             return []
-        items: list[dict[str, str]] = []
+        items: list[dict[str, Any]] = []
         indexed_items = [
-            (PrivateCompanionPageApi._story_item_start_minutes(item), index, item)
+            (
+                PrivateCompanionPageApi._story_item_axis_start(
+                    PrivateCompanionPageApi._story_item_start_minutes(item),
+                    parent_start=parent_start,
+                    parent_end=parent_end,
+                ),
+                index,
+                item,
+            )
             for index, item in enumerate(value)
             if isinstance(item, dict)
         ]
@@ -30250,6 +30355,15 @@ class PrivateCompanionPageApi(
         for _, _, item in indexed_items[:limit]:
             if not isinstance(item, dict):
                 continue
+            evidence_kind = PrivateCompanionPageApi._single_line(item.get("evidence_kind"), 48).lower()
+            if evidence_kind not in {"interaction", "tool_action", "external_record"}:
+                evidence_kind = ""
+            fact_eligibility = PrivateCompanionPageApi._single_line(item.get("fact_eligibility"), 48).lower()
+            if fact_eligibility not in {"current_observed", "history_observed"}:
+                fact_eligibility = ""
+            status = PrivateCompanionPageApi._single_line(item.get("status"), 32).lower()
+            if status not in {"planned", "unknown", "active", "completed", "partially_completed"}:
+                status = ""
             items.append(
                 {
                     "window": PrivateCompanionPageApi._single_line(item.get("window") or item.get("time"), 24),
@@ -30265,6 +30379,9 @@ class PrivateCompanionPageApi(
                     "action": PrivateCompanionPageApi._single_line(item.get("action"), 24),
                     "reason": PrivateCompanionPageApi._single_line(item.get("reason"), 32),
                     "lifecycle_status": PrivateCompanionPageApi._single_line(item.get("lifecycle_status"), 20),
+                    "evidence_kind": evidence_kind,
+                    "fact_eligibility": fact_eligibility,
+                    "status": status,
                     "basis": [
                         PrivateCompanionPageApi._single_line(value, 24)
                         for value in (item.get("basis") or [])[:3]
