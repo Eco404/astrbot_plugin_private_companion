@@ -39463,6 +39463,9 @@ document.addEventListener("click", async (event) => {
       showToast(`链路测试失败：${error.message}`, "error");
     } finally {
       setActionBusy(troubleshootingTest, false);
+      document.querySelectorAll("[data-troubleshooting-test]").forEach((button) => {
+        if (button.dataset.troubleshootingTest === testType) setActionBusy(button, false);
+      });
     }
     return;
   }

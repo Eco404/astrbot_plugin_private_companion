@@ -41,6 +41,15 @@ def test_image_workspace_is_served_only_through_companion_page_api() -> None:
     assert "async def get_image_extension_status" in source
 
 
+def test_troubleshooting_redraw_releases_current_test_button() -> None:
+    for panel_root in PANEL_ROOTS:
+        script = (panel_root / "app.js").read_text(encoding="utf-8")
+
+        assert 'document.querySelectorAll("[data-troubleshooting-test]")' in script
+        assert "button.dataset.troubleshootingTest === testType" in script
+        assert "setActionBusy(button, false)" in script
+
+
 def test_image_workspace_api_proxies_extension_status() -> None:
     expected = {
         "installed": True,
