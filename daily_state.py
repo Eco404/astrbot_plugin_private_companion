@@ -10377,6 +10377,27 @@ class DailyStateMixin(DailyStateTickMixin):
                 )
                 phase = _single_line(canonical.get("temporal_phase"), 16).lower()
                 if phase == "past":
+                    # ``normalize_plan_item`` evaluates a HH:MM value on the
+                    # calendar date alone.  A plan that deliberately rolls
+                    # past midnight therefore looks stale even while its
+                    # normalized schedule axis is still current/upcoming.
+                    # Preserve the evidence status as ``planned`` in that
+                    # case; the separate display status may still project the
+                    # wall-clock phase as active.
+                    items = plan.get("items") if isinstance(plan, dict) else None
+                    starts = self._normalized_plan_item_starts(items)
+                    start = starts[index] if isinstance(items, list) and 0 <= index < len(starts) else None
+                    if start is not None:
+                        next_start = next((value for value in starts[index + 1 :] if value is not None), None)
+                        end = self._plan_item_end_minutes(start, item, next_start=next_start)
+                        clock_phase = self._schedule_window_runtime_status(
+                            start,
+                            end,
+                            plan_date=plan_date,
+                            explicit_status=item.get("lifecycle_status"),
+                        )
+                        if clock_phase in {"planned", "active"}:
+                            return "planned"
                     return "unknown"
                 return "planned"
             except Exception:
@@ -11404,6 +11425,48 @@ class DailyStateMixin(DailyStateTickMixin):
             if start - lead <= now_minutes < end:
                 return segment
         return None
+
+    def _current_detail_snapshot_for_update(self) -> dict[str, Any] | None:
+        """Return the finished detail snapshot for the clock-current plan segment."""
+
+        segment = self._current_detail_segment_for_update()
+        if not isinstance(segment, dict):
+            return None
+        plan_date = _single_line(segment.get("plan_date"), 16)
+        now_minutes = self._effective_plan_now_minutes(plan_date)
+        if now_minutes is None:
+            return None
+        start = _safe_int(segment.get("start"), -1, minimum=-1)
+        end = _safe_int(segment.get("end"), -1, minimum=-1)
+        if start < 0 or end < 0:
+            return None
+        if end <= start:
+            end += 24 * 60
+        # Detail generation may select the next segment during its lead
+        # window. Passive state material must remain tied to the actual clock
+        # window so it cannot describe the next scene early.
+        if not (start <= now_minutes < end):
+            return None
+        segment_item = segment.get("item")
+        if isinstance(segment_item, dict):
+            lifecycle = self._normalize_schedule_lifecycle_status(
+                segment_item.get("lifecycle_status") or segment_item.get("status")
+            )
+            # A finished detail snapshot still describes its parent plan. If
+            # that plan was changed, deferred, cancelled, or already closed,
+            # the old atmosphere must not survive as current prompt material.
+            if lifecycle not in {"", "planned", "active"}:
+                return None
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if not isinstance(enhanced, dict):
+            return None
+        snapshot = enhanced.get(str(segment.get("key") or ""))
+        if not isinstance(snapshot, dict):
+            return None
+        status = _single_line(snapshot.get("status"), 24).lower()
+        if status and status != "done":
+            return None
+        return snapshot
 
     def _current_detail_state_variables(self) -> list[dict[str, str]]:
         segment = self._current_detail_segment_for_update()
@@ -13061,13 +13124,16 @@ class DailyStateMixin(DailyStateTickMixin):
         normalized = _single_line(text, 180)
         if not normalized:
             return False
+        third_party_checker = getattr(self, "_user_activity_question_targets_someone_else", None)
+        if callable(third_party_checker) and third_party_checker(normalized):
+            return False
         direct_checker = getattr(self, "_user_asks_bot_current_state_or_activity", None)
         if callable(direct_checker) and direct_checker(normalized):
             return True
         return bool(
             re.search(
-                r"(最近|刚才|现在|今天|这两天|这会儿).{0,12}(在)?(干嘛|干啥|做什么|做啥|忙什么|忙啥|弄什么|写什么|写了什么|创作什么|创作了什么|玩什么|折腾什么)|"
-                r"你.{0,8}(在)?(干嘛|干啥|做什么|做啥|忙什么|忙啥|写什么|写了什么|弄什么|创作什么|创作了什么)",
+                r"(最近|刚才|现在|今天|这两天|这会儿).{0,12}(在)?(干嘛|干啥|干什么|做什么|做啥|忙什么|忙啥|弄什么|写什么|写了什么|创作什么|创作了什么|玩什么|折腾什么)|"
+                r"你.{0,8}(在)?(干嘛|干啥|干什么|做什么|做啥|忙什么|忙啥|写什么|写了什么|弄什么|创作什么|创作了什么)",
                 normalized,
             )
             or re.search(

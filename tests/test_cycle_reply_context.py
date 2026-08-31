@@ -35,7 +35,9 @@ def _state_harness() -> PrivateCompanionPlugin:
     plugin._environment_now = lambda: datetime(2026, 7, 31, 20, 0, 0)
     plugin._current_time_period_label = lambda _now: ("晚上", "evening")
     plugin._get_current_plan_item = lambda _plan: {}
+    plugin._get_clock_plan_item_for_display = lambda _plan: None
     plugin._current_detail_segment_for_update = lambda: {}
+    plugin._current_detail_snapshot_for_update = lambda: None
     plugin._private_user_role = lambda *_args, **_kwargs: "owner"
     plugin._sanitize_schedule_context_for_private_user = lambda value, _user: value
     plugin._format_plan_item_for_prompt = lambda _item: ""
@@ -325,6 +327,9 @@ class CycleReplyContextTests(unittest.IsolatedAsyncioTestCase):
         }
         plugin._current_detail_segment_for_update = lambda: {
             "key": "future-detail",
+        }
+        plugin._current_detail_snapshot_for_update = lambda: {
+            "status": "done",
             "summary": "稍后去教室参加完整课程安排",
         }
         state = {"energy": 42, "mood_bias": "疲惫", "weather": "暴雨"}
@@ -535,7 +540,11 @@ class CycleReplyContextTests(unittest.IsolatedAsyncioTestCase):
         )
         state = {"energy": 79, "mood_bias": "专注"}
 
-        for text in ("那你现在在干啥呢", "好像你在忙的样子，忙啥呢"):
+        for text in (
+            "那你现在在干啥呢",
+            "好像你在忙的样子，忙啥呢",
+            "你现在在干什么？",
+        ):
             with self.subTest(text=text):
                 update = plugin._private_passive_state_update_for_prompt(
                     session=f"default:FriendMessage:{text}",
@@ -550,6 +559,186 @@ class CycleReplyContextTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("先正面回答拟人化日程素材中的当前活动", update[0])
                 self.assertIn("不得另编素材未提供的动作、地点、饮食或娱乐活动", update[0])
                 self.assertIn("不要为了显得具体而补造细节", update[0])
+
+    def test_current_activity_question_does_not_use_lightweight_changed_path(self) -> None:
+        plugin = _state_harness()
+
+        for text in (
+            "你现在在干什么？",
+            "那你现在在干啥呢",
+            "你这会儿忙啥呢",
+            "你今天在做什么呀",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(plugin._user_asks_bot_current_state_or_activity(text))
+                self.assertTrue(plugin._user_asks_recent_bot_activity(text))
+                self.assertFalse(plugin._is_lightweight_private_passive_inbound(text))
+
+    def test_third_person_activity_question_is_not_bot_current_state(self) -> None:
+        plugin = _state_harness()
+
+        for text in (
+            "你觉得春希现在在干什么？",
+            "你猜他在干什么？",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(plugin._user_asks_bot_current_state_or_activity(text))
+                self.assertFalse(plugin._user_asks_recent_bot_activity(text))
+                self.assertFalse(plugin._is_lightweight_private_passive_inbound(text))
+                update = plugin._private_passive_state_update_for_prompt(
+                    session=f"default:FriendMessage:{text}",
+                    state={"energy": 75, "mood_bias": "平稳"},
+                    current_user={},
+                    inbound_text=text,
+                    lightweight=False,
+                )
+                self.assertNotEqual(update[2], "direct")
+
+        self.assertTrue(plugin._user_asks_bot_current_state_or_activity("我猜你现在在干什么？"))
+
+    def test_light_state_uses_clock_plan_and_finished_detail_without_claiming_execution(self) -> None:
+        plugin = _state_harness()
+        plugin._passive_state_session_cache = {}
+        planned_item = {
+            "time": "20:45",
+            "end": "21:30",
+            "activity": "晚餐后回到琴房慢速视奏",
+            "lifecycle_status": "planned",
+            "status": "planned",
+            "evidence_kind": "none",
+            "fact_eligibility": "none",
+        }
+        plugin.data = {
+            "daily_plan": {"date": "2026-07-31", "items": [planned_item]},
+            "detail_enhanced_segments": {
+                "2026-07-31:0:20:45": {
+                    "status": "done",
+                    "summary": "回到琴房只留一盏暖黄落地灯，慢速视奏。",
+                }
+            },
+        }
+        plugin._get_current_plan_item = lambda _plan: None
+        plugin._get_clock_plan_item_for_display = lambda _plan: planned_item
+        plugin._format_plan_item_for_prompt = lambda item: (
+            f"{item['time']}-{item['end']}｜{item['activity']}"
+        )
+        plugin._current_detail_segment_for_update = lambda: {"key": "2026-07-31:0:20:45"}
+        plugin._current_detail_snapshot_for_update = lambda: plugin.data["detail_enhanced_segments"][
+            "2026-07-31:0:20:45"
+        ]
+
+        verified, planned = plugin._private_passive_schedule_material({})
+        update = plugin._private_passive_state_update_for_prompt(
+            session="default:FriendMessage:10001",
+            state={"energy": 75, "mood_bias": "平稳"},
+            current_user={},
+            inbound_text="晚上好",
+            lightweight=True,
+        )
+        direct_update = plugin._private_passive_state_update_for_prompt(
+            session="default:FriendMessage:10002",
+            state={"energy": 75, "mood_bias": "平稳"},
+            current_user={},
+            inbound_text="你现在在干什么？",
+            lightweight=False,
+        )
+
+        self.assertEqual("", verified)
+        self.assertIn("20:45-21:30", planned)
+        self.assertEqual(update[1:], (True, "changed"))
+        self.assertIn("当前计划时段（未确认执行）", update[0])
+        self.assertIn("慢速视奏", update[0])
+        self.assertIn("暖黄落地灯", update[0])
+        self.assertNotIn("拟人化日程素材：（暂无）", update[0])
+        self.assertEqual(direct_update[1:], (True, "direct"))
+        self.assertIn("当前计划时段（未确认执行）", direct_update[0])
+        self.assertIn("必须用‘按计划/原本安排’口径回答", direct_update[0])
+        self.assertIn("慢速视奏", direct_update[0])
+
+    def test_finished_detail_summary_changes_light_state_fingerprint(self) -> None:
+        plugin = _state_harness()
+        plugin._passive_state_session_cache = {}
+        plugin.data = {"daily_plan": {}, "detail_enhanced_segments": {}}
+        plugin._get_current_plan_item = lambda _plan: None
+        plugin._get_clock_plan_item_for_display = lambda _plan: None
+        plugin._current_detail_segment_for_update = lambda: {"key": "2026-07-31:0:20:45"}
+        plugin._current_detail_snapshot_for_update = lambda: plugin.data[
+            "detail_enhanced_segments"
+        ].get("2026-07-31:0:20:45")
+        state = {"energy": 75, "mood_bias": "平稳"}
+
+        first = plugin._private_passive_state_update_for_prompt(
+            session="default:FriendMessage:10001",
+            state=state,
+            current_user={},
+            inbound_text="晚上好",
+            lightweight=True,
+        )
+        plugin.data["detail_enhanced_segments"]["2026-07-31:0:20:45"] = {
+            "status": "done",
+            "summary": "在暖黄灯下慢速视奏。",
+        }
+        second = plugin._private_passive_state_update_for_prompt(
+            session="default:FriendMessage:10001",
+            state=state,
+            current_user={},
+            inbound_text="继续说吧",
+            lightweight=True,
+        )
+
+        self.assertEqual(first[2], "changed")
+        self.assertEqual(second[1:], (True, "changed"))
+        self.assertIn("在暖黄灯下慢速视奏", second[0])
+
+    def test_clock_projection_ignores_deferred_changed_and_completed_rows(self) -> None:
+        plugin = _state_harness()
+        plugin._get_current_plan_item = lambda _plan: None
+        item = {
+            "time": "20:45",
+            "end": "21:30",
+            "activity": "已经失效的原计划",
+        }
+        plugin._get_clock_plan_item_for_display = lambda _plan: item
+
+        for lifecycle in ("deferred", "changed", "completed", "cancelled"):
+            with self.subTest(lifecycle=lifecycle):
+                item["lifecycle_status"] = lifecycle
+                verified, planned = plugin._private_passive_schedule_material({})
+                self.assertEqual("", verified)
+                self.assertEqual("", planned)
+
+    def test_clock_plan_and_detail_are_sanitized_for_friend_profile(self) -> None:
+        plugin = _state_harness()
+        plugin._passive_state_session_cache = {}
+        plugin.config = {}
+        plugin.default_nickname = "有所思"
+        plugin.target_user_ids = []
+        del plugin.__dict__["_sanitize_schedule_context_for_private_user"]
+        plugin._private_user_role = lambda *_args, **_kwargs: "friend"
+        planned_item = {
+            "time": "20:45",
+            "end": "21:30",
+            "activity": "给有所思整理乐谱",
+            "lifecycle_status": "planned",
+        }
+        plugin._get_current_plan_item = lambda _plan: None
+        plugin._get_clock_plan_item_for_display = lambda _plan: planned_item
+        plugin._current_detail_segment_for_update = lambda: {"key": "detail"}
+        plugin._current_detail_snapshot_for_update = lambda: {
+            "status": "done",
+            "summary": "把有所思放在桌边的乐谱收好。",
+        }
+
+        update = plugin._private_passive_state_update_for_prompt(
+            session="default:FriendMessage:20002",
+            state={"energy": 75, "mood_bias": "平稳"},
+            current_user={"relationship_role": "friend"},
+            inbound_text="晚上好",
+            lightweight=True,
+        )
+
+        self.assertNotIn("有所思", update[0])
+        self.assertIn("某个熟人", update[0])
 
     def test_continuity_anchor_omits_missing_optional_state_fields(self) -> None:
         plugin = _state_harness()

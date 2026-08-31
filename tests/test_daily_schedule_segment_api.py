@@ -440,11 +440,68 @@ class DailyScheduleSegmentApiTests(unittest.IsolatedAsyncioTestCase):
         timeline = self.api._daily_timeline_summary(self.plugin.data)
 
         self.assertEqual(timeline["segment_count"], 2)
+        current = next(item for item in timeline["segments"] if item["key"] == "2026-07-11:0:09:00")
+        self.assertEqual("planned", current["evidence_lifecycle"])
+        self.assertEqual("active", current["clock_status"])
         pending = next(item for item in timeline["segments"] if item["key"] == "2026-07-11:1:10:00")
         self.assertEqual(pending["status"], "")
         self.assertEqual(pending["summary"], "处理手边事项")
         self.assertEqual(pending["basis"], ["state"])
         self.assertEqual(timeline["plan_quality"]["score"], 90)
+
+    def test_story_projection_keeps_evidence_lifecycle_and_adds_clock_status(self):
+        items = self.api._timeline_story_items(
+            [
+                {"window": "08:30-09:00", "event": "先整理书架"},
+                {"window": "09:00-09:20", "event": "再收拾桌面"},
+                {"window": "09:20-09:40", "event": "最后整理抽屉"},
+            ],
+            5,
+            "2026-07-11",
+        )
+
+        self.assertEqual(["planned", "planned", "planned"], [item["lifecycle"] for item in items])
+        self.assertEqual(["completed", "active", "planned"], [item["clock_status"] for item in items])
+
+    def test_story_projection_preserves_only_bounded_execution_evidence(self):
+        items = self.api._timeline_story_items(
+            [
+                {
+                    "window": "09:00-09:20",
+                    "event": "有交互证据",
+                    "evidence_kind": "interaction",
+                    "fact_eligibility": "current_observed",
+                    "status": "active",
+                },
+                {
+                    "window": "09:20-09:40",
+                    "event": "不可信字段",
+                    "evidence_kind": "private_note",
+                    "fact_eligibility": "owner_only",
+                    "status": "executing",
+                },
+            ],
+            5,
+            "2026-07-11",
+        )
+
+        observed = next(item for item in items if item["text"] == "有交互证据")
+        self.assertEqual("interaction", observed["evidence_kind"])
+        self.assertEqual("current_observed", observed["fact_eligibility"])
+        self.assertEqual("active", observed["status"])
+        self.assertEqual("active", observed["lifecycle"])
+        untrusted = next(item for item in items if item["text"] == "不可信字段")
+        self.assertEqual("", untrusted["evidence_kind"])
+        self.assertEqual("", untrusted["fact_eligibility"])
+        self.assertEqual("", untrusted["status"])
+        self.assertEqual("planned", untrusted["lifecycle"])
+
+    def test_current_plan_api_exposes_evidence_and_clock_status_with_legacy_lifecycle(self):
+        current = self.api._life_observation_summary(self.plugin.data)["current_plan"]
+
+        self.assertEqual("planned", current["evidence_lifecycle"])
+        self.assertEqual("active", current["clock_status"])
+        self.assertEqual(current["clock_status"], current["lifecycle"])
 
     def test_timeline_hides_snapshots_when_detail_day_is_stale(self):
         self.plugin.data["detail_enhanced_day"] = "2026-07-10"
@@ -488,9 +545,40 @@ class DailyScheduleSegmentApiTests(unittest.IsolatedAsyncioTestCase):
         # The panel shows clock progress while canonical execution evidence
         # remains separate in the agenda store.
         self.assertEqual(timeline["segments"][2]["lifecycle"], "active")
+        self.assertEqual(timeline["segments"][2]["evidence_lifecycle"], "planned")
+        self.assertEqual(timeline["segments"][2]["clock_status"], "active")
+        story_items = self.api._timeline_story_items(
+            [{"window": "00:30-01:00", "event": "继续收尾"}],
+            5,
+            "2026-07-11",
+            parent_start=24 * 60 + 30,
+            parent_end=25 * 60 + 30,
+        )
+        self.assertEqual("active", story_items[0]["clock_status"])
         current = self.plugin._current_detail_segment_for_update()
         self.assertIsNotNone(current)
         self.assertEqual(current["index"], 2)
+
+    def test_cross_midnight_story_items_sort_and_limit_on_parent_axis(self):
+        items = self.api._timeline_story_items(
+            [
+                {"window": "00:40-00:50", "event": "第五项"},
+                {"window": "23:50-00:00", "event": "第二项"},
+                {"window": "01:00-01:10", "event": "第六项"},
+                {"window": "00:10-00:20", "event": "第三项"},
+                {"window": "23:40-23:50", "event": "第一项"},
+                {"window": "00:20-00:30", "event": "第四项"},
+            ],
+            5,
+            "2026-07-11",
+            parent_start=23 * 60 + 30,
+            parent_end=25 * 60 + 30,
+        )
+
+        self.assertEqual(
+            ["23:40-23:50", "23:50-00:00", "00:10-00:20", "00:20-00:30", "00:40-00:50"],
+            [item["window"] for item in items],
+        )
 
     def test_adjustment_scope_uses_recorded_anchor_instead_of_moving_current_segment(self):
         self.plugin.data["schedule_adjustments"] = [
