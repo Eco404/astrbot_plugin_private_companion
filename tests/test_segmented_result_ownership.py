@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from astrbot.api.message_components import Plain
-from astrbot.core.message.message_event_result import MessageEventResult
+from astrbot.core.message.message_event_result import MessageEventResult, ResultContentType
 
 
 def test_unmarked_general_result_is_not_resegmented():
@@ -48,3 +48,20 @@ def test_plugin_built_result_carries_ownership_marker():
     result = plugin._build_result_from_chain([Plain("本插件回复。")])
 
     assert getattr(result, "_private_companion_owned_result", False) is True
+
+
+def test_segmented_rebuild_preserves_llm_metadata_without_marking_independent_reply():
+    from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
+
+    plugin = object.__new__(PrivateCompanionPlugin)
+    source = MessageEventResult(chain=[Plain("模型原始回复")])
+    source.set_result_content_type(ResultContentType.LLM_RESULT)
+
+    rebuilt = plugin._build_segmented_result_from_chain(
+        [Plain("模型分段回复")],
+        source,
+    )
+    assert rebuilt.is_llm_result() is True
+
+    independent = plugin._build_result_from_chain([Plain("插件自身回复")])
+    assert independent.is_llm_result() is False

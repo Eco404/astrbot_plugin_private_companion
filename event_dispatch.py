@@ -5309,7 +5309,21 @@ Bot 近期回复：
                 return True
         return False
 
-    def _build_result_from_chain(self, chain: list[Any]) -> Any:
+    def _build_result_from_chain(
+        self,
+        chain: list[Any],
+        *,
+        source_result: Any | None = None,
+    ) -> Any:
+        """Build a result while retaining producer metadata when transforming it.
+
+        Decorating hooks may replace only the chain (for example, the
+        segmented-reply hook).  AstrBot stores the LLM/non-LLM distinction on
+        ``result_content_type`` rather than on the components themselves.  A
+        replacement must therefore copy that metadata from the result it is
+        transforming; callers that create an independent plugin reply keep
+        the framework default.
+        """
         try:
             from astrbot.api.event import MessageEventResult
         except ImportError:
@@ -5328,6 +5342,14 @@ Bot 近期回复：
                 result = MessageEventResult(chain=chain)
             except TypeError:
                 result = MessageEventResult().chain_result(chain)
+        if source_result is not None:
+            for attr in ("result_content_type", "use_t2i_", "use_markdown_"):
+                if not hasattr(source_result, attr) or not hasattr(result, attr):
+                    continue
+                try:
+                    setattr(result, attr, getattr(source_result, attr))
+                except Exception:
+                    pass
         result = self._disable_result_t2i(result)
         # Decorating hooks are global in AstrBot. Keep an explicit ownership
         # marker on results built by this plugin so its optional segmentation
@@ -5337,6 +5359,34 @@ Bot 近期回复：
         except Exception:
             pass
         return result
+
+    def _build_segmented_result_from_chain(
+        self,
+        chain: list[Any],
+        source_result: Any,
+    ) -> Any:
+        """Rebuild a segmented result while tolerating legacy overrides.
+
+        Some integrations and tests replace ``_build_result_from_chain`` with
+        the historical one-argument callable. Keep that extension point
+        working while still preserving the source result's LLM metadata when
+        the native builder supports it.
+        """
+        builder = self._build_result_from_chain
+        try:
+            return builder(chain, source_result=source_result)
+        except TypeError as exc:
+            if "source_result" not in str(exc):
+                raise
+            rebuilt = builder(chain)
+            for attr in ("result_content_type", "use_t2i_", "use_markdown_"):
+                if not hasattr(source_result, attr) or not hasattr(rebuilt, attr):
+                    continue
+                try:
+                    setattr(rebuilt, attr, getattr(source_result, attr))
+                except Exception:
+                    pass
+            return rebuilt
 
     def _disable_result_t2i(self, result: Any) -> Any:
         if result is None:

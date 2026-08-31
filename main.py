@@ -10530,6 +10530,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         result = event.get_result()
         if result is None or not result.chain:
             return
+        source_result = result
         is_llm_result = False
         try:
             is_llm_result = bool(result.is_llm_result())
@@ -10541,6 +10542,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             chain = list(getattr(result, "chain", []) or []) if result is not None else []
             if not chain:
                 return
+            source_result = result
             try:
                 is_llm_result = bool(result.is_llm_result())
             except Exception:
@@ -10645,7 +10647,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
         if len(chunks) <= 1:
             if changed:
-                event.set_result(self._build_result_from_chain(chunks[0]))
+                event.set_result(
+                    self._build_segmented_result_from_chain(chunks[0], source_result)
+                )
             return
         llm_segment_count = max(0, _safe_int(getattr(event, "_private_companion_llm_segment_count", 0), 0, 0))
         logger.debug(
@@ -10672,7 +10676,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 source="decorating_result",
             )
         ):
-            empty_result = self._build_result_from_chain([])
+            empty_result = self._build_segmented_result_from_chain([], source_result)
             try:
                 empty_result.stop_event()
             except Exception:
@@ -10680,7 +10684,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             event.set_result(empty_result)
             event.stop_event()
             return
-        event.set_result(self._build_result_from_chain(chunks[0]))
+        event.set_result(
+            self._build_segmented_result_from_chain(chunks[0], source_result)
+        )
         if runtime_persona_setting(self, 'enable_daily_case_review_experiment', False):
             self._record_daily_review_outbound_case(event, chunks[0])
         activity_baseline = time.time()
