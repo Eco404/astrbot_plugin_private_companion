@@ -207,9 +207,6 @@ class BookshelfAccessTests(unittest.IsolatedAsyncioTestCase):
                 "last_album": {"id": "album-1", "title": "旧夹层"}
             }
             api = PrivateCompanionPageApi(harness)
-            api._is_bookshelf_archive_item = lambda item: (
-                isinstance(item, dict) and item.get("type") == "archive_item"
-            )
             api._bookshelf_summary = AsyncMock(return_value={"secret_books": []})
             token = api._issue_bookshelf_access_token()
             app = Quart(__name__)
@@ -245,9 +242,6 @@ class BookshelfAccessTests(unittest.IsolatedAsyncioTestCase):
             ]
             harness.data["reading_archive_integration"] = {"last_album": {}}
             api = PrivateCompanionPageApi(harness)
-            api._is_bookshelf_archive_item = lambda item: (
-                isinstance(item, dict) and item.get("type") == "archive_item"
-            )
             api._bookshelf_summary = AsyncMock(return_value={"secret_books": []})
             token = api._issue_bookshelf_access_token()
             app = Quart(__name__)
@@ -270,6 +264,33 @@ class BookshelfAccessTests(unittest.IsolatedAsyncioTestCase):
                 harness.data["reading_archive_integration"],
             )
             self.assertEqual([], harness.saved_sections)
+
+    async def test_generic_archive_image_data_requires_token_and_reads_local_page(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            page_path = root / "bookshelf_pages" / "album-1" / "page-1.png"
+            page_path.parent.mkdir(parents=True)
+            page_path.write_bytes(b"\x89PNG\r\n\x1a\narchive-page")
+            harness = _BookshelfAccessHarness(root)
+            harness.data["bookshelf_items"] = [
+                {
+                    "type": "archive_item",
+                    "album_id": "album-1",
+                    "pages": [{"index": 1, "path": str(page_path)}],
+                }
+            ]
+            api = PrivateCompanionPageApi(harness)
+            token = api._issue_bookshelf_access_token()
+            app = Quart(__name__)
+
+            async with app.test_request_context(
+                f"/bookshelf/image_data?album_id=album-1&page=1&access_token={token}"
+            ):
+                result = await api.get_bookshelf_image_data()
+
+            self.assertTrue(result["success"])
+            self.assertTrue(result["data"]["data_url"].startswith("data:image/png;base64,"))
+            self.assertEqual(page_path.stat().st_size, result["data"]["size"])
 
     async def test_rejected_and_unchanged_deletes_do_not_mutate_or_save(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

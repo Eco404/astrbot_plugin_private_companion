@@ -11746,12 +11746,15 @@ class PrivateCompanionPageApi(
     def _bookshelf_album_id(self, item: Any, *, limit: int = 80) -> str:
         if not isinstance(item, dict):
             return ""
-        album_id = self._single_line(item.get("album_id") or item.get("id"), limit)
+        explicit_album_id = self._single_line(item.get("album_id"), limit)
+        album_id = explicit_album_id or self._single_line(item.get("id"), limit)
+        if not explicit_album_id and album_id.startswith("archive-"):
+            album_id = self._single_line(album_id.removeprefix("archive-"), limit)
         key = self._single_line(item.get("key"), 120)
         if not album_id and key.startswith("archive_item:"):
             album_id = self._single_line(key.split(":", 1)[1], limit)
         if not album_id and key.startswith("archive-"):
-            album_id = self._single_line(key[3:], limit)
+            album_id = self._single_line(key.removeprefix("archive-"), limit)
         return album_id
 
     def _bookshelf_diary_date_key(self, value: Any) -> str:
@@ -11873,9 +11876,13 @@ class PrivateCompanionPageApi(
         self.plugin.data["daily_diary_delete_revision"] = revision + 1
 
     def _is_bookshelf_archive_item(self, item: Any) -> bool:
-        # Historical archive records remain on disk for migration safety, but
-        # the public companion package never reads, renders, or manages them.
-        return False
+        if not isinstance(item, dict):
+            return False
+        kind = self._single_line(item.get("type") or item.get("kind"), 32)
+        if kind:
+            return kind == "archive_item"
+        key = self._single_line(item.get("key"), 120)
+        return key.startswith("archive_item:") or key.startswith("archive-")
 
     def _bookshelf_deleted_album_ids(self, state: Any) -> set[str]:
         if not isinstance(state, dict):
@@ -27357,8 +27364,24 @@ class PrivateCompanionPageApi(
     ) -> str:
         if not album_id or (page_index < 1 and not cover):
             return ""
-        # Legacy archive records are never rendered by the public package.
-        return ""
+        url = f"{self._page_asset_prefix()}/bookshelf/image?album_id={quote(str(album_id), safe='')}"
+        if cover:
+            url += "&cover=1"
+        elif page_index > 0:
+            url += f"&page={page_index}"
+        if access_token:
+            url += f"&access_token={quote(str(access_token), safe='')}"
+        raw_path = self._single_line(path_value, 500)
+        if raw_path:
+            try:
+                path = Path(raw_path).resolve()
+                path.relative_to(data_root)
+                if path.exists() and path.is_file():
+                    stat = path.stat()
+                    url += f"&v={int(stat.st_mtime)}-{stat.st_size}"
+            except Exception:
+                pass
+        return url
 
     def _bookshelf_cover_url(
         self,

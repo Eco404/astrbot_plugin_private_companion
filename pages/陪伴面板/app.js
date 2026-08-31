@@ -5691,16 +5691,16 @@ function bookshelfImageDataPath(src) {
   if (raw.startsWith("data:")) return raw;
   try {
     const url = new URL(raw, window.location.origin);
-if (url.pathname.endsWith("/disabled_archive_asset")) {
-return `/disabled_archive_asset_data${url.search}`;
+    if (url.pathname.endsWith("/bookshelf/image")) {
+      return `/bookshelf/image_data${url.search}`;
     }
     if (url.pathname.endsWith("/creative/project/cover")) {
       return `/creative/project/cover_data${url.search}`;
     }
-const marker = "/disabled_archive_asset?";
+    const marker = "/bookshelf/image?";
     const markerIndex = raw.indexOf(marker);
     if (markerIndex >= 0) {
-return `/disabled_archive_asset_data?${raw.slice(markerIndex + marker.length)}`;
+      return `/bookshelf/image_data?${raw.slice(markerIndex + marker.length)}`;
     }
     const creativeMarker = "/creative/project/cover?";
     const creativeMarkerIndex = raw.indexOf(creativeMarker);
@@ -5708,9 +5708,9 @@ return `/disabled_archive_asset_data?${raw.slice(markerIndex + marker.length)}`;
       return `/creative/project/cover_data?${raw.slice(creativeMarkerIndex + creativeMarker.length)}`;
     }
   } catch (error) {
-const marker = "/disabled_archive_asset?";
+    const marker = "/bookshelf/image?";
     const markerIndex = raw.indexOf(marker);
-if (markerIndex >= 0) return `/disabled_archive_asset_data?${raw.slice(markerIndex + marker.length)}`;
+    if (markerIndex >= 0) return `/bookshelf/image_data?${raw.slice(markerIndex + marker.length)}`;
     const creativeMarker = "/creative/project/cover?";
     const creativeMarkerIndex = raw.indexOf(creativeMarker);
     if (creativeMarkerIndex >= 0) return `/creative/project/cover_data?${raw.slice(creativeMarkerIndex + creativeMarker.length)}`;
@@ -5729,7 +5729,7 @@ async function hydrateBookshelfImages(root = document) {
     try {
       if (endpoint.startsWith("data:")) {
         img.src = endpoint;
-} else if (endpoint.startsWith("/disabled_archive_asset_data") || endpoint.startsWith("/creative/project/cover_data")) {
+      } else if (endpoint.startsWith("/bookshelf/image_data") || endpoint.startsWith("/creative/project/cover_data")) {
         const result = await fetchJson(endpoint);
         if (result?.data_url) img.src = result.data_url;
       } else {
@@ -39900,7 +39900,7 @@ async function rereadSelectedBookshelfItem(button = null) {
   }
   const currentPage = state.bookshelfPage;
   await runAction(async () => {
-const result = await postJson("/disabled_archive_comments", {
+    const result = await postJson("/bookshelf/comments/update", {
       album_id: albumId,
       access_token: (state.bookshelfAccessToken || bookshelfUnlockedForCurrentPersona()?.access_token || ""),
     });

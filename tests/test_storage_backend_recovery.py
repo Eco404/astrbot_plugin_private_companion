@@ -15,7 +15,11 @@ from astrbot_plugin_private_companion.storage.sqlite_backend import (
     SqliteStoreBackend,
     SqliteStoreNotInitializedError,
 )
-from astrbot_plugin_private_companion.storage.store_manager import StoreManager, reconcile_bookshelf_payload
+from astrbot_plugin_private_companion.storage.store_manager import (
+    StoreManager,
+    _bookshelf_item_identity,
+    reconcile_bookshelf_payload,
+)
 
 
 def _new_store() -> dict:
@@ -56,6 +60,16 @@ class StorageBackendRecoveryTests(unittest.TestCase):
             sqlite_path=self.sqlite_path,
             ensure_defaults=_ensure_defaults,
             new_store=_new_store,
+        )
+
+    def test_archive_item_identity_normalizes_full_archive_prefix(self) -> None:
+        self.assertEqual(
+            "archive_item:album-1",
+            _bookshelf_item_identity({"type": "archive_item", "id": "archive-album-1"}),
+        )
+        self.assertEqual(
+            "archive_item:album-1",
+            _bookshelf_item_identity({"type": "archive_item", "key": "archive-album-1"}),
         )
 
     @staticmethod

@@ -49,12 +49,15 @@ def _bookshelf_item_identity(item: Any) -> str:
     if not isinstance(item, dict):
         return ""
     item_type = str(item.get("type") or item.get("kind") or "").strip()
-    album_id = str(item.get("album_id") or item.get("id") or "").strip()
+    explicit_album_id = str(item.get("album_id") or "").strip()
+    album_id = explicit_album_id or str(item.get("id") or "").strip()
+    if not explicit_album_id and album_id.startswith("archive-"):
+        album_id = album_id.removeprefix("archive-").strip()
     key = str(item.get("key") or "").strip()
     if not album_id and key.startswith("archive_item:"):
         album_id = key.split(":", 1)[1].strip()
     if not album_id and key.startswith("archive-"):
-        album_id = key[3:].strip()
+        album_id = key.removeprefix("archive-").strip()
     if album_id:
         return f"{item_type or 'archive_item'}:{album_id}"
     return key
