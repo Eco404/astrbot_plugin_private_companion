@@ -359,6 +359,7 @@ from .worldbook import WorldbookMixin
 from .user_memory import UserMemoryMixin
 from .creative import CreativeMixin
 from .content_companion_bridge import ContentCompanionBridgeMixin
+from .external_bridge_resolver import invalidate_external_bridge_cache
 from .proactive import ProactiveMixin
 from .group_wakeup import GroupWakeupMixin
 from .group_observation import GroupObservationMixin
@@ -1371,6 +1372,19 @@ class PrivateCompanionPlugin(
     AtRelayMixin,
     Star,
 ):
+    @filter.on_plugin_loaded()
+    async def _on_external_plugin_loaded(self, metadata: Any, *args: Any, **kwargs: Any) -> None:
+        # 任意插件装载后主动失效桥接缓存：运行中安装/重载可选扩展能立即被
+        # 发现，未安装扩展的负向结果因此可以缓存到失效为止，不做周期重查。
+        # metadata 是 AstrBot 传入的外部对象，这里不读取其内容。
+        invalidate_external_bridge_cache(self)
+
+    @filter.on_plugin_unloaded()
+    async def _on_external_plugin_unloaded(self, metadata: Any, *args: Any, **kwargs: Any) -> None:
+        # 卸载后立即清掉旧实例引用，避免正向缓存继续指向已卸载插件的
+        # extension_api。同样只失效，不读取 metadata 内容。
+        invalidate_external_bridge_cache(self)
+
     # AstrBot registers handlers from their exact defining module.  Keep the
     # implementations in EventDispatchMixin, but expose the decorated entry
     # points here so waiting/request/response form one complete pipeline.
@@ -7759,10 +7773,6 @@ class PrivateCompanionPlugin(
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._scheduler_loop())
             logger.info("主动消息循环已启动")
-        self._create_startup_background_task(
-            "mobile_location_watch",
-            self._mobile_location_watch_loop,
-        )
         if self._startup_maintenance_task is None or self._startup_maintenance_task.done():
             self._startup_maintenance_task = asyncio.create_task(self._run_startup_background_maintenance())
         self._create_startup_background_task(
