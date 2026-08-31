@@ -16928,10 +16928,10 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         motive: str = "",
         action_summary: str = "",
     ) -> str:
-        # AstrBot history is stored as user/assistant pairs, so proactive sends
-        # need a tiny synthetic user side. Keep it neutral: internal reason,
-        # motive and action details stay in plugin state instead of visible chat.
-        return "【主动承接占位】用户还没发来新消息；下一条是 Bot 主动发出的内容。后续如果用户回应，顺着上一条主动消息自然接住就好。"
+        # AstrBot history is stored as user/assistant pairs. Keep the synthetic
+        # user side empty so an implementation detail can never appear in the
+        # conversation UI or be echoed by a later model response.
+        return ""
 
     @staticmethod
     def _proactive_component_is_image(component: Any) -> bool:
@@ -17116,7 +17116,8 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             return False
         for attempt in range(4):
             try:
-                user_msg_obj = UserMessageSegment(content=str(user_prompt or ""))
+                safe_user_prompt = "" if self._proactive_archive_context_text(user_prompt) else str(user_prompt or "").strip()
+                user_msg_obj = UserMessageSegment(content=safe_user_prompt)
                 assistant_msg_obj = AssistantMessageSegment(content=visible_assistant_response)
                 async def _write():
                     conv_id = await self._ensure_conversation_id_for_umo(umo, title="Private Companion 主动消息")
