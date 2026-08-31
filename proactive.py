@@ -4148,11 +4148,11 @@ class ProactiveMixin(UserRestGateMixin):
         last_seen = _safe_float(current.get("last_seen_at"), 0.0)
         changed = False
 
-        def finish_previous() -> None:
+        def finish_previous(dwell_end: float) -> None:
             nonlocal changed
             if not previous_token:
                 return
-            dwell_seconds = max(0.0, last_seen - _safe_float(current.get("started_at"), last_seen))
+            dwell_seconds = max(0.0, dwell_end - _safe_float(current.get("started_at"), dwell_end))
             policy_getter = getattr(self, "_proactive_quota_policy", None)
             policy = policy_getter(user) if callable(policy_getter) else {}
             tier = _safe_int(policy.get("tier"), 3, 1, 5) if isinstance(policy, dict) else 3
@@ -4173,14 +4173,20 @@ class ProactiveMixin(UserRestGateMixin):
             store.pop(user_id, None)
 
         if not token:
-            finish_previous()
+            # 客户端只在到达/离开时上传定位，停留期内没有新的观察刷新
+            # last_seen；离开确认本身就是停留的终点，用本次检查时间补全
+            # 整段 dwell，不再依赖中途轮询。
+            finish_previous(check_now)
             return changed
         if previous_token and previous_token != token:
-            finish_previous()
+            # 换区即离开已确认，停留终点是本次检查时间。
+            finish_previous(check_now)
             current = {}
             previous_token = ""
         if previous_token and last_seen > 0 and check_now - last_seen > _ANONYMOUS_AREA_STABLE_GAP_SECONDS:
-            finish_previous()
+            # 观察中断太久，中断期间的停留不可信，保守用最后可见时间结算，
+            # 不虚增 dwell 也不把还在原地的用户误判成“离开后”。
+            finish_previous(last_seen)
             current = {}
             previous_token = ""
         if not previous_token:
@@ -4353,19 +4359,6 @@ class ProactiveMixin(UserRestGateMixin):
             logger.debug("手机位置事件处理暂时失败: %s", _single_line(exc, 160))
             return {"handled": False, "reason": "watch_failed"}
         return {"handled": True, "triggered": bool(triggered)}
-
-    async def _mobile_location_watch_loop(self):
-        while not self._stop_event.is_set():
-            try:
-                await self._mobile_location_watch_once()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.debug("移动位置主动监视暂时失败: %s", _single_line(exc, 160))
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=15.0)
-            except asyncio.TimeoutError:
-                continue
 
     async def _kick_proactive_loop_once(self) -> None:
         try:
