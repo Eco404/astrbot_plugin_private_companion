@@ -27,6 +27,10 @@ logger = get_module_logger(__name__)
 
 
 class DailyReviewMixin:
+    _DAILY_REVIEW_FAILURE_COOLDOWN_SECONDS = 30 * 60
+    _DAILY_REVIEW_FAILURE_MAX_BACKOFF_SECONDS = 6 * 60 * 60
+    _DAILY_REVIEW_FAILURE_CIRCUIT_SECONDS = 24 * 60 * 60
+    _DAILY_REVIEW_MAX_CONSECUTIVE_FAILURES = 5
     _DAILY_REVIEW_SEVERITIES = {"info", "warn", "error"}
     _DAILY_REVIEW_CATEGORIES = {
         "reply",
@@ -159,6 +163,39 @@ class DailyReviewMixin:
             lock = asyncio.Lock()
             self._daily_review_generation_lock = lock
         return lock
+
+    def _daily_review_failure_attempt(
+        self,
+        date_key: str,
+        error: str,
+        *,
+        previous: Any = None,
+        attempted_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Build a persisted retry state for an automatic review failure."""
+        now = float(attempted_at if attempted_at is not None else time.time())
+        prior = previous if isinstance(previous, dict) else self.data.get("daily_review_last_attempt")
+        prior_status = _single_line((prior or {}).get("status"), 16).lower()
+        prior_at = _safe_float((prior or {}).get("attempted_at"), 0.0, 0.0)
+        prior_count = _safe_int((prior or {}).get("failure_count"), 0, 0, 1000)
+        same_failure_window = prior_status in {"failed", "paused"} and prior_at > 0 and now - prior_at <= self._DAILY_REVIEW_FAILURE_CIRCUIT_SECONDS
+        failure_count = prior_count + 1 if same_failure_window else 1
+        paused = failure_count >= self._DAILY_REVIEW_MAX_CONSECUTIVE_FAILURES
+        if paused:
+            retry_after = now + self._DAILY_REVIEW_FAILURE_CIRCUIT_SECONDS
+        else:
+            backoff = self._DAILY_REVIEW_FAILURE_COOLDOWN_SECONDS * (
+                2 ** min(max(0, failure_count - 1), 8)
+            )
+            retry_after = now + min(backoff, self._DAILY_REVIEW_FAILURE_MAX_BACKOFF_SECONDS)
+        return {
+            "date": _single_line(date_key, 16),
+            "status": "paused" if paused else "failed",
+            "attempted_at": now,
+            "retry_after": retry_after,
+            "failure_count": failure_count,
+            "error": self._daily_review_safe_text(error, 180),
+        }
 
     def _daily_review_now(self, ts: float | None = None) -> datetime:
         timezone_name = _single_line(
@@ -657,14 +694,28 @@ class DailyReviewMixin:
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
         candidates = [text]
-        match = re.search(r"\{[\s\S]*\}", text)
-        if match and match.group(0) != text:
-            candidates.append(match.group(0))
+        decoder = json.JSONDecoder()
+        # Providers often add a short explanation before/after the object.
+        # Scan each opening brace with the JSON decoder instead of a greedy
+        # regex so unrelated braces in that explanation cannot invalidate the
+        # actual response object.
+        candidates.extend(
+            text[index:]
+            for index, char in enumerate(text)
+            if char == "{"
+        )
+        seen: set[str] = set()
         for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
             try:
                 payload = json.loads(candidate)
             except Exception:
-                continue
+                try:
+                    payload, _ = decoder.raw_decode(candidate)
+                except Exception:
+                    continue
             if isinstance(payload, dict):
                 return payload
         return {}
@@ -1297,6 +1348,7 @@ class DailyReviewMixin:
             existing = self._daily_review_report_for_date(date_key)
             if isinstance(existing, dict) and not force:
                 return existing
+            previous_attempt = deepcopy(self.data.get("daily_review_last_attempt"))
             provider_id = self._task_provider(
                 self._daily_review_setting("daily_review_provider_id", ""),
                 self._daily_review_setting("troubleshooting_provider_id", ""),
@@ -1314,12 +1366,9 @@ class DailyReviewMixin:
             if not provider_id:
                 error = "未配置可用的每日巡视模型"
                 async with self._data_lock:
-                    self.data["daily_review_last_attempt"] = {
-                        "date": date_key,
-                        "status": "failed",
-                        "attempted_at": time.time(),
-                        "error": error,
-                    }
+                    self.data["daily_review_last_attempt"] = self._daily_review_failure_attempt(
+                        date_key, error, previous=previous_attempt
+                    )
                     self._save_data_sync(sections={"daily_review_last_attempt"})
                 if force:
                     raise RuntimeError(error)
@@ -1359,16 +1408,19 @@ class DailyReviewMixin:
             except Exception as exc:
                 safe_error = self._daily_review_safe_text(exc, 180)
                 async with self._data_lock:
-                    self.data["daily_review_last_attempt"] = {
-                        "date": date_key,
-                        "status": "failed",
-                        "attempted_at": time.time(),
-                        "error": safe_error,
-                    }
+                    self.data["daily_review_last_attempt"] = self._daily_review_failure_attempt(
+                        date_key, safe_error, previous=previous_attempt
+                    )
                     self._save_data_sync(sections={"daily_review_last_attempt"})
                 if force:
                     raise
-                logger.warning("每日终盘巡视失败，将在冷却后重试: %s", safe_error)
+                logger.warning(
+                    "每日终盘巡视失败，将在退避后重试: date=%s failures=%s status=%s error=%s",
+                    date_key,
+                    self.data["daily_review_last_attempt"].get("failure_count", 1),
+                    self.data["daily_review_last_attempt"].get("status", "failed"),
+                    safe_error,
+                )
                 return None
 
             async with self._data_lock:
@@ -1457,6 +1509,15 @@ class DailyReviewMixin:
                     try:
                         if not bool(self._daily_review_setting("enable_daily_review", True)):
                             continue
+                        last_attempt = self.data.get("daily_review_last_attempt")
+                        retry_status = _single_line(
+                            (last_attempt or {}).get("status"), 16
+                        ).lower() if isinstance(last_attempt, dict) else ""
+                        if retry_status in {"failed", "paused"}:
+                            retry_delay = self._next_daily_review_due_in_seconds()
+                            if retry_delay is not None and retry_delay > 0:
+                                due_in.append(float(retry_delay))
+                                continue
                         pending = self._daily_review_pending_dates(now=self._daily_review_now())
                         for date_key in pending:
                             result = await self._ensure_daily_review(target_date=date_key)
@@ -1484,12 +1545,23 @@ class DailyReviewMixin:
             return None
         current = self._daily_review_now(now)
         target_date = self._daily_review_target_date(now=current)
+        last_attempt = self.data.get("daily_review_last_attempt")
+        if isinstance(last_attempt, dict):
+            attempted_at = _safe_float(last_attempt.get("attempted_at"), 0.0, 0.0)
+            status = _single_line(last_attempt.get("status"), 16).lower()
+            if status in {"failed", "paused"} and attempted_at > 0:
+                retry_after = _safe_float(last_attempt.get("retry_after"), 0.0, 0.0)
+                if retry_after > 0:
+                    return max(0.0, retry_after - current.timestamp())
+                # Older persisted records have no retry_after. Keep their
+                # historical 30-minute cooldown without requiring a date
+                # match, since pending reviews may target older days.
+                return max(
+                    0.0,
+                    self._DAILY_REVIEW_FAILURE_COOLDOWN_SECONDS
+                    - (current.timestamp() - attempted_at),
+                )
         if self._daily_review_report_for_date(target_date) is None:
-            last_attempt = self.data.get("daily_review_last_attempt")
-            if isinstance(last_attempt, dict) and _single_line(last_attempt.get("date"), 16) == target_date:
-                attempted_at = _safe_float(last_attempt.get("attempted_at"), 0.0, 0.0)
-                if _single_line(last_attempt.get("status"), 16) == "failed" and attempted_at > 0:
-                    return max(0.0, 30 * 60 - (current.timestamp() - attempted_at))
             return 0.0
         review_minutes = self._daily_review_minutes(self._daily_review_setting("daily_review_time", "04:00"))
         next_due = current.replace(hour=review_minutes // 60, minute=review_minutes % 60, second=0, microsecond=0)

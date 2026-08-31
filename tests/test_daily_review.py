@@ -8,6 +8,7 @@ import sys
 import time
 import types
 import unittest
+from unittest.mock import AsyncMock
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -203,6 +204,14 @@ class DailyReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, snapshot["proactive"]["total"])
         self.assertEqual(1, len(snapshot["model_failures"]))
         self.assertFalse(snapshot["case_review"]["enabled"])
+
+    def test_json_object_parser_accepts_explanatory_text_and_nested_braces(self) -> None:
+        raw = '模型说明：字段示例 {不是 JSON}。最终结果：{"health_score": 88, "findings": []}。'
+
+        self.assertEqual(
+            {"health_score": 88, "findings": []},
+            self.harness._daily_review_json_object(raw),
+        )
 
     async def test_experimental_case_audit_is_opt_in_and_anonymous(self) -> None:
         date_key, day_ts = self._recent_complete_case_day()
@@ -488,6 +497,87 @@ class DailyReviewTests(unittest.IsolatedAsyncioTestCase):
         self.harness.data["daily_review_reports"] = [{"date": "2026-07-27"}]
         self.assertEqual("2026-07-27", self.harness._daily_review_target_date(now=before_due))
         self.assertEqual(3600.0, self.harness._next_daily_review_due_in_seconds(before_due.timestamp()))
+
+    async def test_scheduler_cools_down_failed_historical_pending_date(self) -> None:
+        now = datetime(2026, 9, 1, 1, 46, tzinfo=ZoneInfo("Asia/Shanghai"))
+        self.harness.data["daily_review_last_attempt"] = {
+            "date": "2026-08-28",
+            "status": "failed",
+            "attempted_at": now.timestamp() - 60,
+            "error": "invalid JSON",
+        }
+
+        self.assertEqual(
+            "2026-08-30",
+            self.harness._daily_review_target_date(now=now),
+        )
+        self.assertEqual(
+            30 * 60 - 60,
+            self.harness._next_daily_review_due_in_seconds(now.timestamp()),
+        )
+
+    async def test_failed_pending_date_cools_down_even_when_latest_report_exists(self) -> None:
+        now = datetime(2026, 9, 1, 5, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        self.harness.data["daily_review_reports"] = [{"date": "2026-08-30"}]
+        self.harness.data["daily_review_last_attempt"] = {
+            "date": "2026-08-28",
+            "status": "failed",
+            "attempted_at": now.timestamp() - 120,
+            "error": "invalid JSON",
+        }
+
+        self.assertEqual(
+            30 * 60 - 120,
+            self.harness._next_daily_review_due_in_seconds(now.timestamp()),
+        )
+
+    async def test_failure_backoff_escalates_and_opens_circuit(self) -> None:
+        attempted_at = 1_000.0
+        previous = None
+        states = []
+        for count in range(1, 6):
+            state = self.harness._daily_review_failure_attempt(
+                "2026-08-28",
+                "invalid JSON",
+                previous=previous,
+                attempted_at=attempted_at + count,
+            )
+            states.append(state)
+            previous = state
+
+        self.assertEqual([1, 2, 3, 4, 5], [item["failure_count"] for item in states])
+        self.assertEqual(["failed", "failed", "failed", "failed", "paused"], [item["status"] for item in states])
+        self.assertEqual(
+            30 * 60 * 2 ** 3,
+            states[3]["retry_after"] - states[3]["attempted_at"],
+        )
+        self.assertEqual(
+            self.harness._DAILY_REVIEW_FAILURE_CIRCUIT_SECONDS,
+            states[4]["retry_after"] - states[4]["attempted_at"],
+        )
+
+    async def test_scheduler_does_not_call_model_during_failure_backoff(self) -> None:
+        self.harness._stop_event = asyncio.Event()
+        self.harness.data["daily_review_last_attempt"] = {
+            "date": "2026-08-28",
+            "status": "failed",
+            "attempted_at": time.time(),
+            "retry_after": time.time() + 1800,
+            "failure_count": 1,
+        }
+        self.harness._ensure_daily_review = AsyncMock()
+
+        async def stop_after_sleep(_seconds: float) -> None:
+            self.harness._stop_event.set()
+
+        original_sleep = asyncio.sleep
+        asyncio.sleep = stop_after_sleep
+        try:
+            await self.harness._daily_review_loop()
+        finally:
+            asyncio.sleep = original_sleep
+
+        self.harness._ensure_daily_review.assert_not_awaited()
 
 
 class DailyReviewUiContractTests(unittest.TestCase):
