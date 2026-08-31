@@ -8,8 +8,10 @@ from typing import Any
 
 
 _POSITIVE_TTL = 15.0
-# 未安装外部插件时负向结果可缓存更久，避免频繁全量扫描 sys.modules。
-_NEGATIVE_TTL = 10.0
+# 未安装外部插件时负向结果缓存到主动失效为止。可选桥接的发现依赖插件
+# 装载事件（on_plugin_loaded / on_plugin_unloaded / 重载），不做周期性
+# 重查，避免反复全量扫描 sys.modules 阻塞事件循环。
+_NEGATIVE_TTL = float("inf")
 _MISSING = object()
 
 
@@ -121,9 +123,18 @@ def _module_candidates(
         if module is not None and id(module) not in seen:
             candidates.append(module)
             seen.add(id(module))
+    if candidates:
+        # Exact module names already cover the expected import layout; skip the
+        # defensive sys.modules sweep so discovery stays O(len(module_names)).
+        return candidates
     for name, module in list(sys.modules.items()):
         if module is None or id(module) in seen:
             continue
+        if len(candidates) >= 10:
+            # The sweep is only a legacy-compatibility fallback for hot-reload
+            # aliases. Bound it so a pathological sys.modules state cannot turn
+            # discovery into an unbounded scan.
+            break
         module_identity = _static_module_field(module, "PLUGIN_NAME", "")
         if (
             any(name.endswith(suffix) for suffix in suffixes)

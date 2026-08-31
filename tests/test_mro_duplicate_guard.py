@@ -42,11 +42,46 @@ def _tree(path: Path) -> ast.Module:
 
 
 def _top_level_class(path: Path, name: str) -> ast.ClassDef:
-    return next(
-        node
-        for node in _tree(path).body
-        if isinstance(node, ast.ClassDef) and node.name == name
+    tree = _tree(path)
+    top_level = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == name
+        ),
+        None,
     )
+    if top_level is not None:
+        return top_level
+
+    imported_modules: dict[str, Path] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        for alias in node.names:
+            module_path = ROOT.joinpath(*node.module.split("."), alias.name).with_suffix(
+                ".py"
+            )
+            if module_path.is_file():
+                imported_modules[alias.asname or alias.name] = module_path
+
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        value = node.value
+        if (
+            isinstance(target, ast.Name)
+            and target.id == name
+            and isinstance(value, ast.Attribute)
+            and value.attr == name
+            and isinstance(value.value, ast.Name)
+        ):
+            implementation_path = imported_modules.get(value.value.id)
+            if implementation_path is not None and implementation_path != path:
+                return _top_level_class(implementation_path, name)
+
+    raise StopIteration
 
 
 def _methods(owner: ast.ClassDef) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
