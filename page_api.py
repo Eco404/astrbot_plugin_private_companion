@@ -1598,6 +1598,11 @@ class PrivateCompanionPageApi(
                     ),
                     "data_version": data.get("version"),
                 },
+                "primary_store_ownership": deepcopy(
+                    data.get("primary_store_ownership")
+                    if isinstance(data.get("primary_store_ownership"), dict)
+                    else {}
+                ),
                 "companion_plugins": section("companion_plugins", self._companion_plugins_summary, {}),
                 "private": {
                     "user_count": len(users),
@@ -5276,6 +5281,7 @@ class PrivateCompanionPageApi(
         mode_transition_snapshot: dict[str, Any] = {}
         mode_transition_committed = False
         story_authority_identity: Any | None = None
+        primary_data_warning: dict[str, Any] = {}
         try:
             active_getter = getattr(self.plugin, "_active_persona_scope", None)
             active_persona = str(active_getter() if callable(active_getter) else "").strip()
@@ -5285,6 +5291,7 @@ class PrivateCompanionPageApi(
                 if callable(primary_getter)
                 else getattr(self.plugin, "plugin_specific_persona_id", "")
             ).strip()
+            primary_persona_before = primary_persona
             if (
                 active_persona
                 and bool(getattr(self.plugin, "enable_multi_persona_mode", False))
@@ -5508,6 +5515,17 @@ class PrivateCompanionPageApi(
                     raise RuntimeError("配置保存失败，多人格模式切换已回滚")
                 if config_saved and mode_transition_snapshot:
                     mode_transition_committed = True
+            if (
+                config_saved
+                and "plugin_specific_persona_id" in changed
+                and primary_persona_before != str(changed.get("plugin_specific_persona_id") or "").strip()
+            ):
+                recorder = getattr(self.plugin, "_record_primary_persona_change", None)
+                if callable(recorder):
+                    primary_data_warning = recorder(
+                        primary_persona_before,
+                        changed.get("plugin_specific_persona_id"),
+                    ) or {}
             overview = await self.get_overview()
             if self._is_http_error_response(overview):
                 return overview
@@ -5516,6 +5534,8 @@ class PrivateCompanionPageApi(
                 overview["data"]["config_saved"] = config_saved
                 if personality_restore:
                     overview["data"]["personality_auto_tune_restore"] = personality_restore
+                if primary_data_warning:
+                    overview["data"]["primary_store_ownership_warning"] = primary_data_warning
                 data = overview.get("data") if isinstance(overview.get("data"), dict) else {}
                 features = data.get("features") if isinstance(data.get("features"), dict) else {}
                 settings = data.get("settings") if isinstance(data.get("settings"), dict) else {}

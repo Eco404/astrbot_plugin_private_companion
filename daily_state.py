@@ -13354,7 +13354,7 @@ class DailyStateMixin(DailyStateTickMixin):
         *,
         as_section: bool = False,
     ) -> str | dict[str, Any]:
-        if not runtime_persona_setting(self, "enable_creative_writing", True):
+        if not runtime_persona_setting(self, "enable_creative_writing", False):
             return ""
         recent_share_context = self._format_recent_creative_share_snapshot_for_reply(
             user,

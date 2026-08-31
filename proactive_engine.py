@@ -4381,7 +4381,7 @@ class ProactiveEngineMixin:
             not is_troubleshooting
             and not due_timer_active
             and (planned_source == "creative_writing" or planned_reason == "creative_share")
-            and not bool(runtime_persona_setting(self, "enable_creative_writing", True))
+            and not bool(runtime_persona_setting(self, "enable_creative_writing", False))
         ):
             self._mark_planned_candidate_status(user, "blocked", "创作功能未开启，已清理旧的创作分享候选")
             user["creative_share_context"] = {}

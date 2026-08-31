@@ -744,7 +744,7 @@ class ContentCompanionBridgeMixin:
             return False, False
         if state != "committed":
             _raise_story_write_fence(state)
-        if not runtime_persona_setting(self, "enable_creative_writing", True):
+        if not runtime_persona_setting(self, "enable_creative_writing", False):
             return True, False
         idle_checker = getattr(self, "_bot_currently_idle_for_creative_writing", None)
         if not idle_checked and callable(idle_checker) and not idle_checker():

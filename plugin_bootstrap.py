@@ -805,7 +805,7 @@ def _initialize_world_and_model_config(self: Any, c: Any) -> None:
     self.greeting_idle_minutes = self._cfg_int(c, "greeting_idle_minutes", 30, 0, 240)
     self.allow_insomnia_night_message = self._cfg_bool(c, "allow_insomnia_night_message", True)
     self.proactive_reply_context_hours = self._cfg_int(c, "proactive_reply_context_hours", 12, 1, 72)
-    self.enable_creative_writing = self._cfg_bool(c, "enable_creative_writing", True)
+    self.enable_creative_writing = self._cfg_bool(c, "enable_creative_writing", False)
     self.enable_creative_work_read_guard = self._cfg_bool(
         c, "enable_creative_work_read_guard", True
     )

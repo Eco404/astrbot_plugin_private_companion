@@ -126,6 +126,14 @@ class _ImageCurrentContractError(RuntimeError):
 
 
 class ImageCompanionBridgeMixin:
+    def _image_companion_execution_lock(self) -> asyncio.Lock:
+        """Serialize owner binding on the shared extension API instance."""
+        lock = getattr(self, "_image_companion_owner_lock", None)
+        if not isinstance(lock, asyncio.Lock):
+            lock = asyncio.Lock()
+            setattr(self, "_image_companion_owner_lock", lock)
+        return lock
+
     def _image_companion_api(self) -> Any | None:
         return resolve_external_bridge(
             self,
@@ -168,12 +176,26 @@ class ImageCompanionBridgeMixin:
         try:
             descriptor_getter = getattr(candidate, "capabilities", missing)
         except Exception:
-            return "incompatible", candidate, 0, "descriptor_method_unreadable"
+            descriptor_getter = missing
         if not callable(descriptor_getter):
             if not pinned_api and not _refreshed:
                 replacement = self._image_companion_api_fresh()
                 if replacement is not candidate:
                     return self._image_companion_contract(api=replacement, _refreshed=True)
+            # Older Image releases expose the complete legacy generation
+            # surface but no descriptor. Keep them usable in a visibly
+            # degraded mode; the formal task path remains unavailable.
+            candidate_type = type(candidate)
+            candidate_module = getattr(candidate_type, "__module__", "")
+            legacy_identity = (
+                getattr(candidate, "plugin_id", "") == _IMAGE_PLUGIN_ID
+                or (
+                    candidate_type.__name__ == "ImageCompanionExtensionAPI"
+                    and "astrbot_plugin_image_companion" in candidate_module
+                )
+            )
+            if legacy_identity and callable(getattr(candidate, "generate_for_companion", None)):
+                return "legacy_compat", candidate, 0, "legacy_api_compat"
             return "incompatible", candidate, 0, "descriptor_method_missing"
 
         try:
@@ -712,13 +734,21 @@ class ImageCompanionBridgeMixin:
 
             builder_input = self._image_task_builder_input(request, asset_ids)
             reference_roles = builder_input["reference_asset_roles"]
-            task = api.build_task(builder_input)
-            if type(task) is not dict:
-                raise _ImageCurrentContractError("image_task_build_malformed")
-            validation = api.validate_task(task)
-            self._image_validate_task_receipt(validation)
-            self._image_require_current_api(api, generation)
-            result = await api.execute_task(task)
+            async with self._image_companion_execution_lock():
+                setattr(api, "_companion_owner", self)
+                try:
+                    task = api.build_task(builder_input)
+                    if type(task) is not dict:
+                        raise _ImageCurrentContractError("image_task_build_malformed")
+                    validation = api.validate_task(task)
+                    self._image_validate_task_receipt(validation)
+                    self._image_require_current_api(api, generation)
+                    result = await api.execute_task(task)
+                finally:
+                    try:
+                        delattr(api, "_companion_owner")
+                    except AttributeError:
+                        pass
             self._image_require_current_api(api, generation)
             return self._image_result_tuple(
                 result,
@@ -799,6 +829,25 @@ class ImageCompanionBridgeMixin:
             result.setdefault("reason", "")
             result.setdefault("backends", {})
             return result
+        if mode == "legacy_compat":
+            getter = getattr(api, "capability_status", None)
+            try:
+                status = getter(self) if callable(getter) else {}
+            except Exception:
+                status = {}
+            result = dict(status) if isinstance(status, dict) else {}
+            result.update(
+                {
+                    "installed": True,
+                    "available": bool(result.get("enabled", True)) and bool(result.get("available", True)),
+                    "degraded": True,
+                    "reason": "legacy_api_compat",
+                    "backup_external_note": "legacy_api_compat",
+                }
+            )
+            result.setdefault("enabled", True)
+            result.setdefault("backends", {})
+            return result
         return {
             "installed": True,
             "enabled": False,
@@ -820,7 +869,7 @@ class ImageCompanionBridgeMixin:
         mode, api, _generation, reason = self._image_companion_contract()
         if api is None:
             return {"enabled": False, "available": False, "busy": False, "reason": "独立生图插件不可用"}
-        if mode in {"current", "current_compat"}:
+        if mode in {"current", "current_compat", "legacy_compat"}:
             status = self._image_companion_status()
             return {
                 "enabled": bool(status.get("enabled")),
@@ -914,7 +963,7 @@ class ImageCompanionBridgeMixin:
             )
         generator = (
             getattr(api, "generate_for_companion", None)
-            if mode == "current_compat" and api is not None
+            if mode in {"current_compat", "legacy_compat"} and api is not None
             else None
         )
         if not callable(generator):
@@ -924,9 +973,11 @@ class ImageCompanionBridgeMixin:
                 "生图能力已拆分，请安装并启用“我会画给你看”插件 astrbot_plugin_image_companion。",
             )
         try:
-            self._image_require_compat_api(api, generation)
+            if mode == "current_compat":
+                self._image_require_compat_api(api, generation)
             response = await generator(self, dict(request))
-            self._image_require_compat_api(api, generation)
+            if mode == "current_compat":
+                self._image_require_compat_api(api, generation)
         except asyncio.CancelledError:
             raise
         except _ImageCurrentContractError as exc:
@@ -1000,7 +1051,7 @@ class ImageCompanionBridgeMixin:
             return {"ok": False, "message": "请安装并启用“我会画给你看”后再测试在线图片 API。"}
         tester = (
             getattr(api, "test_endpoint", None)
-            if mode == "current_compat" and api is not None
+            if mode in {"current_compat", "legacy_compat"} and api is not None
             else None
         )
         if not callable(tester):
@@ -1025,9 +1076,11 @@ class ImageCompanionBridgeMixin:
                 }
             return {"ok": False, "message": "请安装并启用“我会画给你看”后再测试在线图片 API。"}
         try:
-            self._image_require_compat_api(api, generation)
+            if mode == "current_compat":
+                self._image_require_compat_api(api, generation)
             result = await tester(self, dict(endpoint or {}), str(prompt or ""))
-            self._image_require_compat_api(api, generation)
+            if mode == "current_compat":
+                self._image_require_compat_api(api, generation)
             return result
         except asyncio.CancelledError:
             raise

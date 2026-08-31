@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from astrbot.api import logger
 
 from .constants import (
     CREATIVE_MEMORY_MAX_ENTRIES,
@@ -1478,7 +1479,7 @@ class CreativeMixin:
 
     @story_legacy_operation("creative.project.start")
     async def _maybe_start_creative_project(self, *, idle_checked: bool = False) -> bool:
-        if not runtime_persona_setting(self, "enable_creative_writing", True):
+        if not runtime_persona_setting(self, "enable_creative_writing", False):
             return False
         if not idle_checked and not self._bot_currently_idle_for_creative_writing():
             return False
@@ -2000,7 +2001,7 @@ class CreativeMixin:
 
     @story_legacy_operation("creative.project.advance")
     async def _maybe_advance_creative_projects(self) -> None:
-        if not runtime_persona_setting(self, "enable_creative_writing", True):
+        if not runtime_persona_setting(self, "enable_creative_writing", False):
             return
         if self._creative_has_pending_proactive_plan():
             return
@@ -2196,7 +2197,7 @@ class CreativeMixin:
 
     @story_legacy_sync_operation("creative.share.schedule")
     def _maybe_schedule_creative_share(self) -> bool:
-        if not bool(runtime_persona_setting(self, "enable_creative_writing", True)):
+        if not bool(runtime_persona_setting(self, "enable_creative_writing", False)):
             return False
         candidate = self._latest_creative_share_candidate()
         if not isinstance(candidate, dict):

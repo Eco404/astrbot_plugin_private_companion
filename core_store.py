@@ -1096,6 +1096,13 @@ class CoreStoreMixin:
     def _new_store(self) -> dict[str, Any]:
         return {
             "version": DATA_VERSION,
+            "primary_store_ownership": {
+                "schema_version": 1,
+                "owner_persona_id": "",
+                "active_persona_id": "",
+                "status": "unattributed",
+                "history": [],
+            },
             "users": {},
             "private_user_alias_merge_backups": {},
             "groups": {},
@@ -1251,6 +1258,22 @@ class CoreStoreMixin:
     @staticmethod
     def _ensure_store_defaults(data: dict[str, Any]) -> dict[str, Any]:
         data.setdefault("version", DATA_VERSION)
+        ownership = data.get("primary_store_ownership")
+        if not isinstance(ownership, dict):
+            data["primary_store_ownership"] = {
+                "schema_version": 1,
+                "owner_persona_id": "",
+                "active_persona_id": "",
+                "status": "unattributed",
+                "history": [],
+            }
+        else:
+            ownership.setdefault("schema_version", 1)
+            ownership.setdefault("owner_persona_id", "")
+            ownership.setdefault("active_persona_id", "")
+            ownership.setdefault("status", "unattributed")
+            if not isinstance(ownership.get("history"), list):
+                ownership["history"] = []
         data.setdefault("users", {})
         data.setdefault("private_user_alias_merge_backups", {})
         data.setdefault("groups", {})
@@ -1863,6 +1886,116 @@ class CoreStoreMixin:
             )
         self._refresh_data_save_revision_from_manager()
 
+    def _primary_store_owner_id(self) -> str:
+        getter = getattr(self, "_primary_persona_id", None)
+        if callable(getter):
+            try:
+                return str(getter() or "").strip()
+            except Exception:
+                pass
+        return str(getattr(self, "plugin_specific_persona_id", "") or "").strip()
+
+    def _ensure_primary_store_ownership(self, data: dict[str, Any]) -> bool:
+        """Annotate the legacy primary store without changing its contents."""
+        if not isinstance(data, dict):
+            return False
+        before = deepcopy(data.get("primary_store_ownership"))
+        self._ensure_store_defaults(data)
+        ownership = data.get("primary_store_ownership")
+        if not isinstance(ownership, dict):
+            ownership = {
+                "schema_version": 1,
+                "owner_persona_id": "",
+                "active_persona_id": "",
+                "status": "unattributed",
+                "history": [],
+            }
+            data["primary_store_ownership"] = ownership
+        current = self._primary_store_owner_id()
+        owner = str(ownership.get("owner_persona_id") or "").strip()
+        if not owner and current:
+            ownership["owner_persona_id"] = current
+            ownership["status"] = "bound"
+        ownership["active_persona_id"] = current
+        if owner and current and owner != current:
+            ownership["status"] = "pending_review"
+            warning = {
+                "code": "primary_store_owner_mismatch",
+                "owner_persona_id": owner,
+                "active_persona_id": current,
+                "message": "主存储仍绑定旧主人格；请在确认备份后决定保留、迁移或合并历史。",
+            }
+            self._primary_store_ownership_warning = warning
+            logger.warning(
+                "检测到主存储人格归属变化: owner=%s active=%s",
+                owner,
+                current,
+            )
+        else:
+            self._primary_store_ownership_warning = {}
+        return before != ownership
+
+    def _record_primary_persona_change(self, old_persona_id: Any, new_persona_id: Any) -> dict[str, Any]:
+        """Record a primary-ID change and preserve a recoverable local snapshot."""
+        old_id = str(old_persona_id or "").strip()
+        new_id = str(new_persona_id or "").strip()
+        if old_id == new_id:
+            return {}
+        data = getattr(self, "_data_default", None)
+        if not isinstance(data, dict):
+            return {"code": "primary_store_snapshot_unavailable", "message": "主存储尚未加载，未执行归属记录"}
+        self._ensure_store_defaults(data)
+        ownership = data.get("primary_store_ownership")
+        if not isinstance(ownership, dict):
+            ownership = {
+                "schema_version": 1,
+                "owner_persona_id": "",
+                "active_persona_id": "",
+                "status": "unattributed",
+                "history": [],
+            }
+            data["primary_store_ownership"] = ownership
+        owner = str(ownership.get("owner_persona_id") or old_id).strip()
+        backup_path = ""
+        try:
+            root = Path(str(getattr(self, "data_dir", "") or Path(str(getattr(self, "data_file", "companions.json"))).parent))
+            root.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            backup = root / f"companions.json.primary-switch-{stamp}.bak"
+            backup.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            backup_path = str(backup)
+        except Exception as exc:
+            logger.warning("主人格切换快照写入失败: %s", _single_line(exc, 180))
+        history = ownership.setdefault("history", [])
+        if not isinstance(history, list):
+            history = []
+            ownership["history"] = history
+        history.append({
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "from_persona_id": owner,
+            "to_persona_id": new_id,
+            "backup_path": backup_path,
+            "status": "pending_review",
+        })
+        del history[:-20]
+        ownership["owner_persona_id"] = owner
+        ownership["active_persona_id"] = new_id
+        ownership["status"] = "pending_review"
+        warning = {
+            "code": "primary_store_owner_mismatch",
+            "owner_persona_id": owner,
+            "active_persona_id": new_id,
+            "backup_path": backup_path,
+            "message": "主人格已变更，companions.json 的历史归属未自动迁移；请依据备份进行保留、迁移或合并。",
+        }
+        self._primary_store_ownership_warning = warning
+        try:
+            self._write_data_snapshot_sync(deepcopy(data))
+        except Exception as exc:
+            logger.warning("主人格归属审计写入失败: %s", _single_line(exc, 180))
+            warning["persist_error"] = _single_line(exc, 180)
+        return warning
+
     def _load_data_sync(self) -> dict[str, Any]:
         manager = getattr(self, "store_manager", None)
         if manager is not None:
@@ -1904,6 +2037,7 @@ class CoreStoreMixin:
                     logger.warning("启动读取数据时压缩主动候选重复计数: items=%s", repeat_changed)
                 if compacted:
                     logger.info("启动读取数据时压缩历史存储: %s", compacted)
+                self._ensure_primary_store_ownership(data)
                 self._persist_startup_maintenance_sync(
                     manager,
                     before_maintenance,
@@ -1922,7 +2056,9 @@ class CoreStoreMixin:
                 )
                 raise
         if not os.path.exists(self.data_file):
-            return self._new_store()
+            data = self._new_store()
+            self._ensure_primary_store_ownership(data)
+            return data
         try:
             with open(self.data_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -1946,6 +2082,9 @@ class CoreStoreMixin:
                 logger.warning("启动读取 JSON 时压缩主动候选重复计数: items=%s", repeat_changed)
             if compacted:
                 logger.info("启动读取 JSON 时压缩历史存储: %s", compacted)
+            ownership_changed = self._ensure_primary_store_ownership(data)
+            if ownership_changed:
+                self._write_data_snapshot_sync(deepcopy(data))
             return data
         except Exception as exc:
             logger.error(

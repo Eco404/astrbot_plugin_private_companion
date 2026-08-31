@@ -1664,7 +1664,7 @@
   "enable_creative_writing": {
     "description": "Legacy flat config: 启用私下创作行为",
     "type": "bool",
-    "default": true,
+    "default": false,
     "invisible": true
   },
   "enable_creative_work_read_guard": {
@@ -6602,7 +6602,7 @@
         "description": "启用私下创作行为",
         "type": "bool",
         "hint": "安装并启用 astrbot_plugin_content_companion 后，此开关作为陪伴主链的创作协同开关；实际项目生成、续写、审校和保存由内容扩展负责。未安装时仅启用本体兼容回退，升级期间可保持旧行为。",
-        "default": true
+        "default": false
       },
       "enable_creative_work_read_guard": {
         "description": "启用创作原文读取保护",

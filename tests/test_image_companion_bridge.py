@@ -944,6 +944,51 @@ async def test_descriptorless_image_api_never_receives_companion_owner() -> None
 
 
 @pytest.mark.asyncio
+async def test_known_legacy_image_api_is_used_in_degraded_mode(tmp_path: Path) -> None:
+    calls: list[tuple[object, dict[str, object]]] = []
+
+    class Api:
+        async def generate_for_companion(self, owner, request):
+            calls.append((owner, request))
+            return {
+                "handled": True,
+                "backend": "legacy",
+                "image_path": str((tmp_path / "legacy.png").resolve()),
+                "note": "legacy compatibility",
+            }
+
+    Api.__name__ = "ImageCompanionExtensionAPI"
+    Api.__module__ = "astrbot_plugin_image_companion.main"
+    api = Api()
+    harness = _BridgeHarness()
+    harness._image_companion_api = lambda: api
+
+    result = await harness._image_companion_generate(
+        workflow_kind="selfie",
+        prompt_text="take a picture",
+        session_key="test",
+    )
+
+    assert result == (
+        "legacy",
+        str((tmp_path / "legacy.png").resolve()),
+        "legacy compatibility",
+    )
+    assert calls == [
+        (
+            harness,
+            {
+                "workflow_kind": "selfie",
+                "prompt_text": "take a picture",
+                "session_key": "test",
+            },
+        )
+    ]
+    assert harness._image_companion_status()["reason"] == "legacy_api_compat"
+    assert harness._image_companion_status()["degraded"] is True
+
+
+@pytest.mark.asyncio
 async def test_split_runtime_does_not_call_owner_legacy_executor(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
     materialized: list[str] = []
