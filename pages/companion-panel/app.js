@@ -948,7 +948,7 @@ const pluginIntegrationAvailabilityRules = {
   enable_qzone_generated_image_publish: () => imageCompanionInstalled() && state.overview?.qzone?.platform_supported !== false,
   enable_qzone_comment_inbox: () => state.overview?.qzone?.platform_supported !== false,
   enable_qzone_emotional_vent_publish: () => Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
-  enable_creative_writing: () => true,
+  enable_creative_writing: () => false,
   enable_creative_cover_generation: () => true,
   CREATIVE_MODEL_PROVIDER_ID: () => true,
   CREATIVE_PROVIDER_ID: () => true,
