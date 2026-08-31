@@ -34,6 +34,7 @@ class _ScheduleHarness(DailyStateMixin):
             "detail_enhanced_segments": {
                 f"{today}:1:10:00": {
                     "status": "done",
+                    "summary": "在学校教室专心上课。",
                     "location": "学校教室",
                     "location_basis": ["coarse_plan"],
                     "location_confidence": 0.8,
@@ -100,6 +101,59 @@ class ScheduleRuntimeProjectionRegressionTests(unittest.IsolatedAsyncioTestCase)
         self.assertIn(harness._plan_item_runtime_status(plan, plan["items"][0], 0), {"planned", "unknown"})
         self.assertEqual("completed", harness._plan_item_display_status(plan, plan["items"][0], 0))
         self.assertEqual("active", harness._plan_item_display_status(plan, plan["items"][1], 1))
+
+    def test_clock_plan_context_does_not_relax_canonical_current_getter(self) -> None:
+        harness = _ScheduleHarness()
+        harness._effective_plan_now_minutes = lambda _date: 10 * 60 + 30
+        plan = harness.data["daily_plan"]
+
+        self.assertIsNone(harness._get_current_plan_item(plan))
+        self.assertEqual(
+            "去学校上课",
+            harness._get_clock_plan_item_for_display(plan)["activity"],
+        )
+        self.assertEqual("active", harness._plan_item_display_status(plan, plan["items"][1], 1))
+
+    def test_current_detail_snapshot_is_loaded_by_segment_key(self) -> None:
+        harness = _ScheduleHarness()
+        harness._effective_plan_now_minutes = lambda _date: 10 * 60 + 15
+
+        snapshot = harness._current_detail_snapshot_for_update()
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual("done", snapshot["status"])
+        self.assertEqual("在学校教室专心上课。", snapshot["summary"])
+
+    def test_detail_snapshot_is_not_exposed_during_generation_lead_window(self) -> None:
+        harness = _ScheduleHarness()
+        today = _today_key()
+        harness.data["daily_plan"]["items"] = [
+            {"time": "09:00", "end": "10:00", "activity": "整理房间", "lifecycle_status": "planned"},
+            {"time": "10:15", "end": "11:00", "activity": "去学校上课", "lifecycle_status": "planned"},
+        ]
+        harness.data["detail_enhanced_segments"] = {
+            f"{today}:1:10:15": {
+                "status": "done",
+                "summary": "提前生成但尚未进入的上课片段。",
+            }
+        }
+        harness._effective_plan_now_minutes = lambda _date: 10 * 60 + 5
+
+        segment = harness._current_detail_segment_for_update()
+
+        self.assertIsNotNone(segment)
+        self.assertEqual(10 * 60 + 15, segment["start"])
+        self.assertIsNone(harness._current_detail_snapshot_for_update())
+
+    def test_detail_snapshot_is_not_exposed_after_parent_plan_is_invalidated(self) -> None:
+        harness = _ScheduleHarness()
+        harness._effective_plan_now_minutes = lambda _date: 10 * 60 + 15
+        current_item = harness.data["daily_plan"]["items"][1]
+
+        for lifecycle in ("changed", "deferred", "completed", "cancelled"):
+            with self.subTest(lifecycle=lifecycle):
+                current_item["lifecycle_status"] = lifecycle
+                self.assertIsNone(harness._current_detail_snapshot_for_update())
 
     async def test_current_segment_reapplies_prebuilt_detail_location_at_start(self) -> None:
         harness = _ScheduleHarness()

@@ -135,6 +135,34 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state_calls, 0)
         self.assertNotIn("memory.current_state", {item["key"] for item in collected})
 
+    async def test_third_person_activity_question_skips_current_state_memory_lookup(self) -> None:
+        plugin = _private_collector_harness()
+        state_calls = 0
+
+        async def current_state(**_kwargs) -> str:
+            nonlocal state_calls
+            state_calls += 1
+            return "不应读取"
+
+        async def private_recall(**_kwargs) -> str:
+            return ""
+
+        plugin._memory_companion_compose_feature_context = current_state
+        plugin._memory_companion_compose_private_recall = private_recall
+
+        for text in ("你觉得春希现在在干什么？", "你猜他在做什么？"):
+            with self.subTest(text=text):
+                collected = await plugin._collect_private_passive_prompt_contexts(
+                    _PrivateEvent(),
+                    SimpleNamespace(system_prompt="", prompt=text),
+                    inbound_text=text,
+                    current_user={"user_id": "10001"},
+                    is_private_chat=True,
+                )
+                self.assertNotIn("memory.current_state", {item["key"] for item in collected})
+
+        self.assertEqual(state_calls, 0)
+
     async def test_private_turn_includes_authorized_mobile_location_context(self) -> None:
         plugin = _private_collector_harness()
         plugin._format_mobile_user_location_context = lambda _user: (
@@ -171,7 +199,11 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
         plugin._memory_companion_compose_feature_context = current_state
         plugin._memory_companion_compose_private_recall = private_recall
 
-        for text in ("那你现在在干啥呢", "好像你在忙的样子，忙啥呢"):
+        for text in (
+            "那你现在在干啥呢",
+            "好像你在忙的样子，忙啥呢",
+            "你现在在干什么？",
+        ):
             with self.subTest(text=text):
                 collected = await plugin._collect_private_passive_prompt_contexts(
                     _PrivateEvent(),

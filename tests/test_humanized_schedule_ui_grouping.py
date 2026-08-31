@@ -41,6 +41,28 @@ class HumanizedScheduleUiGroupingTests(unittest.TestCase):
         for key in ("enable_daily_plan", "enable_detail_enhancement", "enable_daily_diary", "enable_daily_greetings", "enable_enhanced_dreams"):
             self.assertIn(f'"{key}",', self.script)
 
+    def test_detail_projection_uses_clock_phase_for_familiar_display_labels(self) -> None:
+        self.assertIn("scheduleTimelineSegmentLabel(segment)", self.script)
+        self.assertIn("scheduleStoryLifecycleLabel(item)", self.script)
+        self.assertIn(
+            'scheduleLifecycleLabel(clockStatus || (!evidence ? legacy : "") || evidence || legacy)',
+            self.script,
+        )
+        self.assertIn('scheduleLifecycleLabel(item?.clock_status || lifecycle)', self.script)
+        self.assertNotIn('active: "当前时段·计划投影"', self.script)
+        self.assertNotIn('completed: "时段已过·未核实"', self.script)
+
+    def test_legacy_dashboard_consumers_use_explicit_plan_projection_labels(self) -> None:
+        self.assertIn("const currentLifecycleText = scheduleTimelineSegmentLabel(current);", self.script)
+        self.assertIn("const segmentLifecycleText = scheduleTimelineSegmentLabel(segment);", self.script)
+        self.assertIn("segment?.clock_status || segment?.lifecycle", self.script)
+        self.assertIn('activityMeta || "当前计划时段"', self.script)
+        self.assertIn('current.activity, "暂无当前计划时段"', self.script)
+        self.assertIn('current.activity || "暂无当前计划时段"', self.script)
+        self.assertIn("scheduleTimelineSegmentLabel(current), current.mood", self.script)
+        self.assertIn('if (!evidence && !clockStatus && !legacy) return "";', self.script)
+        self.assertNotIn('<em class="life-current-marker">当前日程</em>', self.script)
+
     def test_passive_continuity_anchor_is_grouped_after_delta_and_has_dual_visibility(
         self,
     ) -> None:
