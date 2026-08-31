@@ -16,6 +16,7 @@ from astrbot.api.event import AstrMessageEvent
 
 from .constants import DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT
 from .helpers import _flat_get, _missing_optional_model_dependency, _now_ts, _path_text, _photo_group_request_matches, _safe_float, _safe_int, _set_into_config, _single_line, _today_key
+from .logging_util import get_module_logger
 from .photo_generation_scope import PHOTO_GENERATION_SCOPE_LIMIT_KEYS
 from .photo_reference_catalog import (
     CATALOG_VERSION,
@@ -30,6 +31,8 @@ from .photo_prompt_context import PhotoPromptSection
 from .persona_config import runtime_persona_setting
 from .runtime_config_dispatcher import dispatch_runtime_config_effects
 
+
+logger = get_module_logger(__name__)
 
 _PHOTO_REFERENCE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 

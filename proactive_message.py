@@ -12604,15 +12604,19 @@ Output:
         )
 
     async def _generate_photo_image_result(self, **kwargs: Any) -> PhotoGenerationResult:
+        self._image_companion_generation_metadata = {}
+        self._nai_image_generation_metadata = {}
         backend, image_path, note = await self._generate_photo_image(**kwargs)
         metadata: dict[str, Any] = {}
+        bridge_metadata_supported = False
         for getter_name in ("_image_companion_last_metadata", "_nai_image_last_metadata"):
             getter = getattr(self, getter_name, None)
             if callable(getter):
+                bridge_metadata_supported = True
                 metadata = getter() or {}
                 if metadata:
                     break
-        if not metadata:
+        if not metadata and not bridge_metadata_supported:
             metadata = self._photo_generation_result_metadata(
                 image_path=image_path,
                 session_key=_single_line(kwargs.get("session_key"), 340),

@@ -53,9 +53,15 @@ async def test_nai_image_bridge_preserves_result_shape_and_metadata() -> None:
 @pytest.mark.asyncio
 async def test_nai_image_bridge_returns_install_hint_without_plugin() -> None:
     harness = _BridgeHarness()
+    harness._nai_image_api = lambda: None
+    harness._nai_image_generation_metadata = {
+        "reference_id": "stale-reference",
+        "reference_used": True,
+    }
     result = await harness._nai_image_generate(workflow_kind="selfie", prompt_text="test")
     assert result[0] == "NAI 生图"
     assert "astrbot_plugin_nai_image" in result[2]
+    assert harness._nai_image_last_metadata() == {}
 
 
 def test_nai_image_status_is_unavailable_without_plugin() -> None:

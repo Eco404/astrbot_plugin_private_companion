@@ -922,6 +922,7 @@ class ImageCompanionBridgeMixin:
         delivery order remain unchanged, but it no longer executes an image
         backend locally.
         """
+        self._image_companion_generation_metadata = {}
         api = self._image_companion_api_fresh()
         mode, api, generation, reason = self._image_companion_contract(api=api)
         if mode == "current" and api is not None:

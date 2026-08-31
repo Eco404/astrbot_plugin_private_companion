@@ -117,6 +117,7 @@ class NAIImageBridgeMixin:
         delivery order remain unchanged, while the NAI plugin executes the
         image backend locally.
         """
+        self._nai_image_generation_metadata = {}
         api = self._nai_image_api()
         generator = getattr(api, "generate_for_companion", None) if api is not None else None
         if not callable(generator):

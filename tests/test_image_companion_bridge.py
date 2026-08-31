@@ -914,6 +914,37 @@ async def test_current_image_rejects_control_characters_in_failure_code(
 
 
 @pytest.mark.asyncio
+async def test_current_image_failure_clears_previous_generation_metadata(
+    tmp_path: Path,
+) -> None:
+    class FailedApi(_CurrentImageApi):
+        async def execute_task(self, value: object) -> dict[str, object]:
+            result = await super().execute_task(value)
+            result["status"] = "failed"
+            result["output"] = None
+            result["error"] = {"code": "generation_failed", "stage": "backend"}
+            return result
+
+    harness = _BridgeHarness()
+    harness._image_companion_generation_metadata = {
+        "reference_id": "stale-reference",
+        "reference_used": True,
+    }
+    api = FailedApi(tmp_path / "output.png")
+    harness._image_companion_api = lambda: api
+
+    result = await harness._image_companion_generate(
+        workflow_kind="selfie",
+        prompt_text="test",
+        session_key="test",
+    )
+
+    assert result[1] == ""
+    assert "generation_failed" in result[2]
+    assert harness._image_companion_last_metadata() == {}
+
+
+@pytest.mark.asyncio
 async def test_descriptorless_image_api_never_receives_companion_owner() -> None:
     calls = 0
 
