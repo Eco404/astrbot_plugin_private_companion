@@ -1029,11 +1029,44 @@ class ImageCompanionBridgeMixin:
     ) -> dict[str, Any]:
         mode, api, generation, reason = self._image_companion_contract()
         if mode == "current":
+            # Endpoint probing is an optional diagnostic surface, not part of
+            # the generation task contract. Use it when the active extension
+            # exposes it; retain the old explanation only for newer builds
+            # that intentionally omit this optional method.
+            tester = getattr(api, "test_endpoint", None) if api is not None else None
+            if callable(tester):
+                try:
+                    self._image_require_current_api(api, generation)
+                    result = await tester(self, dict(endpoint or {}), str(prompt or ""))
+                    self._image_require_current_api(api, generation)
+                    return dict(result) if isinstance(result, dict) else {
+                        "ok": False,
+                        "message": "Image 扩展返回了无效的在线 API 测试结果。",
+                    }
+                except asyncio.CancelledError:
+                    raise
+                except _ImageCurrentContractError as exc:
+                    return {
+                        "ok": False,
+                        "unsupported": True,
+                        "code": "image_contract_incompatible",
+                        "message": "Image 扩展在测试期间发生了热重载，请重试。",
+                        "detail": _single_line(exc.code, 160),
+                    }
+                except Exception as exc:
+                    logger.warning(
+                        "Image 当前契约在线 API 测试失败: error_type=%s",
+                        type(exc).__name__,
+                    )
+                    return {
+                        "ok": False,
+                        "message": "在线图片 API 测试请求失败，请检查生图排障记录。",
+                    }
             return {
                 "ok": False,
                 "unsupported": True,
                 "code": "image_current_contract_endpoint_test_unsupported",
-                "message": "新版 Image 扩展不支持陪伴面板的旧式单端点测试；请到完整图片生成链路测试。",
+                "message": "当前 Image 扩展未提供在线 API 测试接口；请到完整图片生成链路测试。",
                 "detail": "当前 Image 配置未被判定为错误，旧式单端点测试未执行。请在排障页运行文生图或自拍测试。",
                 "next_step": "到排障页运行完整图片生成链路测试。",
             }

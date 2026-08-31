@@ -1117,6 +1117,30 @@ async def test_endpoint_test_explains_current_contract_without_calling_legacy_pa
 
 
 @pytest.mark.asyncio
+async def test_endpoint_test_uses_optional_current_api_diagnostic() -> None:
+    calls: list[tuple[object, dict[str, object], str]] = []
+
+    class Api(_CurrentImageApi):
+        async def test_endpoint(self, owner, endpoint, prompt):
+            calls.append((owner, endpoint, prompt))
+            return {"ok": True, "message": "endpoint ok"}
+
+    api = Api(Path("C:/unused.png"))
+    harness = _BridgeHarness()
+    harness._image_companion_api = lambda: api
+
+    result = await harness._image_companion_test_endpoint(
+        {"base_url": "https://example.test/v1"},
+        "endpoint probe",
+    )
+
+    assert result == {"ok": True, "message": "endpoint ok"}
+    assert calls == [
+        (harness, {"base_url": "https://example.test/v1"}, "endpoint probe")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_endpoint_test_uses_refreshed_missing_result_for_diagnosis() -> None:
     stale_api = SimpleNamespace()
     harness = _BridgeHarness()

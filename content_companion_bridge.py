@@ -560,7 +560,7 @@ class ContentCompanionBridgeMixin:
         if normalized is None or not runtime_persona_setting(
             self,
             "enable_creative_writing",
-            True,
+            False,
         ):
             return False
         scheduler = getattr(self, "_schedule_creative_share_candidate", None)
@@ -824,7 +824,7 @@ class ContentCompanionBridgeMixin:
                     if not runtime_persona_setting(
                         self,
                         "enable_creative_writing",
-                        True,
+                        False,
                     ):
                         return
                     pending_checker = getattr(
