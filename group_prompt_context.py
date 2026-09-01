@@ -571,6 +571,11 @@ def build_group_prompt_context(
             ),
             xml_element(
                 "constraint",
+                attrs={"key": "pronoun_disambiguation"},
+                text="群聊里问“我是谁/你记得我是谁吗/你知道我是谁吗”时，“我”指当前发言者本人（current.id），问的是你眼中 TA 是谁；只有问“你是谁/你叫什么名字/介绍一下你自己”时，“你”才指 Bot 自己。",
+            ),
+            xml_element(
+                "constraint",
                 attrs={"key": "internal_id_privacy"},
                 text="不要在回复中复述内部 ID。",
             ),

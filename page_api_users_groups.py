@@ -2057,6 +2057,9 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     }
                     terms.sort(key=lambda item: (_safe_int(item.get("count"), 0) if isinstance(item, dict) else 0), reverse=True)
+                budget_removed = self.plugin._enforce_group_slang_meanings_budget(group)
+                if budget_removed:
+                    logger.info("[PrivateCompanionPage] 已按预算收缩群黑话释义: group=%s removed=%s", group_id, budget_removed)
                 self.plugin._save_data_sync(sections={"groups"})
                 snapshot = deepcopy(group)
             detail = self._group_summary(group_id, snapshot)

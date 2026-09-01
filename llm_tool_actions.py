@@ -3963,9 +3963,9 @@ class LlmToolActionsMixin:
             )
             if fallback_message:
                 message = f"{message}\n{fallback_message}".strip()
-            trace_writer = getattr(self, "_append_photo_generation_trace_event", None)
+            trace_writer = getattr(self, "_append_photo_generation_trace_event_async", None)
             if callable(trace_writer):
-                trace_writer(
+                await trace_writer(
                     generation_trace_id,
                     "delivery_started",
                     data={"caption": message, "image_path": image_path},

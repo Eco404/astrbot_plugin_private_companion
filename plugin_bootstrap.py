@@ -978,6 +978,26 @@ def _initialize_proactive_and_reaction_config(self: Any, c: Any) -> None:
     self._reply_component_style_cache: dict[str, tuple[str, str]] = {}
     self._group_reply_quote_target_cache: dict[str, dict[str, Any]] = {}
     self.enable_segmented_proactive_reply = self._cfg_bool(c, "enable_segmented_proactive_reply", False)
+    # 被动戳一戳配置
+    self.enable_reactive_poke = self._cfg_bool(c, "enable_reactive_poke", False)
+    self.reactive_poke_trigger_probability = self._cfg_unit_interval(
+        c, "reactive_poke_trigger_probability", 1.0
+    )
+    self.reactive_poke_normal_reply_probability = self._cfg_unit_interval(
+        c, "reactive_poke_normal_reply_probability", 0.3
+    )
+    self.reactive_poke_back_probability = self._cfg_unit_interval(
+        c, "reactive_poke_back_probability", 0.1
+    )
+    self.reactive_poke_super_poke_probability = self._cfg_unit_interval(
+        c, "reactive_poke_super_poke_probability", 0.01
+    )
+    self.reactive_poke_back_times = self._cfg_int(c, "reactive_poke_back_times", 1, 1, 10)
+    self.reactive_poke_super_poke_times = self._cfg_int(c, "reactive_poke_super_poke_times", 5, 1, 20)
+    self.reactive_poke_interval = self._cfg_float(c, "reactive_poke_interval", 1.0, 0.1, 5.0)
+    self.reactive_poke_normal_replies = self._cfg_raw(c, "reactive_poke_normal_replies", None)
+    self.reactive_poke_prompts = self._cfg_raw(c, "reactive_poke_prompts", None)
+    self.reactive_poke_back_prompts = self._cfg_raw(c, "reactive_poke_back_prompts", None)
     # The legacy switch remains the module master switch.  Rule-based
     # segmentation defaults on so existing configurations keep their behavior;
     # the LLM-controlled protocol is opt-in.

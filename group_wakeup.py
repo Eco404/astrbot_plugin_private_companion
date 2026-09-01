@@ -1137,8 +1137,13 @@ class GroupWakeupMixin:
             return {}
         if str(scene.get("talking_to") or "") == "bot":
             return {}
-        if str(scene.get("trigger") or "") in {"at_other", "reply_other", "at_all"}:
-            return {}
+        trigger = str(scene.get("trigger") or "")
+        if trigger in {"at_other", "reply_other", "at_all"}:
+            # Still check for direct wakeup words (keywords) even when @ing
+            # others.  Only skip soft signals so the bot is not intrusive.
+            return self._evaluate_wakeup_direct_words_only(
+                group, scene, sender_id, cleaned,
+            )
         fixture_group_settings: Mapping[str, Any] = {}
         fixture_adapter = getattr(self, "_lab_fixture_adapter", None)
         fixture_settings = getattr(fixture_adapter, "group_wakeup_settings", None)
@@ -1441,6 +1446,43 @@ class GroupWakeupMixin:
             }
         return {}
 
+    def _evaluate_wakeup_direct_words_only(
+        self,
+        group: dict[str, Any],
+        scene: dict[str, Any],
+        sender_id: str,
+        cleaned: str,
+    ) -> dict[str, Any]:
+        """Check only direct wakeup words when the message @s other users.
+
+        Soft signals (question, cold group, context words, interest) are
+        skipped so the bot is not intrusive in conversations between others.
+        """
+        if self._group_sender_is_primary_user(sender_id):
+            owner_direct_words = self._configured_group_owner_direct_wakeup_words()
+            for word in owner_direct_words:
+                if self._text_contains_wakeup_word(cleaned, word):
+                    strength = self._group_wakeup_strength("direct_word", group, scene)
+                    return {
+                        "type": "direct_word",
+                        "word": word,
+                        "strength": strength,
+                        "reason": "owner_direct_wakeup_word",
+                        "note": "主要用户使用了专属强唤醒词（消息中含 @他人）。",
+                    }
+        direct_words = self._configured_group_direct_wakeup_words()
+        for word in direct_words:
+            if self._text_contains_wakeup_word(cleaned, word):
+                strength = self._group_wakeup_strength("direct_word", group, scene)
+                return {
+                    "type": "direct_word",
+                    "word": word,
+                    "strength": strength,
+                    "reason": "direct_wakeup_word",
+                    "note": "群友提到了强唤醒词（消息中含 @他人）。",
+                }
+        return {}
+
     def _infer_group_scene(
         self,
         event: AstrMessageEvent | None,
@@ -1474,6 +1516,25 @@ class GroupWakeupMixin:
             scene.update({"trigger": "at_all", "reason": "at_all"})
             return scene
         if non_bot_targets:
+            # Also check whether the bot is also @ed in the same message.
+            # If the bot is also @ed, treat this as "bot conversation" rather
+            # than "other-only", so downstream keyword/wakeup logic fires.
+            bot_also_attended = any(
+                isinstance(item, dict) and item.get("is_bot")
+                for item in at_targets
+            ) or bool(re.search(r"\[CQ:at,qq=" + re.escape(str(self_id or "")) + r"(?:,|\])", cleaned))
+            if bot_also_attended:
+                scene.update({
+                    "trigger": "at_bot",
+                    "talking_to": "bot",
+                    "talking_to_name": "你",
+                    "reason": "explicit_at_bot",
+                    "at_other_targets": [
+                        {"user_id": str(t.get("user_id", "")), "name": str(t.get("name", ""))}
+                        for t in non_bot_targets
+                    ],
+                })
+                return scene
             target = non_bot_targets[0]
             target_id = str(target.get("user_id") or "")
             scene.update({

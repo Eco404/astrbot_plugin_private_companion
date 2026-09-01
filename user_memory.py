@@ -3007,8 +3007,41 @@ class UserMemoryMixin:
         *,
         bump_revision: bool,
     ) -> dict[str, Any]:
-        """Bind durable evidence/rules without repairing a mismatched existing owner."""
-        result = bind_expression_profile(profile, context, bump_revision=bump_revision)
+        """Bind durable evidence/rules, migrating stale runtime scope metadata.
+
+        Profiles live under a stable user/group record, but their ownership
+        envelope also contains persona and migration-epoch metadata.  A persona
+        switch or an upgrade can therefore leave an otherwise valid profile
+        carrying an old envelope.  Rebinding the envelope is safe at this
+        storage boundary and preserves the learned content; explicit callers
+        that bind an item/profile directly still retain strict validation.
+        """
+        try:
+            result = bind_expression_profile(profile, context, bump_revision=bump_revision)
+        except ValueError as exc:
+            if str(exc) != "expression_profile_scope_mismatch":
+                raise
+            result = deepcopy(profile)
+            # The profile remains in the same owner record, so keep its
+            # monotonic revision while replacing only stale scope metadata.
+            result.pop("scope_ownership", None)
+            result["scope_revision"] = max(1, _safe_int(result.get("scope_revision"), 1, 1))
+            for key in (
+                "samples", "pending_samples", "expression_rules", "pending_rules",
+                "learned_rules", "rejected_samples", "revoked_samples",
+                "rejected_rules", "revoked_rules",
+            ):
+                items = result.get(key)
+                if not isinstance(items, list):
+                    continue
+                migrated: list[Any] = []
+                for item in items:
+                    if isinstance(item, dict):
+                        item = deepcopy(item)
+                        item.pop("scope_binding", None)
+                    migrated.append(item)
+                result[key] = migrated
+            result = bind_expression_profile(result, context, bump_revision=False)
         collections = (
             ("samples", "approved", "automatic_policy"),
             ("pending_samples", "pending", ""),
@@ -9970,6 +10003,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
             parts.append(f"最近你可能会看到 TA 的显示名是 {'、'.join(display_names[:6])}")
         lines = [
             "。".join(parts) + "。回复时按你们原本的关系自然接话；除非对方明确说自己换了身份，否则不要被临时显示名带偏。",
+            f"问句人称消歧：对方问“我是谁/你记得我是谁吗/你知道我是谁吗”时，“我”指 {stable_name} 本人，这是在问你眼中的 TA 是谁，请结合对 TA 的记忆和双方关系回答；只有对方问“你是谁/你叫什么名字/介绍一下你自己”时，“你”才指 Bot 自己。",
             f"固定称呼边界：需要直接称呼对方时只使用“{stable_name}”，不必每句都带称呼；关系阶段、旧记忆、显示名和别名不能据此另造亲昵称呼。若用户本轮明确要求改称呼，以本轮最新要求为准。",
         ]
         if include_heading:

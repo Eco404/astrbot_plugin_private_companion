@@ -1244,6 +1244,15 @@ class EventDispatchMixin:
             ts = _safe_float(value.get("ts"), 0) if isinstance(value, dict) else 0
             if ts <= 0 or now - ts > 300.0:
                 cache.pop(key, None)
+        # Cap total entries so a high-frequency conversation cannot accumulate
+        # an unbounded number of signatures inside the sliding window.
+        max_items = 1024
+        if len(cache) > max_items:
+            for key in sorted(cache, key=lambda k: _safe_float(cache.get(k, {}).get("ts"), 0))[
+                : len(cache) - max_items
+            ]:
+                cache.pop(key, None)
+
         # Check every exact-text entry because independent inbound message IDs
         # have separate idempotency slots under the same reply signature.
         for previous in cache.values():

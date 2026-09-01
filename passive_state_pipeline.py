@@ -447,11 +447,43 @@ async def inject_humanized_state(
                             )
                     wakeup_effect = getattr(event, "private_companion_group_wakeup_state_effect", None)
                     wakeup_state_text = ""
-                    if passive_states_enabled and isinstance(wakeup_effect, dict) and wakeup_effect:
+                    needs_daily_state = bool(
+                        passive_states_enabled
+                        and isinstance(wakeup_effect, dict)
+                        and wakeup_effect
+                    )
+                    slang_embedding_builder = getattr(self, "_group_slang_embedding_context", None)
+
+                    async def _load_group_daily_state() -> dict[str, Any] | None:
+                        if not needs_daily_state:
+                            return None
                         try:
-                            state = await self._ensure_daily_state()
+                            return await self._ensure_daily_state()
                         except Exception:
-                            state = self.data.get("daily_state", {})
+                            return self.data.get("daily_state", {})
+
+                    async def _load_group_slang_embedding() -> str:
+                        if not callable(slang_embedding_builder):
+                            return ""
+                        try:
+                            return await slang_embedding_builder(
+                                group,
+                                str(event.message_str or ""),
+                                include_heading=False,
+                            )
+                        except Exception as exc:
+                            logger.debug(
+                                "[PrivateCompanion] 群黑话嵌入上下文生成失败: %s",
+                                _single_line(exc, 120),
+                            )
+                            return ""
+
+                    # 将可能触网的 daily_state 与黑话 embedding 并行拉取，避免串行等待拉长回复
+                    state, slang_embedding_text = await asyncio.gather(
+                        _load_group_daily_state(),
+                        _load_group_slang_embedding(),
+                    )
+                    if needs_daily_state and isinstance(state, dict):
                         wakeup_state_text = self._format_group_wakeup_humanized_prompt(
                             wakeup_effect,
                             state,
@@ -479,27 +511,13 @@ async def inject_humanized_state(
                     elif group_context:
                         group_context_section = prompt_section("群聊上下文", str(group_context))
                     group_sections: list[dict[str, Any]] = []
-                    slang_embedding_builder = getattr(self, "_group_slang_embedding_context", None)
-                    if callable(slang_embedding_builder):
-                        try:
-                            slang_embedding_text = await slang_embedding_builder(
-                                group,
-                                str(event.message_str or ""),
-                                include_heading=False,
+                    if slang_embedding_text:
+                        group_sections.append(
+                            prompt_section(
+                                "群内黑话语义近似（仅作软参考）",
+                                slang_embedding_text,
                             )
-                        except Exception as exc:
-                            logger.debug(
-                                "群黑话嵌入上下文生成失败: %s",
-                                _single_line(exc, 120),
-                            )
-                            slang_embedding_text = ""
-                        if slang_embedding_text:
-                            group_sections.append(
-                                prompt_section(
-                                    "群内黑话语义近似（仅作软参考）",
-                                    slang_embedding_text,
-                                )
-                            )
+                        )
                     high_intensity_for_context = getattr(event, "private_companion_group_high_intensity", None)
                     recent_atrelay_context = self._format_recent_atrelay_context_for_prompt(
                         kind="group",
@@ -513,6 +531,18 @@ async def inject_humanized_state(
                         group_sections.append(prompt_section("刚刚的转述动作", recent_atrelay_context))
                     if wakeup_state_text:
                         group_sections.append(prompt_section("群聊唤醒与当前状态", wakeup_state_text))
+                    if bool(runtime_persona_setting(self, "enable_group_social_context", False)):
+                        try:
+                            self._append_group_social_context_sections(
+                                group,
+                                group_sections,
+                                sender_id=sender_id,
+                            )
+                        except Exception as exc:
+                            logger.debug(
+                                "[PrivateCompanion] 群聊社交上下文注入失败: %s",
+                                _single_line(exc, 120),
+                            )
                     group_sections.extend(extra_sections)
                     realtime_formatter = getattr(self, "_format_external_realtime_prompt_section", None)
                     if callable(realtime_formatter):

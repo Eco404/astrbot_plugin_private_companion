@@ -8692,6 +8692,51 @@
         "condition": {
           "enable_group_companion": true
         }
+      },
+      "enable_group_social_context": {
+        "description": "群聊社交氛围总开关",
+        "type": "bool",
+        "hint": "开启后，Bot 会感知群聊氛围（调侃/互怼/严肃/火药味/告白/冷场）并据此调节扮演强度、记住名场面、接梗前先看边界。默认关闭，可逐步开启子项。",
+        "default": false,
+        "condition": {
+          "enable_group_companion": true
+        }
+      },
+      "enable_group_mood_detection": {
+        "description": "群聊氛围感知",
+        "type": "bool",
+        "hint": "从最近群消息用规则提炼氛围标签与社交张力，并把氛围摘要注入群聊上下文。",
+        "default": false,
+        "condition": {
+          "enable_group_social_context": true
+        }
+      },
+      "enable_group_roleplay_strength": {
+        "description": "群聊扮演强度自适应",
+        "type": "bool",
+        "hint": "根据氛围调节夸张度：玩闹氛围可以适度夸张接梗起哄，严肃/火药味/冷场时克制回应。",
+        "default": false,
+        "condition": {
+          "enable_group_social_context": true
+        }
+      },
+      "enable_group_moments": {
+        "description": "群聊名场面记忆",
+        "type": "bool",
+        "hint": "用规则粗筛群里的名场面候选（引用回复、火花词、多人爆冲），带时效保留并在需要时注入群聊上下文。",
+        "default": false,
+        "condition": {
+          "enable_group_social_context": true
+        }
+      },
+      "enable_group_joke_guard": {
+        "description": "群聊接梗边界护栏",
+        "type": "bool",
+        "hint": "跟踪成员的玩笑敏感度（撤回、严肃反对、冷场信号），对敏感成员降氛围强度并避免向其开玩笑。",
+        "default": false,
+        "condition": {
+          "enable_group_social_context": true
+        }
       }
     }
   },
@@ -11622,6 +11667,136 @@
         "default": 30,
         "condition": {
           "enable_poke_action": true
+        }
+      }
+    }
+  },
+  "reactive_poke_config": {
+    "description": "被动戳一戳",
+    "type": "object",
+    "hint": "控制被用户戳时的 LLM 回复、反戳等行为。",
+    "items": {
+      "enable_reactive_poke": {
+        "description": "启用被动戳一戳",
+        "type": "bool",
+        "hint": "开启后，用户戳 Bot 时 Bot 会以文字或 LLM 回复，并可能戳回去。",
+        "default": false
+      },
+      "reactive_poke_trigger_probability": {
+        "description": "触发回复总概率",
+        "type": "float",
+        "hint": "0-1 之间，决定 Bot 被戳后有多大概率回应。1 为 100% 回应。",
+        "default": 1.0,
+        "condition": {
+          "enable_reactive_poke": true
+        }
+      },
+      "reactive_poke_normal_reply_probability": {
+        "description": "不调用 LLM 的回复概率",
+        "type": "float",
+        "hint": "使用预设文本回复的概率，取值 0-1。LLM 回复概率 = 1 - 此值。",
+        "default": 0.3,
+        "condition": {
+          "enable_reactive_poke": true
+        }
+      },
+      "reactive_poke_back_probability": {
+        "description": "反戳概率",
+        "type": "float",
+        "hint": "被戳后戳回去的概率，取值 0-1。",
+        "default": 0.1,
+        "condition": {
+          "enable_reactive_poke": true
+        }
+      },
+      "reactive_poke_super_poke_probability": {
+        "description": "超级反戳概率",
+        "type": "float",
+        "hint": "被戳后进行超级反戳的概率，取值 0-1。",
+        "default": 0.01,
+        "condition": {
+          "enable_reactive_poke": true
+        }
+      },
+      "reactive_poke_back_times": {
+        "description": "普通反戳次数",
+        "type": "int",
+        "hint": "普通反戳时戳几下。",
+        "default": 1,
+        "condition": {
+          "enable_reactive_poke": true
+        }
+      },
+      "reactive_poke_super_poke_times": {
+        "description": "超级反戳次数",
+        "type": "int",
+        "hint": "超级反戳时疯狂戳几下。",
+        "default": 5,
+        "condition": {
+          "enable_reactive_poke": true
+        }
+      },
+      "reactive_poke_interval": {
+        "description": "反戳动作间隔秒数",
+        "type": "float",
+        "hint": "连续反戳时每次戳的间隔，单位秒。",
+        "default": 1.0,
+        "condition": {
+          "enable_reactive_poke": true
+        }
+      },
+      "reactive_poke_normal_replies": {
+        "description": "预设回复列表",
+        "type": "list",
+        "hint": "不调用 LLM 时使用的预设回复，每行一条。",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "嗯？有人戳我吗？",
+          "哎呀，被发现了~",
+          "戳我干嘛呀~",
+          "在呢在呢~",
+          "唔…再戳就不理你了哦"
+        ],
+        "condition": {
+          "enable_reactive_poke": true
+        }
+      },
+      "reactive_poke_prompts": {
+        "description": "被戳提示词列表",
+        "type": "list",
+        "hint": "每行一条提示词，被戳时随机选一条让 LLM 生成回复。",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "有人戳了戳你，请你回一句俏皮的话。",
+          "你被人戳了一下，请给出你的反应。",
+          "你被戳了戳，请表达出一些惊讶。",
+          "有人在玩弄你，请表达出可爱的不满。",
+          "你被戳了戳，请表达出害羞的样子。",
+          "有人戳了你，请表达出傲娇的反应。",
+          "被人戳了戳，请给出一个有趣的回应。",
+          "你被人戳了戳，请用你的个性化方式回应。"
+        ],
+        "condition": {
+          "enable_reactive_poke": true
+        }
+      },
+      "reactive_poke_back_prompts": {
+        "description": "反戳提示词列表",
+        "type": "list",
+        "hint": "每行一条提示词，决定反戳时随机选一条让 LLM 生成回复。",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "你决定戳回对方，请说一句调皮的话。",
+          "你要反击戳回对方，请表达出你的小得意。"
+        ],
+        "condition": {
+          "enable_reactive_poke": true
         }
       }
     }

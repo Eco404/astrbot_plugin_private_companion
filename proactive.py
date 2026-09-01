@@ -3910,6 +3910,53 @@ class ProactiveMixin(UserRestGateMixin):
         persona_id = str(active_getter() if callable(active_getter) else "").strip()
         return f"{persona_id}:{label}" if persona_id else label
 
+    def _maintenance_task_min_interval_seconds(self, label: str) -> float:
+        """Per-task minimum cadence for the scheduler loop so long-running
+        maintenance work does not need to be re-invoked every cycle."""
+        intervals = {
+            "被动注入缓存": 300.0,
+            "日程归档": 600.0,
+            "日记": 300.0,
+            "每日巡视": 300.0,
+            "每日穿搭": 300.0,
+            "个人目标": 300.0,
+            "今日日程": 120.0,
+            "当前细化": 120.0,
+            "当前在线感": 120.0,
+            "天气预警": 120.0,
+            "环境突变": 120.0,
+            "余额感知": 120.0,
+            "日常状态": 120.0,
+            "创作推进": 60.0,
+            "备忘便签": 60.0,
+            "晚安识屏": 60.0,
+        }
+        return _safe_float(intervals.get(label), 60.0, 30.0, 3600.0)
+
+    def _maintenance_task_due(self, label: str, *, now: float | None = None) -> bool:
+        last_run = getattr(self, "_maintenance_task_last_run", None)
+        if not isinstance(last_run, dict):
+            return True
+        check_now = _now_ts() if now is None else now
+        stamp = _safe_float(last_run.get(self._maintenance_failure_key(label)), 0.0)
+        if stamp <= 0:
+            return True
+        return check_now - stamp >= self._maintenance_task_min_interval_seconds(label)
+
+    def _touch_maintenance_task_run(self, label: str) -> None:
+        last_run = getattr(self, "_maintenance_task_last_run", None)
+        if not isinstance(last_run, dict):
+            last_run = {}
+            self._maintenance_task_last_run = last_run
+        last_run[self._maintenance_failure_key(label)] = _now_ts()
+
+    def _scheduler_maintenance_tasks_due(self) -> tuple[tuple[str, Any], ...]:
+        return tuple(
+            item
+            for item in self._scheduler_maintenance_tasks()
+            if self._maintenance_task_due(item[0])
+        )
+
     def _scheduler_maintenance_tasks(self) -> tuple[tuple[str, Any], ...]:
         tasks = (
             ("日常状态", self._ensure_daily_state),
@@ -4020,12 +4067,18 @@ class ProactiveMixin(UserRestGateMixin):
                 token = activator(persona_id) if callable(activator) else None
             try:
                 await self._tick()
-                for label, task_factory in self._scheduler_maintenance_tasks():
+                maintenance_tasks = (
+                    self._scheduler_maintenance_tasks()
+                    if immediate
+                    else self._scheduler_maintenance_tasks_due()
+                )
+                for label, task_factory in maintenance_tasks:
                     try:
                         if self._maintenance_task_blocked_by_failure(label):
                             continue
                         await task_factory()
                         self._clear_maintenance_task_failure(label)
+                        self._touch_maintenance_task_run(label)
                     except Exception as exc:
                         self._record_maintenance_task_failure(label, exc)
                         logger.warning(
