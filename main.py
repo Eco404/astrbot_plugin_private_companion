@@ -3203,6 +3203,7 @@ class PrivateCompanionPlugin(
                 item["first_ts"] = now
                 item["count"] = 0
                 should_schedule = True
+            current_episode_count = previous_episode_count + 1 if was_active else 1
             item.update(
                 {
                     "schema_version": 2,
@@ -3222,7 +3223,7 @@ class PrivateCompanionPlugin(
                     "status": "active",
                     "resolved_ts": 0,
                     "last_ts": now,
-                    "count": previous_episode_count + 1,
+                    "count": current_episode_count,
                     "lifetime_count": previous_lifetime_count + 1,
                 }
             )
