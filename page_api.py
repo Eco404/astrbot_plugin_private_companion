@@ -1841,6 +1841,54 @@ class PrivateCompanionPageApi(
             "reason": self._single_line(reason, 120),
         }
 
+    def _image_generation_extension_status(self) -> dict[str, Any]:
+        """Read the public Image extension snapshot without making it mandatory."""
+        getter = getattr(self.plugin, "_image_companion_status", None)
+        if not callable(getter):
+            return {}
+        try:
+            status = getter()
+        except Exception:
+            return {}
+        return dict(status) if isinstance(status, dict) else {}
+
+    def _image_generation_called_plugin_diagnostics(
+        self,
+        status: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        snapshot = dict(status) if isinstance(status, dict) else self._image_generation_extension_status()
+        generation = snapshot.get("generation")
+        generation = generation if isinstance(generation, dict) else {}
+        has_image_bridge = callable(getattr(self.plugin, "_image_companion_status", None))
+        plugin_id = self._single_line(
+            generation.get("plugin_id") or snapshot.get("plugin_id"),
+            100,
+        )
+        if not plugin_id and has_image_bridge:
+            plugin_id = "astrbot_plugin_image_companion"
+        plugin_name = self._single_line(
+            generation.get("plugin_name") or snapshot.get("plugin_name"),
+            100,
+        )
+        if not plugin_name and plugin_id == "astrbot_plugin_image_companion":
+            plugin_name = "我会画给你看"
+        return {
+            "called_plugin": plugin_id,
+            "called_plugin_name": plugin_name,
+            "called_plugin_version": self._single_line(
+                generation.get("plugin_version") or snapshot.get("plugin_version"),
+                60,
+            ),
+            "called_plugin_api_version": self._single_line(
+                generation.get("api_version") or snapshot.get("api_version"),
+                80,
+            ),
+            "called_plugin_status_schema": self._single_line(
+                generation.get("status_schema_version") or snapshot.get("status_schema_version"),
+                80,
+            ),
+        }
+
     def _req041_runtime_summary(self) -> dict[str, Any]:
         """Build an aggregate-only migration and isolation status for administrators."""
         runtime = getattr(self.plugin, "req041_migration_status", None)
@@ -7210,6 +7258,8 @@ class PrivateCompanionPageApi(
                 "error": safe_error,
                 "exception_type": exc.__class__.__name__,
             }
+            if test_type in {"image_generation", "image_generation_text2img", "image_generation_selfie"}:
+                result.update(self._image_generation_called_plugin_diagnostics())
         result["type"] = test_type
         result["elapsed_ms"] = self._int(result.get("elapsed_ms")) or int((time.time() - start) * 1000)
         result["ran_at"] = time.time()
@@ -8202,6 +8252,7 @@ class PrivateCompanionPageApi(
     async def _run_image_generation_chain_test(self, payload: dict[str, Any]) -> dict[str, Any]:
         async with self._image_api_runtime_lock():
             self._sync_photo_generation_runtime_config()
+        called_plugin = self._image_generation_called_plugin_diagnostics()
         structured_generator = getattr(self.plugin, "_generate_photo_image_result", None)
         legacy_generator = getattr(self.plugin, "_generate_photo_image", None)
         generator = structured_generator if callable(structured_generator) else legacy_generator
@@ -8210,6 +8261,7 @@ class PrivateCompanionPageApi(
                 "ok": False,
                 "title": "图片生成链路测试",
                 "error": "插件缺少图片生成入口 _generate_photo_image",
+                **called_plugin,
             }
         reference_enabled = bool(getattr(self.plugin, "enable_photo_reference_image", False))
         reference_getter = getattr(self.plugin, "_photo_persona_reference_image_path", None)
@@ -8277,6 +8329,7 @@ class PrivateCompanionPageApi(
             has_reference_source=has_reference_source,
             reference_image_path=reference_image_path,
         )
+        diagnostics = {**called_plugin, **diagnostics}
         logger.info(
             "图片生成排障测试开始: workflow_kind=%s prompt_chars=%s reference=%s timeout=%ss estimated=%ss prompt=%s",
             self._single_line(workflow_kind, 40),
@@ -8463,10 +8516,70 @@ class PrivateCompanionPageApi(
             and getattr(self.plugin, "external_image_api_key", "")
             and getattr(self.plugin, "external_image_api_model", "")
         )
-        backup_available = bool(getattr(self.plugin, "_backup_external_photo_available", lambda: False)())
-        external_available = bool(getattr(self.plugin, "_external_photo_available", lambda: False)())
-        comfyui_available = bool(getattr(self.plugin, "_comfyui_photo_available", lambda: False)())
-        sdgen_available = bool(getattr(self.plugin, "_sdgen_photo_available", lambda: False)())
+        endpoint_unavailable_note = getattr(
+            self.plugin,
+            "_external_image_api_endpoint_unavailable_note",
+            None,
+        )
+        ready_endpoint_queue = []
+        for endpoint in endpoint_queue:
+            try:
+                unavailable_note = (
+                    endpoint_unavailable_note(endpoint)
+                    if callable(endpoint_unavailable_note)
+                    else "" if all(
+                        str(endpoint.get(key) or "").strip()
+                        for key in ("base_url", "api_key", "model")
+                    ) else "incomplete"
+                )
+            except Exception:
+                unavailable_note = ""
+            if not unavailable_note:
+                ready_endpoint_queue.append(endpoint)
+        extension_status = self._image_generation_extension_status()
+        generation_status = extension_status.get("generation")
+        generation_status = generation_status if isinstance(generation_status, dict) else {}
+        generation_state = self._single_line(generation_status.get("state"), 20).lower()
+        generation_schema = self._single_line(
+            generation_status.get("status_schema_version")
+            or extension_status.get("status_schema_version"),
+            80,
+        )
+        generation_backends = generation_status.get("backends")
+        generation_backends = generation_backends if isinstance(generation_backends, dict) else {}
+        has_explicit_generation_status = bool(
+            generation_schema and generation_state in {"ready", "unavailable"}
+        )
+        if has_explicit_generation_status:
+            external_available = bool(generation_backends.get("external"))
+            backup_available = bool(generation_backends.get("backup_external"))
+            comfyui_available = bool(generation_backends.get("comfyui"))
+            sdgen_available = bool(generation_backends.get("sdgen"))
+            availability_source = generation_schema
+        else:
+            reported_backup_available = bool(
+                getattr(self.plugin, "_backup_external_photo_available", lambda: False)()
+            )
+            reported_external_available = bool(
+                getattr(self.plugin, "_external_photo_available", lambda: False)()
+            )
+            external_available = bool(
+                reported_external_available
+                or ready_endpoint_queue
+                or primary_external_configured
+            )
+            backup_available = bool(
+                reported_backup_available
+                or len(ready_endpoint_queue) > 1
+            )
+            comfyui_available = bool(getattr(self.plugin, "_comfyui_photo_available", lambda: False)())
+            sdgen_available = bool(getattr(self.plugin, "_sdgen_photo_available", lambda: False)())
+            if ready_endpoint_queue:
+                availability_source = "endpoint_queue"
+            elif primary_external_configured:
+                availability_source = "legacy_config"
+            else:
+                availability_source = "legacy_runtime_probe"
         tool_call_timeout = self._image_generation_tool_call_timeout_seconds()
 
         segments: list[tuple[str, int]] = []
@@ -8475,14 +8588,14 @@ class PrivateCompanionPageApi(
             segments.append(("NAI 生图直连", external_timeout * 2))
             warnings.append("NAI 直连超时与重试由 NAI 生图插件内部控制，本插件只能估算耗时。")
         if preferred in {"auto", "external"} and external_available:
-            if endpoint_queue:
-                for index, endpoint in enumerate(endpoint_queue[:12]):
+            if ready_endpoint_queue:
+                for index, endpoint in enumerate(ready_endpoint_queue[:12]):
                     timeout_seconds = self._int(endpoint.get("timeout_seconds"), external_timeout, 20, 600)
                     name = self._single_line(endpoint.get("name") or endpoint.get("model") or f"在线图片 API #{index + 1}", 40)
                     segments.append((name, timeout_seconds * 2))
-                if len(endpoint_queue) > 1:
+                if len(ready_endpoint_queue) > 1:
                     warnings.append(
-                        f"已配置 {len(endpoint_queue)} 条在线生图 API 队列：会按优先级逐条失败后再试下一条，完整失败链路会比单接口测试更慢。"
+                        f"检测到 {len(ready_endpoint_queue)} 条可用在线生图 API：会按优先级逐条失败后再试下一条，完整失败链路会比单接口测试更慢。"
                     )
             else:
                 segments.append(("主在线图片 API", external_timeout * 2))
@@ -8517,6 +8630,7 @@ class PrivateCompanionPageApi(
         warnings.append("排障生图只检查生成文件，不覆盖后续发图、QQ 空间发布、记忆回写和主链工具调用耗时。")
 
         return {
+            **self._image_generation_called_plugin_diagnostics(extension_status),
             "timeout_seconds": test_timeout,
             "test_timeout_seconds": test_timeout,
             "estimated_timeout_seconds": estimated,
@@ -8527,6 +8641,9 @@ class PrivateCompanionPageApi(
             "comfyui_wait_seconds": comfyui_wait,
             "backup_external": backup_available,
             "external_queue_lock": external_available,
+            "availability_source": availability_source,
+            "endpoint_count": len(endpoint_queue),
+            "ready_endpoint_count": len(ready_endpoint_queue),
             "tool_call_timeout_seconds": tool_call_timeout,
             "warnings": warnings[:8],
         }
@@ -10744,6 +10861,12 @@ class PrivateCompanionPageApi(
             ("exception_type", 120),
             ("title", 80),
             ("delivery_umo", 180),
+            ("called_plugin", 100),
+            ("called_plugin_name", 100),
+            ("called_plugin_version", 60),
+            ("called_plugin_api_version", 80),
+            ("called_plugin_status_schema", 80),
+            ("availability_source", 80),
         ):
             if source.get(key) not in (None, ""):
                 envelope[key] = self._single_line(source.get(key), limit)

@@ -13220,6 +13220,10 @@ function testDiagnosticFacts(result = {}) {
     ["完成时间", result.ran_at_text || testDiagnosticTimeText(result.finished_at || result.ran_at) || "未记录"],
     ["错误类别", result.error_category || "无"],
     ["异常类型", result.exception_type || "无"],
+    ["调用插件", result.called_plugin_name || result.called_plugin || ""],
+    ["插件版本", result.called_plugin_version || ""],
+    ["插件协议", result.called_plugin_api_version || result.called_plugin_status_schema || ""],
+    ["可用性依据", result.availability_source || ""],
     ["Provider", result.provider || result.provider_id || ""],
     ["数据来源", result.source || ""],
     ["地点", result.location_label || ""],
@@ -13398,6 +13402,41 @@ function showTestDiagnosticDialog(title, result) {
   if (dialog.open) return;
   if (typeof dialog.showModal === "function") dialog.showModal();
   else dialog.setAttribute("open", "");
+}
+
+async function recoverCompletedTroubleshootingTest(
+  testType,
+  previousResult = {},
+  requestedAtMs = Date.now(),
+  timeoutMs = 14 * 60 * 1000,
+) {
+  const previousRequestId = String(previousResult?.request_id || previousResult?.trace_id || "");
+  const previousFinishedAt = Number(previousResult?.finished_at || previousResult?.ran_at || 0);
+  const recoveryWindowStartedAt = Number.isFinite(Number(requestedAtMs))
+    ? Number(requestedAtMs)
+    : Date.now();
+  while (Date.now() - recoveryWindowStartedAt < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    try {
+      await loadTroubleshooting({ silent: true, skipExperimentalRender: true });
+    } catch (_error) {
+      continue;
+    }
+    const result = state.troubleshooting?.chain_tests?.[testType];
+    if (!result || typeof result !== "object") continue;
+    const requestId = String(result.request_id || result.trace_id || "");
+    const finishedAt = Number(result.finished_at || result.ran_at || 0);
+    const belongsToCurrentRun = previousRequestId
+      ? requestId && requestId !== previousRequestId
+      : finishedAt * 1000 >= requestedAtMs - 5000;
+    if (
+      belongsToCurrentRun
+      && finishedAt > previousFinishedAt
+    ) {
+      return result;
+    }
+  }
+  return null;
 }
 
 function resolveTestDiagnosticResult(source, key) {
@@ -39439,6 +39478,8 @@ document.addEventListener("click", async (event) => {
   if (troubleshootingTest) {
     const testType = troubleshootingTest.dataset.troubleshootingTest || "";
     const workflowKind = troubleshootingTest.dataset.troubleshootingWorkflowKind || "";
+    const previousResult = state.troubleshooting?.chain_tests?.[testType] || {};
+    const requestedAtMs = Date.now();
     setActionBusy(troubleshootingTest, true);
     try {
       const result = await postJson("/troubleshooting/test", { type: testType, workflow_kind: workflowKind });
@@ -39468,6 +39509,22 @@ document.addEventListener("click", async (event) => {
         showToast(result.ok ? "链路测试通过" : `链路测试失败：${result.error || "未返回有效结果"}`, result.ok ? "success" : "error");
       }
     } catch (error) {
+      const recovered = testType.startsWith("image_generation")
+        ? await recoverCompletedTroubleshootingTest(testType, previousResult, requestedAtMs)
+        : null;
+      if (recovered) {
+        state.troubleshooting = state.troubleshooting || {};
+        state.troubleshooting.chain_tests = {
+          ...(state.troubleshooting.chain_tests || {}),
+          [testType]: recovered,
+        };
+        renderTroubleshooting();
+        showToast(
+          recovered.ok ? "链路测试通过" : `链路测试失败：${recovered.error || "未返回有效结果"}`,
+          recovered.ok ? "success" : "error",
+        );
+        return;
+      }
       state.troubleshooting = state.troubleshooting || {};
       state.troubleshooting.chain_tests = {
         ...(state.troubleshooting.chain_tests || {}),

@@ -795,6 +795,121 @@ class PhotoReferenceLibraryPageApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reference_image"], reference)
         self.assertIn("persona  original.png", result["reference_image"])
 
+    async def test_timeout_diagnostics_uses_ready_synced_endpoints_when_service_status_is_generic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin = _PhotoReferencePagePlugin(Path(temp_dir))
+            plugin.photo_generation_backend = "external"
+            plugin.external_image_api_timeout_seconds = 180
+            plugin.backup_external_image_api_timeout_seconds = 180
+            plugin.comfyui_photo_wait_seconds = 90
+            endpoints = [
+                {
+                    "name": "primary",
+                    "enabled": True,
+                    "base_url": "https://images.example/v1",
+                    "api_key": "secret-1",
+                    "model": "gpt-image-2",
+                    "timeout_seconds": 180,
+                },
+                {
+                    "name": "backup",
+                    "enabled": True,
+                    "base_url": "https://backup.example/v1",
+                    "api_key": "secret-2",
+                    "model": "gpt-image-2",
+                    "timeout_seconds": 120,
+                },
+            ]
+            plugin._external_image_api_endpoint_queue = lambda **_kwargs: list(endpoints)
+            plugin._external_image_api_endpoint_unavailable_note = lambda _endpoint: ""
+            plugin._external_photo_available = lambda: False
+            plugin._backup_external_photo_available = lambda: False
+            plugin._comfyui_photo_available = lambda: False
+            plugin._sdgen_photo_available = lambda: False
+            api = PrivateCompanionPageApi(plugin)
+            api._image_generation_tool_call_timeout_seconds = lambda: 0
+
+            result = api._image_generation_timeout_diagnostics(
+                workflow_kind="text2img",
+                has_reference_source=False,
+                reference_image_path="",
+            )
+
+        self.assertTrue(result["external_queue_lock"])
+        self.assertTrue(result["backup_external"])
+        self.assertEqual(result["availability_source"], "endpoint_queue")
+        self.assertIn("primary360s", result["timeout_budget"])
+        self.assertIn("backup240s", result["timeout_budget"])
+
+    async def test_timeout_diagnostics_prefers_explicit_extension_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin = _PhotoReferencePagePlugin(Path(temp_dir))
+            plugin.photo_generation_backend = "external"
+            plugin.external_image_api_timeout_seconds = 90
+            plugin.backup_external_image_api_timeout_seconds = 60
+            plugin.comfyui_photo_wait_seconds = 90
+            plugin._image_companion_status = lambda: {
+                "plugin_id": "astrbot_plugin_image_companion",
+                "plugin_name": "我会画给你看",
+                "plugin_version": "0.3.5",
+                "status_schema_version": "image.status.v1",
+                "api_version": "image.generation-api.v1",
+                "generation": {
+                    "state": "ready",
+                    "available": True,
+                    "status_schema_version": "image.status.v1",
+                    "backends": {
+                        "external": True,
+                        "backup_external": True,
+                        "comfyui": False,
+                        "sdgen": False,
+                    },
+                },
+            }
+            plugin._external_image_api_endpoint_queue = lambda **_kwargs: []
+            plugin._external_photo_available = lambda: False
+            plugin._backup_external_photo_available = lambda: False
+            plugin._comfyui_photo_available = lambda: False
+            plugin._sdgen_photo_available = lambda: False
+            api = PrivateCompanionPageApi(plugin)
+            api._image_generation_tool_call_timeout_seconds = lambda: 0
+
+            result = api._image_generation_timeout_diagnostics(
+                workflow_kind="text2img",
+                has_reference_source=False,
+                reference_image_path="",
+            )
+
+        self.assertTrue(result["external_queue_lock"])
+        self.assertTrue(result["backup_external"])
+        self.assertEqual(result["availability_source"], "image.status.v1")
+        self.assertIn("主在线图片 API180s", result["timeout_budget"])
+        self.assertEqual(result["called_plugin_version"], "0.3.5")
+
+    async def test_diagnostic_envelope_preserves_called_plugin_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            api = PrivateCompanionPageApi(_PhotoReferencePagePlugin(Path(temp_dir)))
+
+            result = api._diagnostic_envelope(
+                {
+                    "ok": True,
+                    "called_plugin": "astrbot_plugin_image_companion",
+                    "called_plugin_name": "我会画给你看",
+                    "called_plugin_version": "0.3.5",
+                    "called_plugin_api_version": "image.generation-api.v1",
+                    "called_plugin_status_schema": "image.status.v1",
+                    "availability_source": "image.status.v1",
+                },
+                test_type="image_generation_text2img",
+            )
+
+        self.assertEqual(result["called_plugin"], "astrbot_plugin_image_companion")
+        self.assertEqual(result["called_plugin_name"], "我会画给你看")
+        self.assertEqual(result["called_plugin_version"], "0.3.5")
+        self.assertEqual(result["called_plugin_api_version"], "image.generation-api.v1")
+        self.assertEqual(result["called_plugin_status_schema"], "image.status.v1")
+        self.assertEqual(result["availability_source"], "image.status.v1")
+
 
 class PhotoReferenceLibraryPageUiTests(unittest.TestCase):
     @classmethod
@@ -804,6 +919,21 @@ class PhotoReferenceLibraryPageUiTests(unittest.TestCase):
         cls.styles = (page_dir / "app.css").read_text(encoding="utf-8")
         cls.html = (page_dir / "index.html").read_text(encoding="utf-8")
         cls.api = (ROOT / "page_api.py").read_text(encoding="utf-8")
+
+    def test_image_chain_transport_failure_recovers_persisted_backend_result(self) -> None:
+        self.assertIn("async function recoverCompletedTroubleshootingTest", self.script)
+        self.assertIn("timeoutMs = 14 * 60 * 1000", self.script)
+        self.assertIn("await recoverCompletedTroubleshootingTest(testType, previousResult, requestedAtMs)", self.script)
+        self.assertIn('testType.startsWith("image_generation")', self.script)
+
+    def test_image_chain_dialog_shows_called_plugin_version(self) -> None:
+        for marker in (
+            '["调用插件", result.called_plugin_name || result.called_plugin || ""]',
+            '["插件版本", result.called_plugin_version || ""]',
+            '["插件协议", result.called_plugin_api_version || result.called_plugin_status_schema || ""]',
+            '["可用性依据", result.availability_source || ""]',
+        ):
+            self.assertIn(marker, self.script)
 
     def test_photo_feature_opens_a_dedicated_third_level_manager(self) -> None:
         self.assertIn('data-photo-reference-open', self.script)

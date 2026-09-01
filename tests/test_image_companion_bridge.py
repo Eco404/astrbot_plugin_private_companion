@@ -836,6 +836,12 @@ async def test_current_image_rejects_fifo_reference_without_import(
 
 def test_current_image_status_uses_owner_free_surface(tmp_path: Path) -> None:
     class Api(_CurrentImageApi):
+        def status(self) -> dict[str, object]:
+            value = super().status()
+            value.pop("backends", None)
+            value["generation"] = {"backends": {"external": True}}
+            return value
+
         def capability_status(self, _owner):
             raise AssertionError("formal status must not receive Companion owner")
 

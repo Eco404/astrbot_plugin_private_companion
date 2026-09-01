@@ -827,7 +827,16 @@ class ImageCompanionBridgeMixin:
             result.setdefault("enabled", True)
             result.setdefault("available", bool(result.get("enabled")))
             result.setdefault("reason", "")
-            result.setdefault("backends", {})
+            generation_status = result.get("generation")
+            generation_backends = (
+                generation_status.get("backends")
+                if isinstance(generation_status, dict)
+                else None
+            )
+            if not isinstance(result.get("backends"), dict) and isinstance(generation_backends, dict):
+                result["backends"] = dict(generation_backends)
+            else:
+                result.setdefault("backends", {})
             return result
         if mode == "legacy_compat":
             getter = getattr(api, "capability_status", None)
