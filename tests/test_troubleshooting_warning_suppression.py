@@ -51,7 +51,8 @@ class TroubleshootingWarningSuppressionTests(unittest.TestCase):
 
     def test_persona_routing_warning_is_rendered_with_semantic_code(self) -> None:
         self.api.plugin = SimpleNamespace(
-            _format_timestamp_elapsed=lambda _ts: "刚刚"
+            _format_timestamp_elapsed=lambda _ts: "刚刚",
+            enable_multi_persona_mode=True,
         )
         events = self.api._troubleshooting_recent_events(
             diagnostics=[],
@@ -86,7 +87,8 @@ class TroubleshootingWarningSuppressionTests(unittest.TestCase):
 
     def test_unspecified_plugin_persona_has_dedicated_title(self) -> None:
         self.api.plugin = SimpleNamespace(
-            _format_timestamp_elapsed=lambda _ts: "刚刚"
+            _format_timestamp_elapsed=lambda _ts: "刚刚",
+            enable_multi_persona_mode=True,
         )
         events = self.api._troubleshooting_recent_events(
             diagnostics=[],
@@ -110,6 +112,31 @@ class TroubleshootingWarningSuppressionTests(unittest.TestCase):
         self.assertEqual(
             "persona.route.plugin_persona_unspecified", events[0]["warning_code"]
         )
+
+    def test_unspecified_plugin_persona_is_hidden_in_single_mode(self) -> None:
+        self.api.plugin = SimpleNamespace(
+            _format_timestamp_elapsed=lambda _ts: "刚刚",
+            enable_multi_persona_mode=False,
+        )
+        events = self.api._troubleshooting_recent_events(
+            diagnostics=[],
+            proactive_tasks={},
+            proactive_candidates={},
+            token_stats={"recent": []},
+            persona_routing_warnings=[
+                {
+                    "code": "persona.route.plugin_persona_unspecified",
+                    "level": "warn",
+                    "disposition": "sent_with_warning",
+                    "reason_code": "plugin_persona_unspecified",
+                    "window_key": "onebot:FriendMessage:1",
+                    "last_ts": 1,
+                    "count": 1,
+                }
+            ],
+        )
+
+        self.assertEqual([], [item for item in events if item.get("source") == "人格路由"])
 
     def test_persona_routing_projection_keeps_only_fresh_active_items(self) -> None:
         now = 100_000.0

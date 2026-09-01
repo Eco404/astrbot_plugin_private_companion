@@ -33,7 +33,15 @@ from .logging_util import get_module_logger
 logger = get_module_logger(__name__)
 
 
-_DELIVERY_TASK_LABELS = frozenset({"segmented_llm_remainder"})
+_DELIVERY_TASK_LABELS = frozenset(
+    {
+        "segmented_llm_remainder",
+        # Plugin-owned TTS sends the voice-bearing first chunk through the
+        # normal result and releases the remaining text asynchronously. Keep
+        # final history persistence behind that remainder as well.
+        "tts_reply_remainder",
+    }
+)
 
 
 @dataclass(slots=True)

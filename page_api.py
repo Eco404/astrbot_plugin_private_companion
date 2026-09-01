@@ -11132,6 +11132,15 @@ class PrivateCompanionPageApi(
             count = max(1, self._int(item.get("count")))
             disposition = self._single_line(item.get("disposition"), 24) or "fallback"
             warning_code = self._single_line(item.get("code"), 120) or "persona.route.unknown"
+            # An empty plugin-specific persona is valid in single-persona
+            # mode: AstrBot's selected conversation persona is authoritative.
+            # Hide records written by older versions so the panel does not
+            # keep showing a resolved, non-actionable warning forever.
+            if (
+                warning_code == "persona.route.plugin_persona_unspecified"
+                and not bool(getattr(self.plugin, "enable_multi_persona_mode", False))
+            ):
+                continue
             detail = "；".join(
                 part
                 for part in (

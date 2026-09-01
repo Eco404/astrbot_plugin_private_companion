@@ -519,7 +519,7 @@ class PersonaRoutingAuthorityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("", plugin._active_persona_scope())
             self.assertEqual(plugin._data_default, plugin.data)
 
-    async def test_single_mode_without_plugin_persona_records_unspecified_warning(self):
+    async def test_single_mode_without_plugin_persona_follows_astrbot_without_warning(self):
         with tempfile.TemporaryDirectory() as root:
             plugin = _routing_harness(root, conversation_persona="alt")
             plugin.enable_multi_persona_mode = False
@@ -529,15 +529,12 @@ class PersonaRoutingAuthorityTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIsNone(token)
             self.assertEqual("", persona_id)
-            warnings = plugin._data_default["persona_routing_warnings"]["items"]
-            self.assertEqual(1, len(warnings))
-            self.assertEqual("persona.route.plugin_persona_unspecified", warnings[0]["code"])
-            self.assertEqual("plugin_persona_unspecified", warnings[0]["reason_code"])
-            self.assertEqual("passive", warnings[0]["channel"])
+            warnings = plugin._data_default.get("persona_routing_warnings", {}).get("items", [])
+            self.assertEqual([], warnings)
 
             plugin.plugin_specific_persona_id = "main"
             await plugin._activate_persona_for_event_context(_event())
-            self.assertEqual("resolved", warnings[0]["status"])
+            self.assertEqual([], warnings)
 
     async def test_single_mode_without_plugin_persona_allows_proactive_delivery(self):
         with tempfile.TemporaryDirectory() as root:
@@ -550,11 +547,10 @@ class PersonaRoutingAuthorityTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertTrue(result["ok"])
-            self.assertEqual("sent_with_warning", result["action"])
-            self.assertEqual("plugin_persona_unspecified", result["reason_code"])
-            warnings = plugin._data_default["persona_routing_warnings"]["items"]
-            self.assertEqual(1, len(warnings))
-            self.assertEqual("proactive", warnings[0]["channel"])
+            self.assertEqual("matched", result["action"])
+            self.assertEqual("", result["reason_code"])
+            warnings = plugin._data_default.get("persona_routing_warnings", {}).get("items", [])
+            self.assertEqual([], warnings)
 
 
 if __name__ == "__main__":

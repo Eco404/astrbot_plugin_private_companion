@@ -2996,22 +2996,15 @@ class PrivateCompanionPlugin(
             or ("" if multi else primary)
         )
         # In single-persona mode an empty plugin_specific_persona_id means
-        # “use AstrBot's current/default persona”, not a persona mismatch.
-        # Keep delivery allowed and emit one actionable configuration warning.
+        # “use AstrBot's current/default persona”, not a routing problem.
+        # AstrBot remains the authority for the effective conversation persona.
         if not multi and not primary and umo:
-            await self._record_persona_routing_warning(
-                code="persona.route.plugin_persona_unspecified",
-                channel="proactive",
-                disposition="sent_with_warning",
-                reason_code="plugin_persona_unspecified",
-                window_key=umo,
-            )
             return {
                 "ok": True,
-                "action": "sent_with_warning",
+                "action": "matched",
                 "astrbot_persona_id": "",
                 "scheduled_persona_id": "",
-                "reason_code": "plugin_persona_unspecified",
+                "reason_code": "",
             }
         event = SimpleNamespace(
             unified_msg_origin=umo,
@@ -3334,8 +3327,7 @@ class PrivateCompanionPlugin(
                 item_channel = _single_line(item.get("channel"), 24)
                 item_window = _single_line(item.get("window_key"), 180)
                 family = _single_line(item.get("warning_family"), 80) or self._persona_routing_warning_family(
-                    item.get("code"),
-                    item_channel,
+                    item.get("code"), item_channel
                 )
                 if item_channel != normalized_channel or item_window != window or family not in families:
                     continue
@@ -3368,15 +3360,10 @@ class PrivateCompanionPlugin(
 
     async def _activate_persona_for_event_context(self, event: Any) -> tuple[Any, str]:
         if not bool(getattr(self, "enable_multi_persona_mode", False)):
-            if not self._primary_persona_id():
-                await self._record_persona_routing_warning(
-                    code="persona.route.plugin_persona_unspecified",
-                    channel="passive",
-                    disposition="sent_with_warning",
-                    reason_code="plugin_persona_unspecified",
-                    window_key=getattr(event, "unified_msg_origin", ""),
-                )
-            else:
+            # Single-persona mode follows AstrBot's effective session persona.
+            # An empty plugin-specific ID is valid and should not create a
+            # persistent troubleshooting warning.
+            if self._primary_persona_id():
                 await self._resolve_persona_routing_warnings(
                     channel="passive",
                     window_key=getattr(event, "unified_msg_origin", ""),
