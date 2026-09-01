@@ -6370,6 +6370,9 @@ class PrivateCompanionPageApi(
                 if isinstance(routing_root, dict) and isinstance(routing_root.get("items"), list)
                 else []
             )
+            persona_routing_warnings = self._active_persona_routing_warnings(
+                persona_routing_warnings
+            )
             screen_companion = self._screen_companion_summary(data)
             qzone = self._qzone_summary(data)
             all_recent_events = self._troubleshooting_recent_events(
@@ -11120,7 +11123,7 @@ class PrivateCompanionPageApi(
                 warning_code=self._single_line(item.get("warning_code"), 120),
             )
 
-        for item in list(persona_routing_warnings or [])[:120]:
+        for item in self._active_persona_routing_warnings(persona_routing_warnings)[:120]:
             if not isinstance(item, dict):
                 continue
             requested = self._single_line(item.get("requested_persona_id"), 96) or "未解析"
@@ -11266,6 +11269,31 @@ class PrivateCompanionPageApi(
 
         events.sort(key=lambda item: self._float(item.get("ts")), reverse=True)
         return events
+
+    def _active_persona_routing_warnings(
+        self,
+        items: Any,
+        *,
+        max_age_seconds: float = 2 * 60 * 60,
+        now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Project current routing problems without mutating retained history."""
+        if not isinstance(items, list):
+            return []
+        current_ts = time.time() if now is None else float(now)
+        active: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            status = self._single_line(item.get("status"), 16).lower()
+            if status and status != "active":
+                continue
+            last_ts = self._float(item.get("last_ts"))
+            if last_ts <= 0 or current_ts - last_ts > max_age_seconds:
+                continue
+            active.append(item)
+        active.sort(key=lambda item: self._float(item.get("last_ts")), reverse=True)
+        return active
 
     def _passive_no_reply_item_is_obsolete_fixed_error(self, item: dict[str, Any]) -> bool:
         checker = getattr(self.plugin, "_proactive_audit_note_is_obsolete_fixed_error", None)
@@ -22709,6 +22737,7 @@ class PrivateCompanionPageApi(
             "quote_skip_short_reply_chars",
             "quote_target_strategy",
             "enable_photo_text_action",
+            "enable_user_requested_photo_generation",
             "enable_photo_reference_image",
             "photo_action_max_daily",
             "enable_generated_photo_cleanup",
@@ -25966,6 +25995,7 @@ class PrivateCompanionPageApi(
             "enable_creative_cover_generation",
             "daily_outfit_photo_prompt",
             "daily_outfit_rotation_days",
+            "enable_user_requested_photo_generation",
             "enable_natural_language_photo_generation",
             "natural_language_photo_generation_mode",
             "command_photo_generation_max_daily",

@@ -3036,6 +3036,11 @@ class PrivateCompanionPlugin(
                 reason = readiness_reason
 
         if not reason:
+            await self._resolve_persona_routing_warnings(
+                channel="proactive",
+                window_key=umo,
+                warning_families={"proactive_delivery"},
+            )
             return {
                 "ok": True,
                 "action": "matched",
@@ -3114,7 +3119,13 @@ class PrivateCompanionPlugin(
         resolved = self._sanitize_persona_id(resolved_persona_id)
         active = self._sanitize_persona_id(active_persona_id)
         reason = _single_line(reason_code, 80) or "unknown"
-        signature = "|".join((code, reason, window, requested, resolved, active))
+        normalized_code = _single_line(code, 100)
+        normalized_channel = _single_line(channel, 24)
+        warning_family = self._persona_routing_warning_family(
+            normalized_code,
+            normalized_channel,
+        )
+        signature = "|".join((normalized_code, reason, normalized_channel, window))
         record_id = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:20]
         should_schedule = False
         lock = getattr(self, "_data_lock", None)
@@ -3126,26 +3137,79 @@ class PrivateCompanionPlugin(
                 return
             root = store.get("persona_routing_warnings")
             if not isinstance(root, dict):
-                root = {"schema_version": 1, "items": []}
+                root = {"schema_version": 2, "items": []}
                 store["persona_routing_warnings"] = root
+            root["schema_version"] = 2
             items = root.get("items")
             if not isinstance(items, list):
                 items = []
                 root["items"] = items
             item = next(
-                (candidate for candidate in items if isinstance(candidate, dict) and candidate.get("id") == record_id),
+                (
+                    candidate
+                    for candidate in items
+                    if isinstance(candidate, dict)
+                    and (
+                        candidate.get("id") == record_id
+                        or (
+                            _single_line(candidate.get("code"), 100) == normalized_code
+                            and _single_line(candidate.get("reason_code"), 80) == reason
+                            and _single_line(candidate.get("channel"), 24) == normalized_channel
+                            and _single_line(candidate.get("window_key"), 180) == window
+                        )
+                    )
+                ),
                 None,
             )
             if item is None:
-                item = {"id": record_id, "first_ts": now, "count": 0}
+                item = next(
+                    (
+                        candidate
+                        for candidate in items
+                        if isinstance(candidate, dict)
+                        and not self._persona_routing_warning_is_active(candidate)
+                        and _single_line(candidate.get("channel"), 24) == normalized_channel
+                        and _single_line(candidate.get("window_key"), 180) == window
+                        and (
+                            _single_line(candidate.get("warning_family"), 80)
+                            or self._persona_routing_warning_family(
+                                candidate.get("code"),
+                                candidate.get("channel"),
+                            )
+                        )
+                        == warning_family
+                    ),
+                    None,
+                )
+            if item is None:
+                item = {
+                    "id": record_id,
+                    "first_ts": now,
+                    "count": 0,
+                    "lifetime_count": 0,
+                }
                 items.append(item)
+                should_schedule = True
+            previous_last_ts = _safe_float(item.get("last_ts"), 0.0)
+            was_active = self._persona_routing_warning_is_active(item) and (
+                previous_last_ts > 0 and now - previous_last_ts <= 2 * 60 * 60
+            )
+            previous_episode_count = _safe_int(item.get("count"), 0, 0)
+            previous_lifetime_count = max(
+                previous_episode_count,
+                _safe_int(item.get("lifetime_count"), 0, 0),
+            )
+            if not was_active:
+                item["first_ts"] = now
+                item["count"] = 0
                 should_schedule = True
             item.update(
                 {
-                    "schema_version": 1,
-                    "code": _single_line(code, 100),
+                    "schema_version": 2,
+                    "code": normalized_code,
                     "level": "error" if disposition == "blocked" else "warn",
-                    "channel": _single_line(channel, 24),
+                    "channel": normalized_channel,
+                    "warning_family": warning_family,
                     "disposition": _single_line(disposition, 24),
                     "reason_code": reason,
                     "source": "persona_router",
@@ -3155,17 +3219,26 @@ class PrivateCompanionPlugin(
                     "active_persona_id": active,
                     "primary_persona_id": self._primary_persona_id(),
                     "multi_persona": bool(getattr(self, "enable_multi_persona_mode", False)),
+                    "status": "active",
+                    "resolved_ts": 0,
                     "last_ts": now,
-                    "count": int(item.get("count") or 0) + 1,
+                    "count": previous_episode_count + 1,
+                    "lifetime_count": previous_lifetime_count + 1,
                 }
             )
-            items.sort(key=lambda candidate: float((candidate or {}).get("last_ts") or 0), reverse=True)
+            items.sort(
+                key=lambda candidate: _safe_float(
+                    candidate.get("last_ts") if isinstance(candidate, dict) else 0,
+                    0.0,
+                ),
+                reverse=True,
+            )
             del items[120:]
             save_marks = getattr(self, "_persona_routing_warning_save_marks", None)
             if not isinstance(save_marks, dict):
                 save_marks = {}
                 self._persona_routing_warning_save_marks = save_marks
-            previous_save = float(save_marks.get(record_id) or 0)
+            previous_save = _safe_float(save_marks.get(record_id), 0.0)
             if now - previous_save >= 60:
                 save_marks[record_id] = now
                 should_schedule = True
@@ -3187,7 +3260,7 @@ class PrivateCompanionPlugin(
         if not isinstance(log_marks, dict):
             log_marks = {}
             self._persona_routing_warning_log_marks = log_marks
-        if now - float(log_marks.get(record_id) or 0) >= 300:
+        if now - _safe_float(log_marks.get(record_id), 0.0) >= 300:
             log_marks[record_id] = now
             logger.warning(
                 "人格路由告警 code=%s reason=%s umo=%s astrbot=%s plugin=%s action=%s",
@@ -3199,6 +3272,99 @@ class PrivateCompanionPlugin(
                 disposition,
             )
 
+    @staticmethod
+    def _persona_routing_warning_is_active(item: Any) -> bool:
+        if not isinstance(item, dict):
+            return False
+        status = _single_line(item.get("status"), 16).lower()
+        return not status or status == "active"
+
+    @staticmethod
+    def _persona_routing_warning_family(code: Any, channel: Any = "") -> str:
+        normalized_code = _single_line(code, 100).lower()
+        normalized_channel = _single_line(channel, 24).lower()
+        if normalized_code == "persona.route.legacy_binding_ignored":
+            return "legacy_binding"
+        if normalized_channel == "passive" or normalized_code in {
+            "persona.route.passive_primary_fallback",
+        }:
+            return "passive_delivery"
+        if normalized_channel == "proactive" or normalized_code.startswith("persona.route.proactive_"):
+            return "proactive_delivery"
+        if normalized_code == "persona.route.plugin_persona_unspecified":
+            return f"{normalized_channel or 'unknown'}_delivery"
+        return normalized_code or "unknown"
+
+    async def _resolve_persona_routing_warnings(
+        self,
+        *,
+        channel: str,
+        window_key: Any,
+        warning_families: set[str],
+    ) -> int:
+        """Resolve active routing warnings after the same route becomes healthy."""
+        now = time.time()
+        normalized_channel = _single_line(channel, 24)
+        window = _single_line(window_key, 180)
+        families = {
+            _single_line(value, 80)
+            for value in warning_families
+            if _single_line(value, 80)
+        }
+        if not normalized_channel or not families:
+            return 0
+        resolved_count = 0
+        lock = getattr(self, "_data_lock", None)
+
+        async def update() -> None:
+            nonlocal resolved_count
+            store = getattr(self, "_data_default", None)
+            if not isinstance(store, dict):
+                return
+            root = store.get("persona_routing_warnings")
+            if not isinstance(root, dict):
+                return
+            items = root.get("items")
+            if not isinstance(items, list):
+                return
+            for item in items:
+                if not self._persona_routing_warning_is_active(item):
+                    continue
+                item_channel = _single_line(item.get("channel"), 24)
+                item_window = _single_line(item.get("window_key"), 180)
+                family = _single_line(item.get("warning_family"), 80) or self._persona_routing_warning_family(
+                    item.get("code"),
+                    item_channel,
+                )
+                if item_channel != normalized_channel or item_window != window or family not in families:
+                    continue
+                item.update(
+                    {
+                        "schema_version": 2,
+                        "warning_family": family,
+                        "status": "resolved",
+                        "resolved_ts": now,
+                    }
+                )
+                resolved_count += 1
+            if resolved_count:
+                root["schema_version"] = 2
+
+        if isinstance(lock, asyncio.Lock):
+            async with lock:
+                await update()
+        else:
+            await update()
+        if resolved_count:
+            scheduler = getattr(self, "_schedule_default_data_save", None)
+            if callable(scheduler):
+                clear_token = _ACTIVE_PERSONA_ID.set("")
+                try:
+                    scheduler(sections={"persona_routing_warnings"}, delay=0.2)
+                finally:
+                    _ACTIVE_PERSONA_ID.reset(clear_token)
+        return resolved_count
+
     async def _activate_persona_for_event_context(self, event: Any) -> tuple[Any, str]:
         if not bool(getattr(self, "enable_multi_persona_mode", False)):
             if not self._primary_persona_id():
@@ -3208,6 +3374,12 @@ class PrivateCompanionPlugin(
                     disposition="sent_with_warning",
                     reason_code="plugin_persona_unspecified",
                     window_key=getattr(event, "unified_msg_origin", ""),
+                )
+            else:
+                await self._resolve_persona_routing_warnings(
+                    channel="passive",
+                    window_key=getattr(event, "unified_msg_origin", ""),
+                    warning_families={"passive_delivery"},
                 )
             return None, ""
         active = _ACTIVE_PERSONA_ID.get()
@@ -3296,6 +3468,12 @@ class PrivateCompanionPlugin(
                 requested_persona_id=astrbot_persona,
                 resolved_persona_id=primary,
                 active_persona_id=pid,
+            )
+        else:
+            await self._resolve_persona_routing_warnings(
+                channel="passive",
+                window_key=resolved.get("umo"),
+                warning_families={"passive_delivery"},
             )
         self._ensure_persona_profile(pid)
         return _ACTIVE_PERSONA_ID.set(pid), pid
@@ -14170,10 +14348,28 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             result = func()
             if asyncio.iscoroutine(result):
                 result = await asyncio.wait_for(result, timeout=timeout)
+            sections = []
+            if isinstance(result, (list, tuple)):
+                for raw_section in result:
+                    resolved_section = coerce_prompt_section(raw_section)
+                    if resolved_section is None:
+                        continue
+                    section_content = str(resolved_section.content or "").strip()
+                    if section_content:
+                        sections.append(
+                            {
+                                "title": resolved_section.title,
+                                "content": section_content,
+                            }
+                        )
             section = coerce_prompt_section(result)
             if section is not None:
                 title = section.title
                 content = str(section.content or "").strip()
+            elif sections:
+                content = "\n\n".join(
+                    str(item.get("content") or "") for item in sections
+                )
             else:
                 content = str(result or "").strip()
             elapsed_ms = int((time.time() - started) * 1000)
@@ -14190,6 +14386,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 "source": source,
                 "priority": priority,
                 "content": content,
+                "sections": sections,
                 "metadata": metadata,
                 "status": "hit" if content else "empty",
             }
@@ -14246,6 +14443,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     def _add_collected_prompt_contexts(self, prompt_surface: PromptSurface, collected: list[dict[str, Any]]) -> None:
         for item in collected:
             if not isinstance(item, dict):
+                continue
+            sections = item.get("sections")
+            if isinstance(sections, list) and sections:
+                for index, raw_section in enumerate(sections):
+                    section = coerce_prompt_section(raw_section)
+                    if section is None or not str(section.content or "").strip():
+                        continue
+                    prompt_surface.add(
+                        f"{_single_line(item.get('key'), 80)}.{index}",
+                        section.content,
+                        title=section.title,
+                        priority=_safe_int(item.get("priority"), 100, 0) + index,
+                        source=_single_line(item.get("source"), 80),
+                        metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
+                    )
                 continue
             content = str(item.get("content") or "").strip()
             if not content:
@@ -14407,7 +14619,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "资料柜夹层",
             "bookshelf",
             61,
-            lambda: self._format_bookshelf_secret_for_prompt(inbound_text, current_user),
+            lambda: self._format_bookshelf_secret_prompt_section(inbound_text, current_user),
             timeout=1.2,
         )
         add_spec("bookshelf.reading", "资料柜阅读连续性", "bookshelf", 62, lambda: self._format_bookshelf_reading_context_for_reply(inbound_text, current_user))
@@ -14470,7 +14682,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
         add_spec("companion.planner", "私聊互动补充", "companion", 80, lambda: self._format_companion_planner_injection(prompt_user, include_heading=False))
         if not self._memory_companion_should_defer_prompt_section("livingmemory_guidance", event, req):
-            add_spec("livingmemory.guidance", "长期记忆检索", "livingmemory", 90, lambda: self._format_livingmemory_guidance(scope="private" if is_private_chat else "group", include_heading=False))
+            add_spec("livingmemory.guidance", "长期记忆检索", "livingmemory", 90, lambda: self._format_livingmemory_guidance_sections(scope="private" if is_private_chat else "group"))
         add_spec("detail.injection", "Bot 模拟当前片段", "daily_detail", 40, lambda: section_call(self._format_detail_injection))
 
         if is_private_chat:
@@ -14580,11 +14792,18 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "没有可用工具且没有实际执行结果时,不要承诺“我这就拉你/我帮你操作/我已经处理/我去修/我给你弄好”。"
             "遇到拉人、开房间、修网、重启、登录、下载、现实代办等请求,只能自然说明自己做不到实际操作,可以提醒、陪用户确认、建议对方找能操作的人,或在确有工具时调用工具后再描述结果。"
         )
-        platform_boundary_getter = getattr(self, "_platform_capability_prompt", None)
+        boundary_sections = [prompt_section("能力边界", boundary)]
+        platform_boundary_getter = getattr(
+            self,
+            "_platform_capability_prompt_section",
+            None,
+        )
         if callable(platform_boundary_getter):
             platform_boundary = platform_boundary_getter(event)
-            if platform_boundary:
-                boundary = f"{boundary}\n\n{platform_boundary}"
+            resolved_boundary = coerce_prompt_section(platform_boundary)
+            if resolved_boundary is not None and str(resolved_boundary.content or "").strip():
+                boundary_sections.append(platform_boundary)
+        boundary = render_prompt_sections(boundary_sections)
         self._materialize_conversation_system_block(
             req,
             key="guard.capability_boundary",
@@ -14594,6 +14813,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             priority=30,
             source="guard",
             placement=PLACEMENT_DYNAMIC_SYSTEM,
+            structured=True,
         )
         await self._record_request_prompt_fragment(
             event,
@@ -14704,7 +14924,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 mode="conditional",
                 metadata={"注入位置": placement, "触发原因": "livingmemory" if livingmemory_relation_context and not relation_query else "query"},
             )
-        qzone_instruction = self._qzone_tool_instruction(event, include_heading=False)
+        qzone_sections = self._qzone_tool_prompt_sections(event)
+        qzone_instruction = render_prompt_sections(qzone_sections)
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         qzone_marker = "<!-- private_companion_qzone_tools_v1 -->"
@@ -14717,6 +14938,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     title="QQ 空间动态工具",
                     priority=88,
                     source="tools",
+                    structured=True,
                 ) else "system_prompt"
                 if placement == "system_prompt":
                     current_prompt = f"{current_prompt}\n\n{qzone_marker}\n{qzone_instruction}".strip()
@@ -14911,7 +15133,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 reason="media_tools_scoped",
                 scope=self._reaction_expression_scope(event),
             )
+        user_photo_prompt_enabled = self._user_photo_generation_prompt_enabled(event)
+        reaction_photo_prompt_enabled = self._reaction_image_provider_available()
         photo_instruction = self._photo_generation_tool_instruction(
+            event,
             include_spontaneous=reaction_expression_authorized,
             spontaneous_only=reaction_expression_authorized and not explicit_media_request,
             include_heading=False,
@@ -14928,7 +15153,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     title=(
                         "实验性表情表达"
                         if reaction_expression_authorized and not explicit_media_request
-                        else "图库表情与生图工具"
+                        else (
+                            "图库表情与生图工具"
+                            if user_photo_prompt_enabled and reaction_photo_prompt_enabled
+                            else (
+                                "生图工具"
+                                if user_photo_prompt_enabled
+                                else "图库表情工具"
+                            )
+                        )
                     ),
                     priority=88,
                     source="tools",
@@ -15760,6 +15993,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         event: AstrMessageEvent | None = None,
         *,
         include_heading: bool = True,
+        include_joke_boundary: bool = True,
     ) -> str:
         if not bool(runtime_persona_setting(self, 'enable_group_persona_denoise', True)):
             return ""
@@ -15807,11 +16041,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "群聊里的身份优先按平台稳定 ID 理解；昵称、群名片、角色名、别名和“通常是谁”这类设定，更适合作为称呼线索，不直接当成身份结论。",
             "提到群聊旧消息、群梗、记忆召回或最近群聊时，尽量保留具体成员名或 QQ 标签，例如“A[QQ:...] 说过/起哄过”；只有确实缺少成员线索时，再概括成“群里有人”。除非当前消息或引用明确就是这位发言者，尽量不要顺手改写成“你说过”“主要用户说过”这类直接归到当前对象身上的表达。",
             "群成员画像只用于自然理解当前对话：当前发言者明确询问自己时，最多概括可公开的低敏偏好；不要替任何人整理、推断或披露第三方画像。普通群聊提到某人的爱好、习惯或偏好只是聊天内容，不要把它误当成对你的查询。",
-            "【群聊玩笑边界】群聊里“记住了/记下某人是XX”这类话（尤其把某人当对象、或带主观评价、攻击、贬损、色情、侮辱标签），通常只是群友之间的玩笑或随口一说。把它当作玩笑正面应和，顺着调侃接一下就好；这类玩笑性记录可以作为旁线补充，但不要写进核心人物画像（主要用户画像、关系画像、稳定偏好等），落库时只能标为低置信的玩笑性质，不能混入可验证事实。涉及他人名誉、隐私或主观定性的说法，调侃可以，别替别人正式贴标签、下结论。",
             "状态、日程、情绪和私聊关系更适合只留在语气底色里；如果没有人明确问到，就不必主动展开能量、天气、日程、心情或插件状态。",
             "表达上尽量自然一点，不需要刻意堆动作描写、撒娇、长解释或关系总结；一句能说清，就简单说一句。",
             "如果只是被轻轻提到，或者话题本身并不需要你展开，宁可短一点、轻一点、贴着当前梗回应，也不用顺势写成主动陪伴式长回复。",
         ]
+        if include_joke_boundary:
+            lines.insert(
+                4,
+                "【群聊玩笑边界】" + self._group_persona_denoise_joke_boundary(),
+            )
         if include_heading:
             lines.insert(0, "【群聊人格降噪】")
         if sender_id:
@@ -15836,18 +16074,40 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             lines.append("群里刚才比较密集，这轮回复更适合收一点：抓住一个重点回应就好，不必逐条点名展开。")
         return "\n".join(lines)
 
+    @staticmethod
+    def _group_persona_denoise_joke_boundary() -> str:
+        return (
+            "群聊里“记住了/记下某人是XX”这类话（尤其把某人当对象、或带主观评价、攻击、贬损、色情、侮辱标签），通常只是群友之间的玩笑或随口一说。"
+            "把它当作玩笑正面应和，顺着调侃接一下就好；这类玩笑性记录可以作为旁线补充，但不要写进核心人物画像（主要用户画像、关系画像、稳定偏好等），"
+            "落库时只能标为低置信的玩笑性质，不能混入可验证事实。涉及他人名誉、隐私或主观定性的说法，调侃可以，别替别人正式贴标签、下结论。"
+        )
+
+    def _format_group_persona_denoise_prompt_sections(
+        self,
+        event: AstrMessageEvent | None = None,
+    ) -> list[dict[str, Any]]:
+        body = self._format_group_persona_denoise_prompt(
+            event,
+            include_heading=False,
+            include_joke_boundary=False,
+        )
+        if not body:
+            return []
+        return [
+            prompt_section("群聊人格降噪", body),
+            prompt_section("群聊玩笑边界", self._group_persona_denoise_joke_boundary()),
+        ]
+
     async def _append_group_persona_denoise_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         if not bool(runtime_persona_setting(self, 'enable_group_companion', True)):
             return
         group_id = self._extract_group_id_from_event(event)
         if not group_id or not self._group_enabled_for_event(group_id):
             return
-        denoise_text = self._format_group_persona_denoise_prompt(
-            event,
-            include_heading=False,
-        )
-        if not denoise_text:
+        denoise_sections = self._format_group_persona_denoise_prompt_sections(event)
+        if not denoise_sections:
             return
+        denoise_text = render_prompt_sections(denoise_sections)
         marker = "<!-- private_companion_group_persona_denoise_v1 -->"
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
@@ -15860,6 +16120,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             title="群聊人格降噪",
             priority=32,
             source="group",
+            structured=True,
         ) else "system_prompt"
         if placement == "system_prompt":
             req.system_prompt = f"{current_prompt}\n\n{marker}\n{denoise_text}".strip()
@@ -18182,9 +18443,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
             )
 
-    def _scope_photo_generation_tool_for_request(self, req: ProviderRequest) -> bool:
-        """Remove the optional Image tool from this request when it is not ready."""
-        if req is None or self._photo_generation_runtime_available():
+    def _scope_photo_generation_tool_for_request(
+        self,
+        req: ProviderRequest,
+        event: AstrMessageEvent | None = None,
+    ) -> bool:
+        """Remove the Image tool when this request lacks runtime permission."""
+        if req is None or self._user_photo_generation_prompt_enabled(event):
             return False
         tool_set = getattr(req, "func_tool", None)
         if tool_set is None:
@@ -18328,7 +18593,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if self is None or req is None or not bool(getattr(self, "enabled", False)):
             return
         try:
-            if self._scope_photo_generation_tool_for_request(req):
+            if self._scope_photo_generation_tool_for_request(req, event):
                 return
             self._annotate_photo_tool_prompt_format_for_request(req)
         except Exception as exc:
