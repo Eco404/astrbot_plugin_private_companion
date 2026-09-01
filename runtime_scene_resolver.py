@@ -157,6 +157,36 @@ class RuntimeSceneResolver:
         return now.strftime("%Y-%m-%d:%H")
 
     @staticmethod
+    def _commit_ts(value: dict[str, Any] | None) -> float:
+        if not isinstance(value, dict):
+            return 0.0
+        try:
+            stamp = datetime.fromisoformat(str(value.get("committed_at") or "").replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return 0.0
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        return stamp.timestamp()
+
+    def _prune_windows(self, now: datetime | None = None) -> None:
+        """Drop windows that can no longer be valid so hourly scene commits
+        cannot accumulate without bound on a long-running host."""
+        current = self._current(now)
+        if not self._commits:
+            return
+        expired = [key for key, item in self._commits.items() if not self._is_valid(item, current)]
+        for key in expired:
+            self._commits.pop(key, None)
+            self._versions.pop(key, None)
+        # Defense-in-depth hard cap for custom (non-hourly) window ids.
+        overflow = len(self._commits) - 1024
+        if overflow > 0:
+            oldest = sorted(self._commits.items(), key=lambda kv: self._commit_ts(kv[1]))[:overflow]
+            for key, _ in oldest:
+                self._commits.pop(key, None)
+                self._versions.pop(key, None)
+
+    @staticmethod
     def _conversation_active(state: Any) -> bool:
         if isinstance(state, dict):
             if state.get("interacting") or state.get("active") or state.get("conversation_active"):
@@ -227,6 +257,7 @@ class RuntimeSceneResolver:
         if self._is_backfill(now):
             return None
         current = self._current(now)
+        self._prune_windows(current)
         raw_state = _text(state, 120)
         if any(token in raw_state.lower() for token in SELF_STATE_FORBIDDEN):
             return None

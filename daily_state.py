@@ -3513,12 +3513,11 @@ class DailyStateMixin(DailyStateTickMixin):
                     state["weather"] = self._weather_summary_text(weather)
                     return state
                 async with self._data_lock:
-                    before = json.dumps(self.data.get("daily_state", {}), ensure_ascii=False, sort_keys=True, default=str)
                     deleted_sections = self._cleanup_expired_conditions() or set()
                     self._ensure_time_based_hunger_condition()
                     state = self._compose_state_from_conditions(weather)
-                    after = json.dumps(state, ensure_ascii=False, sort_keys=True, default=str)
-                    if before != after or deleted_sections:
+                    existing_state = self.data.get("daily_state")
+                    if (not isinstance(existing_state, dict) or existing_state != state) or deleted_sections:
                         self.data["daily_state"] = state
                         save_sections = {
                             "daily_state",
@@ -7436,7 +7435,7 @@ class DailyStateMixin(DailyStateTickMixin):
         try:
             import aiohttp
 
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                 async with session.get(url) as response:
                     if response.status != 200:
                         logger.debug(f"天气请求失败: {response.status}")
@@ -10544,16 +10543,94 @@ class DailyStateMixin(DailyStateTickMixin):
             blocks.append(f"【主要用户:{name}｜{source_note}】\n" + "\n".join(selected))
         return "\n\n".join(blocks).strip()[-18000:]
 
-    def _load_conversation_history_items(self, conversation: Conversation | None) -> list[dict[str, Any]]:
+    def _load_conversation_history_items(
+        self,
+        conversation: Conversation | None,
+        *,
+        tail_only: int | None = None,
+    ) -> list[dict[str, Any]]:
         if conversation is None:
             return []
+        raw = conversation.history or "[]"
+        if tail_only is not None and tail_only > 0:
+            tail = self._parse_tail_json_items(raw, tail_only)
+            if tail is not None:
+                return tail
         try:
-            loaded = json.loads(conversation.history or "[]")
+            loaded = json.loads(raw)
         except Exception:
             return []
         if not isinstance(loaded, list):
             return []
         return [item for item in loaded if isinstance(item, dict)]
+
+    @staticmethod
+    def _parse_tail_json_items(raw: str, count: int) -> list[dict[str, Any]] | None:
+        """仅反序列化 JSON 数组从尾部往回数 count 个 dict 元素，避免对超大
+        conversation.history 全量 json.loads。
+
+        从右向左逆序扫描元素边界：字符串按"左侧连续反斜杠个数的奇偶性"判定转义
+        引号（奇数 => 转义、偶数 => 定界），从而正确区分字符串、嵌套括号与顶层
+        逗号；对每个尾部元素单独解码，遇到 dict 才计数，语义与"全量解析后过滤
+        dict 再取尾部 count 条"完全一致。任何解析异常、结构不符或不足 count 个
+        时返回 None，由调用方回退全量解析，正确性始终有保证。
+        """
+        if not count or count < 1:
+            return None
+        text = raw.strip()
+        if not (text.startswith("[") and text.endswith("]")):
+            return None
+        end = len(text) - 1  # 数组右括号下标
+        stop = end  # 当前元素区间的右边界(不含)
+        i = end - 1
+        depth = 0
+        in_string = False
+        found: list[dict[str, Any]] = []
+
+        def _collect(span_start: int, span_stop: int) -> bool:
+            try:
+                item = json.loads(text[span_start:span_stop])
+            except Exception:
+                return False
+            if isinstance(item, dict):
+                found.append(item)
+                return len(found) == count
+            return False
+
+        while i >= 0:
+            ch = text[i]
+            if in_string:
+                if ch == '"':
+                    # 判定左侧连续反斜杠个数的奇偶：奇数 => 转义引号，属字符串内容
+                    j = i - 1
+                    bs = 0
+                    while j >= 0 and text[j] == "\\":
+                        bs += 1
+                        j -= 1
+                    if bs % 2 == 1:
+                        i = j  # 跳过该反斜杠串，继续留在字符串内
+                        continue
+                    in_string = False
+                i -= 1
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch in "]}":
+                depth += 1
+            elif ch in "[{":
+                if depth == 0:
+                    # 回溯到数组左括号：当前为第一个元素
+                    if _collect(i + 1, stop) and len(found) == count:
+                        return found[::-1]
+                    return None
+                depth -= 1
+            elif ch == "," and depth == 0:
+                span_start = i + 1
+                if _collect(span_start, stop):
+                    return found[::-1]
+                stop = i
+            i -= 1
+        return None
 
     @staticmethod
     def _daily_proactive_archive_context_text(text: str) -> bool:
@@ -13078,6 +13155,32 @@ class DailyStateMixin(DailyStateTickMixin):
             include_heading=include_heading,
         )
 
+    def _passive_injection_fingerprint(self, state: dict[str, Any], now: float | None = None) -> str:
+        s = state if isinstance(state, dict) else {}
+        runtime = s.get("sleep_runtime")
+        runtime = runtime if isinstance(runtime, dict) else {}
+        now = _now_ts() if now is None else now
+        picked = {
+            "tick": int(now // 300),
+            "energy": s.get("energy"),
+            "mood": s.get("mood_bias"),
+            "sleep": s.get("sleep"),
+            "dream": s.get("dream"),
+            "health": s.get("health"),
+            "hunger": s.get("hunger"),
+            "body_cycle": s.get("body_cycle"),
+            "location": s.get("location"),
+            "sleep_phase": runtime.get("phase"),
+            "sleep_label": runtime.get("label"),
+            "sleep_event": runtime.get("last_event"),
+            "conditions": [
+                (c.get("kind"), c.get("label"), c.get("mood"), c.get("intensity"))
+                for c in (s.get("conditions") or [])
+                if isinstance(c, dict)
+            ],
+        }
+        return _single_line(json.dumps(picked, ensure_ascii=False, sort_keys=True, default=str), 800)
+
     def _prepared_lightweight_state_injection(
         self,
         state: dict[str, Any],
@@ -13099,16 +13202,19 @@ class DailyStateMixin(DailyStateTickMixin):
             cache_store = {}
         cache = cache_store.get(persona_scope)
         cache_field = "text" if include_heading else "body"
-        if isinstance(cache, dict) and not force:
-            text = str(cache.get(cache_field) or "").strip()
-            if text and cache.get("date") == _today_key() and now - _safe_float(cache.get("ts"), 0) < 60:
-                return text
+        if isinstance(cache, dict) and cache_field in cache and cache.get("fingerprint") == self._passive_injection_fingerprint(state, now):
+            return str(cache.get(cache_field) or "").strip()
         text = self._format_lightweight_state_injection(
             state,
             include_heading=include_heading,
         )
         cache = dict(cache) if isinstance(cache, dict) else {}
-        cache.update({"date": _today_key(), "ts": now, cache_field: text})
+        cache.update({
+            "date": _today_key(),
+            "ts": now,
+            cache_field: text,
+            "fingerprint": self._passive_injection_fingerprint(state, now),
+        })
         cache_store[persona_scope] = cache
         self._passive_light_injection_cache = cache_store
         return text
@@ -18417,7 +18523,9 @@ class DailyStateMixin(DailyStateTickMixin):
     async def _run_proactive_maintenance_tasks(self) -> None:
         if self._proactive_generation_disabled():
             return
-        for label, task_factory in (
+        # 分批轮换：每个 tick 周期只执行约一半维护任务，交错进行，
+        # 避免单个周期内串行跑完全部任务拉高瞬时负载；各任务内部自带到期门控。
+        tasks = (
             ("技能成长结算", self._maybe_settle_skill_growth),
             ("B站无聊观看", self._maybe_trigger_bilibili_boredom_watch),
             ("网页探索", self._maybe_trigger_web_exploration),
@@ -18425,7 +18533,12 @@ class DailyStateMixin(DailyStateTickMixin):
             ("新闻无聊阅读", self._maybe_trigger_news_boredom_read),
             ("QQ空间生活说说", self._maybe_publish_qzone_life_post),
             ("QQ空间评论收件箱", self._maybe_process_qzone_comment_inbox),
-        ):
+        )
+        batch = getattr(self, "_proactive_maintenance_batch", 0)
+        self._proactive_maintenance_batch = 1 - batch
+        for index, (label, task_factory) in enumerate(tasks):
+            if (index % 2) != batch:
+                continue
             try:
                 await task_factory()
             except Exception as exc:
@@ -18441,7 +18554,16 @@ class DailyStateMixin(DailyStateTickMixin):
 
     async def _tick(self):
         try:
-            await self._pull_body_monitor_candidates()
+            last_poll = getattr(self, "_last_body_monitor_poll_ts", 0.0)
+            poll_interval = _safe_float(
+                getattr(self, "_body_monitor_poll_interval", 90.0),
+                90.0,
+                30.0,
+                600.0,
+            )
+            if _now_ts() - last_poll >= poll_interval:
+                await self._pull_body_monitor_candidates()
+                self._last_body_monitor_poll_ts = _now_ts()
         except Exception as exc:
             logger.warning(
                 "Body Monitor 事件拉取失败，本轮继续执行其他主动任务: %s",

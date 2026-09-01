@@ -192,6 +192,27 @@ class ExpressionWriteScopeTests(unittest.TestCase):
             namespaces,
         )
 
+    def test_stale_profile_scope_is_rebound_in_place_after_persona_migration(self):
+        old_context = Context(kind="private", identity_id="person-a", migration_epoch="epoch-old")
+        new_context = Context(kind="private", identity_id="person-a", migration_epoch="epoch-new")
+        profile = bind_expression_profile(
+            {"samples": [{"id": "legacy", "text": "旧表达", "ts": 1}]}, old_context,
+        )
+        harness = Harness(private_context=new_context)
+        owner = {"user_id": "person-a", "expression_profile": profile}
+        harness._update_expression_profile_from_message(owner, "新的表达")
+        migrated = owner["expression_profile"]
+        self.assertEqual(
+            new_context.migration_epoch,
+            harness._req041_scoped_context_for_user(owner).migration_epoch,
+        )
+        self.assertEqual(2, len(migrated["samples"]))
+        self.assertNotEqual(
+            profile["scope_ownership"]["source_namespace"],
+            migrated["scope_ownership"]["source_namespace"],
+        )
+        self.assertTrue(all("scope_binding" in item for item in migrated["samples"]))
+
     def test_unmanaged_legacy_instance_keeps_official_compatibility(self):
         harness = Harness(managed=False)
         owner = {"expression_profile": {"samples": []}}
