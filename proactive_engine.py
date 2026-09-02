@@ -9180,6 +9180,41 @@ class ProactiveEngineMixin:
             "voice": 0.3 if any(token in text for token in ("懒得打字", "留句语音", "小声说", "睡不着", "不想敲字")) else 0.0,
         }
 
+    def _busy_proactive_voice_context(self) -> dict[str, Any]:
+        """Return the current busy schedule context without making it a hard gate."""
+        getter = getattr(self, "_busy_reply_context", None)
+        if not callable(getter):
+            return {"busy": False, "reason": "unavailable", "schedule": "", "until": 0.0}
+        try:
+            context = getter()
+        except Exception:
+            return {"busy": False, "reason": "error", "schedule": "", "until": 0.0}
+        if not isinstance(context, dict):
+            return {"busy": False, "reason": "invalid", "schedule": "", "until": 0.0}
+        return {
+            "busy": bool(context.get("busy")),
+            "reason": _single_line(context.get("reason"), 40),
+            "schedule": _single_line(context.get("schedule"), 220),
+            "until": _safe_float(context.get("until"), 0.0),
+        }
+
+    @staticmethod
+    def _busy_voice_reason_eligible(reason: str) -> bool:
+        """Keep hands-free voice for social snippets, not operational notices."""
+        return reason in {
+            "check_in",
+            "quiet_care",
+            "state_share",
+            "background_schedule",
+            "activity_share",
+            "diary_share",
+            "morning_greeting",
+            "noon_greeting",
+            "evening_greeting",
+            "insomnia_night",
+            "important_date_share",
+        }
+
     def _soften_topic_hook(self, text: str) -> str:
         cleaned = _single_line(text, 60)
         if not cleaned:
@@ -9619,6 +9654,8 @@ class ProactiveEngineMixin:
         action_profile = self._persona_action_profile()
         motive_bias = self._motive_action_bias(motive)
         affinity_bias = self._action_affinity_bias(user)
+        busy_voice_context = self._busy_proactive_voice_context()
+        busy_schedule = bool(busy_voice_context.get("busy"))
         current_item = self._proactive_current_agenda_item()
         current_item_text = self._format_plan_item_for_prompt(current_item)
 
@@ -9666,12 +9703,19 @@ class ProactiveEngineMixin:
             if action_profile["clingy"]:
                 weight += 0.12
             weighted.append(("poke", weight))
-        if self._voice_available(user) and reason in {"state_share", "diary_share", "insomnia_night", "evening_greeting", "quiet_care"}:
+        if self._voice_available(user) and (
+            reason in {"state_share", "diary_share", "insomnia_night", "evening_greeting", "quiet_care"}
+            or (busy_schedule and self._busy_voice_reason_eligible(reason))
+        ):
             weight = 0.5 + (0.55 if action_profile["voicey"] else 0.0) + motive_bias["voice"] + affinity_bias["voice"]
             if action_profile["clingy"]:
                 weight += 0.2
             if reason == "insomnia_night":
                 weight += 0.28
+            if busy_schedule:
+                # A busy agenda makes a short voice note more convenient, but
+                # the normal weighted choice still leaves text as the fallback.
+                weight += 0.22
             weighted.append(("voice", weight))
         for ability in self._available_external_proactive_abilities(user):
             ability_name = str(ability.get("name") or "")
@@ -10580,7 +10624,12 @@ class ProactiveEngineMixin:
             recency_repair = getattr(self, "_repair_group_share_recency_text", None)
             if callable(recency_repair):
                 text = recency_repair(user, text)
-        if not text and not image_path and not extra_components:
+        sticker_pending_getter = getattr(self, "_proactive_sticker_only_pending", None)
+        try:
+            sticker_only_pending = bool(sticker_pending_getter(user.get("umo"))) if callable(sticker_pending_getter) else False
+        except Exception:
+            sticker_only_pending = False
+        if not text and not image_path and not extra_components and not sticker_only_pending:
             return reason, "", "", [], action_summary, effective_action
         if deferred_poke:
             poke_payload = await self._execute_proactive_action("poke", user, name, reason)
@@ -10590,13 +10639,16 @@ class ProactiveEngineMixin:
                 ) or "主动戳一戳执行失败"
                 return reason, "", "", [], "戳一戳未执行", "poke"
             action_summary = _single_line(poke_payload.get("summary"), 80) or "戳了你一下"
-        pre_poke_count, pre_poke_context = await self._maybe_run_pre_message_poke(
-            user,
-            name,
-            reason,
-            action=effective_action,
-            motive=planned_motive,
-        )
+        if sticker_only_pending:
+            pre_poke_count, pre_poke_context = 0, ""
+        else:
+            pre_poke_count, pre_poke_context = await self._maybe_run_pre_message_poke(
+                user,
+                name,
+                reason,
+                action=effective_action,
+                motive=planned_motive,
+            )
         if pre_poke_context and not pre_poke_context.startswith("poke：已"):
             logger.info("消息前置戳一戳失败,跳过本次前置戳: %s", _single_line(pre_poke_context, 120))
         if pre_poke_count > 0:

@@ -27,6 +27,7 @@ class _GenerationHarness(ProactiveMessageMixin, LlmToolActionsMixin):
 
     def __init__(self, raw_text: str) -> None:
         self.raw_text = raw_text
+        self.direct_fallback_calls = 0
 
     @staticmethod
     def _reaction_image_provider_available() -> bool:
@@ -36,10 +37,20 @@ class _GenerationHarness(ProactiveMessageMixin, LlmToolActionsMixin):
         return self.raw_text
 
     async def _generate_proactive_message_direct_fallback(self, *_args, **_kwargs) -> str:
+        self.direct_fallback_calls += 1
         return ""
 
     async def _finalize_proactive_generated_text(self, _user, raw_text: str, **_kwargs):
         return raw_text.strip(), ""
+
+
+class _BusyExpressionHarness(_GenerationHarness):
+    def __init__(self, raw_text: str) -> None:
+        super().__init__(raw_text)
+        self.data = {"daily_state": {}}
+
+    def _busy_proactive_voice_context(self):
+        return {"busy": True, "reason": "focused_schedule", "schedule": "上午上课"}
 
 
 class _AttachmentHarness(ProactiveMessageMixin):
@@ -177,6 +188,7 @@ class _ModeDeliveryHarness(ProactiveMessageMixin):
     def _segmented_scope_allows_umo(_umo: str) -> bool:
         return True
 
+
     @staticmethod
     def _platform_supports(*_args, **_kwargs) -> bool:
         return True
@@ -198,7 +210,75 @@ class _ModeDeliveryHarness(ProactiveMessageMixin):
         return None
 
 
+class _StickerOnlyDeliveryHarness(_ModeDeliveryHarness):
+    async def _prepare_proactive_reaction_attachment(self, _umo: str, _text: str):
+        return self.reaction_component, {"sticker_only": True}
+
+
 class ProactiveReactionExpressionTests(unittest.IsolatedAsyncioTestCase):
+    def test_busy_expression_hint_allows_short_voice_without_forcing_it(self) -> None:
+        harness = _BusyExpressionHarness("")
+
+        hint = harness._proactive_expression_shape_hint(
+            {"user_id": "10001", "umo": UMO},
+            reason="background_schedule",
+            action="voice",
+        )
+
+        self.assertIn("忙碌片段", hint)
+        self.assertIn("不是强制动作", hint)
+
+    def test_reaction_fallback_only_accepts_compact_social_text(self) -> None:
+        self.assertTrue(ProactiveMessageMixin._proactive_reaction_text_is_compact("收到啦，晚点聊"))
+        self.assertFalse(
+            ProactiveMessageMixin._proactive_reaction_text_is_compact(
+                "https://example.com/path 这是重要资料，请按说明完成配置并保存结果。"
+            )
+        )
+
+    def test_sticker_only_requires_light_social_reason(self) -> None:
+        harness = _GenerationHarness("")
+        intent = {
+            "sticker_only": True,
+            "_proactive_action": "message",
+        }
+        intent["_proactive_reason"] = "check_in"
+        self.assertTrue(harness._proactive_reaction_intent_allows_sticker_only(intent))
+        intent["_proactive_reason"] = "deadline_reminder"
+        self.assertFalse(harness._proactive_reaction_intent_allows_sticker_only(intent))
+
+    async def test_sticker_only_intent_keeps_empty_visible_text(self) -> None:
+        raw = (
+            '<pc_reaction_expression>{"purpose":"轻轻打招呼","emotion":"开心",'
+            '"intensity":2,"sticker_only":true}</pc_reaction_expression>'
+        )
+        harness = _GenerationHarness(raw)
+        user = {"user_id": "10001", "umo": UMO}
+
+        text = await harness._generate_proactive_message_with_llm(
+            user,
+            "用户",
+            "check_in",
+        )
+
+        self.assertEqual("", text)
+        cached = harness._proactive_reaction_intent_cache()[UMO]["intent"]
+        self.assertTrue(cached["sticker_only"])
+        self.assertTrue(harness._proactive_sticker_only_pending(UMO))
+        self.assertEqual(0, harness.direct_fallback_calls)
+        self.assertNotIn("_proactive_render_failure_stage", user)
+
+    async def test_sticker_only_delivery_sends_image_without_empty_text(self) -> None:
+        harness = _StickerOnlyDeliveryHarness(send_results=[True])
+
+        outcome = await harness._send_proactive_message_chain(UMO, "")
+
+        self.assertTrue(outcome.delivered)
+        self.assertTrue(outcome.complete)
+        self.assertEqual(1, len(harness.sent_chains))
+        self.assertIs(harness.sent_chains[0][0], harness.reaction_component)
+        self.assertEqual([(True, "delivered")], harness.settled)
+
     async def test_generation_strips_hidden_intent_and_caches_it_for_delivery(self) -> None:
         raw = (
             "刚看到一个很有意思的小东西，顺手来和你分享一下。"

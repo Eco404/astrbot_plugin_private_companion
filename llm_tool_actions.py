@@ -958,7 +958,7 @@ class LlmToolActionsMixin:
                 if reaction_expression_high_frequency(
                     runtime_persona_setting(self, 'reaction_expression_trigger_probability', 0.2)
                 )
-                else "- 轻松闲聊、玩笑、安慰、撒娇、庆祝、惊讶、接梗或轻吐槽等能自然补充语气的场景，通常应在完整回复末尾追加内部标签。只有纯事实答复、严肃或敏感情境，或确实没有合适情绪时才省略。"
+                else "- 轻松闲聊、玩笑、安慰、撒娇、庆祝、惊讶、接梗、轻吐槽，或‘收到/好的/笑死’这类语义明确的短回应，通常应在完整回复末尾追加内部标签。只有纯事实答复、严肃或敏感情境，或确实没有合适情绪时才省略。"
             )
             spontaneous_lines = [
                     "- 先完成一条正常、完整、可以独立发送的文字回复。表情图片只能作为文字后的补充，绝对不能替代文字回复。",
@@ -1664,6 +1664,8 @@ class LlmToolActionsMixin:
                         16,
                     ),
                 )
+                if self._reaction_expression_bool_arg(payload_obj.get("sticker_only"), False):
+                    normalized["sticker_only"] = True
                 meaningful = any(
                     str(payload_obj.get(key) or "").strip()
                     for key in ("query", "purpose", "emotion")

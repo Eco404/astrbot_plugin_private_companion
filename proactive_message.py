@@ -2031,6 +2031,24 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             lines.append("当前能量平稳：优先一到两句短消息，保留一点停顿和留白，避免客服式完整陈述。")
         if reason in {"check_in", "quiet_care", "state_share"} and "photo" not in action:
             lines.append("如果本轮只是想起对方或顺手分享一点感受，低信息量的短句也可以成立；不要为了增加信息而硬塞新事实。")
+        busy_context_getter = getattr(self, "_busy_proactive_voice_context", None)
+        try:
+            busy_context = busy_context_getter() if callable(busy_context_getter) else {}
+        except Exception:
+            busy_context = {}
+        if isinstance(busy_context, dict) and busy_context.get("busy"):
+            lines.append(
+                "当前日程处于忙碌片段：如果这轮只是轻量问候、感受或一句顺手分享，"
+                "可以把语音当作更省手的表达；语音脚本保持一两句、口语化，不要朗读长说明。"
+            )
+            lines.append(
+                "忙碌只提供表达倾向，不是强制动作；涉及命令、链接、重要事实、配置或需要留档的信息，继续用文字。"
+            )
+        if action == "message" and self._proactive_reaction_expression_enabled(action):
+            lines.append(
+                "如果正文只是‘收到/好的/笑死/辛苦了’这类语义明确的短回应，"
+                "可以考虑在正文之后追加一个匹配情绪的语义表情标签；正文较长、信息重要或语气不确定时不要追加。"
+            )
         return "\n".join(lines)
 
     def _format_plan_item_for_framework_prompt(self, item: dict[str, Any] | None) -> str:
@@ -2670,18 +2688,89 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             if reaction_expression_high_frequency(
                 runtime_persona_setting(self, "reaction_expression_trigger_probability", 0.2)
             )
-            else "- 只有轻松分享、玩笑、庆祝、撒娇、接梗、轻吐槽或温和安慰等场景中，追加一张表情包确实比纯文字更自然时，才在全部可见正文之后留下一个内部标签。"
+            else "- 只有轻松分享、玩笑、庆祝、撒娇、接梗、轻吐槽、温和安慰，或‘收到/好的/笑死’这类语义明确的短回应中，追加一张表情包确实比纯文字更自然时，才在全部可见正文之后留下一个内部标签。"
         )
         return """
 【主动消息的可选表情表达】
-- 先写一条完整、自然、没有图片也能独立成立的主动私聊正文；表情包只能补充语气，不能替代、缩短或省略正文。
+- 通常先写一条完整、自然、没有图片也能独立成立的主动私聊正文；除下一条明确允许的轻量插话外，表情包只补充语气，不替代、缩短或省略正文。
+- 只有在低信息量的主动插话（例如轻轻打招呼、接梗、表达一个明确情绪）中，纯表情包比文字更自然时，才允许省略正文，并在标签 JSON 中设置 `"sticker_only":true`；事实通知、提醒、重要信息、关系边界不明或语气不确定时禁止只发图。
 - __HIGH_FREQUENCY_HINT__
 - 事实通知、严肃或敏感话题、低压提醒、对方长期未回应、关系边界不明确，或没有准确情绪时，只输出正文，不要为了展示功能而写标签。
-- 标签格式：`<pc_reaction_expression>{"purpose":"分享开心","emotion":"开心","intensity":2,"candidate_queries":["开心分享","得意一下"]}</pc_reaction_expression>`。
+- 标签格式：`<pc_reaction_expression>{"purpose":"分享开心","emotion":"开心","intensity":2,"candidate_queries":["开心分享","得意一下"],"sticker_only":false}</pc_reaction_expression>`。
 - `purpose` 写沟通用途，`emotion` 写想传达的情绪，`intensity` 为 0-5；`candidate_queries` 最多提供少量简短检索说法，不写图片路径、文件名或用户隐私。
 - 每条主动消息最多一个标签，放在全部可见正文和 TTS 标签之后；不要用 Markdown 代码块，不要解释这个标签，也不要调用图片工具。
 - 插件之后仍可能因概率、冷却、用户偏好、重复图片或图库不匹配而只发送正文；正文必须始终自然成立。
         """.replace("__HIGH_FREQUENCY_HINT__", high_frequency_hint).strip()
+
+    @staticmethod
+    def _proactive_reaction_text_is_compact(visible_text: Any) -> bool:
+        """Avoid high-frequency reaction fallback on long or operational text."""
+        text = _single_line(visible_text, 700)
+        if not text or len(text) > 42 or text.count("，") + text.count(",") > 2:
+            return False
+        if re.search(r"(?:https?://|www\.|[A-Za-z0-9_./-]+\.[A-Za-z]{2,})", text):
+            return False
+        if any(token in text for token in ("命令", "配置", "验证码", "密码", "地址", "截止", "报错", "错误", "失败")):
+            return False
+        social_tokens = (
+            "收到",
+            "好的",
+            "好耶",
+            "笑死",
+            "哈哈",
+            "嘿嘿",
+            "辛苦",
+            "谢谢",
+            "晚安",
+            "早安",
+            "想你",
+            "想起你",
+            "开心",
+            "可爱",
+            "加油",
+            "呜呜",
+            "抱抱",
+            "分享",
+        )
+        return len(text) <= 24 or any(token in text for token in social_tokens)
+
+    @staticmethod
+    def _proactive_sticker_only_reason_allowed(reason: Any, action: Any = "message") -> bool:
+        """Limit textless reactions to lightweight social proactive routes."""
+        normalized_action = _single_line(action, 60).lower()
+        normalized_reason = _single_line(reason, 60).lower()
+        if normalized_action not in {"", "message"}:
+            return False
+        return normalized_reason in {
+            "check_in",
+            "quiet_care",
+            "state_share",
+            "morning_greeting",
+            "noon_greeting",
+            "evening_greeting",
+            "memory_echo",
+            "mood_checkin",
+            "absence_miss",
+        }
+
+    def _proactive_reaction_intent_allows_sticker_only(
+        self,
+        intent: dict[str, Any] | None,
+    ) -> bool:
+        if not isinstance(intent, dict) or not bool(intent.get("sticker_only")):
+            return False
+        return self._proactive_sticker_only_reason_allowed(
+            intent.get("_proactive_reason"),
+            intent.get("_proactive_action", "message"),
+        )
+
+    def _proactive_sticker_only_pending(self, umo: Any = "") -> bool:
+        key = _single_line(umo, 240)
+        if not key:
+            return False
+        entry = self._proactive_reaction_intent_cache().get(key)
+        intent = entry.get("intent") if isinstance(entry, dict) else None
+        return self._proactive_reaction_intent_allows_sticker_only(intent)
 
     def _proactive_reaction_expression_fallback_intent(
         self,
@@ -2697,7 +2786,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         ):
             return {}
         text = _single_line(visible_text, 700)
-        if not text:
+        if not self._proactive_reaction_text_is_compact(text):
             return {}
         return normalize_reaction_expression_intent(
             query="开心回应",
@@ -3730,6 +3819,17 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             action="voice",
         )
         state_hint = self._sanitize_owner_environment_context_for_private_user(state_hint, user)
+        busy_hint = ""
+        busy_context_getter = getattr(self, "_busy_proactive_voice_context", None)
+        try:
+            busy_context = busy_context_getter() if callable(busy_context_getter) else {}
+        except Exception:
+            busy_context = {}
+        if isinstance(busy_context, dict) and busy_context.get("busy"):
+            busy_hint = (
+                "正处于忙碌片段，像腾不出手时顺手留的一句；"
+                "控制在一两句短口语，不复述日程、不报内部状态，也不要扩展成说明。"
+            )
         return f"""
 你现在要在同一段私聊会话里，准备一小句真正会被念出来的主动语音内容。
 当前会话里已有的人格、关系、上下文会继续生效，这里不要再重复铺陈。
@@ -3741,6 +3841,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
 - 最近一句用户消息：{last_user_message or "（暂无）"}
 - 关系画像：{profile['level']}｜偏好：{profile['preference']}
 - 当前状态底色：{state_hint or "今天整体比较平稳。"}
+- 忙碌表达倾向：{busy_hint or "当前没有额外的忙碌表达倾向。"}
 - 当前会话 TTS 规则：{tts_prompt or "（当前没有额外 TTS 提示词,就按人格自己的语音习惯来）"}
 - 当前语音格式重点：{req['summary']}
 
@@ -6382,6 +6483,10 @@ Output:
                 if callable(extractor)
                 else (str(candidate or ""), {})
             )
+            if isinstance(reaction_intent, dict) and reaction_intent:
+                reaction_intent["_proactive_reason"] = reason
+                reaction_intent["_proactive_action"] = action
+            sticker_only = self._proactive_reaction_intent_allows_sticker_only(reaction_intent)
             if not reaction_intent:
                 fallback_builder = getattr(
                     self,
@@ -6399,16 +6504,19 @@ Output:
                             "高频主动表情兜底构建失败: error_type=%s",
                             type(exc).__name__,
                         )
-            finalized, failure_stage = await self._finalize_proactive_generated_text(
-                user,
-                visible_candidate,
-                name=name,
-                reason=reason,
-                action=action,
-                action_context=action_context,
-                motive=motive,
-            )
-            if finalized:
+            if sticker_only and not visible_candidate.strip():
+                finalized, failure_stage = "", ""
+            else:
+                finalized, failure_stage = await self._finalize_proactive_generated_text(
+                    user,
+                    visible_candidate,
+                    name=name,
+                    reason=reason,
+                    action=action,
+                    action_context=action_context,
+                    motive=motive,
+                )
+            if finalized or sticker_only:
                 self._store_proactive_reaction_intent(
                     user,
                     reaction_intent if isinstance(reaction_intent, dict) else {},
@@ -6419,7 +6527,7 @@ Output:
         failure_stages: list[str] = []
         if raw_text:
             finalized, failure_stage = await finalize_candidate(raw_text)
-            if finalized:
+            if finalized or self._proactive_sticker_only_pending(umo):
                 return finalized
             failure_stages.append(f"框架主链{failure_stage or '处理后为空'}")
         else:
@@ -6435,7 +6543,7 @@ Output:
         )
         if fallback_text:
             finalized, failure_stage = await finalize_candidate(fallback_text)
-            if finalized:
+            if finalized or self._proactive_sticker_only_pending(umo):
                 logger.info(
                     "主动框架主链为空后已由直接人格化兜底恢复: user=%s reason=%s",
                     _single_line(user.get("user_id"), 40),
@@ -15423,6 +15531,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         self,
         text: str,
         *,
+        umo: str = "",
         image_path: str = "",
         extra_components: list[Any] | None = None,
         reason: str = "",
@@ -15432,7 +15541,12 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
         raw = str(text or "").strip()
         has_media = bool(_path_text(image_path, 1000)) or bool(extra_components)
         if not raw:
-            if has_media:
+            sticker_pending_getter = getattr(self, "_proactive_sticker_only_pending", None)
+            try:
+                sticker_only_pending = bool(sticker_pending_getter(umo)) if callable(sticker_pending_getter) else False
+            except Exception:
+                sticker_only_pending = False
+            if has_media or sticker_only_pending:
                 return {"decision": "send", "text": "", "reason": ""}
             return {"decision": "drop", "text": "", "reason": "主动行为没有产出可发送内容", "hard": True}
         if self._looks_like_internal_provider_error_text(raw):
@@ -16513,8 +16627,9 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             or not self._proactive_reaction_expression_enabled("message")
         ):
             return None, None
+        sticker_only = self._proactive_reaction_intent_allows_sticker_only(intent)
         visible_checker = getattr(self, "_reaction_expression_has_visible_text", None)
-        if callable(visible_checker) and not visible_checker(visible_text):
+        if callable(visible_checker) and not visible_checker(visible_text) and not sticker_only:
             return None, None
 
         event = self._build_proactive_reaction_event(
@@ -16570,6 +16685,7 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
             if isinstance(pending, dict):
                 await settle(pending, sent=False, reason="attachment_file_missing")
             return None, None
+        pending["sticker_only"] = sticker_only
         try:
             builder = getattr(self, "_build_reaction_image_component", None)
             if callable(builder):
@@ -16759,6 +16875,32 @@ continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
                     )
                 except Exception:
                     pass
+                if isinstance(reaction_pending, dict) and reaction_pending.get("sticker_only"):
+                    try:
+                        reaction_sent = bool(
+                            await self._send_chain_components(
+                                umo,
+                                [reaction_component],
+                            )
+                        )
+                    except Exception as exc:
+                        reaction_sent = False
+                        logger.warning(
+                            "主动纯表情投递失败: umo=%s error_type=%s",
+                            _single_line(umo, 140),
+                            type(exc).__name__,
+                        )
+                    await self._settle_proactive_reaction_attachment(
+                        reaction_pending,
+                        sent=reaction_sent,
+                        reason="delivered" if reaction_sent else "delivery_failed",
+                    )
+                    return _ProactiveSendOutcome(
+                        delivered=reaction_sent,
+                        complete=reaction_sent,
+                        extra_components_delivered=1 if reaction_sent else 0,
+                        note="" if reaction_sent else "主动纯表情未送达",
+                    )
                 if isinstance(reaction_pending, dict):
                     reaction_pending["delivery_mode"] = reaction_delivery_mode
                 if reaction_delivery_mode == "separate_before":

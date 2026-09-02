@@ -995,6 +995,7 @@ class DailyStateTickMixin:
             try:
                 outbound_validation = outbound_validator(
                     text,
+                    umo=send_umo_for_send,
                     image_path=image_path,
                     extra_components=extra_components,
                     reason=reason or normalize_legacy_tag_text(user.get("planned_proactive_reason")),
@@ -1468,7 +1469,12 @@ class DailyStateTickMixin:
                 )
             self._debug_tick_skip(user_id, note, prefix="放弃")
             return
-        if not text and not image_path and not extra_components:
+        sticker_pending_getter = getattr(self, "_proactive_sticker_only_pending", None)
+        try:
+            sticker_only_pending = bool(sticker_pending_getter(user.get("umo"))) if callable(sticker_pending_getter) else False
+        except Exception:
+            sticker_only_pending = False
+        if not text and not image_path and not extra_components and not sticker_only_pending:
             empty_note = "主动行为没有产出可发送内容"
             if render_failure_stage:
                 empty_note = _single_line(f"{empty_note}：{render_failure_stage}", 360)
