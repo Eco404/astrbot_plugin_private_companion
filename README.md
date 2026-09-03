@@ -16,7 +16,7 @@
 | --- | --- |
 | 插件名 | <code>astrbot_plugin_private_companion</code> |
 | 显示名 | 我会永远陪着你 |
-| 版本 | <code>6.4.5a</code> |
+| 版本 | <code>6.4.5b</code> |
 | AstrBot | <code>>= 4.22.0</code> |
 | 官方声明平台 | <code>aiocqhttp</code>、<code>qq_official</code> |
 | 管理入口 | AstrBot 插件扩展页中的“陪伴面板”，或可选的独立 WebUI |

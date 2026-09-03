@@ -582,6 +582,24 @@ async def test_current_image_contract_uses_owner_free_task_and_transient_bytes(
     }
 
 
+def test_reference_import_receipt_accepts_legacy_tokens_and_extension_fields() -> None:
+    lease_id, asset_ids = ImageCompanionBridgeMixin._image_import_receipt(
+        {
+            "result_version": "image.reference-import-result.v1",
+            "instance_generation": 7,
+            "status": "succeeded",
+            "lease_id": "reflease_" + "a" * 32,
+            "asset_ids": ["ref_" + "b" * 32],
+            "metadata": {"source": "hot-reloaded-image-api"},
+        },
+        generation=7,
+        expected_assets=1,
+    )
+
+    assert lease_id == "reflease_" + "a" * 32
+    assert asset_ids == ("ref_" + "b" * 32,)
+
+
 @pytest.mark.asyncio
 async def test_formal_image_legacy_rollout_uses_explicit_compatibility_method(
     tmp_path: Path,

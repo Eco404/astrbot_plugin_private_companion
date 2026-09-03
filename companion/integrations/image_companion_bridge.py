@@ -84,6 +84,7 @@ _IMAGE_IMPORT_RESULT_FIELDS = frozenset(
         "error",
     }
 )
+_IMAGE_IMPORT_REQUIRED_FIELDS = _IMAGE_IMPORT_RESULT_FIELDS - {"ttl_seconds", "error"}
 _IMAGE_RESULT_FIELDS = frozenset(
     {
         "result_version",
@@ -101,8 +102,11 @@ _IMAGE_OUTPUT_FIELDS = frozenset(
     {"asset_id", "kind", "media_type", "local_path", "sha256", "size_bytes"}
 )
 _IMAGE_API_UNSET = object()
-_IMAGE_LEASE_RE = re.compile(r"^reflease_[0-9a-f]{48}$")
-_IMAGE_REFERENCE_ASSET_RE = re.compile(r"^ref_[0-9a-f]{48}$")
+# 48-hex tokens are emitted by current Image releases. Keep reading the
+# historical 32-hex form so a hot-reloaded older API can finish its lease
+# instead of making the whole generation request fail at the bridge boundary.
+_IMAGE_LEASE_RE = re.compile(r"^reflease_[0-9a-f]{32}(?:[0-9a-f]{16})?$")
+_IMAGE_REFERENCE_ASSET_RE = re.compile(r"^ref_[0-9a-f]{32}(?:[0-9a-f]{16})?$")
 _IMAGE_OUTPUT_ASSET_RE = re.compile(r"^image_[0-9a-f]{32}$")
 _IMAGE_REQUEST_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _IMAGE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -558,7 +562,7 @@ class ImageCompanionBridgeMixin:
         generation: int,
         expected_assets: int,
     ) -> tuple[str, tuple[str, ...]]:
-        if type(value) is not dict or set(value) != _IMAGE_IMPORT_RESULT_FIELDS:
+        if type(value) is not dict or not _IMAGE_IMPORT_REQUIRED_FIELDS.issubset(value):
             raise _ImageCurrentContractError("reference_import_result_malformed")
         if (
             value.get("result_version") != _IMAGE_REFERENCE_IMPORT_RESULT_VERSION
@@ -585,7 +589,10 @@ class ImageCompanionBridgeMixin:
                 or _IMAGE_REFERENCE_ASSET_RE.fullmatch(asset) is None
                 for asset in assets
             )
-            or value.get("ttl_seconds") != _IMAGE_REFERENCE_IMPORT_TTL_SECONDS
+            or (
+                value.get("ttl_seconds") is not None
+                and value.get("ttl_seconds") != _IMAGE_REFERENCE_IMPORT_TTL_SECONDS
+            )
             or value.get("error") is not None
         ):
             raise _ImageCurrentContractError("reference_import_result_malformed")
