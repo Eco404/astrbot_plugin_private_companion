@@ -10950,12 +10950,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             # TTS/reaction paths) may enter the optional splitter; otherwise a
             # response from an unrelated plugin would be rewritten here.
             return
-        if getattr(result, "use_t2i_", None) or getattr(result, "use_markdown_", None):
+        if getattr(result, "use_t2i_", None):
             return
         if not self._segmented_platform_allows(event=event):
             return
         if not chain:
             return
+        markdown_mode = getattr(result, "use_markdown_", None)
+        try:
+            setattr(event, "_private_companion_segmented_markdown_mode", markdown_mode)
+        except Exception:
+            pass
         chunks, changed, text = self._segment_llm_reply_chain(event, chain)
         if not chunks or not text:
             return
@@ -10986,6 +10991,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         plain_segments = self._plain_text_segments_from_chunks(chunks)
         if (
             not has_reaction_intent
+            and not bool(markdown_mode)
+            and not bool(
+                getattr(event, "_private_companion_segmented_markdown_detected", False)
+            )
             and plain_segments
             and len(plain_segments) == len(chunks)
             and await self._send_segmented_event_forward_message(
@@ -11060,6 +11069,31 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if not body or any(not isinstance(comp, Plain) for comp in body):
             return ""
         return "".join(str(getattr(comp, "text", "") or "") for comp in body).strip()
+
+    def _segmented_result_from_chain(
+        self,
+        event: AstrMessageEvent,
+        chain: list[Any],
+    ) -> Any:
+        result = self._build_result_from_chain(chain)
+        markdown_mode = getattr(
+            event,
+            "_private_companion_segmented_markdown_mode",
+            None,
+        )
+        if markdown_mode is None:
+            return result
+        try:
+            setter = getattr(result, "use_markdown", None)
+            if callable(setter):
+                updated = setter(bool(markdown_mode))
+                if updated is not None:
+                    result = updated
+            elif hasattr(result, "use_markdown_"):
+                result.use_markdown_ = bool(markdown_mode)
+        except Exception:
+            pass
+        return result
 
     def _private_plain_result_allows_segmenting(
         self,
@@ -11744,10 +11778,18 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if not accepted:
                 raise RuntimeError("主动分段补发未被平台接受")
             return "platform"
-        try:
-            await event.send(event.chain_result(chain))
-        except Exception:
-            await event.send(self._build_result_from_chain(chain))
+        markdown_mode = getattr(
+            event,
+            "_private_companion_segmented_markdown_mode",
+            None,
+        )
+        if markdown_mode is not None:
+            await event.send(self._segmented_result_from_chain(event, chain))
+        else:
+            try:
+                await event.send(event.chain_result(chain))
+            except Exception:
+                await event.send(self._build_result_from_chain(chain))
         return "event"
 
     async def _send_segmented_llm_chain_remainder(
@@ -11941,7 +11983,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         )
                         return
                     try:
-                        await event.send(self._build_result_from_chain(outbound_chunk))
+                        await event.send(
+                            self._segmented_result_from_chain(event, outbound_chunk)
+                        )
                         if case_id:
                             self._update_daily_review_case(
                                 case_id,
