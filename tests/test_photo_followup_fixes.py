@@ -21,6 +21,7 @@ from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
 from astrbot_plugin_private_companion.private_image import PrivateImageMixin
 from astrbot_plugin_private_companion.proactive_engine import ProactiveEngineMixin
 from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
+from astrbot_plugin_private_companion.conversation_prompt_section import PhotoPromptContent
 
 
 class _PhotoActionHarness(ProactiveMessageMixin):
@@ -274,15 +275,16 @@ class PhotoFollowupFixTests(unittest.IsolatedAsyncioTestCase):
             outfit_profile={"palette": "gray"},
         )
 
-        by_name = {section.name: section for section in sections}
-        self.assertEqual(by_name["daily_outfit_contract"].source, "fixed_prompt")
+        self.assertTrue(all(isinstance(section.content, PhotoPromptContent) for section in sections))
+        by_name = {section.title: section.content for section in sections}
+        self.assertEqual(by_name["daily_outfit_contract"].domain_source, "fixed_prompt")
         self.assertTrue(by_name["daily_outfit_contract"].protected)
         self.assertLessEqual(len(by_name["user_request"].positive), 1400)
         self.assertLessEqual(len(by_name["daily_outfit_contract"].negative), 760)
         visual_chars = sum(
-            len(section.positive) + len(section.negative)
+            len(section.content.positive) + len(section.content.negative)
             for section in sections
-            if section.source not in {"user_request", "fixed_prompt"}
+            if section.content.domain_source not in {"user_request", "fixed_prompt"}
         )
         self.assertLessEqual(visual_chars, 500)
 
@@ -413,7 +415,7 @@ class PhotoFollowupFixTests(unittest.IsolatedAsyncioTestCase):
         )
         context = render_prompt_sections(
             [snapshot_section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
         self.assertIn("最近一次真实图片分享", context)
         self.assertIn("窗边书桌前认真写字", context)

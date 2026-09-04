@@ -124,6 +124,7 @@ from .conversation_prompt_section import (
     PromptRenderMode,
     PromptSection,
     prompt_document,
+    prompt_heading_ref,
     prompt_list,
     prompt_section,
     prompt_text,
@@ -166,7 +167,7 @@ logger = get_module_logger(__name__)
 
 
 def _render_group_background_block(section: PromptSection) -> str:
-    return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+    return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
 
 def _render_group_background_document(document: PromptDocument) -> tuple[str, str]:
@@ -269,7 +270,7 @@ def build_group_episode_cache_prompt_document(
             "你是 Private Companion 的群聊片段归档器。请整理群聊片段记忆，让角色以后知道群里发生过什么、哪个梗出现过、哪些话题已经结束。",
             render_prompt_sections(
                 [archive_safety, expression_learning, output_contract],
-                mode=PromptRenderMode.LEGACY_BLOCK,
+                mode=PromptRenderMode.LABELED_BLOCK,
             ),
             separator="\n\n",
         ),
@@ -310,7 +311,7 @@ def build_group_episode_cache_prompt_document(
         source="group_observation",
         content=render_prompt_sections(
             [task_parameters, group_records],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         ),
     )
     return prompt_document(system=[system_root], user=[user_root])
@@ -726,9 +727,11 @@ class GroupObservationMixin:
             sender_id,
             text,
         )
+        if section is None:
+            return ""
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_group_role_context_prompt_section(
@@ -736,14 +739,9 @@ class GroupObservationMixin:
         group: dict[str, Any],
         sender_id: str = "",
         text: Any = "",
-    ) -> PromptSection:
+    ) -> PromptSection | None:
         if not self._group_role_context_requested(text):
-            return prompt_section(
-                key="group.role_context",
-                title="群权限身份",
-                source="group_observation",
-                content="",
-            )
+            return None
         summary = self._group_role_snapshot_summary(group)
         snapshot = group.get("role_snapshot") if isinstance(group.get("role_snapshot"), dict) else {}
         observed = snapshot.get("observed_roles") if isinstance(snapshot.get("observed_roles"), dict) else {}
@@ -3193,7 +3191,7 @@ class GroupObservationMixin:
         section = await self._group_slang_embedding_prompt_section(group, text)
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _is_uncertain_group_slang_meaning(self, meaning: str = "", usage: str = "") -> bool:
@@ -3748,19 +3746,12 @@ class GroupObservationMixin:
                         priority=31,
                         placement=PLACEMENT_DYNAMIC_SYSTEM,
                     )
-                else:
-                    rendered = render_prompt_sections(
-                        [section],
-                        mode=PromptRenderMode.CONVERSATION_XML,
-                    )
-                    req.system_prompt = f"{current_prompt}\n\n{rendered}".strip()
             elif plan is not None and not plan.contains_marker(marker):
                 plan.add(
                     section=section,
                     marker=marker,
                     priority=31,
                     placement=PLACEMENT_TURN_TAIL,
-                    temporary=True,
                 )
         recorder = getattr(self, "_record_request_prompt_fragment", None)
         if callable(recorder):
@@ -4271,7 +4262,7 @@ class GroupObservationMixin:
             return ""
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _group_share_send_block_reason(self, user_id: str, user: dict[str, Any], *, now: float | None = None) -> str:
@@ -4308,7 +4299,7 @@ class GroupObservationMixin:
         section = self._format_group_wakeup_humanized_prompt_section(effect, state)
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_group_wakeup_humanized_prompt_section(
@@ -4606,10 +4597,22 @@ class GroupObservationMixin:
             content=prompt_text(
                 "你在一个群聊里,系统认为现在也许可以非常轻地接一句,但你必须先判断这句会不会显得硬插话。\n"
                 "只输出 JSON,不要解释,不要 Markdown。",
-                group_context,
-                memory_reference,
-                persona_style,
-                trigger_message,
+                prompt_text(
+                    prompt_heading_ref(group_context.title, newline=True),
+                    group_context.content,
+                ),
+                prompt_text(
+                    prompt_heading_ref(memory_reference.title, newline=True),
+                    memory_reference.content,
+                ),
+                prompt_text(
+                    prompt_heading_ref(persona_style.title, newline=True),
+                    persona_style.content,
+                ),
+                prompt_text(
+                    prompt_heading_ref(trigger_message.title, newline=True),
+                    trigger_message.content,
+                ),
                 """要求：
 - 如果这像群友之间的一对一、已经有人在自然接话、你这句没有新增价值,should_reply 必须为 false
 - 链接、分享卡片以及围绕链接猜测内容的消息,should_reply 必须为 false
@@ -5054,7 +5057,7 @@ class GroupObservationMixin:
 不要输出解释过程。""",
                 render_prompt_sections(
                     evidence_sections,
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 ),
                 """只输出 JSON,键为词,值为对象：
 {

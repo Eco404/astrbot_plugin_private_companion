@@ -5,7 +5,7 @@ import unittest
 from astrbot_plugin_private_companion.conversation_prompt_section import (
     PromptRenderMode,
     PromptSection,
-    render_prompt_section,
+    render_prompt_sections,
 )
 from astrbot_plugin_private_companion.event_dispatch import EventDispatchMixin
 
@@ -33,7 +33,7 @@ class EventDispatchBackgroundPromptSectionTests(unittest.TestCase):
             example_lines=["- false_complete: A / B => 很快补话"],
         )
 
-        rendered = render_prompt_section(section, mode=PromptRenderMode.BODY_ONLY)
+        rendered = render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY)
 
         self.assertIsInstance(section, PromptSection)
         self.assertEqual("background.smart_message_debounce", section.key)
@@ -53,7 +53,7 @@ class EventDispatchBackgroundPromptSectionTests(unittest.TestCase):
             recent_flow="甲：晚安",
         )
 
-        rendered = render_prompt_section(section, mode=PromptRenderMode.BODY_ONLY)
+        rendered = render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY)
 
         self.assertEqual("background.group_air_reply_guard", section.key)
         self.assertTrue(rendered.startswith("判断群聊里 Bot 现在是否应该继续回复。只回答 REPLY 或 SILENCE"))
@@ -75,7 +75,7 @@ class EventDispatchBackgroundPromptSectionTests(unittest.TestCase):
             recent_flow="甲：你觉得呢\nBot：我觉得可以。\n乙：然后呢",
         )
 
-        rendered = render_prompt_section(section, mode=PromptRenderMode.BODY_ONLY)
+        rendered = render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY)
 
         self.assertEqual("background.group_followup_judge", section.key)
         self.assertIn("只回答 YES 或 NO，不要解释。", rendered)

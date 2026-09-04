@@ -109,9 +109,8 @@ from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _
 from .conversation_prompt_section import (
     PromptRenderMode,
     PromptSection,
-    coerce_prompt_section,
     prompt_section,
-    render_prompt_section,
+    render_prompt_sections,
 )
 from .markdown_segment_guard import (
     MARKDOWN_BLOCK_TOKEN_PATTERN,
@@ -1546,8 +1545,8 @@ class EventDispatchMixin:
         for index, raw in enumerate(raw_modules[:max_modules]):
             if isinstance(raw, PromptSection):
                 section = raw
-                module_content = render_prompt_section(
-                    section,
+                module_content = render_prompt_sections(
+                    [section],
                     mode=PromptRenderMode.BODY_ONLY,
                 ).strip()
                 key = _single_line(section.key, 100) or f"module.{index + 1}"
@@ -1559,16 +1558,8 @@ class EventDispatchMixin:
                 raw_metadata = dict(section.metadata)
             elif isinstance(raw, Mapping):
                 raw_content = raw.get("content")
-                authored = coerce_prompt_section(raw)
-                if authored is not None and not isinstance(raw_content, str):
-                    module_content = render_prompt_section(
-                        authored,
-                        mode=PromptRenderMode.BODY_ONLY,
-                    ).strip()
-                    raw_chars = len(module_content)
-                else:
-                    module_content = str(raw_content or "").strip()
-                    raw_chars = _safe_int(raw.get("chars"), len(module_content), 0)
+                module_content = raw_content.strip() if isinstance(raw_content, str) else ""
+                raw_chars = _safe_int(raw.get("chars"), len(module_content), 0)
                 key = _single_line(raw.get("key"), 100) or f"module.{index + 1}"
                 source = _single_line(raw.get("source"), 80)
                 raw_title = _single_line(raw.get("title"), 80)
@@ -2770,9 +2761,9 @@ class EventDispatchMixin:
             event,
             limit=limit,
         )
-        return render_prompt_section(
-            section,
-            mode=PromptRenderMode.LEGACY_BLOCK,
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _forbidden_recall_words(self) -> list[str]:
@@ -4600,15 +4591,15 @@ class EventDispatchMixin:
             recent = snapshot.get("texts", []) if isinstance(snapshot, dict) else []
         except Exception:
             recent = []
-        prompt = render_prompt_section(
-            self._smart_message_debounce_prompt_section(
+        prompt = render_prompt_sections(
+            [self._smart_message_debounce_prompt_section(
                 private_chat=private_chat,
                 sender_name=sender_name,
                 sender_id=sender_id,
                 cleaned=cleaned,
                 recent=recent,
                 example_lines=example_lines,
-            ),
+            )],
             mode=PromptRenderMode.BODY_ONLY,
         )
         raw = ""
@@ -4886,8 +4877,8 @@ class EventDispatchMixin:
             f"- {self._format_ts_for_display(_safe_float(item.get('ts'), 0)) if hasattr(self, '_format_ts_for_display') else int(_safe_float(item.get('ts'), 0))}: {_single_line(item.get('text'), 120)}"
             for item in recent_bot[-6:]
         ) or "（无）"
-        prompt = render_prompt_section(
-            self._group_air_reply_guard_prompt_section(
+        prompt = render_prompt_sections(
+            [self._group_air_reply_guard_prompt_section(
                 sender_id=sender_id,
                 sender_name=sender_name,
                 text=text,
@@ -4895,7 +4886,7 @@ class EventDispatchMixin:
                 recent_bot_count=len(recent_bot),
                 recent_bot_lines=recent_bot_lines,
                 recent_flow=recent_flow,
-            ),
+            )],
             mode=PromptRenderMode.BODY_ONLY,
         )
         try:
@@ -4927,15 +4918,15 @@ class EventDispatchMixin:
             if callable(flow_formatter)
             else ""
         )
-        prompt = render_prompt_section(
-            self._group_followup_judge_prompt_section(
+        prompt = render_prompt_sections(
+            [self._group_followup_judge_prompt_section(
                 sender_id=sender_id,
                 sender_name=sender_name,
                 text=text,
                 active=active,
                 scene=scene,
                 recent_flow=recent_flow,
-            ),
+            )],
             mode=PromptRenderMode.BODY_ONLY,
         )
         raw = await self._llm_call(

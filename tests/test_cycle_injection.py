@@ -98,7 +98,7 @@ class CycleInjectionTests(unittest.TestCase):
         )
         boundary = render_prompt_sections(
             [boundary_section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
         self.assertIn("Bot 当前经期与互动边界", boundary)

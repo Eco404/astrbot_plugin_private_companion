@@ -702,20 +702,24 @@ placement、marker、temporary 和 merge policy 属于交付编排，继续由 p
 
 实施完成于 2026-09-04，基于 `origin/main@30d7ed07`。
 
-- `conversation_prompt_section.py` 已成为唯一提示词 authoring model，提供 `PromptSection`、`PromptDocument`、文本/字段/列表/XML/CDATA/Exact 节点和六种 renderer。
-- `PromptSurface` 与 `ConversationInjectionPlan` 只接收已完成 authoring 的 `PromptSection`；请求级排序、placement、marker、幂等和 manifest 不再通过 `structured/opaque` 猜测正文类型。
-- 用户对话主链统一渲染为 `<private_companion_context>` XML；后台与功能 LLM 继续使用原有 legacy/body/JSON wire；TTS、成员安全、生图和跨插件协议使用 Exact 或专用 renderer。
+- `conversation_prompt_section.py` 是唯一 authoring model。`PromptSection` 是严格、不可变的类型；`key/title/source` 必填，业务代码只能通过 keyword-only `prompt_section()` 构造。
+- 内容类型覆盖文本、模板变量、字段、列表、XML、CDATA、精确文本、标题引用和生图 positive/negative 载荷。原始 `Mapping`、非法 XML 名称和错误 sink 会在构造或渲染时直接失败，不再自动清洗或猜测。
+- `PromptSection.children` 只表示真实语义层级；用户对话 XML 保留递归嵌套，只含 children 的父 section 也会正常输出。`PromptDocument` 只负责 system/user 通道和显式 `PromptRenderSpec`，不构成第二套正文模型。
+- 用户对话主链统一渲染为 `<private_companion_context>` XML；后台与功能 LLM 的 `【标题】正文`、body/JSON wire 由 `LABELED_*`/`BODY_ONLY` renderer 生成；TTS、成员安全、生图、NAI 和跨插件协议使用 `EXACT` 或专用 renderer，既有 wire 不变。
+- `PromptSurface` 与 `ConversationInjectionPlan` 只接收 `PromptSection`。编排层只保留排序、placement、marker、merge policy、幂等与 manifest；已删除 `structured/opaque/temporary`、字符串分区视图和直接 request fallback。
+- key 冲突采用确定性策略：指纹相同视为幂等；显式 `replace/append` 按策略执行；未指定策略的不同内容保留首个并记录 warning/manifest conflict；严格测试模式直接抛错。
+- `trust` 和 `temporary` 字段已删除。`metadata` 只作排障和來源记录，wire 由 typed content 与 `PromptRenderSpec` 决定；生图六字段载荷也不再从 metadata 反序列化。
+- 旧 `PromptValue/coerce_prompt_section/render_prompt_section/legacy_heading_token`、位置参数构造、legacy render enum 和 Surface 字符串 API 已删除。跨插件的旧版字符串输入只在明确的外部协议边界包装为 `ExactText`，不重新开放通用兼容 API。
 - 互动表达、回复温度、群聊氛围、名场面、扮演强度、玩笑边界和群周期等上游模块只提供事实、等级或 reason code，最终提示文案由所属功能的 section builder 持有。
-- 场景快照提供 canonical section 与兼容字符串视图；Proactive Chat 优先传递 typed Exact section，旧外部版本仅提供字符串时仍由兼容边界包装，不改变原 wire。
-- 静态检查已禁止生产代码新增原始 `【标题】`、手写会话 XML/CDATA、旧格式控制位、散装 Surface/Plan 参数和直接业务 `PromptSection(...)`。
+- 静态检查禁止生产代码新增原始 `【标题】`、手写会话 XML/CDATA、已删 API/控制位、散装 Surface/Plan 参数、直接业务 `PromptSection(...)` 和 Plan 外的 request prompt 写入。保留的 `【】` 仅限统一 renderer、旧持久化数据识别、消息占位符、正则或用户可见标签。
 
 实施中通过真实 `ProviderRequest` 发现并修复两项基础设施问题：仅含子 section 的组合块不再被误判为空，`ExactText` 在 system/turn 合并时也不再被 `strip()` 改写。不同 key 但正文相同的块按身份分别保留，不再做跨 key 正文去重。
 
 最终验收结果：
 
-- 当前分支全量 pytest：`4589 passed, 32 failed, 1 skipped, 877 subtests passed`。
-- 同环境 `origin/main`：`4482 passed, 32 failed, 1 skipped, 786 subtests passed`；32 个失败的集合一致，本分支新增失败为 0。
-- package-aware unittest：当前分支运行 `3857` 项，结果为 `17 failures, 11 errors`；失败集合与运行 `3775` 项的 `origin/main` 一致。
+- 当前分支全量 pytest：`4602 passed, 20 failed, 1 skipped, 910 subtests passed`。
+- 同环境 `origin/main`：`4444 passed, 33 failed, 9 skipped, 786 subtests passed`；当前 20 个失败全部位于上游失败域，本分支新增失败为 0。
+- package-aware unittest：运行 `3859` 项，结果为 `17 failures, 11 errors`；失败仍是上游同一组 Provider、外部插件和持久化基线。必须从仓库父目录使用 package top-level 发现，从 `tests/` 直接发现会伪造相对导入错误。
 - OneBot v11 与 QQ Official 的真实事件类各覆盖私聊/群聊：主链 section 只出现一次，QQ Official 专属边界只在对应适配器出现，turn-tail 实际落在 `extra_user_content_parts`。
 - 主动私聊、群插话和群归档后台 Prompt 保持既有 wire/golden；20 个 FunctionTool Schema snapshot 保持一致。
 - 当前插件 ZIP 已在隔离 `ASTRBOT_ROOT` 中由 AstrBot v4.28.0-beta.1 正式加载、启动并正常关闭。

@@ -1338,7 +1338,7 @@ class WorldbookMixin:
             source="worldbook",
             content=prompt_text(
                 render_prompt_sections([intro], mode=PromptRenderMode.BODY_ONLY),
-                render_prompt_sections(fields, mode=PromptRenderMode.LEGACY_BLOCK),
+                render_prompt_sections(fields, mode=PromptRenderMode.LABELED_BLOCK),
                 render_prompt_sections([requirements], mode=PromptRenderMode.BODY_ONLY),
                 separator="\n\n",
             ),
@@ -1610,7 +1610,7 @@ class WorldbookMixin:
         )
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_worldbook_private_mentions_prompt_section(
@@ -1763,7 +1763,7 @@ class WorldbookMixin:
                     text=text,
                 )
             ],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_worldbook_group_members_prompt_section(

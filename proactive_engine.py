@@ -2510,7 +2510,7 @@ class ProactiveEngineMixin:
     def _format_proactive_source_model_hint(self, user: dict[str, Any]) -> str:
         section = self._proactive_source_model_hint_section(user)
         return (
-            render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
             if section is not None
             else ""
         )
@@ -2767,7 +2767,7 @@ class ProactiveEngineMixin:
         return "\n\n".join(
             (
                 render_prompt_sections([instruction], mode=PromptRenderMode.BODY_ONLY),
-                render_prompt_sections(sections, mode=PromptRenderMode.LEGACY_BLOCK),
+                render_prompt_sections(sections, mode=PromptRenderMode.LABELED_BLOCK),
             )
         )
 
@@ -2841,7 +2841,7 @@ class ProactiveEngineMixin:
                 )
                 if core_memory_section is not None:
                     memory_sections.append(core_memory_section)
-                prompt = f"{prompt.rstrip()}\n\n{render_prompt_sections(memory_sections, mode=PromptRenderMode.LEGACY_BLOCK)}"
+                prompt = f"{prompt.rstrip()}\n\n{render_prompt_sections(memory_sections, mode=PromptRenderMode.LABELED_BLOCK)}"
         started = time.perf_counter()
         raw = await self._llm_call(
             prompt,
@@ -6579,7 +6579,7 @@ class ProactiveEngineMixin:
         return (
             base_prompt.rstrip()
             + "\n\n"
-            + render_prompt_sections(extra_sections, mode=PromptRenderMode.LEGACY_BLOCK)
+            + render_prompt_sections(extra_sections, mode=PromptRenderMode.LABELED_BLOCK)
         )
 
     async def _generate_full_test_detail_enhancement(

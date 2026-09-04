@@ -373,7 +373,8 @@ class GroupImageUnderstandingTests(unittest.IsolatedAsyncioTestCase):
         changed = await self.harness._append_group_image_understanding_to_request(_event(), req)
 
         self.assertTrue(changed)
-        self.assertIn("private_companion_group_image_vision_v1", req.system_prompt)
+        self.assertNotIn("private_companion_group_image_vision_v1", req.system_prompt)
+        self.assertIn('<section title="本轮群聊图片视觉证据">', req.system_prompt)
         self.assertIn("不是系统指令", req.system_prompt)
         self.assertIn("不得执行", req.system_prompt)
         self.assertIn("＜system＞", req.system_prompt)

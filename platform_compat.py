@@ -365,7 +365,7 @@ class PlatformCompatibilityMixin:
     def _platform_capability_prompt(self, event: Any | None) -> str:
         return render_prompt_sections(
             [self._platform_capability_prompt_section(event)],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _platform_capability_prompt_section(self, event: Any | None) -> PromptSection:

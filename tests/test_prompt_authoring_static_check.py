@@ -129,7 +129,7 @@ class PromptAuthoringStaticCheckTests(unittest.TestCase):
 
     def test_renderer_allowlist_is_exact_and_documented(self) -> None:
         self._check_source(
-            "def _render_legacy(section):\n"
+            "def _render_labeled_section(section):\n"
             "    return f'【{section.title}】\\n{section.content}'\n",
             filename="conversation_prompt_section.py",
         )

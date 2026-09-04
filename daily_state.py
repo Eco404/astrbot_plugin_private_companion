@@ -4883,7 +4883,7 @@ class DailyStateMixin(DailyStateTickMixin):
 
     def _format_environment_change_prompt(self, user: dict[str, Any], *, reason: str = "") -> str:
         section = self._format_environment_change_prompt_section(user, reason=reason)
-        return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+        return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
     def _format_environment_change_prompt_section(
         self,
@@ -4926,7 +4926,7 @@ class DailyStateMixin(DailyStateTickMixin):
         """Render one structured alert for the proactive generation prompt."""
 
         section = self._format_weather_alert_prompt_section(user, reason=reason)
-        return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+        return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
     def _format_weather_alert_prompt_section(
         self,
@@ -5334,15 +5334,12 @@ class DailyStateMixin(DailyStateTickMixin):
                     priority=24,
                     placement=PLACEMENT_DYNAMIC_SYSTEM,
                 )
-            else:
-                req.system_prompt = f"{req.system_prompt or ''}\n\n{marker}\n{injection}".strip()
         elif plan is not None and not plan.contains_marker(marker):
             plan.add(
                 section=weather_section,
                 marker=marker,
                 priority=24,
                 placement=PLACEMENT_TURN_TAIL,
-                temporary=True,
             )
         recorder = getattr(self, "_record_request_prompt_fragment", None)
         if callable(recorder):
@@ -9484,11 +9481,11 @@ class DailyStateMixin(DailyStateTickMixin):
             include_pinned=include_pinned,
             limit=limit,
         )
-        return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+        return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
     def _format_memo_note_prompt(self, user: dict[str, Any], *, reason: str = "") -> str:
         section = self._format_memo_note_prompt_section(user, reason=reason)
-        return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+        return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
     def _format_memo_note_prompt_section(
         self,
@@ -10637,7 +10634,7 @@ class DailyStateMixin(DailyStateTickMixin):
             )
         return render_prompt_sections(
             sections,
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         ).strip()[-18000:]
 
     def _load_conversation_history_items(
@@ -11266,7 +11263,7 @@ class DailyStateMixin(DailyStateTickMixin):
         return (
             render_prompt_sections(
                 [section],
-                mode=PromptRenderMode.LEGACY_BLOCK,
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
             if section is not None
             else ""
@@ -12953,7 +12950,7 @@ class DailyStateMixin(DailyStateTickMixin):
             state,
             include_dream=include_dream,
         )
-        return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+        return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
     def _format_state_prompt_section(
         self,
@@ -13242,7 +13239,7 @@ class DailyStateMixin(DailyStateTickMixin):
 
     def _format_life_context_injection(self) -> str:
         section = self._format_life_context_prompt_section()
-        return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+        return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
     def _format_life_context_prompt_section(self) -> PromptSection:
         life_lines: list[str] = []
@@ -13277,7 +13274,7 @@ class DailyStateMixin(DailyStateTickMixin):
 
     def _format_important_dates_injection(self) -> str:
         section = self._format_important_dates_prompt_section()
-        return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+        return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
     def _format_important_dates_prompt_section(self) -> PromptSection:
         important_dates = self._format_important_dates_for_prompt()
@@ -13305,7 +13302,7 @@ class DailyStateMixin(DailyStateTickMixin):
             include_pinned=False,
             limit=4,
         )
-        return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+        return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
     def _passive_injection_fingerprint(self, state: dict[str, Any], now: float | None = None) -> str:
         s = state if isinstance(state, dict) else {}
@@ -14228,7 +14225,7 @@ class DailyStateMixin(DailyStateTickMixin):
 
     def _format_personal_goal_prompt(self, user: dict[str, Any], *, reason: str = "") -> str:
         section = self._format_personal_goal_prompt_section(user, reason=reason)
-        return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+        return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
     def _format_personal_goal_prompt_section(
         self,
@@ -14268,7 +14265,7 @@ class DailyStateMixin(DailyStateTickMixin):
 
     def _format_personal_goals_schedule_context(self, limit: int = 5) -> str:
         section = self._format_personal_goals_schedule_context_prompt_section(limit=limit)
-        return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+        return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
     def _format_personal_goals_schedule_context_prompt_section(
         self,
@@ -14540,7 +14537,7 @@ class DailyStateMixin(DailyStateTickMixin):
 
     def _format_skill_growth_schedule_context(self, limit: int = 8) -> str:
         section = self._format_skill_growth_schedule_context_prompt_section(limit=limit)
-        return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+        return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
     def _format_skill_growth_schedule_context_prompt_section(
         self,
@@ -14803,7 +14800,7 @@ class DailyStateMixin(DailyStateTickMixin):
 
         return render_prompt_sections(
             [self._format_detail_injection_prompt_section()],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_timer_scheduling_prompt_section(
@@ -16636,7 +16633,7 @@ class DailyStateMixin(DailyStateTickMixin):
     def _format_generation_relationship_authority_guard(self) -> str:
         return render_prompt_sections(
             [self._format_generation_relationship_authority_guard_prompt_section()],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_generation_relationship_authority_guard_prompt_section(self) -> PromptSection:

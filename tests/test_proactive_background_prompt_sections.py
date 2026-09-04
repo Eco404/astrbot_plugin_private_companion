@@ -4,22 +4,27 @@ import inspect
 import unittest
 
 from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PromptDocumentPart,
     PromptSection,
     prompt_cdata,
     prompt_section,
+    render_prompt_document,
 )
 from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
 
 
 class ProactiveBackgroundPromptSectionTests(unittest.TestCase):
     def render(self, document) -> str:
-        return ProactiveMessageMixin._render_proactive_prompt_document(document)
+        return render_prompt_document(document)["user"]
 
     def assert_document(self, document, *, task: str) -> None:
         self.assertEqual(task, document.metadata["task"])
         self.assertFalse(document.system)
         self.assertTrue(document.user)
         self.assertTrue(all(isinstance(section, PromptSection) for section in document.user))
+        self.assertTrue(
+            all(isinstance(part, PromptDocumentPart) for part in document.user_parts)
+        )
         keys = [section.key for section in document.user]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertTrue(all(keys))
@@ -286,6 +291,19 @@ class ProactiveBackgroundPromptSectionTests(unittest.TestCase):
         for producer in producers:
             with self.subTest(producer=producer.__name__):
                 self.assertNotIn("【", inspect.getsource(producer))
+
+    def test_proactive_prompt_documents_use_only_typed_render_contracts(self) -> None:
+        source = inspect.getsource(ProactiveMessageMixin)
+
+        for legacy_key in (
+            "legacy_render_mode",
+            "legacy_heading_style",
+            "legacy_prefix",
+            "legacy_separator_before",
+            "_render_proactive_prompt_document",
+        ):
+            with self.subTest(legacy_key=legacy_key):
+                self.assertNotIn(legacy_key, source)
 
 
 if __name__ == "__main__":

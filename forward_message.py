@@ -35,12 +35,12 @@ from .logging_util import get_module_logger
 logger = get_module_logger(__name__)
 
 
-def _render_conversation_section_legacy(section: PromptSection | None) -> str:
+def _render_conversation_section_labeled(section: PromptSection | None) -> str:
     if section is None:
         return ""
     return render_prompt_sections(
         [section],
-        mode=PromptRenderMode.LEGACY_BLOCK,
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
 
 
@@ -61,23 +61,22 @@ class ForwardMessageMixin:
         ]
 
     @staticmethod
-    def _register_materialized_forward_context(
+    def _materialize_forward_context(
         req: ProviderRequest,
         *,
         section: PromptSection,
         marker: str,
         priority: int,
-    ) -> None:
+    ) -> bool:
         plan = get_conversation_injection_plan(req)
         if plan is None or plan.contains_marker(marker):
-            return
-        plan.add(
+            return False
+        return plan.materialize_system_block(
+            req,
             section=section,
             marker=marker,
             priority=priority,
             placement=PLACEMENT_DYNAMIC_SYSTEM,
-            temporary=False,
-            materialized=True,
         )
 
     def _forward_descriptor_cache_keys(self, event: AstrMessageEvent) -> list[str]:
@@ -1027,7 +1026,7 @@ class ForwardMessageMixin:
         req: ProviderRequest,
     ) -> str:
         section = await self._format_forward_message_context_prompt_section(event, req)
-        rendered = _render_conversation_section_legacy(section)
+        rendered = _render_conversation_section_labeled(section)
         if section is not None:
             setattr(
                 event,
@@ -1138,7 +1137,7 @@ class ForwardMessageMixin:
             self_recognition_prompt = (
                 render_prompt_sections(
                     [recognition_section],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 )
                 if isinstance(recognition_section, PromptSection)
                 else self._private_image_self_recognition_context_prompt()
@@ -1837,7 +1836,7 @@ class ForwardMessageMixin:
         self,
         event: AstrMessageEvent,
     ) -> str:
-        return _render_conversation_section_legacy(
+        return _render_conversation_section_labeled(
             await self._format_reply_chain_context_prompt_section(event)
         )
 
@@ -2132,7 +2131,7 @@ class ForwardMessageMixin:
         self,
         event: AstrMessageEvent,
     ) -> str:
-        return _render_conversation_section_legacy(
+        return _render_conversation_section_labeled(
             await self._format_reply_rich_card_context_prompt_section(event)
         )
 
@@ -2253,8 +2252,7 @@ class ForwardMessageMixin:
                     priority=65,
                 ) else "system_prompt"
             if placement == "system_prompt":
-                req.system_prompt = f"{current_prompt}\n\n{marker}\n{context}".strip()
-                self._register_materialized_forward_context(
+                self._materialize_forward_context(
                     req,
                     section=context_section,
                     marker=marker,
@@ -2287,8 +2285,7 @@ class ForwardMessageMixin:
                     priority=64,
                 ) else "system_prompt"
             if placement == "system_prompt":
-                req.system_prompt = f"{req.system_prompt or ''}\n\n{chain_marker}\n{reply_chain_context}".strip()
-                self._register_materialized_forward_context(
+                self._materialize_forward_context(
                     req,
                     section=reply_chain_section,
                     marker=chain_marker,
@@ -2323,8 +2320,7 @@ class ForwardMessageMixin:
                     priority=65,
                 ) else "system_prompt"
             if placement == "system_prompt":
-                req.system_prompt = f"{current_prompt}\n\n{marker}\n{rich_card_context}".strip()
-                self._register_materialized_forward_context(
+                self._materialize_forward_context(
                     req,
                     section=rich_card_section,
                     marker=marker,

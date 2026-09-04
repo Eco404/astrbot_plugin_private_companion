@@ -41,18 +41,8 @@ def _render_creative_prompt(section: PromptSection) -> str:
     return render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY)
 
 
-def _render_creative_prompt_block(*, key: str, title: str, content: Any) -> str:
-    return render_prompt_sections(
-        [
-            prompt_section(
-                key=key,
-                title=title,
-                source="creative",
-                content=content,
-            )
-        ],
-        mode=PromptRenderMode.LEGACY_BLOCK,
-    )
+def _render_creative_labeled_section(section: PromptSection) -> str:
+    return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
 
 def _persona_provider_id(owner: Any, canonical_key: str, legacy_attr: str, quick_role: str) -> str:
@@ -744,23 +734,32 @@ class CreativeMixin:
                 )
             except Exception as exc:
                 logger.debug("创作立项 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
-        persona_block = _render_creative_prompt_block(
-            key="background.creative.project.persona",
-            title="人格与身份",
-            content=persona_context,
+        persona_block = _render_creative_labeled_section(
+            prompt_section(
+                key="background.creative.project.persona",
+                title="人格与身份",
+                source="creative",
+                content=persona_context,
+            )
         )
-        memory_block = _render_creative_prompt_block(
-            key="background.creative.project.memory",
-            title="我会牢牢记住你 创作连续性参考",
-            content=(
-                f"{memory_context or '暂无外部长期创作记忆。'}\n"
-                "使用方式：优先尊重用户长期偏好、已有项目、人工修订和避雷；不要说自己“查了记忆”。"
-            ),
+        memory_block = _render_creative_labeled_section(
+            prompt_section(
+                key="background.creative.project.memory",
+                title="我会牢牢记住你 创作连续性参考",
+                source="creative",
+                content=(
+                    f"{memory_context or '暂无外部长期创作记忆。'}\n"
+                    "使用方式：优先尊重用户长期偏好、已有项目、人工修订和避雷；不要说自己“查了记忆”。"
+                ),
+            )
         )
-        direction_block = _render_creative_prompt_block(
-            key="background.creative.project.direction",
-            title="用户配置的创作方向",
-            content=direction_prompt or "未指定，按人格、灵感和连续性自然决定。",
+        direction_block = _render_creative_labeled_section(
+            prompt_section(
+                key="background.creative.project.direction",
+                title="用户配置的创作方向",
+                source="creative",
+                content=direction_prompt or "未指定，按人格、灵感和连续性自然决定。",
+            )
         )
         prompt = prompt_section(
             key="background.creative.project",
@@ -1406,10 +1405,13 @@ class CreativeMixin:
 
         async def _do_generate(extra_notice: str = "") -> str:
             story_time = _single_line(story_bible.get("story_time"), 60)
-            persona_block = _render_creative_prompt_block(
-                key="background.creative.writing.persona",
-                title="作者人格与身份",
-                content=persona_context,
+            persona_block = _render_creative_labeled_section(
+                prompt_section(
+                    key="background.creative.writing.persona",
+                    title="作者人格与身份",
+                    source="creative",
+                    content=persona_context,
+                )
             )
             prompt = prompt_section(
                 key="background.creative.writing",

@@ -85,16 +85,16 @@ from .logging_util import get_module_logger
 logger = get_module_logger(__name__)
 
 
-def _render_tool_prompt_section_legacy(section: PromptSection | None) -> str:
+def _render_tool_prompt_section_labeled(section: PromptSection | None) -> str:
     if section is None:
         return ""
-    return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+    return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
 
-def _render_tool_prompt_section_legacy_inline(section: PromptSection | None) -> str:
+def _render_tool_prompt_section_labeled_inline(section: PromptSection | None) -> str:
     if section is None:
         return ""
-    return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_INLINE)
+    return render_prompt_sections([section], mode=PromptRenderMode.LABELED_INLINE)
 
 
 PHOTO_TOOL_SILENT_SENTINEL = "[[PC_PHOTO_SENT_NO_FOLLOWUP]]"
@@ -400,7 +400,7 @@ class LlmToolActionsMixin:
 
     def _media_delivery_truth_instruction(self) -> str:
         return "".join(
-            _render_tool_prompt_section_legacy_inline(section)
+            _render_tool_prompt_section_labeled_inline(section)
             for section in self._media_delivery_truth_prompt_sections()
         )
 
@@ -660,7 +660,7 @@ class LlmToolActionsMixin:
         )
 
     def _cross_user_memory_query_instruction(self) -> str:
-        return _render_tool_prompt_section_legacy(
+        return _render_tool_prompt_section_labeled(
             self._cross_user_memory_query_prompt_section()
         )
 
@@ -681,7 +681,7 @@ class LlmToolActionsMixin:
         )
 
     def _relation_lookup_instruction(self) -> str:
-        return _render_tool_prompt_section_legacy(
+        return _render_tool_prompt_section_labeled(
             self._relation_lookup_prompt_section()
         )
 
@@ -723,7 +723,7 @@ class LlmToolActionsMixin:
         section = self._qzone_tool_instruction_prompt_section(event)
         if section is None:
             return ""
-        rendered = _render_tool_prompt_section_legacy(section)
+        rendered = _render_tool_prompt_section_labeled(section)
         if not include_recent_context:
             return rendered
         sections = self._qzone_tool_prompt_sections(event)
@@ -731,7 +731,7 @@ class LlmToolActionsMixin:
             return rendered
         recent = render_prompt_sections(
             sections[1:],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
         return f"{rendered}\n\n{recent}".strip()
 
@@ -1168,7 +1168,7 @@ class LlmToolActionsMixin:
         spontaneous_only: bool = False,
         allow_photo_on_reaction_turns: bool = False,
     ) -> str:
-        return _render_tool_prompt_section_legacy(
+        return _render_tool_prompt_section_labeled(
             self._photo_generation_tool_prompt_section(
                 event,
                 include_spontaneous=include_spontaneous,
@@ -1820,7 +1820,7 @@ class LlmToolActionsMixin:
         )
 
     def _creative_work_tool_instruction(self) -> str:
-        return _render_tool_prompt_section_legacy(
+        return _render_tool_prompt_section_labeled(
             self._creative_work_tool_prompt_section()
         )
 
@@ -2705,7 +2705,7 @@ class LlmToolActionsMixin:
         )
 
     def _memo_management_tool_instruction(self) -> str:
-        return _render_tool_prompt_section_legacy(
+        return _render_tool_prompt_section_labeled(
             self._memo_management_tool_prompt_section()
         )
 
@@ -2736,7 +2736,7 @@ class LlmToolActionsMixin:
         )
 
     def _schedule_management_tool_instruction(self) -> str:
-        return _render_tool_prompt_section_legacy(
+        return _render_tool_prompt_section_labeled(
             self._schedule_management_tool_prompt_section()
         )
 

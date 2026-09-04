@@ -791,30 +791,24 @@ class GameIntegrationMixin:
             cache_key = ""
             cache = {}
             now = time.time()
-        prompt = prompt_section(
-            key="background.game.emotional_afterglow",
-            title="游戏互动情绪余韵",
+        persona_section = prompt_section(
+            key="background.game.emotional_afterglow.persona",
+            title="Bot 人格资料",
+            source="game_integration",
+            content=xml_element("reference_data", text=persona),
+        )
+        event_section = prompt_section(
+            key="background.game.emotional_afterglow.event",
+            title="游戏事件与上下文资料",
             source="game_integration",
             content=prompt_group(
-                "你负责根据 Bot 人格结算一次游戏互动后的短期情绪余韵，不生成对用户的回复。",
-                prompt_section(
-                    key="background.game.emotional_afterglow.persona",
-                    title="Bot 人格资料",
-                    source="game_integration",
-                    content=xml_element("reference_data", text=persona),
-                ),
-                prompt_section(
-                    key="background.game.emotional_afterglow.event",
-                    title="游戏事件与上下文资料",
-                    source="game_integration",
-                    content=xml_element(
-                        "reference_data",
-                        text=json.dumps(
-                            prompt_payload,
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            default=str,
-                        ),
+                xml_element(
+                    "reference_data",
+                    text=json.dumps(
+                        prompt_payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
                     ),
                 ),
                 (
@@ -834,6 +828,13 @@ class GameIntegrationMixin:
                     '"invite_interest":0到100整数}'
                 ),
             ),
+        )
+        prompt = prompt_section(
+            key="background.game.emotional_afterglow",
+            title="游戏互动情绪余韵",
+            source="game_integration",
+            content="你负责根据 Bot 人格结算一次游戏互动后的短期情绪余韵，不生成对用户的回复。",
+            children=(persona_section, event_section),
         )
         try:
             timeout = self._game_finite_float(getattr(self, "game_afterglow_assessment_timeout_seconds", 8.0), 8.0)

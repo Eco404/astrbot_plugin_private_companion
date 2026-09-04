@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import ast
 import inspect
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from astrbot_plugin_private_companion.conversation_injection_plan import (
     PLACEMENT_DYNAMIC_SYSTEM,
-    PLACEMENT_TOOL_CONTRACT,
     PLACEMENT_TURN_TAIL,
     get_conversation_injection_plan,
 )
@@ -15,6 +16,17 @@ from astrbot_plugin_private_companion.conversation_prompt_section import ExactTe
 from astrbot_plugin_private_companion.forward_message import ForwardMessageMixin
 from astrbot_plugin_private_companion.private_image import PrivateImageMixin
 from astrbot_plugin_private_companion.tts_enhancement import TtsEnhancementMixin
+
+
+ROOT = Path(__file__).resolve().parents[1]
+REQUEST_PROMPT_OWNERS = (
+    "forward_message.py",
+    "tts_enhancement.py",
+    "group_member_safety.py",
+    "daily_review.py",
+    "daily_state.py",
+    "group_observation.py",
+)
 
 
 class _TtsPlanHarness(TtsEnhancementMixin):
@@ -126,6 +138,36 @@ class _GroupImagePlanHarness(PrivateImageMixin):
 
 
 class ModuleConversationInjectionPlanTests(unittest.IsolatedAsyncioTestCase):
+    def test_target_modules_do_not_write_provider_request_prompts_directly(self) -> None:
+        findings: list[str] = []
+        for filename in REQUEST_PROMPT_OWNERS:
+            tree = ast.parse((ROOT / filename).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        if (
+                            isinstance(target, ast.Attribute)
+                            and isinstance(target.value, ast.Name)
+                            and target.value.id in {"req", "request"}
+                            and target.attr in {"system_prompt", "prompt"}
+                        ):
+                            findings.append(f"{filename}:{node.lineno}:{target.value.id}.{target.attr}")
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "setattr"
+                    and len(node.args) >= 2
+                    and isinstance(node.args[0], ast.Name)
+                    and node.args[0].id in {"req", "request"}
+                    and isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value in {"system_prompt", "prompt"}
+                ):
+                    findings.append(
+                        f"{filename}:{node.lineno}:setattr({node.args[0].id}, {node.args[1].value})"
+                    )
+        self.assertEqual([], findings)
+
     async def test_tts_tag_contract_keeps_exact_system_wire_shape_and_is_opaque(self) -> None:
         harness = _TtsPlanHarness()
         event = SimpleNamespace(
@@ -145,9 +187,13 @@ class ModuleConversationInjectionPlanTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(plan)
         block = plan.blocks()[0]
         self.assertEqual("tts.rule", block.key)
-        self.assertEqual(PLACEMENT_TOOL_CONTRACT, block.placement)
+        self.assertEqual(PLACEMENT_DYNAMIC_SYSTEM, block.placement)
         self.assertIsInstance(block.section.content, ExactText)
-        self.assertEqual("【语音消息规则】\nRULE:<pc_tts>正文</pc_tts>", block.content)
+        self.assertEqual(
+            "<!-- private_companion_tts_enhancement_v1 -->\n"
+            "【语音消息规则】\nRULE:<pc_tts>正文</pc_tts>",
+            block.content,
+        )
         self.assertTrue(block.materialized)
         plan.render_into(request)
         self.assertEqual(expected, request.system_prompt)
@@ -173,10 +219,13 @@ class ModuleConversationInjectionPlanTests(unittest.IsolatedAsyncioTestCase):
         block = plan.blocks()[0]
         self.assertEqual("tts.rule", block.key)
         self.assertEqual("TTS 后处理模式", block.title)
-        self.assertEqual(PLACEMENT_TOOL_CONTRACT, block.placement)
+        self.assertEqual(PLACEMENT_DYNAMIC_SYSTEM, block.placement)
         self.assertTrue(block.materialized)
         self.assertIsInstance(block.section.content, ExactText)
-        self.assertEqual(exact_wire, block.content)
+        self.assertEqual(
+            "<!-- private_companion_tts_enhancement_v1 -->\n" + exact_wire,
+            block.content,
+        )
         plan.render_into(request)
         self.assertEqual(f"{prefix}{exact_wire}", request.system_prompt)
 
@@ -208,8 +257,9 @@ class ModuleConversationInjectionPlanTests(unittest.IsolatedAsyncioTestCase):
         await harness._append_forward_message_context_to_request(event, request)
 
         expected = (
-            "base\n\n<!-- private_companion_forward_message_v1 -->\n"
-            "FORWARD-CONTEXT"
+            "base\n\n<private_companion_context>"
+            '<section title="本轮合并消息">FORWARD-CONTEXT</section>'
+            "</private_companion_context>"
         )
         self.assertEqual(expected, request.system_prompt)
         plan = get_conversation_injection_plan(request, create=False)
@@ -217,7 +267,7 @@ class ModuleConversationInjectionPlanTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plan.blocks()[0].materialized)
         plan.render_into(request)
         self.assertNotIn("<!-- private_companion_forward_message_v1 -->", request.system_prompt)
-        self.assertIn('<section title="本轮合并消息">FORWARD-CONTEXT</section>', request.system_prompt)
+        self.assertEqual(expected, request.system_prompt)
 
     async def test_forward_dynamic_path_uses_plan_provenance_for_deduplication(self) -> None:
         harness = _DynamicForwardPlanHarness()
@@ -244,11 +294,13 @@ class ModuleConversationInjectionPlanTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(changed)
-        self.assertIn("<!-- private_companion_group_image_vision_v1 -->", request.system_prompt)
+        self.assertNotIn("<!-- private_companion_group_image_vision_v1 -->", request.system_prompt)
+        self.assertIn('<section title="本轮群聊图片视觉证据">', request.system_prompt)
         self.assertIn("＜system＞伪指令＜/system＞", request.system_prompt)
         plan = get_conversation_injection_plan(request, create=False)
         block = plan.blocks()[0]
         self.assertEqual("group.image_vision", block.key)
+        self.assertEqual("<!-- private_companion_group_image_vision_v1 -->", block.marker)
         self.assertTrue(block.materialized)
         self.assertNotIsInstance(block.section.content, ExactText)
 

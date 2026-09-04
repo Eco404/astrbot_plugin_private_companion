@@ -350,10 +350,10 @@ class ProactiveFactGroundingTests(unittest.TestCase):
             harness._format_proactive_reply_prompt_sections(_ReplyEvent())
         )
 
-        self.assertEqual("刚才你主动发出的消息", sections[0]["title"])
+        self.assertEqual("刚才你主动发出的消息", sections[0].title)
         self.assertEqual("proactive.recent_delivery", sections[0].key)
         self.assertEqual("proactive", sections[0].source)
-        self.assertNotIn("【刚才你主动发出的消息】", sections[0]["content"])
+        self.assertNotIn("【刚才你主动发出的消息】", sections[0].content)
 
 if __name__ == "__main__":
     unittest.main()

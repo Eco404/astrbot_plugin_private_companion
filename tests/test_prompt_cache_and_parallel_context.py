@@ -26,6 +26,15 @@ async def _no_record(*_args, **_kwargs) -> None:
     return None
 
 
+def _private_recall_section(content: str):
+    return prompt_section(
+        key="memory.private_recall",
+        title="当前私聊长期记忆补充",
+        source="memory_companion",
+        content=content,
+    )
+
+
 def _private_collector_harness() -> PrivateCompanionPlugin:
     plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
     plugin.memory_companion_context_timeout_seconds = 1.2
@@ -83,11 +92,11 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
             await release.wait()
             return "现在在书房，穿浅蓝色居家服。"
 
-        async def private_recall(**kwargs) -> str:
+        async def private_recall(**kwargs):
             calls["recall"] = dict(kwargs)
             recall_started.set()
             await release.wait()
-            return "【当前私聊长期记忆补充】\n用户偏好简短回答。"
+            return _private_recall_section("用户偏好简短回答。")
 
         plugin._memory_companion_compose_feature_context = current_state
         plugin._memory_companion_compose_private_recall = private_recall
@@ -113,16 +122,17 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
         release.set()
         collected = await task
 
-        by_key = {item["key"]: item for item in collected}
+        by_key = {item.key: item for item in collected}
         self.assertEqual(calls["state"]["user_id"], "10001")
         self.assertEqual(calls["recall"]["user_id"], "10001")
         self.assertEqual(calls["state"]["timeout_seconds"], 1.6)
-        self.assertEqual(by_key["memory.current_state"]["priority"], 54)
-        self.assertEqual("我会牢牢记住你 当前状态参考", by_key["memory.current_state"]["title"])
-        self.assertNotIn("【我会牢牢记住你 当前状态参考】", by_key["memory.current_state"]["content"])
-        self.assertIn("现在在书房，穿浅蓝色居家服。", by_key["memory.current_state"]["content"])
-        self.assertIn("优先服从本轮状态注入和当前会话中明确发生的时间线", by_key["memory.current_state"]["content"])
-        self.assertEqual(by_key["memory.private_recall"]["status"], "hit")
+        current_state = by_key["memory.current_state"]
+        self.assertEqual(current_state.priority, 54)
+        self.assertEqual("我会牢牢记住你 当前状态参考", current_state.sections[0].title)
+        self.assertNotIn("【我会牢牢记住你 当前状态参考】", current_state.sections[0].content)
+        self.assertIn("现在在书房，穿浅蓝色居家服。", current_state.sections[0].content)
+        self.assertIn("优先服从本轮状态注入和当前会话中明确发生的时间线", current_state.sections[0].content)
+        self.assertEqual(by_key["memory.private_recall"].status, "hit")
 
     async def test_unrelated_turn_skips_current_state_memory_lookup(self) -> None:
         plugin = _private_collector_harness()
@@ -133,8 +143,8 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
             state_calls += 1
             return "不应读取"
 
-        async def private_recall(**_kwargs) -> str:
-            return ""
+        async def private_recall(**_kwargs):
+            return _private_recall_section("")
 
         plugin._memory_companion_compose_feature_context = current_state
         plugin._memory_companion_compose_private_recall = private_recall
@@ -147,7 +157,7 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(state_calls, 0)
-        self.assertNotIn("memory.current_state", {item["key"] for item in collected})
+        self.assertNotIn("memory.current_state", {item.key for item in collected})
 
     async def test_third_person_activity_question_skips_current_state_memory_lookup(self) -> None:
         plugin = _private_collector_harness()
@@ -158,8 +168,8 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
             state_calls += 1
             return "不应读取"
 
-        async def private_recall(**_kwargs) -> str:
-            return ""
+        async def private_recall(**_kwargs):
+            return _private_recall_section("")
 
         plugin._memory_companion_compose_feature_context = current_state
         plugin._memory_companion_compose_private_recall = private_recall
@@ -173,7 +183,7 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
                     current_user={"user_id": "10001"},
                     is_private_chat=True,
                 )
-                self.assertNotIn("memory.current_state", {item["key"] for item in collected})
+                self.assertNotIn("memory.current_state", {item.key for item in collected})
 
         self.assertEqual(state_calls, 0)
 
@@ -186,8 +196,8 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
             content="用户当前位于已标记地点“公司”（工作地点）范围内",
         )
 
-        async def private_recall(**_kwargs) -> str:
-            return ""
+        async def private_recall(**_kwargs):
+            return _private_recall_section("")
 
         plugin._memory_companion_compose_private_recall = private_recall
         collected = await plugin._collect_private_passive_prompt_contexts(
@@ -198,9 +208,10 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
             is_private_chat=True,
         )
 
-        by_key = {item["key"]: item for item in collected}
-        self.assertEqual(by_key["reality_touch.mobile_location"]["priority"], 68)
-        self.assertIn("已标记地点“公司”", by_key["reality_touch.mobile_location"]["content"])
+        by_key = {item.key: item for item in collected}
+        location = by_key["reality_touch.mobile_location"]
+        self.assertEqual(location.priority, 68)
+        self.assertIn("已标记地点“公司”", location.sections[0].content)
 
     async def test_colloquial_current_activity_question_triggers_state_context(self) -> None:
         plugin = _private_collector_harness()
@@ -210,8 +221,8 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
             calls.append(kwargs["query"])
             return "当前正在专心处理手头的事。"
 
-        async def private_recall(**_kwargs) -> str:
-            return ""
+        async def private_recall(**_kwargs):
+            return _private_recall_section("")
 
         plugin._memory_companion_compose_feature_context = current_state
         plugin._memory_companion_compose_private_recall = private_recall
@@ -229,7 +240,7 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
                     current_user={"user_id": "10001"},
                     is_private_chat=True,
                 )
-                by_key = {item["key"]: item for item in collected}
+                by_key = {item.key: item for item in collected}
                 self.assertIn("memory.current_state", by_key)
                 self.assertIn(text, calls[-1])
 

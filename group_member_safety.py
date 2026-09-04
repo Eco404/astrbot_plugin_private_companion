@@ -11,7 +11,7 @@ from typing import Any
 
 from .helpers import _safe_float, _safe_int, _single_line, _strip_group_member_safety_markers
 from .persona_config import runtime_persona_setting
-from .conversation_injection_plan import PLACEMENT_TOOL_CONTRACT, get_conversation_injection_plan
+from .conversation_injection_plan import PLACEMENT_DYNAMIC_SYSTEM, get_conversation_injection_plan
 from .conversation_prompt_section import (
     PromptDocument,
     PromptRenderMode,
@@ -528,22 +528,17 @@ class GroupMemberSafetyMixin:
             key="group.member_safety_hidden_marker",
             title="群成员风险观察协议",
             source="group_member_safety",
-            content=exact_text(instruction),
+            content=exact_text(f"{marker}\n{instruction}"),
         )
         plan = get_conversation_injection_plan(req)
         if plan is not None:
-            rendered = f"{marker}\n{instruction}"
-            req.system_prompt = f"{current_prompt}\n\n{rendered}".strip()
-            plan.add(
+            plan.materialize_system_block(
+                req,
                 section=section,
                 marker=marker,
                 priority=32,
-                placement=PLACEMENT_TOOL_CONTRACT,
-                temporary=False,
-                materialized=True,
+                placement=PLACEMENT_DYNAMIC_SYSTEM,
             )
-        else:
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{instruction}".strip()
 
     async def _record_group_member_safety_decision(
         self,

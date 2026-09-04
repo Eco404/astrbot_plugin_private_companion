@@ -91,8 +91,9 @@ from .persona_config import runtime_persona_setting
 from .conversation_prompt_section import (
     PromptRenderMode,
     PromptSection,
-    legacy_heading_token,
+    prompt_heading_ref,
     prompt_section,
+    render_prompt_content,
     render_prompt_sections,
 )
 from .dreaming import (
@@ -148,14 +149,14 @@ from .logging_util import get_module_logger
 logger = get_module_logger(__name__)
 
 
-def _render_conversation_section_legacy(section: PromptSection | None) -> str:
-    """Render a canonical section for legacy string-returning call sites."""
+def _render_conversation_section_labeled(section: PromptSection | None) -> str:
+    """Render a canonical section for labeled string-returning call sites."""
 
     if section is None:
         return ""
     return render_prompt_sections(
         [section],
-        mode=PromptRenderMode.LEGACY_BLOCK,
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
 
 
@@ -163,18 +164,8 @@ def _render_user_memory_background_prompt(section: PromptSection) -> str:
     return render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY)
 
 
-def _render_user_memory_prompt_block(*, key: str, title: str, content: Any) -> str:
-    return render_prompt_sections(
-        [
-            prompt_section(
-                key=key,
-                title=title,
-                source="user_memory",
-                content=content,
-            )
-        ],
-        mode=PromptRenderMode.LEGACY_BLOCK,
-    )
+def _render_user_memory_labeled_section(section: PromptSection) -> str:
+    return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
 
 DEFAULT_AI_DAILY_NEWS_SOURCE = "B站 AI早报|bilibili:285286947"
@@ -1319,7 +1310,7 @@ class UserMemoryMixin:
             content=body,
         )
         return {
-            "prompt": _render_conversation_section_legacy(section),
+            "prompt": _render_conversation_section_labeled(section),
             "section": section,
             "rules": [dict(item) for item in learned_rules],
             "context": context,
@@ -1342,7 +1333,7 @@ class UserMemoryMixin:
             context_owner=context_owner,
             stage_owner=stage_owner,
         )
-        return _render_conversation_section_legacy(section)
+        return _render_conversation_section_labeled(section)
 
     def _format_expression_voice_prompt_section(
         self,
@@ -7857,25 +7848,37 @@ Character-specific bottom-line baseline (reference only; empty means use the con
             line = _single_line(item, 120)
             if line:
                 recent_lines.append(f"- {line}")
-        recent_block = _render_user_memory_prompt_block(
-            key="background.memory.smart_silence.recent_context",
-            title="最近上下文",
-            content="\n".join(recent_lines) or "（无）",
+        recent_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.smart_silence.recent_context",
+                title="最近上下文",
+                source="user_memory",
+                content="\n".join(recent_lines) or "（无）",
+            )
         )
-        last_bot_block = _render_user_memory_prompt_block(
-            key="background.memory.smart_silence.last_bot_message",
-            title="Bot 上次发出的话",
-            content=last_companion or "（无）",
+        last_bot_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.smart_silence.last_bot_message",
+                title="Bot 上次发出的话",
+                source="user_memory",
+                content=last_companion or "（无）",
+            )
         )
-        inbound_block = _render_user_memory_prompt_block(
-            key="background.memory.smart_silence.inbound",
-            title="用户刚才说",
-            content=inbound,
+        inbound_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.smart_silence.inbound",
+                title="用户刚才说",
+                source="user_memory",
+                content=inbound,
+            )
         )
-        response_block = _render_user_memory_prompt_block(
-            key="background.memory.smart_silence.response",
-            title="待发送回复",
-            content=response,
+        response_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.smart_silence.response",
+                title="待发送回复",
+                source="user_memory",
+                content=response,
+            )
         )
         prompt = prompt_section(
             key="background.memory.smart_silence",
@@ -8182,7 +8185,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         *,
         now: float | None = None,
     ) -> str:
-        return _render_conversation_section_legacy(
+        return _render_conversation_section_labeled(
             self._format_emotion_inertia_prompt_section(user, now=now)
         )
 
@@ -8232,7 +8235,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         *,
         now: float | None = None,
     ) -> str:
-        return _render_conversation_section_legacy(
+        return _render_conversation_section_labeled(
             self._format_private_reunion_prompt_section(
                 user,
                 inbound_text,
@@ -8290,7 +8293,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         *,
         now: float | None = None,
     ) -> str:
-        return _render_conversation_section_legacy(
+        return _render_conversation_section_labeled(
             self._format_conversation_departure_prompt_section(
                 user,
                 inbound_text,
@@ -8433,7 +8436,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         user: dict[str, Any],
         inbound_text: str,
     ) -> str:
-        return _render_conversation_section_legacy(
+        return _render_conversation_section_labeled(
             self._format_bot_self_preference_consistency_prompt_section(
                 user,
                 inbound_text,
@@ -8564,7 +8567,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         user: dict[str, Any],
         inbound_text: str = "",
     ) -> str:
-        return _render_conversation_section_legacy(
+        return _render_conversation_section_labeled(
             self._format_recent_proactive_media_ownership_prompt_section(
                 user,
                 inbound_text,
@@ -8610,7 +8613,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         user: dict[str, Any],
         inbound_text: str = "",
     ) -> str:
-        return _render_conversation_section_legacy(
+        return _render_conversation_section_labeled(
             self._format_private_fact_attribution_guard_prompt_section(
                 user,
                 inbound_text,
@@ -8809,65 +8812,95 @@ Character-specific bottom-line baseline (reference only; empty means use the con
         attribution_guard = self._format_private_fact_attribution_guard(user, inbound_text)
         creative_review_context = str(creative_context or "").strip()[:3200]
         content_tier_prompt = (
-            _render_user_memory_prompt_block(
-                key="background.memory.response_review.content_tier",
-                title="统一内容尺度",
-                content=f"{content_tier}；normal 不主动升级，flirt 只允许非露骨暧昧。",
+            _render_user_memory_labeled_section(
+                prompt_section(
+                    key="background.memory.response_review.content_tier",
+                    title="统一内容尺度",
+                    source="user_memory",
+                    content=f"{content_tier}；normal 不主动升级，flirt 只允许非露骨暧昧。",
+                )
             )
             if content_policy_enabled
             else ""
         )
-        inbound_block = _render_user_memory_prompt_block(
-            key="background.memory.response_review.inbound",
-            title="用户刚才说",
-            content=_single_line(inbound_text, 260) or "（无）",
+        inbound_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.response_review.inbound",
+                title="用户刚才说",
+                source="user_memory",
+                content=_single_line(inbound_text, 260) or "（无）",
+            )
         )
-        last_bot_block = _render_user_memory_prompt_block(
-            key="background.memory.response_review.last_bot_message",
-            title=last_message_label,
-            content=last_message or "（无）",
+        last_bot_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.response_review.last_bot_message",
+                title=last_message_label,
+                source="user_memory",
+                content=last_message or "（无）",
+            )
         )
-        response_block = _render_user_memory_prompt_block(
-            key="background.memory.response_review.original_response",
-            title="原回复",
-            content=response_text,
+        response_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.response_review.original_response",
+                title="原回复",
+                source="user_memory",
+                content=response_text,
+            )
         )
-        issues_block = _render_user_memory_prompt_block(
-            key="background.memory.response_review.issues",
-            title="需要修正的问题",
-            content=", ".join(effective_flags),
+        issues_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.response_review.issues",
+                title="需要修正的问题",
+                source="user_memory",
+                content=", ".join(effective_flags),
+            )
         )
-        intent_block = _render_user_memory_prompt_block(
-            key="background.memory.response_review.intent",
-            title="当前意图/情绪",
-            content=(
-                f"{intent.get('intent', 'chat')}｜{intent.get('emotion', 'neutral')}｜"
-                f"{intent.get('reply_style', 'natural')}"
-            ),
+        intent_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.response_review.intent",
+                title="当前意图/情绪",
+                source="user_memory",
+                content=(
+                    f"{intent.get('intent', 'chat')}｜{intent.get('emotion', 'neutral')}｜"
+                    f"{intent.get('reply_style', 'natural')}"
+                ),
+            )
         )
-        current_time_block = _render_user_memory_prompt_block(
-            key="background.memory.response_review.current_time",
-            title="真实当前时间",
-            content=self._environment_now().strftime("%Y-%m-%d %H:%M"),
+        current_time_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.response_review.current_time",
+                title="真实当前时间",
+                source="user_memory",
+                content=self._environment_now().strftime("%Y-%m-%d %H:%M"),
+            )
         )
-        persona_block = _render_user_memory_prompt_block(
-            key="background.memory.response_review.persona",
-            title="当前人格",
-            content=(
-                persona[:2600]
-                if persona
-                else "（沿用原回复已有的人格语气，不要另造通用助手口吻）"
-            ),
+        persona_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.response_review.persona",
+                title="当前人格",
+                source="user_memory",
+                content=(
+                    persona[:2600]
+                    if persona
+                    else "（沿用原回复已有的人格语气，不要另造通用助手口吻）"
+                ),
+            )
         )
-        reply_style_block = _render_user_memory_prompt_block(
-            key="background.memory.response_review.reply_style",
-            title="回复风格",
-            content=reply_style or "（保持当前私聊的自然表达）",
+        reply_style_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.response_review.reply_style",
+                title="回复风格",
+                source="user_memory",
+                content=reply_style or "（保持当前私聊的自然表达）",
+            )
         )
-        creative_block = _render_user_memory_prompt_block(
-            key="background.memory.response_review.creative_context",
-            title="本轮真实创作记录",
-            content=creative_review_context or "（本轮没有创作记录上下文）",
+        creative_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.response_review.creative_context",
+                title="本轮真实创作记录",
+                source="user_memory",
+                content=creative_review_context or "（本轮没有创作记录上下文）",
+            )
         )
         prompt = prompt_section(
             key="background.memory.response_review",
@@ -9449,7 +9482,7 @@ Character-specific bottom-line baseline (reference only; empty means use the con
     ) -> str:
         sections = await self._format_proactive_reply_prompt_sections(event)
         return "\n".join(
-            _render_conversation_section_legacy(section)
+            _render_conversation_section_labeled(section)
             for section in sections
         )
 
@@ -9562,11 +9595,18 @@ avoid 写清楚哪些严肃、排障、工具失败、低落或边界场景不�
                 user.get("expression_profile"),
                 hint=raw_text,
             )
-            existing_rule_title = legacy_heading_token("已有表达规则")
-            existing_rule_block = _render_user_memory_prompt_block(
+            existing_rule_section = prompt_section(
                 key="background.memory.dialogue_episode.existing_rules",
                 title="已有表达规则",
+                source="user_memory",
                 content=existing_rule_reference,
+            )
+            existing_rule_title = render_prompt_content(
+                prompt_heading_ref(existing_rule_section.title)
+            )
+            existing_rule_block = render_prompt_sections(
+                [existing_rule_section],
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
             expression_rule_task += (
                 f"\n先对照{existing_rule_title}再归纳：情境同义且模板相同，或只是占位符/语气词变化时，"
@@ -9612,15 +9652,21 @@ avoid 写清楚哪些严肃、排障、工具失败、低落或边界场景不�
       "evidence_count": 2
     }
   ]"""
-        persona_block = _render_user_memory_prompt_block(
-            key="background.memory.dialogue_episode.persona",
-            title="AstrBot 默认人格",
-            content=self._get_default_persona_prompt(),
+        persona_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.dialogue_episode.persona",
+                title="AstrBot 默认人格",
+                source="user_memory",
+                content=self._get_default_persona_prompt(),
+            )
         )
-        recent_dialogue_block = _render_user_memory_prompt_block(
-            key="background.memory.dialogue_episode.recent_dialogue",
-            title="最近对话",
-            content=raw_text,
+        recent_dialogue_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.dialogue_episode.recent_dialogue",
+                title="最近对话",
+                source="user_memory",
+                content=raw_text,
+            )
         )
         prompt = prompt_section(
             key="background.memory.dialogue_episode",
@@ -10095,7 +10141,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         stable_user_id: str = "",
         channel_scope: str = "private",
     ) -> str:
-        return _render_conversation_section_legacy(
+        return _render_conversation_section_labeled(
             self._format_owner_exclusive_relationship_prompt_section(
                 user,
                 stable_user_id=stable_user_id,
@@ -10127,7 +10173,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         self,
         user: dict[str, Any],
     ) -> str:
-        return _render_conversation_section_legacy(
+        return _render_conversation_section_labeled(
             self._format_companion_planner_prompt_section(user)
         )
 
@@ -10223,7 +10269,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         *,
         limit: int = 2,
     ) -> str:
-        return _render_conversation_section_legacy(
+        return _render_conversation_section_labeled(
             self._format_private_chat_context_prompt_section(user, limit=limit)
         )
 
@@ -10288,7 +10334,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         user: dict[str, Any],
         inbound_text: str,
     ) -> str:
-        return _render_conversation_section_legacy(
+        return _render_conversation_section_labeled(
             self._format_short_reaction_prompt_section(user, inbound_text)
         )
 
@@ -10347,7 +10393,7 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         user: dict[str, Any],
         event: Any | None = None,
     ) -> str:
-        return _render_conversation_section_legacy(
+        return _render_conversation_section_labeled(
             self._format_private_identity_anchor_prompt_section(
                 user_id,
                 user,
@@ -10414,23 +10460,32 @@ bot_promises 只记录 Bot 明确承诺要提醒、记住、转述、发送或�
         )
         if not facts:
             return
-        persona_block = _render_user_memory_prompt_block(
-            key="background.memory.profile.persona",
-            title="AstrBot 默认人格",
-            content=self._get_default_persona_prompt(),
+        persona_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.profile.persona",
+                title="AstrBot 默认人格",
+                source="user_memory",
+                content=self._get_default_persona_prompt(),
+            )
         )
-        relationship_block = _render_user_memory_prompt_block(
-            key="background.memory.profile.relationship",
-            title="当前关系判断",
-            content=(
-                f"{profile['level']}｜{profile['preference']}｜"
-                f"{profile.get('note') or '暂无'}"
-            ),
+        relationship_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.profile.relationship",
+                title="当前关系判断",
+                source="user_memory",
+                content=(
+                    f"{profile['level']}｜{profile['preference']}｜"
+                    f"{profile.get('note') or '暂无'}"
+                ),
+            )
         )
-        facts_block = _render_user_memory_prompt_block(
-            key="background.memory.profile.facts",
-            title="记忆原文",
-            content=facts,
+        facts_block = _render_user_memory_labeled_section(
+            prompt_section(
+                key="background.memory.profile.facts",
+                title="记忆原文",
+                source="user_memory",
+                content=facts,
+            )
         )
         prompt = prompt_section(
             key="background.memory.profile",

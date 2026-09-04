@@ -264,7 +264,7 @@ class AstrBotKnowledgeMixin:
         )
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_roleplay_knowledge_context_section(

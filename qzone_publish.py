@@ -163,7 +163,7 @@ class QzonePublishMixin:
         section = self._qzone_recent_self_publish_chat_prompt_section(limit=limit)
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _qzone_recent_self_publish_chat_prompt_section(
@@ -457,7 +457,7 @@ class QzonePublishMixin:
                         prompt_section(key="qzone.sanitize.draft", title="原草稿", source="qzone_publish", content=cleaned),
                         prompt_section(key="qzone.sanitize.context", title="原任务背景", source="qzone_publish", content=_single_line(prompt, 600)),
                     ],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 ),
             )
         )
@@ -562,7 +562,7 @@ class QzonePublishMixin:
                         prompt_section(key="qzone.publish_test.memory", title="我会牢牢记住你 公开可写生活参考", source="qzone_publish", content=(memory_context or "暂无") + "\n使用方式：只选公开可写、不会泄露私聊或内部记忆来源的生活连续性。"),
                         prompt_section(key="qzone.publish_test.recent", title="最近说说去重", source="qzone_publish", content=recent_publish_context or "暂无最近记录。"),
                     ],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 ),
                 relationship_authority_guard,
                 self._format_worldview_adaptation_prompt(),
@@ -692,7 +692,7 @@ class QzonePublishMixin:
                         prompt_section(key="qzone.image_test.diary", title="近日私密日记余味", source="qzone_publish", content=diary_context or "暂无"),
                         prompt_section(key="qzone.image_test.recent", title="最近说说去重", source="qzone_publish", content=self._qzone_recent_publish_context(state) or "暂无最近记录。"),
                     ],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 ),
                 relationship_authority_guard,
                 self._format_worldview_adaptation_prompt(),
@@ -1055,7 +1055,7 @@ class QzonePublishMixin:
                         prompt_section(key="qzone.photo_prompt.schedule", title="当前/附近日程", source="qzone_publish", content=current_desc),
                         prompt_section(key="qzone.photo_prompt.diary", title="近日日记余味", source="qzone_publish", content=_single_line(diary_context, 500) or "暂无"),
                     ],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 ),
                 self._format_worldview_adaptation_prompt(),
                 relationship_authority_guard,
@@ -1066,7 +1066,7 @@ class QzonePublishMixin:
                         prompt_section(key="qzone.photo_prompt.style", title="空间配图风格提示", source="qzone_publish", content=self._qzone_publish_image_style_prompt()),
                         prompt_section(key="qzone.photo_prompt.backend_style", title="生图风格", source="qzone_publish", content=f"{style_name}\n风格要求：{style_instruction}"),
                     ],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 ),
                 render_prompt_sections([prompt_section(key="qzone.photo_prompt.output", title="配图 JSON 输出契约", source="qzone_publish", content=output_contract)], mode=PromptRenderMode.BODY_ONLY),
             ) if part

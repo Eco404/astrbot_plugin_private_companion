@@ -46,7 +46,7 @@ def _section(
 
 
 class ConversationInjectionPlanTests(unittest.TestCase):
-    def test_materialize_system_block_tolerates_plan_frozen_by_late_hook(self) -> None:
+    def test_materialize_system_block_rejects_late_write_after_plan_freeze(self) -> None:
         plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
         request = SimpleNamespace(
             system_prompt="persona",
@@ -63,21 +63,13 @@ class ConversationInjectionPlanTests(unittest.TestCase):
             content="boundary",
         )
 
-        added = plugin._materialize_conversation_system_block(
-            request,
-            section=section,
-            marker="<!-- frozen-boundary -->",
-        )
-
-        self.assertTrue(added)
-        self.assertIn("<!-- frozen-boundary -->", request.system_prompt)
-        self.assertFalse(
+        with self.assertRaises(RuntimeError):
             plugin._materialize_conversation_system_block(
                 request,
                 section=section,
                 marker="<!-- frozen-boundary -->",
             )
-        )
+        self.assertEqual("persona", request.system_prompt)
 
     def test_main_helpers_require_authored_sections_and_preserve_exact_text(self) -> None:
         plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
@@ -212,9 +204,37 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         self.assertNotIn("content", plan.manifest()[2])
         self.assertEqual(64, len(plan.manifest()[2]["sha256"]))
         self.assertEqual(
-            [item["marker"] for item in plan.legacy_turn_fragments()],
+            [item["marker"] for item in plan.turn_fragments()],
             ["<!-- early -->", "<!-- duplicate -->", "<!-- replaced -->", "<!-- first -->"],
         )
+        self.assertEqual(1, len(first.conflicts))
+        self.assertEqual("same", first.conflicts[0]["key"])
+
+    def test_identical_key_is_idempotent_and_strict_conflict_raises(self) -> None:
+        section = _section("same", "body")
+        plan = ConversationInjectionPlan()
+        first = plan.add(section=section, marker="<!-- same -->")
+
+        self.assertIs(first, plan.add(section=section, marker="<!-- same -->"))
+        self.assertEqual([], plan.manifest()[0]["conflicts"])
+
+        strict = ConversationInjectionPlan(strict_conflicts=True)
+        strict.add(section=section, marker="<!-- same -->")
+        with self.assertRaisesRegex(ValueError, "same"):
+            strict.add(section=_section("same", "different"), marker="<!-- other -->")
+
+    def test_surface_records_conflict_and_strict_mode_rejects_it(self) -> None:
+        surface = PromptSurface()
+        surface.add(_section("same", "first"))
+        surface.add(_section("same", "second"))
+
+        self.assertEqual("first", surface.sections()[0].content)
+        self.assertEqual("same", surface.conflicts()[0]["key"])
+
+        strict = PromptSurface(strict_conflicts=True)
+        strict.add(_section("same", "first"))
+        with self.assertRaisesRegex(ValueError, "same"):
+            strict.add(_section("same", "second"))
 
     def test_child_only_turn_section_is_visible_and_keeps_turn_placement(self) -> None:
         request = SimpleNamespace(
@@ -252,8 +272,9 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         rendered = request.extra_user_content_parts[0].text
         self.assertIn('<section title="回复风格约束">保持自然简洁。</section>', rendered)
         item = plan.manifest(include_content=True)[0]
-        self.assertEqual("保持自然简洁。", item["content"])
-        self.assertEqual(len("保持自然简洁。"), item["chars"])
+        self.assertEqual("【回复风格约束】\n保持自然简洁。", item["content"])
+        self.assertEqual(len(item["content"]), item["chars"])
+        self.assertEqual("reply.style", item["children"][0]["key"])
 
     def test_append_merge_preserves_authored_child_sections(self) -> None:
         plan = ConversationInjectionPlan()
@@ -293,11 +314,11 @@ class ConversationInjectionPlanTests(unittest.TestCase):
             merge_policy="append",
         )
 
-        rendered = plan.legacy_turn_fragments()[0]["content"]
+        rendered = plan.turn_fragments()[0]["content"]
         payload = ET.fromstring(rendered)
         self.assertEqual(
             ["第一项", "第二项"],
-            [item.attrib["title"] for item in payload.findall("./section")],
+            [item.attrib["title"] for item in payload.findall("./section/section")],
         )
 
     def test_turn_tail_render_is_idempotent_and_preserves_foreign_parts(self) -> None:
@@ -351,14 +372,12 @@ class ConversationInjectionPlanTests(unittest.TestCase):
             marker="<!-- dynamic -->",
             priority=20,
             placement=PLACEMENT_DYNAMIC_SYSTEM,
-            temporary=False,
         )
         plan.add(
             section=_section("stable", "stable text", title="稳定约束"),
             marker="<!-- stable -->",
             priority=30,
             placement=PLACEMENT_STABLE_SYSTEM,
-            temporary=False,
         )
 
         plan.render_into(request)
@@ -440,7 +459,6 @@ class ConversationInjectionPlanTests(unittest.TestCase):
             marker="<!-- environment -->",
             priority=30,
             placement=PLACEMENT_DYNAMIC_SYSTEM,
-            temporary=False,
             materialized=True,
         )
         request.system_prompt = f"{previous}\n\n<!-- environment -->\nenvironment"
@@ -640,24 +658,26 @@ class ConversationInjectionPlanTests(unittest.TestCase):
             priority=10,
         )
 
-        static, dynamic, static_children, dynamic_children = surface.render_partition_with_fragments(
+        static_sections, dynamic_sections = surface.partition_sections(
             lambda fragment: fragment.normalized_key() == "style"
         )
 
-        static_xml = ET.fromstring(static)
-        dynamic_xml = ET.fromstring(dynamic)
+        static_xml = ET.fromstring(render_prompt_sections(static_sections))
+        dynamic_xml = ET.fromstring(render_prompt_sections(dynamic_sections))
         self.assertEqual(static_xml.find("./section").attrib["title"], "风格")
         self.assertEqual(static_xml.findtext("./section"), "style block")
         self.assertEqual(dynamic_xml.find("./section").attrib["title"], "状态")
         self.assertEqual(dynamic_xml.findtext("./section"), "state block")
-        self.assertEqual([item["key"] for item in static_children], ["style"])
-        self.assertEqual([item["key"] for item in dynamic_children], ["state"])
-
         plan = ConversationInjectionPlan()
         plan.add(
-            section=_section("passive.batch", "state block", title="状态"),
+            section=prompt_section(
+                key="passive.batch",
+                title="本轮回复上下文",
+                source="test",
+                content="",
+                children=dynamic_sections,
+            ),
             marker="<!-- passive -->",
-            children=dynamic_children,
         )
         safe_children = plan.manifest()[0]["children"]
         self.assertEqual([item["key"] for item in safe_children], ["state"])
@@ -697,7 +717,7 @@ class ConversationInjectionPlanTests(unittest.TestCase):
             )
         )
 
-        payload = ET.fromstring(surface.render())
+        payload = ET.fromstring(render_prompt_sections(surface.sections()))
 
         self.assertEqual(
             "可见文本与孤立代理项结束",
@@ -723,7 +743,7 @@ class ConversationInjectionPlanTests(unittest.TestCase):
             )
         )
 
-        rendered = surface.render()
+        rendered = render_prompt_sections(surface.sections())
         payload = ET.fromstring(rendered)
 
         self.assertNotIn(">\n<", rendered)
@@ -763,7 +783,7 @@ class ConversationInjectionPlanTests(unittest.TestCase):
             ),
         )
 
-        payload = ET.fromstring(surface.render())
+        payload = ET.fromstring(render_prompt_sections(surface.sections()))
         history = payload.find("./section/history")
         message = payload.find("./section/history/message")
 
@@ -772,7 +792,7 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         self.assertEqual("m&1", message.attrib["id"])
         self.assertEqual("A<B", message.attrib["name"])
         self.assertEqual("  原文\n不折叠  ", message.text)
-        self.assertIn('<status ready="true"/>', surface.render())
+        self.assertIn('<status ready="true"/>', render_prompt_sections(surface.sections()))
         with self.assertRaises(ValueError):
             xml_element("message bad", text="no")
         with self.assertRaises(TypeError):
@@ -845,22 +865,7 @@ class ConversationInjectionPlanTests(unittest.TestCase):
             if owner is not None:
                 direct_writes[owner.name] = direct_writes.get(owner.name, 0) + 1
 
-        self.assertEqual(
-            set(direct_writes),
-            {
-                "_append_environment_perception_to_request",
-                "_append_reply_style_to_request",
-                "_append_group_high_intensity_reply_guard_to_request",
-                "_materialize_conversation_system_block",
-                "_place_conversation_prompt_sections",
-                "_append_group_active_period_boundary_to_request",
-                "_append_private_active_period_boundary_to_request",
-                "_append_group_persona_denoise_to_request",
-                "_append_atrelay_target_summary_to_request",
-                "_append_worldbook_mentions_to_request",
-                "_append_rest_reply_backlog_to_request",
-            },
-        )
+        self.assertEqual(set(), set(direct_writes))
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ from astrbot_plugin_private_companion.domains.social.joke_boundary import (
 from astrbot_plugin_private_companion.group_observation import GroupObservationMixin
 from astrbot_plugin_private_companion.conversation_prompt_section import (
     PromptRenderMode,
+    PromptSection,
     render_prompt_sections,
 )
 
@@ -313,9 +314,9 @@ class GroupObservationMountTests(unittest.TestCase):
             "enable_group_moments": True,
             "enable_group_joke_guard": True,
         })
-        sections: list[dict] = []
+        sections: list[PromptSection] = []
         self.harness._append_group_social_context_sections(group, sections, sender_id="b", now=T0)
-        titles = [section.get("title") or section.get("name", "") for section in sections]
+        titles = [section.title for section in sections]
         self.assertEqual(
             {"group.social_mood", "group.social_moments", "group.roleplay_strength"},
             {section.key for section in sections},
@@ -345,12 +346,12 @@ class GroupObservationMountTests(unittest.TestCase):
             "users": {"b": {"current_interaction": {"expression_band": "hurt"}}}
         }
         self.harness._settings["enable_group_roleplay_strength"] = True
-        sections: list[dict] = []
+        sections: list[PromptSection] = []
         self.harness._append_group_social_context_sections(
             group, sections, sender_id="b", now=T0
         )
-        roleplay = next(section for section in sections if section.get("title") == "扮演强度")
-        self.assertIn("压低表达强度", roleplay["content"])
+        roleplay = next(section for section in sections if section.title == "扮演强度")
+        self.assertIn("压低表达强度", roleplay.content)
 
     def test_joke_reason_code_is_rendered_only_by_section_builder(self):
         boundary = settle_joke_boundary(

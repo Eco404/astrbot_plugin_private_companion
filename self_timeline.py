@@ -97,7 +97,7 @@ class SelfTimelineMixin:
         )
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_self_timeline_context_for_reply_section(

@@ -19,7 +19,10 @@ if PACKAGE not in sys.modules:
     spec.loader.exec_module(package)
 
 from astrbot_plugin_private_companion import command_handlers, page_api, photo_reference_metadata
-from astrbot_plugin_private_companion.conversation_prompt_section import legacy_heading_token
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    prompt_heading_ref,
+    render_prompt_content,
+)
 
 
 class PageBackgroundPromptAuthoringTests(unittest.TestCase):
@@ -50,8 +53,11 @@ class PageBackgroundPromptAuthoringTests(unittest.TestCase):
         self.assertEqual(system, rendered_system)
         self.assertEqual(user, rendered_user)
 
-    def test_legacy_heading_token_is_owned_by_prompt_renderer_module(self) -> None:
-        self.assertEqual("【待确认说话方式】", legacy_heading_token("待确认说话方式"))
+    def test_heading_reference_is_owned_by_prompt_renderer_module(self) -> None:
+        self.assertEqual(
+            "【待确认说话方式】",
+            render_prompt_content(prompt_heading_ref("待确认说话方式")),
+        )
 
     def test_page_llm_prompt_producers_declare_stable_section_keys(self) -> None:
         source = inspect.getsource(page_api)
@@ -81,7 +87,7 @@ class PageBackgroundPromptAuthoringTests(unittest.TestCase):
         reference_source = inspect.getsource(photo_reference_metadata.build_reference_metadata_review_prompt)
 
         self.assertIn("prompt_section(", manual_source)
-        self.assertIn("PromptRenderMode.LEGACY_BLOCK", manual_source)
+        self.assertIn("PromptRenderMode.LABELED_BLOCK", manual_source)
         self.assertNotIn("【用户问题】", manual_source)
         self.assertIn("prompt_document(", reference_source)
         self.assertIn("PromptRenderMode.BODY_ONLY", reference_source)

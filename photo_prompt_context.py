@@ -8,6 +8,7 @@ from typing import Any
 
 from . import photo_wardrobe_decision as _wardrobe_rules
 from .conversation_prompt_section import (
+    PhotoPromptContent,
     PromptRenderMode,
     PromptSection,
     exact_text,
@@ -77,95 +78,82 @@ _OUTFIT_ROTATION_NEGATIVE_PATTERN = re.compile(
 )
 
 __all__ = [
-    "PhotoPromptSection",
     "ResolvedPhotoPromptContext",
     "compile_local_photo_prompt",
     "resolve_photo_prompt_context",
 ]
 
 
-@dataclass(frozen=True, slots=True)
-class PhotoPromptSection:
-    name: str
-    source: str
-    positive: str = ""
-    negative: str = ""
-    protected: bool = False
-    sanitize_conflicts: bool | None = None
-
-    def __post_init__(self) -> None:
-        if self.source not in _SECTION_SOURCES:
-            raise ValueError(f"unsupported photo prompt section source: {self.source}")
-
-    def to_prompt_section(self) -> PromptSection:
-        """Expose this domain section through the canonical prompt authoring type."""
-
-        raw_identity = f"{self.source}.{self.name}"
-        identity = re.sub(r"[^A-Za-z0-9_.:-]+", "_", raw_identity).strip("_.:-") or "section"
-        digest = hashlib.sha256(raw_identity.encode("utf-8", "ignore")).hexdigest()[:12]
-        return prompt_section(
-            key=f"photo.{identity[:120]}.{digest}",
-            title=self.name or "图片提示词",
-            source="photo_prompt_context",
-            content=exact_text(self.positive),
-            metadata={"photo_prompt_section": _photo_prompt_section_payload(self)},
-        )
-
-
-def _coerce_photo_prompt_section(value: Any) -> PhotoPromptSection | None:
-    """Recover the photo-domain payload from either supported section type."""
-
-    if isinstance(value, PhotoPromptSection):
-        return value
-    if not isinstance(value, PromptSection):
+def _photo_content(value: Any) -> PhotoPromptContent | None:
+    if not isinstance(value, PromptSection) or value.children:
         return None
-    payload = value.metadata.get("photo_prompt_section")
-    if not isinstance(payload, Mapping):
+    payload = value.content
+    if not isinstance(payload, PhotoPromptContent):
         return None
-    try:
-        return PhotoPromptSection(
-            name=str(payload.get("name") or ""),
-            source=str(payload.get("source") or ""),
-            positive=str(payload.get("positive") or ""),
-            negative=str(payload.get("negative") or ""),
-            protected=bool(payload.get("protected", False)),
-            sanitize_conflicts=(
-                None
-                if payload.get("sanitize_conflicts") is None
-                else bool(payload.get("sanitize_conflicts"))
-            ),
-        )
-    except (TypeError, ValueError):
+    if payload.domain_source not in _SECTION_SOURCES:
         return None
+    return payload
+
+
+def _validated_photo_prompt_section(value: Any) -> PromptSection | None:
+    """Accept only canonical sections carrying typed photo-domain content."""
+
+    return value if _photo_content(value) is not None else None
+
+
+_MISSING = object()
+
+
+def _replace_photo_prompt_section(
+    section: PromptSection,
+    *,
+    positive: Any = _MISSING,
+    negative: Any = _MISSING,
+) -> PromptSection:
+    payload = _photo_content(section)
+    if payload is None:
+        raise TypeError("section must carry PhotoPromptContent")
+    updates: dict[str, Any] = {}
+    if positive is not _MISSING:
+        updates["positive"] = positive
+    if negative is not _MISSING:
+        updates["negative"] = negative
+    return replace(section, content=replace(payload, **updates))
 
 
 def _photo_prompt_section_payload(value: Any) -> dict[str, Any]:
     """Serialize one photo section to the stable external six-field contract."""
 
-    section = _coerce_photo_prompt_section(value)
+    section = _validated_photo_prompt_section(value)
     if section is None:
         raise TypeError("value is not a compatible photo prompt section")
+    payload = _photo_content(section)
+    if payload is None:
+        raise TypeError("value is not a compatible photo prompt section")
     return {
-        "name": section.name,
-        "source": section.source,
-        "positive": section.positive,
-        "negative": section.negative,
-        "protected": section.protected,
-        "sanitize_conflicts": section.sanitize_conflicts,
+        "name": section.title,
+        "source": payload.domain_source,
+        "positive": payload.positive,
+        "negative": payload.negative,
+        "protected": payload.protected,
+        "sanitize_conflicts": payload.sanitize_conflicts,
     }
 
 
-def _section_conflict_sanitization_enabled(section: PhotoPromptSection) -> bool:
-    if section.sanitize_conflicts is not None:
-        return bool(section.sanitize_conflicts)
-    return not section.protected
+def _section_conflict_sanitization_enabled(section: PromptSection) -> bool:
+    payload = _photo_content(section)
+    if payload is None:
+        raise TypeError("section must carry PhotoPromptContent")
+    if payload.sanitize_conflicts is not None:
+        return payload.sanitize_conflicts
+    return not payload.protected
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedPhotoPromptContext:
     final_prompt: str
     complete_prompt: str
-    prompt_sections: tuple[PhotoPromptSection, ...]
+    prompt_sections: tuple[PromptSection, ...]
     reference: Any
     detected_conflicts: tuple[dict[str, Any], ...]
     removed_conflicts: tuple[dict[str, Any], ...]
@@ -326,7 +314,7 @@ def _preview(value: Any) -> str:
 
 
 def _audit(
-    section: PhotoPromptSection,
+    section: PromptSection,
     *,
     rule: str,
     category: str,
@@ -334,9 +322,12 @@ def _audit(
     text: str,
 ) -> dict[str, Any]:
     raw = str(text or "")
+    payload = _photo_content(section)
+    if payload is None:
+        raise TypeError("section must carry PhotoPromptContent")
     return {
-        "source": section.source,
-        "section": section.name,
+        "source": payload.domain_source,
+        "section": section.title,
         "rule": rule,
         "category": category,
         "action": action,
@@ -429,7 +420,7 @@ def _split_clauses(text: str) -> tuple[list[str], str]:
 
 
 def _sanitize_field(
-    section: PhotoPromptSection,
+    section: PromptSection,
     text: str,
     *,
     negative: bool,
@@ -481,7 +472,7 @@ def _sanitize_field(
 
 
 def _conflicts_in_section(
-    section: PhotoPromptSection,
+    section: PromptSection,
     *,
     active_category: str,
     authoritative: bool,
@@ -490,7 +481,10 @@ def _conflicts_in_section(
     excluded_outfit_terms: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
-    for text, negative in ((section.positive, False), (section.negative, True)):
+    payload = _photo_content(section)
+    if payload is None:
+        raise TypeError("section must carry PhotoPromptContent")
+    for text, negative in ((payload.positive, False), (payload.negative, True)):
         conflict = (
             _negative_conflict(
                 text,
@@ -516,10 +510,10 @@ def _conflicts_in_section(
 
 
 def _sanitize_sections(
-    sections: Sequence[PhotoPromptSection],
+    sections: Sequence[PromptSection],
     wardrobe: Any,
 ) -> tuple[
-    list[PhotoPromptSection],
+    list[PromptSection],
     list[dict[str, Any]],
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -533,7 +527,7 @@ def _sanitize_sections(
     )
     excluded_outfit_terms = _excluded_outfit_terms(wardrobe)
     authoritative_items = _specific_outfit_items(_value(wardrobe, "requested_outfit_text", ""))
-    sanitized: list[PhotoPromptSection] = []
+    sanitized: list[PromptSection] = []
     detected: list[dict[str, Any]] = []
     removed: list[dict[str, Any]] = []
     effective_roles = frozenset(
@@ -542,28 +536,32 @@ def _sanitize_sections(
         if str(item or "").strip()
     )
     for section in sections:
-        if not isinstance(section, PhotoPromptSection):
-            raise TypeError("sections must contain PhotoPromptSection values")
+        payload = _photo_content(section)
+        if payload is None:
+            raise TypeError("sections must contain PromptSection values with PhotoPromptContent")
         if (
             not _section_conflict_sanitization_enabled(section)
-            or section.source in {"user_request", "wardrobe_decision"}
+            or payload.domain_source in {"user_request", "wardrobe_decision"}
         ):
             sanitized.append(section)
             continue
-        if section.name != "global_fixed_prompt":
-            positive_text, embedded_negative = _split_embedded_polarity(section.positive)
+        if section.title != "global_fixed_prompt":
+            positive_text, embedded_negative = _split_embedded_polarity(payload.positive)
             if embedded_negative:
-                section = replace(
+                section = _replace_photo_prompt_section(
                     section,
                     positive=positive_text,
                     negative=", ".join(
                         part
-                        for part in (section.negative.strip(), embedded_negative)
+                        for part in (payload.negative.strip(), embedded_negative)
                         if part
                     ),
                 )
-        if section.source == "recent_continuity" and "outfit" not in effective_roles:
-            match = _RECENT_OUTFIT_CONTINUITY_PATTERN.search(section.positive)
+                payload = _photo_content(section)
+                if payload is None:
+                    raise AssertionError("typed photo section replacement lost its payload")
+        if payload.domain_source == "recent_continuity" and "outfit" not in effective_roles:
+            match = _RECENT_OUTFIT_CONTINUITY_PATTERN.search(payload.positive)
             if match:
                 detected.append(
                     _audit(
@@ -583,13 +581,19 @@ def _sanitize_sections(
                         text=match.group(0),
                     )
                 )
-                rewritten = _RECENT_OUTFIT_CONTINUITY_PATTERN.sub("", section.positive)
+                rewritten = _RECENT_OUTFIT_CONTINUITY_PATTERN.sub("", payload.positive)
                 rewritten = re.sub(r"\s+,", ",", rewritten)
                 rewritten = re.sub(r",\s*([.;。；])", r"\1", rewritten)
-                section = replace(section, positive=rewritten.strip())
+                section = _replace_photo_prompt_section(
+                    section,
+                    positive=rewritten.strip(),
+                )
+                payload = _photo_content(section)
+                if payload is None:
+                    raise AssertionError("typed photo section replacement lost its payload")
         positive, positive_found, positive_removed = _sanitize_field(
             section,
-            section.positive,
+            payload.positive,
             negative=False,
             active_category=active_category,
             authoritative=authoritative,
@@ -599,7 +603,7 @@ def _sanitize_sections(
         )
         negative, negative_found, negative_removed = _sanitize_field(
             section,
-            section.negative,
+            payload.negative,
             negative=True,
             active_category=active_category,
             authoritative=authoritative,
@@ -615,13 +619,22 @@ def _sanitize_sections(
         ):
             positive = ""
             negative = ""
-        sanitized.append(replace(section, positive=positive, negative=negative))
+        sanitized.append(
+            _replace_photo_prompt_section(
+                section,
+                positive=positive,
+                negative=negative,
+            )
+        )
 
     residual: list[dict[str, Any]] = []
     for index, section in enumerate(sanitized):
+        payload = _photo_content(section)
+        if payload is None:
+            raise AssertionError("sanitized photo section lost its typed payload")
         if (
             not _section_conflict_sanitization_enabled(section)
-            or section.source in {"user_request", "wardrobe_decision"}
+            or payload.domain_source in {"user_request", "wardrobe_decision"}
         ):
             continue
         found = _conflicts_in_section(
@@ -642,12 +655,19 @@ def _sanitize_sections(
                     "action": "section_dropped",
                 }
             )
-        sanitized[index] = replace(section, positive="", negative="")
+        sanitized[index] = _replace_photo_prompt_section(
+            section,
+            positive="",
+            negative="",
+        )
 
     for section in sanitized:
+        payload = _photo_content(section)
+        if payload is None:
+            raise AssertionError("sanitized photo section lost its typed payload")
         if (
             not _section_conflict_sanitization_enabled(section)
-            or section.source in {"user_request", "wardrobe_decision"}
+            or payload.domain_source in {"user_request", "wardrobe_decision"}
         ):
             continue
         residual.extend(
@@ -664,7 +684,7 @@ def _sanitize_sections(
 
 
 def _scan_residual_conflicts(
-    sections: Sequence[PhotoPromptSection],
+    sections: Sequence[PromptSection],
     wardrobe: Any,
 ) -> list[dict[str, Any]]:
     active_category = str(_value(wardrobe, "category", "") or "").strip().lower()
@@ -678,9 +698,12 @@ def _scan_residual_conflicts(
     excluded_outfit_terms = _excluded_outfit_terms(wardrobe)
     residual: list[dict[str, Any]] = []
     for section in sections:
+        payload = _photo_content(section)
+        if payload is None:
+            raise TypeError("sections must contain PromptSection values with PhotoPromptContent")
         if (
             not _section_conflict_sanitization_enabled(section)
-            or section.source in {"user_request", "wardrobe_decision"}
+            or payload.domain_source in {"user_request", "wardrobe_decision"}
         ):
             continue
         residual.extend(
@@ -697,7 +720,7 @@ def _scan_residual_conflicts(
 
 
 def _apply_budget(
-    sections: list[PhotoPromptSection],
+    sections: list[PromptSection],
     indexes: list[int],
     budget: int,
     *,
@@ -706,20 +729,26 @@ def _apply_budget(
     remaining = budget
     for index in indexes:
         section = sections[index]
-        if section.protected or section.name == "global_fixed_prompt":
+        payload = _photo_content(section)
+        if payload is None:
+            raise TypeError("sections must contain PromptSection values with PhotoPromptContent")
+        if payload.protected or section.title == "global_fixed_prompt":
             continue
-        current = getattr(section, field)
+        current = getattr(payload, field)
         clipped = _clip(current, remaining, preserve_tail=True) if remaining > 0 else ""
-        sections[index] = replace(section, **{field: clipped})
+        sections[index] = _replace_photo_prompt_section(section, **{field: clipped})
         remaining -= len(clipped)
         if clipped and remaining > 0:
             remaining -= 1
 
 
-def _budget_sections(sections: list[PhotoPromptSection]) -> list[PhotoPromptSection]:
+def _budget_sections(sections: list[PromptSection]) -> list[PromptSection]:
     result = list(sections)
     indexes = lambda *sources: [
-        index for index, section in enumerate(result) if section.source in sources
+        index
+        for index, section in enumerate(result)
+        if (_photo_content(section) is not None)
+        and _photo_content(section).domain_source in sources
     ]
     _apply_budget(result, indexes("wardrobe_decision"), 420)
     _apply_budget(result, indexes("reference_fallback"), 320)
@@ -729,12 +758,15 @@ def _budget_sections(sections: list[PhotoPromptSection]) -> list[PhotoPromptSect
 
     for index in indexes("recent_continuity"):
         section = result[index]
-        if section.protected:
+        payload = _photo_content(section)
+        if payload is None:
+            raise AssertionError("budgeted photo section lost its typed payload")
+        if payload.protected:
             continue
-        limit = 460 if section.positive.startswith("Recent-photo continuity:") else 280
-        result[index] = replace(
+        limit = 460 if payload.positive.startswith("Recent-photo continuity:") else 280
+        result[index] = _replace_photo_prompt_section(
             section,
-            positive=_clip(section.positive, limit, preserve_tail=True),
+            positive=_clip(payload.positive, limit, preserve_tail=True),
         )
     _apply_budget(
         result,
@@ -746,7 +778,9 @@ def _budget_sections(sections: list[PhotoPromptSection]) -> list[PhotoPromptSect
         [
             index
             for index, section in enumerate(result)
-            if section.source not in {"user_request", "composition"}
+            if (_photo_content(section) is not None)
+            and _photo_content(section).domain_source
+            not in {"user_request", "composition"}
         ],
         230,
         field="negative",
@@ -755,15 +789,16 @@ def _budget_sections(sections: list[PhotoPromptSection]) -> list[PhotoPromptSect
 
 
 def _join_field(
-    sections: Sequence[PhotoPromptSection],
+    sections: Sequence[PromptSection],
     sources: frozenset[str],
     field: str = "positive",
 ) -> str:
     return "\n".join(
         value
         for section in sections
-        if section.source in sources
-        for value in (getattr(section, field).strip(),)
+        for payload in (_photo_content(section),)
+        if payload is not None and payload.domain_source in sources
+        for value in (getattr(payload, field).strip(),)
         if value
     )
 
@@ -790,7 +825,7 @@ def _render_photo_wire(text: str) -> str:
     )
 
 
-def _assemble(sections: Sequence[PhotoPromptSection], prompt_format: str) -> str:
+def _assemble(sections: Sequence[PromptSection], prompt_format: str) -> str:
     groups = (
         (
             "User image request",
@@ -818,9 +853,12 @@ def _assemble(sections: Sequence[PhotoPromptSection], prompt_format: str) -> str
     positive_blocks = [f"[{label}]\n{_strip_compaction_markers(text)}" for label, text in groups if text]
     user_negative = _join_field(sections, frozenset({"user_request"}), "negative")
     decision_negative = "\n".join(
-        section.negative.strip()
+        payload.negative.strip()
         for section in sections
-        if section.source != "user_request" and section.negative.strip()
+        for payload in (_photo_content(section),)
+        if payload is not None
+        and payload.domain_source != "user_request"
+        and payload.negative.strip()
     )
     negative = ", ".join(value for value in (decision_negative, user_negative) if value)
     negative = _strip_compaction_markers(negative)
@@ -854,9 +892,12 @@ _LOCAL_VISUAL_PROMPT_SOURCES = frozenset(
 )
 
 
-def _local_visual_section_text(section: PhotoPromptSection) -> str:
+def _local_visual_section_text(section: PromptSection) -> str:
     """Project a sanitized section into text that an image model may render."""
-    text = str(section.positive or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    payload = _photo_content(section)
+    if payload is None:
+        raise TypeError("section must carry PhotoPromptContent")
+    text = payload.positive.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not text:
         return ""
     text = re.sub(
@@ -865,10 +906,10 @@ def _local_visual_section_text(section: PhotoPromptSection) -> str:
         "",
         text,
     )
-    if section.source == "user_request":
+    if payload.domain_source == "user_request":
         text = re.sub(r"^\s*positive\s+prompt\s*:\s*", "", text, flags=re.I)
         text = re.sub(r"^\s*user\s+request\s*:\s*", "", text, flags=re.I)
-    elif section.source == "scene_context":
+    elif payload.domain_source == "scene_context":
         text = re.sub(r"^\s*resolved\s+selfie\s+scene\s+facts\s*:\s*", "", text, flags=re.I)
         text = re.split(
             r"\s*An explicit scene or location in the current request overrides\b",
@@ -876,14 +917,14 @@ def _local_visual_section_text(section: PhotoPromptSection) -> str:
             maxsplit=1,
             flags=re.I,
         )[0]
-    elif section.source == "visual_memory":
+    elif payload.domain_source == "visual_memory":
         text = re.sub(r"^\s*visual\s+continuity\s+reference\s*:\s*", "", text, flags=re.I)
-    elif section.source == "preset":
+    elif payload.domain_source == "preset":
         text = re.sub(r"^\s*scene\s+preset\s*:\s*", "", text, flags=re.I)
-    elif section.source == "fixed_prompt":
+    elif payload.domain_source == "fixed_prompt":
         text = re.sub(r"^\s*additional\s+(?:fixed\s+prompt|outfit\s+preference)\s*:\s*", "", text, flags=re.I)
-    elif section.source == "composition":
-        lower_name = str(section.name or "").strip().lower()
+    elif payload.domain_source == "composition":
+        lower_name = section.title.strip().lower()
         if lower_name == "relationship_role_reference":
             text = "two distinct people in one coherent scene" if "shared frame" in text.lower() else ""
         elif lower_name == "composition":
@@ -907,7 +948,7 @@ def _local_visual_section_text(section: PhotoPromptSection) -> str:
 
 
 def compile_local_photo_prompt(
-    sections: Sequence[PhotoPromptSection | PromptSection],
+    sections: Sequence[PromptSection],
     prompt_format: str,
 ) -> str:
     """Compile renderable positive content for single-text local image workflows.
@@ -916,9 +957,9 @@ def compile_local_photo_prompt(
     LLM. ComfyUI/SDGen often feed their only text input directly to CLIP/T5, so
     those labels, decisions and negative blocks must not share that input.
     """
-    normalized_sections: list[PhotoPromptSection] = []
+    normalized_sections: list[PromptSection] = []
     for value in sections:
-        section = _coerce_photo_prompt_section(value)
+        section = _validated_photo_prompt_section(value)
         if section is None:
             raise TypeError("sections must contain compatible photo prompt sections")
         normalized_sections.append(section)
@@ -928,7 +969,10 @@ def compile_local_photo_prompt(
     values: list[str] = []
     seen: set[str] = set()
     for section in normalized_sections:
-        if section.source not in _LOCAL_VISUAL_PROMPT_SOURCES:
+        payload = _photo_content(section)
+        if payload is None:
+            raise AssertionError("normalized photo section lost its typed payload")
+        if payload.domain_source not in _LOCAL_VISUAL_PROMPT_SOURCES:
             continue
         value = _local_visual_section_text(section)
         key = value.casefold()
@@ -1001,9 +1045,9 @@ def _sanitize_reference(reference: Any, wardrobe: Any, workflow_kind: str) -> tu
 
 
 def _remove_reference_dependent_context(
-    sections: Sequence[PhotoPromptSection],
-) -> tuple[list[PhotoPromptSection], list[dict[str, Any]], list[dict[str, Any]]]:
-    sanitized: list[PhotoPromptSection] = []
+    sections: Sequence[PromptSection],
+) -> tuple[list[PromptSection], list[dict[str, Any]], list[dict[str, Any]]]:
+    sanitized: list[PromptSection] = []
     detected: list[dict[str, Any]] = []
     removed: list[dict[str, Any]] = []
     reference_pattern = re.compile(
@@ -1012,11 +1056,16 @@ def _remove_reference_dependent_context(
         flags=re.I,
     )
     for section in sections:
-        if section.source == "user_request":
+        payload = _photo_content(section)
+        if payload is None:
+            raise TypeError("sections must contain PromptSection values with PhotoPromptContent")
+        if payload.domain_source == "user_request":
             sanitized.append(section)
             continue
-        if section.source == "recent_continuity" and (section.positive or section.negative):
-            for text in (section.positive, section.negative):
+        if payload.domain_source == "recent_continuity" and (
+            payload.positive or payload.negative
+        ):
+            for text in (payload.positive, payload.negative):
                 if not text:
                     continue
                 detected.append(
@@ -1037,12 +1086,18 @@ def _remove_reference_dependent_context(
                         text=text,
                     )
                 )
-            sanitized.append(replace(section, positive="", negative=""))
+            sanitized.append(
+                _replace_photo_prompt_section(
+                    section,
+                    positive="",
+                    negative="",
+                )
+            )
             continue
 
         fields: dict[str, str] = {}
         for field in ("positive", "negative"):
-            text = getattr(section, field)
+            text = getattr(payload, field)
             clauses, separator = _split_clauses(text)
             kept: list[str] = []
             for clause in clauses:
@@ -1068,22 +1123,22 @@ def _remove_reference_dependent_context(
                     )
                 )
             fields[field] = separator.join(kept)
-        sanitized.append(replace(section, **fields))
+        sanitized.append(_replace_photo_prompt_section(section, **fields))
     return sanitized, detected, removed
 
 
 def resolve_photo_prompt_context(
     *,
     wardrobe: Any,
-    sections: Sequence[PhotoPromptSection | PromptSection],
+    sections: Sequence[PromptSection],
     prompt_format: str,
     workflow_kind: str,
     reference: Any = None,
 ) -> ResolvedPhotoPromptContext:
     clean_reference, reference_removed = _sanitize_reference(reference, wardrobe, workflow_kind)
-    prepared: list[PhotoPromptSection] = []
+    prepared: list[PromptSection] = []
     for value in sections:
-        section = _coerce_photo_prompt_section(value)
+        section = _validated_photo_prompt_section(value)
         if section is None:
             raise TypeError("sections must contain compatible photo prompt sections")
         prepared.append(section)

@@ -72,15 +72,53 @@ from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .conversation_prompt_section import (
+    PhotoPromptContent,
     PromptDocument,
+    PromptDocumentPart,
+    PromptLabel,
+    PromptLabelStyle,
     PromptRenderMode,
+    PromptRenderSpec,
     PromptSection,
     exact_text,
     prompt_cdata,
     prompt_document,
+    prompt_document_part,
     prompt_section,
+    render_prompt_document,
     render_prompt_sections,
 )
+
+
+_PROACTIVE_DOCUMENT_RENDER = PromptRenderSpec(
+    mode=PromptRenderMode.LABELED_BLOCK,
+    trim=True,
+)
+
+
+def _proactive_prompt_part(
+    section: PromptSection,
+    *,
+    mode: PromptRenderMode | None = None,
+    label_style: PromptLabelStyle | None = None,
+    prefix: str = "",
+    separator_before: str = "\n\n",
+) -> PromptDocumentPart:
+    label = (
+        PromptLabel(style=label_style, separator=exact_text("\n"))
+        if label_style is not None
+        else None
+    )
+    return prompt_document_part(
+        section,
+        render_spec=PromptRenderSpec(
+            mode=PromptRenderMode.BODY_ONLY if label is not None else mode,
+            label=label,
+            prefix=exact_text(prefix) if prefix else None,
+            separator_before=exact_text(separator_before),
+            trim=True,
+        ),
+    )
 
 try:
     import chinese_calendar as calendar_cn
@@ -192,7 +230,6 @@ from .photo_reference_catalog import (
     project_reference_candidate,
 )
 from .photo_prompt_context import (
-    PhotoPromptSection,
     _clip as _clip_photo_prompt_text,
     compile_local_photo_prompt,
     resolve_photo_prompt_context,
@@ -848,7 +885,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 schedule_context = str(schedule_sanitizer(schedule_context, user) or "").strip()
             except Exception:
                 schedule_context = ""
-        def legacy_bridge_section(key: str, title: str, content: str) -> str:
+        def labeled_bridge_section(key: str, title: str, content: str) -> str:
             return render_prompt_sections(
                 [
                     prompt_section(
@@ -858,10 +895,10 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         content=content,
                     )
                 ],
-                mode=PromptRenderMode.LEGACY_BLOCK,
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
 
-        bridge_intro = legacy_bridge_section(
+        bridge_intro = labeled_bridge_section(
             "proactive_chat.bridge",
             "Private Companion × Proactive Chat 联动",
             (
@@ -874,13 +911,13 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             for part in (
                 bridge_intro,
                 recipient_identity,
-                legacy_bridge_section("proactive_chat.relationship", "当前关系", relationship_context) if relationship_context else "",
-                legacy_bridge_section("proactive_chat.atmosphere", "当前互动气氛", _single_line(intent_context, 360)) if intent_context else "",
-                legacy_bridge_section("proactive_chat.timing", "当前时机", time_context) if time_context else "",
-                legacy_bridge_section("proactive_chat.runtime", "当前运行态", runtime_context) if runtime_context else "",
-                legacy_bridge_section("proactive_chat.state", "Bot 当前状态底色", state_context) if state_context else "",
+                labeled_bridge_section("proactive_chat.relationship", "当前关系", relationship_context) if relationship_context else "",
+                labeled_bridge_section("proactive_chat.atmosphere", "当前互动气氛", _single_line(intent_context, 360)) if intent_context else "",
+                labeled_bridge_section("proactive_chat.timing", "当前时机", time_context) if time_context else "",
+                labeled_bridge_section("proactive_chat.runtime", "当前运行态", runtime_context) if runtime_context else "",
+                labeled_bridge_section("proactive_chat.state", "Bot 当前状态底色", state_context) if state_context else "",
                 location_context,
-                legacy_bridge_section("proactive_chat.schedule", "当前生活片段候选", schedule_context[:700]) if schedule_context and schedule_context != "（暂无）" else "",
+                labeled_bridge_section("proactive_chat.schedule", "当前生活片段候选", schedule_context[:700]) if schedule_context and schedule_context != "（暂无）" else "",
                 proactive_voice,
                 expression_voice,
                 "先沿用 Proactive Chat 本轮自己的主动动机，再从以上信息中只取与当前收件人和此刻真正相关的少量线索；不要拼成状态播报。",
@@ -1491,7 +1528,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             return ""
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_recent_web_exploration_context_prompt_section(
@@ -1572,7 +1609,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             return ""
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_recent_ai_daily_context_prompt_section(
@@ -1654,7 +1691,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             return ""
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_recent_news_context_prompt_section(
@@ -2004,7 +2041,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     def _creative_share_excerpt_prompt_hint(cls) -> str:
         return render_prompt_sections(
             [cls._creative_share_excerpt_prompt_section()],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     @staticmethod
@@ -2015,8 +2052,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         cleaned_context: str,
     ) -> PromptDocument:
         return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
             user=(
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="background.screen_narration",
                     title="屏幕观察内部摘要",
                     source="proactive_message",
@@ -2037,8 +2075,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "worldview_adaptation": worldview_adaptation,
                         "cleaned_context": cleaned_context,
                     },
-                    metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-                ),
+                ), mode=PromptRenderMode.BODY_ONLY),
             ),
             metadata={"task": "screen_narration"},
         )
@@ -2054,13 +2091,13 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         cleaned_context = self._sanitize_action_context_text(action, action_context)
         terms = self._worldview_terms()
         worldview_adaptation = self._format_worldview_adaptation_prompt()
-        prompt = self._render_proactive_prompt_document(
+        prompt = render_prompt_document(
             self._screen_narration_prompt_document(
                 screen_term=terms["screen"],
                 worldview_adaptation=worldview_adaptation,
                 cleaned_context=cleaned_context,
             )
-        )
+        )["user"]
         text = await self._llm_call(
             prompt,
             max_tokens=80,
@@ -2198,7 +2235,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     ) -> str:
         return render_prompt_sections(
             [self._proactive_expression_shape_prompt_section(user, reason=reason, action=action)],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_plan_item_for_framework_prompt(self, item: dict[str, Any] | None) -> str:
@@ -2581,7 +2618,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             action=action,
         )
         return (
-            render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
             if section is not None
             else ""
         )
@@ -2725,7 +2762,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     ) -> str:
         section = self._format_proactive_recipient_identity_guard_prompt_section(user, name)
         return (
-            render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
             if section is not None
             else ""
         )
@@ -2740,7 +2777,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         except (AttributeError, TypeError):
             section = None
         if section is not None:
-            return render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+            return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
         legacy_formatter = getattr(self, "_format_proactive_recipient_identity_guard", None)
         if (
             callable(legacy_formatter)
@@ -2810,38 +2847,6 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         repaired, count = re.subn(pattern, lambda match: f"{match.group(1)}{replacement}", cleaned, count=1)
         return (repaired, wrong) if count else (cleaned, "")
 
-    @staticmethod
-    def _render_proactive_prompt_document(document: PromptDocument) -> str:
-        rendered_document = ""
-        for section in (*document.system, *document.user):
-            heading_style = str(section.metadata.get("legacy_heading_style") or "").strip()
-            if heading_style in {"square", "colon", "fullwidth_colon"}:
-                body = render_prompt_sections(
-                    [section],
-                    mode=PromptRenderMode.BODY_ONLY,
-                ).strip()
-                if heading_style == "square":
-                    heading = f"[{section.title}]"
-                elif heading_style == "fullwidth_colon":
-                    heading = f"{section.title}："
-                else:
-                    heading = f"{section.title}:"
-                rendered = f"{heading}\n{body}" if body else heading
-            else:
-                mode = section.metadata.get("legacy_render_mode", PromptRenderMode.LEGACY_BLOCK)
-                rendered = render_prompt_sections([section], mode=mode).strip()
-            prefix = str(section.metadata.get("legacy_prefix") or "").strip()
-            if prefix and rendered:
-                rendered = f"{prefix}\n{rendered}"
-            if rendered:
-                separator = str(section.metadata.get("legacy_separator_before") or "\n\n")
-                rendered_document = (
-                    f"{rendered_document}{separator}{rendered}"
-                    if rendered_document
-                    else rendered
-                )
-        return rendered_document
-
     def _default_proactive_prompt_document(
         self,
         variables: dict[str, Any] | None = None,
@@ -2852,8 +2857,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             return values.get(name, "{{" + name + "}}")
 
         return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
             user=(
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="proactive.template.introduction",
                     title="主动私聊任务",
                     source="proactive_message",
@@ -2862,8 +2868,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "状态汇报或例行打卡。"
                     ),
                     variables={"name": value("name")},
-                    metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-                ),
+                ), mode=PromptRenderMode.BODY_ONLY),
                 prompt_section(
                     key="proactive.template.clues",
                     title="这次可以使用的线索",
@@ -2917,19 +2922,18 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "- 一两句即可；一个画面、一点感受或一个轻问题已经足够。说完就停，不追加自我解释或结尾客套。"
                     ),
                 ),
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="proactive.template.output",
                     title="主动私聊输出要求",
                     source="proactive_message",
                     content="最终文本会直接成为聊天窗口里的下一句话。只输出要发出的正文，不要标题、引号、前缀、分析或说明。",
-                    metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-                ),
+                ), mode=PromptRenderMode.BODY_ONLY),
             ),
             metadata={"kind": "proactive_generation_template"},
         )
 
     def _default_proactive_prompt_template(self) -> str:
-        return self._render_proactive_prompt_document(self._default_proactive_prompt_document())
+        return render_prompt_document(self._default_proactive_prompt_document())["user"]
 
     def _proactive_reaction_expression_enabled(self, action: str = "message") -> bool:
         normalized_action = _single_line(action, 40).lower().split("+")[-1]
@@ -3025,7 +3029,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     def _proactive_reaction_expression_prompt_hint(self, action: str) -> str:
         section = self._proactive_reaction_expression_prompt_section(action)
         return (
-            render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
             if section is not None
             else ""
         )
@@ -3146,7 +3150,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     def _proactive_natural_delivery_hint(self) -> str:
         return render_prompt_sections(
             [self._proactive_natural_delivery_prompt_section()],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_proactive_future_schedule_hint_section(
@@ -3211,7 +3215,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     def _format_proactive_future_schedule_hint(self, *, reason: str) -> str:
         section = self._format_proactive_future_schedule_hint_section(reason=reason)
         return (
-            render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
             if section is not None
             else ""
         )
@@ -3322,7 +3326,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     def _format_proactive_calendar_constraint_hint(self) -> str:
         section = self._format_proactive_calendar_constraint_hint_section()
         return (
-            render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
             if section is not None
             else ""
         )
@@ -3348,7 +3352,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     def _proactive_troubleshooting_request_hint(self, user: dict[str, Any] | None) -> str:
         section = self._proactive_troubleshooting_request_prompt_section(user)
         return (
-            render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
             if section is not None
             else ""
         )
@@ -3382,7 +3386,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     def _deferred_immediate_share_tense_hint(self, user: dict[str, Any], action: str) -> str:
         section = self._deferred_immediate_share_tense_prompt_section(user, action)
         return (
-            render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
             if section is not None
             else ""
         )
@@ -3666,57 +3670,75 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         custom_template = str(runtime_persona_setting(self, "proactive_prompt_template", "") or "")
         template_document = (
             prompt_document(
+                user_render=_PROACTIVE_DOCUMENT_RENDER,
                 user=(
-                    prompt_section(
+                    _proactive_prompt_part(prompt_section(
                         key="proactive.template.custom",
                         title="用户自定义主动消息模板",
                         source="proactive_message.config",
                         content=custom_template,
-                        metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-                    ),
+                    ), mode=PromptRenderMode.BODY_ONLY),
                 ),
                 metadata={"kind": "proactive_generation_template"},
             )
             if custom_template
             else self._default_proactive_prompt_document()
         )
-        template_text = self._render_proactive_prompt_document(template_document)
+        template_text = render_prompt_document(template_document)["user"]
         included_keys = {section.key for section in (*template_document.system, *template_document.user)}
-        appended_sections: list[PromptSection] = []
+        appended_parts: list[PromptDocumentPart] = []
 
-        def render_section(section: PromptSection | None) -> str:
+        def make_part(
+            section: PromptSection | None,
+            *,
+            mode: PromptRenderMode | None = None,
+            prefix: str = "",
+            separator_before: str = "\n\n",
+        ) -> PromptDocumentPart | None:
             if section is None:
-                return ""
-            return self._render_proactive_prompt_document(prompt_document(user=(section,)))
+                return None
+            return _proactive_prompt_part(
+                section,
+                mode=mode,
+                prefix=prefix,
+                separator_before=separator_before,
+            )
 
-        def append_section(section: PromptSection | None) -> None:
-            if section is None or not section.key or section.key in included_keys:
+        def render_part(part: PromptDocumentPart | None) -> str:
+            if part is None:
+                return ""
+            return render_prompt_document(
+                prompt_document(
+                    user=(part,),
+                    user_render=_PROACTIVE_DOCUMENT_RENDER,
+                )
+            )["user"]
+
+        def append_part(part: PromptDocumentPart | None) -> None:
+            if part is None:
                 return
-            if not render_section(section):
+            section = part.section
+            if not section.key or section.key in included_keys:
                 return
-            appended_sections.append(section)
+            if not render_part(part):
+                return
+            appended_parts.append(part)
             included_keys.add(section.key)
 
-        def legacy_body_section(
+        def append_section(
+            section: PromptSection | None,
             *,
-            key: str,
-            title: str,
-            source: str,
-            content: Any,
+            mode: PromptRenderMode | None = None,
             prefix: str = "",
-        ) -> PromptSection | None:
-            body = str(content or "").strip()
-            if not body:
-                return None
-            metadata: dict[str, Any] = {"legacy_render_mode": PromptRenderMode.BODY_ONLY}
-            if prefix:
-                metadata["legacy_prefix"] = prefix
-            return prompt_section(
-                key=key,
-                title=title,
-                source=source,
-                content=body,
-                metadata=metadata,
+            separator_before: str = "\n\n",
+        ) -> None:
+            append_part(
+                make_part(
+                    section,
+                    mode=mode,
+                    prefix=prefix,
+                    separator_before=separator_before,
+                )
             )
 
         def sanitized_section(
@@ -3765,30 +3787,35 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "{{action_context}}": action_prompt_context if action_prompt_context and action_prompt_context != "（无额外上下文）" else "什么都没做,就是忽然想来找你",
             "{{unanswered_count}}": str(unanswered_count) if unanswered_count > 0 else "",
             "{{unanswered_hint}}": unanswered_hint,
-            "{{unanswered_afterglow_hint}}": render_section(unanswered_afterglow_section),
-            "{{burst_hint}}": render_section(burst_section),
-            "{{expression_shape_hint}}": render_section(expression_shape_section),
-            "{{open_loops_hint}}": render_section(open_loops_section),
-            "{{future_schedule_hint}}": render_section(future_schedule_section),
+            "{{unanswered_afterglow_hint}}": render_part(make_part(unanswered_afterglow_section)),
+            "{{burst_hint}}": render_part(make_part(burst_section)),
+            "{{expression_shape_hint}}": render_part(make_part(expression_shape_section)),
+            "{{open_loops_hint}}": render_part(make_part(open_loops_section)),
+            "{{future_schedule_hint}}": render_part(make_part(future_schedule_section)),
             "{{current_time}}": current_time,
         }
         placeholder_sections = {
-            "{{timer_hint}}": legacy_body_section(
-                key="proactive.timer_context",
-                title="主动定时上下文",
-                source="proactive_message.compat",
-                content=timer_hint,
+            "{{timer_hint}}": make_part(
+                prompt_section(
+                    key="proactive.timer_context",
+                    title="主动定时上下文",
+                    source="proactive_message.compat",
+                    content=timer_hint,
+                )
+                if str(timer_hint or "").strip()
+                else None,
+                mode=PromptRenderMode.BODY_ONLY,
             ),
-            "{{unanswered_afterglow_hint}}": unanswered_afterglow_section,
-            "{{burst_hint}}": burst_section,
-            "{{expression_shape_hint}}": expression_shape_section,
-            "{{open_loops_hint}}": open_loops_section,
-            "{{future_schedule_hint}}": future_schedule_section,
+            "{{unanswered_afterglow_hint}}": make_part(unanswered_afterglow_section),
+            "{{burst_hint}}": make_part(burst_section),
+            "{{expression_shape_hint}}": make_part(expression_shape_section),
+            "{{open_loops_hint}}": make_part(open_loops_section),
+            "{{future_schedule_hint}}": make_part(future_schedule_section),
         }
-        for token, section in placeholder_sections.items():
-            if section is not None and token in template_text:
-                included_keys.add(section.key)
-                replacements[token] = render_section(section)
+        for token, part in placeholder_sections.items():
+            if part is not None and token in template_text:
+                included_keys.add(part.section.key)
+                replacements[token] = render_part(part)
         prompt = template_text
         for key, value in replacements.items():
             prompt = prompt.replace(key, value)
@@ -3869,8 +3896,8 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "这份人格约束最终说话者的身份、性格、关系站位、称呼和措辞。"
                         "日程、记忆、主动动机及工具结果只能提供本轮内容，不能覆盖或改写人格。"
                     ),
-                    metadata={"legacy_prefix": persona_marker},
-                )
+                ),
+                prefix=persona_marker,
             )
         proactive_voice_marker = "<!-- private_companion_proactive_voice_v1 -->"
         proactive_voice_sections_getter = getattr(self, "_format_proactive_voice_prompt_sections", None)
@@ -3882,31 +3909,25 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             for index, proactive_voice_section in enumerate(proactive_voice_sections):
                 if not isinstance(proactive_voice_section, PromptSection):
                     continue
-                if index == 0:
-                    proactive_voice_section = prompt_section(
-                        key=proactive_voice_section.key,
-                        title=proactive_voice_section.title,
-                        source=proactive_voice_section.source,
-                        content=proactive_voice_section.content,
-                        children=proactive_voice_section.children,
-                        metadata={
-                            **dict(proactive_voice_section.metadata),
-                            "legacy_prefix": proactive_voice_marker,
-                        },
-                    )
-                append_section(proactive_voice_section)
+                append_section(
+                    proactive_voice_section,
+                    prefix=proactive_voice_marker if index == 0 else "",
+                )
         else:
             proactive_voice_getter = getattr(self, "_format_proactive_voice_prompt", None)
             proactive_voice = proactive_voice_getter() if callable(proactive_voice_getter) else ""
-            append_section(
-                legacy_body_section(
+            proactive_voice = str(proactive_voice or "").strip()
+            if proactive_voice:
+                append_section(
+                    prompt_section(
                     key="proactive.voice.compat",
                     title="主动消息说话方式",
                     source="main.compat",
                     content=proactive_voice,
+                    ),
+                    mode=PromptRenderMode.BODY_ONLY,
                     prefix=proactive_voice_marker,
                 )
-            )
         expression_section_getter = getattr(self, "_format_expression_voice_prompt_section", None)
         expression_voice_section = (
             expression_section_getter(
@@ -3921,17 +3942,8 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         expression_voice_marker = "<!-- private_companion_expression_voice_v1 -->"
         if isinstance(expression_voice_section, PromptSection):
             append_section(
-                prompt_section(
-                    key=expression_voice_section.key,
-                    title=expression_voice_section.title,
-                    source=expression_voice_section.source,
-                    content=expression_voice_section.content,
-                    children=expression_voice_section.children,
-                    metadata={
-                        **dict(expression_voice_section.metadata),
-                        "legacy_prefix": expression_voice_marker,
-                    },
-                )
+                expression_voice_section,
+                prefix=expression_voice_marker,
             )
         elif not callable(expression_section_getter):
             expression_formatter = getattr(self, "_format_expression_voice_for_prompt", None)
@@ -3945,15 +3957,18 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 if callable(expression_formatter)
                 else ""
             )
-            append_section(
-                legacy_body_section(
+            expression_voice = str(expression_voice or "").strip()
+            if expression_voice:
+                append_section(
+                    prompt_section(
                     key="proactive.expression_voice.compat",
                     title="主动消息表达方式",
                     source="user_memory.compat",
                     content=expression_voice,
+                    ),
+                    mode=PromptRenderMode.BODY_ONLY,
                     prefix=expression_voice_marker,
                 )
-            )
         append_section(self._proactive_natural_delivery_prompt_section())
         append_section(deferred_share_tense_section)
         tool_boundary_section = prompt_section(
@@ -4104,8 +4119,8 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         f"{memory_context}\n"
                         "使用方式：只作为自然连续性和边界参考；能贴住当前切口就轻轻用,不相关就忽略。不要说“我查到/我记忆里”。"
                     ),
-                    metadata={"legacy_prefix": "<!-- private_companion_memory_generation_context_v1 -->"},
-                )
+                ),
+                prefix="<!-- private_companion_memory_generation_context_v1 -->",
             )
             append_section(core_memory_usage_contract_section(memory_context, stage="generation"))
         relationship_guard_getter = getattr(self, "_format_generation_relationship_authority_guard", None)
@@ -4116,12 +4131,13 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 relationship_guard = ""
             if relationship_guard:
                 append_section(
-                    legacy_body_section(
+                    prompt_section(
                         key="proactive.relationship_authority",
                         title="关系事实权限",
                         source="user_memory.compat",
                         content=relationship_guard,
-                    )
+                    ),
+                    mode=PromptRenderMode.BODY_ONLY,
                 )
         append_section(self._format_proactive_recipient_identity_guard_prompt_section(user, name))
         if self._proactive_llm_segmenting_allowed(umo=_single_line(user.get("umo"), 240)):
@@ -4133,35 +4149,30 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     segmenting_section = None
                 if isinstance(segmenting_section, PromptSection):
                     append_section(
-                        prompt_section(
-                            key=segmenting_section.key,
-                            title=segmenting_section.title,
-                            source=segmenting_section.source,
-                            content=segmenting_section.content,
-                            children=segmenting_section.children,
-                            metadata={
-                                **dict(segmenting_section.metadata),
-                                "legacy_render_mode": PromptRenderMode.CONVERSATION_XML,
-                            },
-                        )
+                        segmenting_section,
+                        mode=PromptRenderMode.CONVERSATION_XML,
                     )
             else:
-                append_section(
-                    legacy_body_section(
+                segmenting_instruction = self._proactive_llm_segmenting_instruction(
+                    umo=_single_line(user.get("umo"), 240),
+                )
+                if segmenting_instruction:
+                    append_section(
+                        prompt_section(
                         key="reply.segmentation",
                         title="回复分段控制",
                         source="segmented_reply.compat",
-                        content=self._proactive_llm_segmenting_instruction(
-                            umo=_single_line(user.get("umo"), 240),
+                        content=segmenting_instruction,
                         ),
+                        mode=PromptRenderMode.BODY_ONLY,
                     )
-                )
-        suffix = self._render_proactive_prompt_document(
+        suffix = render_prompt_document(
             prompt_document(
-                user=tuple(appended_sections),
+                user=tuple(appended_parts),
+                user_render=_PROACTIVE_DOCUMENT_RENDER,
                 metadata={"kind": "proactive_generation_appendix"},
             )
-        )
+        )["user"]
         return "\n\n".join(part for part in (prompt.strip(), suffix) if part).strip()
 
     def _proactive_llm_segmenting_allowed(self, *, umo: str = "") -> bool:
@@ -4225,7 +4236,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     def _proactive_visible_text_format_hint(cls, action: str) -> str:
         return render_prompt_sections(
             [cls._proactive_visible_text_format_prompt_section(action)],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_proactive_generation_intent_prompt_section(
@@ -4474,7 +4485,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             action_context=action_context,
         )
         return (
-            render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
             if section is not None
             else ""
         )
@@ -4545,8 +4556,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         if strict_tts:
             rules.append("6. 这次必须优先满足语音格式要求；如果有日语或 <tts> 规则，不要退回普通中文句子。")
         return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
             user=(
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="background.voice_framework.task",
                     title="主动语音正文生成",
                     source="proactive_message",
@@ -4556,9 +4568,8 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "站位必须清楚：这是你主动发语音,不是对方刚刚来找你、叫醒你或问候你。"
                         "聊天历史只作背景,不要把最后一句历史当成当前新消息。"
                     ),
-                    metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-                ),
-                prompt_section(
+                ), mode=PromptRenderMode.BODY_ONLY),
+                _proactive_prompt_part(prompt_section(
                     key="background.voice_framework.context",
                     title="补充信息",
                     source="proactive_message",
@@ -4572,15 +4583,13 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         f"- 当前会话 TTS 规则：{tts_prompt or '（当前没有额外 TTS 提示词,就按人格自己的语音习惯来）'}\n"
                         f"- 当前语音格式重点：{requirement_summary}"
                     ),
-                    metadata={"legacy_heading_style": "fullwidth_colon"},
-                ),
-                prompt_section(
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
+                _proactive_prompt_part(prompt_section(
                     key="background.voice_framework.rules",
                     title="要求",
                     source="proactive_message",
                     content="\n".join(rules),
-                    metadata={"legacy_heading_style": "fullwidth_colon"},
-                ),
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
             ),
             metadata={"task": "proactive_voice"},
         )
@@ -4616,7 +4625,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 "正处于忙碌片段，像腾不出手时顺手留的一句；"
                 "控制在一两句短口语，不复述日程、不报内部状态，也不要扩展成说明。"
             )
-        return self._render_proactive_prompt_document(
+        return render_prompt_document(
             self._framework_voice_prompt_document(
                 name=name,
                 reason=reason,
@@ -4629,7 +4638,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 requirement_summary=req["summary"],
                 strict_tts=strict_tts,
             )
-        )
+        )["user"]
 
     async def _capture_framework_send_message_calls(
         self,
@@ -5364,10 +5373,10 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 content=content,
             )
 
-        def legacy_overhead(key: str, title: str) -> int:
+        def labeled_overhead(key: str, title: str) -> int:
             probe = render_prompt_sections(
                 [history_section(key, title, "x")],
-                mode=PromptRenderMode.LEGACY_BLOCK,
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
             return len(probe) - 1
 
@@ -5375,26 +5384,26 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         older_lines = [_single_line(line, 160) for line in cleaned_lines[:-recent_count]]
         recent_key = "proactive.history.recent"
         recent_title = "最近对话（保留原文）"
-        recent_overhead = legacy_overhead(recent_key, recent_title)
+        recent_overhead = labeled_overhead(recent_key, recent_title)
         recent_budget = max(0, max_chars - recent_overhead)
         fitted_recent = self._fit_proactive_history_lines(recent_lines, recent_budget)
         recent_block = render_prompt_sections(
             [history_section(recent_key, recent_title, "\n".join(fitted_recent))],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
         if not older_lines:
             return recent_block[:max_chars]
 
         older_key = "proactive.history.older"
         older_title = "较早对话（已压缩）"
-        older_overhead = legacy_overhead(older_key, older_title)
+        older_overhead = labeled_overhead(older_key, older_title)
         remaining = max_chars - len(recent_block) - older_overhead - 1
         fitted_older = self._fit_proactive_history_lines(older_lines, remaining)
         if not fitted_older:
             return recent_block[:max_chars]
         older_block = render_prompt_sections(
             [history_section(older_key, older_title, "\n".join(fitted_older))],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
         return f"{older_block}\n{recent_block}"[:max_chars]
 
@@ -5459,8 +5468,8 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         status_rule: str,
         segmenting_section: PromptSection | None = None,
     ) -> PromptDocument:
-        sections: list[PromptSection] = [
-            prompt_section(
+        sections: list[PromptSection | PromptDocumentPart] = [
+            _proactive_prompt_part(prompt_section(
                 key="background.reference_rewrite.task",
                 title="人格参考意图改写",
                 source="proactive_message",
@@ -5468,8 +5477,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     "你要把一条“参考意图”改写成当前人格会自然说出的聊天正文。"
                     "参考意图只说明要表达什么，不是要照抄的句子。"
                 ),
-                metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-            ),
+            ), mode=PromptRenderMode.BODY_ONLY),
             prompt_section(
                 key="background.reference_rewrite.persona",
                 title="当前人格",
@@ -5509,7 +5517,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 source="proactive_message",
                 content=reference,
             ),
-            prompt_section(
+            _proactive_prompt_part(prompt_section(
                 key="background.reference_rewrite.rules",
                 title="要求",
                 source="proactive_message",
@@ -5524,24 +5532,17 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     "视为本轮失败并输出空文本；不要翻译、复述或润色这类内容。\n"
                     f"{status_rule}"
                 ),
-                metadata={"legacy_heading_style": "fullwidth_colon"},
-            ),
+            ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
         ]
         if segmenting_section is not None:
             sections.append(
-                prompt_section(
-                    key=segmenting_section.key,
-                    title=segmenting_section.title,
-                    source=segmenting_section.source,
-                    content=segmenting_section.content,
-                    children=segmenting_section.children,
-                    metadata={
-                        **dict(segmenting_section.metadata),
-                        "legacy_render_mode": PromptRenderMode.CONVERSATION_XML,
-                    },
+                _proactive_prompt_part(
+                    segmenting_section,
+                    mode=PromptRenderMode.CONVERSATION_XML,
                 )
             )
         return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
             user=sections,
             metadata={"task": "proactive_reference_rewrite"},
         )
@@ -5575,7 +5576,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             if callable(voice_sections_getter):
                 reply_style = render_prompt_sections(
                     voice_sections_getter(),
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 )
             else:
                 voice_getter = getattr(self, "_format_proactive_voice_prompt", None)
@@ -5596,7 +5597,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 else None
             )
             expression_voice = (
-                render_prompt_sections([expression_section], mode=PromptRenderMode.LEGACY_BLOCK)
+                render_prompt_sections([expression_section], mode=PromptRenderMode.LABELED_BLOCK)
                 if isinstance(expression_section, PromptSection)
                 else ""
             )
@@ -5643,7 +5644,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 candidate = segmenting_getter()
                 if isinstance(candidate, PromptSection):
                     segmenting_section = candidate
-        prompt = self._render_proactive_prompt_document(
+        prompt = render_prompt_document(
             self._reference_rewrite_prompt_document(
                 persona=persona,
                 style_title="主动开口风格" if proactive_rewrite else "回复风格",
@@ -5660,7 +5661,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 ),
                 segmenting_section=segmenting_section,
             )
-        )
+        )["user"]
         try:
             raw = await self._llm_call(
                 prompt,
@@ -6681,21 +6682,21 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             title: str,
             content: str,
             *,
-            separator_before: str = "",
-        ) -> PromptSection:
-            metadata = {"legacy_heading_style": "square"}
-            if separator_before:
-                metadata["legacy_separator_before"] = separator_before
-            return prompt_section(
-                key=key,
-                title=title,
-                source="proactive_message",
-                content=content,
-                metadata=metadata,
+            separator_before: str = "\n\n",
+        ) -> PromptDocumentPart:
+            return _proactive_prompt_part(
+                prompt_section(
+                    key=key,
+                    title=title,
+                    source="proactive_message",
+                    content=content,
+                ),
+                label_style=PromptLabelStyle.SQUARE,
+                separator_before=separator_before,
             )
 
-        sections: list[PromptSection] = [
-            prompt_section(
+        sections: list[PromptSection | PromptDocumentPart] = [
+            _proactive_prompt_part(prompt_section(
                 key="background.proactive_send_review.contract",
                 title="主动消息发送终审",
                 source="proactive_message",
@@ -6720,8 +6721,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     "- When the current request context says the user explicitly requested this troubleshooting message, treat that request as a concrete reason to speak. Do not drop solely because it is late, the normal proactive interval is short, or there is no spontaneous life story. If the wording is too strong or generic, prefer a shorter, softer rewrite. Fact, safety, privacy, identity, and conversation-conflict checks still apply.\n"
                     "- For a creative share, preserve any `「...」` excerpt exactly as one continuous source quote. Keep conversational introduction and closing outside it; never paraphrase or fabricate text inside the excerpt."
                 ),
-                metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-            ),
+            ), mode=PromptRenderMode.BODY_ONLY),
         ]
         if creative_excerpt_section is not None:
             sections.append(creative_excerpt_section)
@@ -6763,16 +6763,19 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     or "Use only the current recipient identity. Do not guess or copy an exclusive name from persona examples.",
                 ),
                 square("background.proactive_send_review.candidate", "Candidate", candidate),
-                prompt_section(
-                    key="background.proactive_send_review.output",
-                    title="Output",
-                    source="proactive_message",
-                    content='{"decision":"send|rewrite|drop","text":"","reason":"brief reason"}',
-                    metadata={"legacy_heading_style": "colon"},
+                _proactive_prompt_part(
+                    prompt_section(
+                        key="background.proactive_send_review.output",
+                        title="Output",
+                        source="proactive_message",
+                        content='{"decision":"send|rewrite|drop","text":"","reason":"brief reason"}',
+                    ),
+                    label_style=PromptLabelStyle.COLON,
                 ),
             )
         )
         return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
             user=sections,
             metadata={"task": "proactive_send_review"},
         )
@@ -7000,7 +7003,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         proactive_voice = (
             render_prompt_sections(
                 proactive_voice_sections_getter(),
-                mode=PromptRenderMode.LEGACY_BLOCK,
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
             if callable(proactive_voice_sections_getter)
             else ""
@@ -7020,7 +7023,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             else None
         )
         expression_voice = (
-            render_prompt_sections([expression_section], mode=PromptRenderMode.LEGACY_BLOCK)
+            render_prompt_sections([expression_section], mode=PromptRenderMode.LABELED_BLOCK)
             if isinstance(expression_section, PromptSection)
             else ""
         )
@@ -7080,7 +7083,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             f"motive={_single_line(motive, 120) or 'none'}; "
             f"summary={_single_line(action_summary, 80) or 'none'}"
         )
-        prompt = self._render_proactive_prompt_document(
+        prompt = render_prompt_document(
             self._proactive_send_review_prompt_document(
                 creative_excerpt_section=creative_excerpt_section,
                 history=history,
@@ -7097,7 +7100,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 recipient_identity=recipient_identity,
                 candidate=text,
             )
-        )
+        )["user"]
         started = time.perf_counter()
         review_provider_id = self._task_provider(
             _persona_provider_id(self, "RESPONSE_REVIEW_PROVIDER_ID", "response_review_provider_id", "fast"),
@@ -7979,8 +7982,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         creative_excerpt_rule: str,
     ) -> PromptDocument:
         return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
             user=(
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="background.response_review.task",
                     title="主动回复空气修正",
                     source="proactive_message",
@@ -7988,8 +7992,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "把下面这条主动私聊消息改成真正的主动开口。\n"
                         "它不是在回复用户刚发来的消息；聊天历史只能当背景。"
                     ),
-                    metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-                ),
+                ), mode=PromptRenderMode.BODY_ONLY),
                 prompt_section(
                     key="background.response_review.original",
                     title="原主动消息",
@@ -8014,14 +8017,14 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     source="proactive_message",
                     content=f"{motive}\n{topic}",
                 ),
-                prompt_section(
-                    key="background.response_review.action_context",
-                    title="动作上下文",
-                    source="proactive_message",
-                    content=action_context or "（无）",
-                    metadata={
-                        "legacy_separator_before": "\n\n\n" if not topic else "\n\n"
-                    },
+                _proactive_prompt_part(
+                    prompt_section(
+                        key="background.response_review.action_context",
+                        title="动作上下文",
+                        source="proactive_message",
+                        content=action_context or "（无）",
+                    ),
+                    separator_before="\n\n\n" if not topic else "\n\n",
                 ),
                 prompt_section(
                     key="background.response_review.intent",
@@ -8056,7 +8059,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     source="proactive_message",
                     content=recipient_identity or "不要猜名字或套用其他对象的专属称呼。",
                 ),
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="background.response_review.rules",
                     title="要求",
                     source="proactive_message",
@@ -8073,8 +8076,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "- 尽量 1 到 2 句，像自然想起对方后随手说一句\n"
                         f"{creative_excerpt_rule}"
                     ),
-                    metadata={"legacy_heading_style": "fullwidth_colon"},
-                ),
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
             ),
             metadata={"task": "response_review"},
         )
@@ -8195,7 +8197,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         proactive_voice = (
             render_prompt_sections(
                 proactive_voice_sections_getter(),
-                mode=PromptRenderMode.LEGACY_BLOCK,
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
             if callable(proactive_voice_sections_getter)
             else ""
@@ -8215,7 +8217,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             else None
         )
         expression_voice = (
-            render_prompt_sections([expression_section], mode=PromptRenderMode.LEGACY_BLOCK)
+            render_prompt_sections([expression_section], mode=PromptRenderMode.LABELED_BLOCK)
             if isinstance(expression_section, PromptSection)
             else ""
         )
@@ -8240,7 +8242,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             if reason == "creative_share"
             else ""
         )
-        prompt = self._render_proactive_prompt_document(
+        prompt = render_prompt_document(
             self._response_review_prompt_document(
                 original_text=cleaned,
                 flags=", ".join(flags),
@@ -8255,7 +8257,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 recipient_identity=recipient_identity,
                 creative_excerpt_rule=creative_excerpt_rule,
             )
-        )
+        )["user"]
         started = time.perf_counter()
         rewritten = await self._llm_call(
             prompt,
@@ -9276,8 +9278,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     @staticmethod
     def _goodnight_screen_check_prompt_document() -> PromptDocument:
         return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
             user=(
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="background.goodnight_screen_check",
                     title="晚安后屏幕状态判断",
                     source="proactive_message",
@@ -9289,8 +9292,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         '只输出 JSON：{"state":"active|inactive|uncertain","reason":"不含隐私的极短判断依据"}。'
                         "reason 禁止包含应用名、窗口名、账号、联系人、文件名、聊天内容、网页内容或屏幕文字。"
                     ),
-                    metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-                ),
+                ), mode=PromptRenderMode.BODY_ONLY),
             ),
             metadata={"task": "goodnight_screen_check"},
         )
@@ -9337,9 +9339,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 event = plugin._create_virtual_event(target)
             except Exception as exc:
                 logger.debug("创建晚安识屏虚拟事件失败: %s", _single_line(exc, 160))
-        prompt = self._render_proactive_prompt_document(
+        prompt = render_prompt_document(
             self._goodnight_screen_check_prompt_document()
-        )
+        )["user"]
         try:
             result = await plugin._invoke_screen_skill(
                 event,
@@ -9539,8 +9541,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     @staticmethod
     def _screen_peek_prompt_document(reason: str) -> PromptDocument:
         return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
             user=(
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="background.screen_peek",
                     title="主动屏幕观察",
                     source="proactive_message",
@@ -9551,8 +9554,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "只留一个内部观察印象。主动原因：{reason}"
                     ),
                     variables={"reason": reason},
-                    metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-                ),
+                ), mode=PromptRenderMode.BODY_ONLY),
             ),
             metadata={"task": "screen_peek"},
         )
@@ -9586,9 +9588,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 event = plugin._create_virtual_event(target)
             except Exception as e:
                 logger.debug(f"创建屏幕虚拟事件失败: {e}")
-        prompt = self._render_proactive_prompt_document(
+        prompt = render_prompt_document(
             self._screen_peek_prompt_document(reason)
-        )
+        )["user"]
         try:
             result = await plugin._invoke_screen_skill(
                 event,
@@ -10285,14 +10287,14 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         max_chars: int,
     ) -> PromptDocument:
         return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
             user=(
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="background.voice.task",
                     title="主动语音生成",
                     source="proactive_message",
                     content="你正在替角色写一条马上要发出去的语音。这条语音是真的会被 TTS 念出来,不是文字陪聊。",
-                    metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-                ),
+                ), mode=PromptRenderMode.BODY_ONLY),
                 prompt_section(
                     key="background.voice.persona",
                     title="人格",
@@ -10327,7 +10329,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     source="proactive_message",
                     content=tts_prompt or "（当前没有额外 TTS 提示词,就按人格自己的语音习惯来）",
                 ),
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="background.voice.rules",
                     title="要求",
                     source="proactive_message",
@@ -10338,8 +10340,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "4. 可以有一点嘴硬、黏人、藏着的想念,但不要把喜欢说满。\n"
                         "5. 不要提 AI、模型、插件、TTS、语音合成这些词。"
                     ),
-                    metadata={"legacy_heading_style": "fullwidth_colon"},
-                ),
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
             ),
             metadata={"task": "voice"},
         )
@@ -10418,7 +10419,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         last_user_message = _single_line(user.get("last_user_message"), 80)
         profile = self._relationship_profile(user)
         tts_prompt = self._get_tts_prompt_text(target)
-        prompt = self._render_proactive_prompt_document(
+        prompt = render_prompt_document(
             self._voice_fallback_prompt_document(
                 persona=persona,
                 name=name,
@@ -10430,7 +10431,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 tts_prompt=tts_prompt,
                 max_chars=runtime_persona_setting(self, "voice_action_max_chars", 30),
             )
-        )
+        )["user"]
         text = await self._llm_call(
             prompt,
             max_tokens=120,
@@ -10630,14 +10631,14 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         spoken: str,
     ) -> PromptDocument:
         return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
             user=(
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="background.voice_repair.task",
                     title="主动语音格式修正",
                     source="proactive_message",
                     content="你要把下面这句主动语音修正成符合当前语音规则的最终版本。",
-                    metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-                ),
+                ), mode=PromptRenderMode.BODY_ONLY),
                 prompt_section(
                     key="background.voice_repair.persona",
                     title="人格",
@@ -10662,7 +10663,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     source="proactive_message",
                     content=spoken,
                 ),
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="background.voice_repair.rules",
                     title="要求",
                     source="proactive_message",
@@ -10672,8 +10673,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "3. 如果要求日语语音，就让真正会被念出来的那一部分变成自然的日语，而不是普通中文。\n"
                         "4. 如果没有强制格式，也保持私聊语音的自然感。"
                     ),
-                    metadata={"legacy_heading_style": "fullwidth_colon"},
-                ),
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
             ),
             metadata={"task": "voice_repair"},
         )
@@ -10687,14 +10687,14 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     ) -> str:
         persona = self._get_default_persona_prompt()
         tts_prompt = self._get_tts_prompt_text(target)
-        return self._render_proactive_prompt_document(
+        return render_prompt_document(
             self._voice_repair_prompt_document(
                 persona=persona,
                 tts_prompt=tts_prompt,
                 requirement_summary=str(requirement.get("summary") or ""),
                 spoken=spoken,
             )
-        )
+        )["user"]
 
     async def _build_tts_modify_components(
         self,
@@ -11585,9 +11585,19 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         )
         prompt = (
             "Positive prompt: "
-            + ", ".join(section.positive for section in sections if section.positive)
+            + ", ".join(
+                section.content.positive
+                for section in sections
+                if isinstance(section.content, PhotoPromptContent)
+                and section.content.positive
+            )
             + ". Negative prompt: "
-            + ", ".join(section.negative for section in sections if section.negative)
+            + ", ".join(
+                section.content.negative
+                for section in sections
+                if isinstance(section.content, PhotoPromptContent)
+                and section.content.negative
+            )
             + "."
         )
         return _single_line(prompt, 1400)
@@ -11598,7 +11608,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         *,
         memory_context: str = "",
         outfit_profile: dict[str, Any] | None = None,
-    ) -> tuple[PhotoPromptSection, ...]:
+    ) -> tuple[PromptSection, ...]:
         persona = self._daily_outfit_role_appearance_text()
         style_name, style_instruction = self._get_photo_style_instruction()
         style_prompt = self._photo_style_prompt_en(style_name, style_instruction)
@@ -11739,43 +11749,59 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 ]
             )
         sections = [
-            PhotoPromptSection(
-                name="user_request",
-                source="user_request",
-                positive=_single_line(
-                    ", ".join(
-                        _single_line(part, 400)
-                        for part in positive
-                        if _single_line(part, 400)
+            prompt_section(
+                key="photo.daily_outfit.user_request",
+                title="user_request",
+                source="photo_prompt_context",
+                content=PhotoPromptContent(
+                    positive=_single_line(
+                        ", ".join(
+                            _single_line(part, 400)
+                            for part in positive
+                            if _single_line(part, 400)
+                        ),
+                        1400,
                     ),
-                    1400,
+                    domain_source="user_request",
+                    protected=True,
                 ),
-                protected=True,
             ),
-            PhotoPromptSection(
-                name="daily_outfit_contract",
-                # These are resolved workflow exclusions rather than ambient
-                # visual context.  Freeze them for this task so the N-1
-                # resolver preserves safety and wardrobe-rotation rules.
-                source="fixed_prompt",
-                negative=_single_line(", ".join(negative), 760),
-                protected=True,
+            prompt_section(
+                key="photo.daily_outfit.contract",
+                title="daily_outfit_contract",
+                source="photo_prompt_context",
+                content=PhotoPromptContent(
+                    # These are resolved workflow exclusions rather than ambient
+                    # visual context. Freeze them for this task so the N-1 resolver
+                    # preserves safety and wardrobe-rotation rules.
+                    negative=_single_line(", ".join(negative), 760),
+                    domain_source="fixed_prompt",
+                    protected=True,
+                ),
             ),
         ]
         if visual_memory:
             sections.append(
-                PhotoPromptSection(
-                    name="visual_memory",
-                    source="visual_memory",
-                    positive=f"visual continuity reference: {visual_memory}",
+                prompt_section(
+                    key="photo.daily_outfit.visual_memory",
+                    title="visual_memory",
+                    source="photo_prompt_context",
+                    content=PhotoPromptContent(
+                        positive=f"visual continuity reference: {visual_memory}",
+                        domain_source="visual_memory",
+                    ),
                 )
             )
         if custom:
             sections.append(
-                PhotoPromptSection(
-                    name="daily_outfit_preference",
-                    source="fixed_prompt",
-                    positive=f"additional outfit preference: {custom}",
+                prompt_section(
+                    key="photo.daily_outfit.preference",
+                    title="daily_outfit_preference",
+                    source="photo_prompt_context",
+                    content=PhotoPromptContent(
+                        positive=f"additional outfit preference: {custom}",
+                        domain_source="fixed_prompt",
+                    ),
                 )
             )
         return tuple(sections)
@@ -12972,7 +12998,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     def _photo_generation_workflow_fixed_prompt_section(
         self,
         workflow_kind: str,
-    ) -> tuple[PhotoPromptSection, dict[str, Any]]:
+    ) -> tuple[PromptSection, dict[str, Any]]:
         normalized = str(workflow_kind or "").strip().lower()
         if normalized in {"edit", "改图", "修图", "重绘", "p图"}:
             scope = "edit"
@@ -12990,13 +13016,17 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         raw = str(runtime_persona_setting(self, config_key, "") or "")
         normalized_prompt = self._sanitize_photo_generation_fixed_prompt_config(raw)
         positive, negative = self._photo_generation_semantic_prompt_parts(normalized_prompt)
-        section = PhotoPromptSection(
-            name="workflow_fixed_prompt",
-            source="fixed_prompt",
-            positive=f"{label}: {positive}" if positive else "",
-            negative=negative,
-            protected=True,
-            sanitize_conflicts=True,
+        section = prompt_section(
+            key=f"photo.workflow_fixed.{scope}",
+            title="workflow_fixed_prompt",
+            source="photo_prompt_context",
+            content=PhotoPromptContent(
+                positive=f"{label}: {positive}" if positive else "",
+                negative=negative,
+                domain_source="fixed_prompt",
+                protected=True,
+                sanitize_conflicts=True,
+            ),
         )
         raw_trimmed = raw.strip()
         audit = {
@@ -13117,9 +13147,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
 
     def _apply_photo_generation_negative_prompt_policy(
         self,
-        sections: tuple[PhotoPromptSection, ...],
+        sections: tuple[PromptSection, ...],
         workflow_kind: str,
-    ) -> tuple[PhotoPromptSection, ...]:
+    ) -> tuple[PromptSection, ...]:
         mode = self._photo_generation_negative_prompt_mode()
         adjusted = list(sections)
         if mode == "replace":
@@ -13131,8 +13161,13 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 "subject_count",
             }
             adjusted = [
-                replace(section, negative="")
-                if section.name in replaceable_names and section.negative
+                replace(
+                    section,
+                    content=replace(section.content, negative=""),
+                )
+                if section.title in replaceable_names
+                and isinstance(section.content, PhotoPromptContent)
+                and section.content.negative
                 else section
                 for section in adjusted
             ]
@@ -13140,12 +13175,16 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             custom_negative = self._photo_generation_custom_negative_prompt(workflow_kind)
             if custom_negative:
                 adjusted.append(
-                    PhotoPromptSection(
-                        name="custom_negative_prompt",
-                        source="fixed_prompt",
-                        negative=custom_negative,
-                        protected=True,
-                        sanitize_conflicts=True,
+                    prompt_section(
+                        key="photo.custom_negative_prompt",
+                        title="custom_negative_prompt",
+                        source="photo_prompt_context",
+                        content=PhotoPromptContent(
+                            negative=custom_negative,
+                            domain_source="fixed_prompt",
+                            protected=True,
+                            sanitize_conflicts=True,
+                        ),
                     )
                 )
         return tuple(adjusted)
@@ -14165,14 +14204,13 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         prompt_format_instruction: str,
         reason: str,
     ) -> PromptDocument:
-        sections: list[PromptSection] = [
-            prompt_section(
+        sections: list[PromptSection | PromptDocumentPart] = [
+            _proactive_prompt_part(prompt_section(
                 key="background.photo_scene.task",
                 title="主动生活图片提示词生成",
                 source="proactive_message",
                 content="请根据 AstrBot 默认人格和主动原因,生成一张要通过生图后端制作的“社交媒体随手拍/自拍/生活碎片图”提示词。",
-                metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-            ),
+            ), mode=PromptRenderMode.BODY_ONLY),
             prompt_section(
                 key="background.photo_scene.persona",
                 title="人格",
@@ -14234,14 +14272,13 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     source="proactive_message",
                     content=prompt_format_instruction,
                 ),
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="background.photo_scene.reason",
                     title="主动原因",
                     source="proactive_message",
                     content=f"主动原因：{reason}",
-                    metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-                ),
-                prompt_section(
+                ), mode=PromptRenderMode.BODY_ONLY),
+                _proactive_prompt_part(prompt_section(
                     key="background.photo_scene.output",
                     title="输出 JSON",
                     source="proactive_message",
@@ -14253,9 +14290,8 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         '  "caption": "图片完成后可转述给最终私聊模型的一句话画面描述"\n'
                         "}"
                     ),
-                    metadata={"legacy_heading_style": "fullwidth_colon"},
-                ),
-                prompt_section(
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
+                _proactive_prompt_part(prompt_section(
                     key="background.photo_scene.rules",
                     title="要求",
                     source="proactive_message",
@@ -14272,11 +14308,11 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "10. 服装语义优先级为：本次明确服装需求优先；具体场景服装参考用于落实该需求；今日穿搭仅在没有新服装意图时作为连续性补充。不要同时写入彼此冲突的两套服装。\n"
                         "11. 只有当前请求明确要求关系角色出现/合影，且选中了对应的角色参考图时，才可让该角色按参考图自然入镜；否则禁止凭文字补画另一人的脸、身体、背影、剪影、倒影或肖像。未明确要求时，关系卡只影响情境，并用非人物生活线索间接表达关系。"
                     ),
-                    metadata={"legacy_heading_style": "fullwidth_colon"},
-                ),
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
             )
         )
         return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
             user=sections,
             metadata={"task": "photo_prompt"},
         )
@@ -14415,7 +14451,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "可用第二只杯子、礼物、便签、空座位等非人物线索间接表达；不合适时忽略本节。"
                     ),
                 )
-        prompt = self._render_proactive_prompt_document(
+        prompt = render_prompt_document(
             self._photo_scene_generation_prompt_document(
                 persona=persona,
                 recipient_name=name,
@@ -14435,7 +14471,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 prompt_format_instruction=prompt_format_instruction,
                 reason=reason,
             )
-        )
+        )["user"]
         text = ""
         try:
             text = await self._llm_call(
@@ -15546,8 +15582,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         candidate_options: str,
     ) -> PromptDocument:
         return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
             user=(
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="background.photo_reference_selection.task",
                     title="人物参考图选择",
                     source="proactive_message",
@@ -15564,8 +15601,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "若候选带有“角色”和“关系”，且用户在本轮明确点名该角色或关系，优先选择对应的关系角色参考图；它只代表该角色本人，不要把该身份转移给 Bot。没有明确点名角色时，不要因为关系卡文字而选择关系角色参考图。\n"
                         "只输出候选编号，不要解释。"
                     ),
-                    metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-                ),
+                ), mode=PromptRenderMode.BODY_ONLY),
                 prompt_section(
                     key="background.photo_reference_selection.request",
                     title="最终画面需求",
@@ -15838,7 +15874,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 for index, item in enumerate(eligible_candidates, start=1)
             )
             none_option = "\n0. 不使用这些候选参考图，按当前要求生成全新画面"
-            prompt = self._render_proactive_prompt_document(
+            prompt = render_prompt_document(
                 self._photo_reference_selection_prompt_document(
                     request_text=_single_line(request_text, 1200),
                     ambient_context=_single_line(ambient_context, 800),
@@ -15846,7 +15882,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     schedule_history_context=_single_line(schedule_history_context, 1200),
                     candidate_options=f"{options}{none_option}",
                 )
-            )
+            )["user"]
             try:
                 llm_kwargs = {
                     "max_tokens": 12,
@@ -16006,8 +16042,9 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     @staticmethod
     def _photo_reference_intent_prompt_document(request_text: str) -> PromptDocument:
         return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
             user=(
-                prompt_section(
+                _proactive_prompt_part(prompt_section(
                     key="background.photo_reference_intent",
                     title="参考图职责识别",
                     source="proactive_message",
@@ -16021,8 +16058,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         "用户要求：{request_text}"
                     ),
                     variables={"request_text": request_text},
-                    metadata={"legacy_render_mode": PromptRenderMode.BODY_ONLY},
-                ),
+                ), mode=PromptRenderMode.BODY_ONLY),
             ),
             metadata={"task": "photo_reference_intent"},
         )
@@ -16072,11 +16108,11 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 ),
             )
 
-        prompt = self._render_proactive_prompt_document(
+        prompt = render_prompt_document(
             self._photo_reference_intent_prompt_document(
                 _single_line(request_text, 1200)
             )
-        )
+        )["user"]
         try:
             raw = await llm_call(
                 prompt,

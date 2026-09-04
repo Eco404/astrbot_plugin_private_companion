@@ -31,7 +31,7 @@ class TtsPromptSectionAuthoringTests(unittest.TestCase):
         section = harness._build_tts_rule_prompt_section("generic")
         rendered = render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
         self.assertIsInstance(section, PromptSection)
@@ -96,7 +96,7 @@ class TtsPromptSectionAuthoringTests(unittest.TestCase):
         self.assertEqual("TTS 后处理模式", section.title)
         self.assertNotIn("【TTS 后处理模式】", str(section.content))
         self.assertEqual(
-            render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK),
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK),
             rendered,
         )
         self.assertEqual(343, len(rendered))

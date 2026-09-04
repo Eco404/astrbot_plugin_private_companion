@@ -10,7 +10,7 @@ from astrbot_plugin_private_companion.conversation_prompt_section import (
     PromptRenderMode,
     prompt_section,
     prompt_text,
-    render_prompt_section,
+    render_prompt_sections,
 )
 from astrbot_plugin_private_companion.event_dispatch import EventDispatchMixin
 
@@ -77,8 +77,8 @@ def test_recall_query_is_authored_as_a_canonical_section() -> None:
     assert section.source == "event_dispatch"
     assert "【撤回消息查询】" not in section.content
     assert "正文中保留【用户原文】" in section.content
-    assert '<section title="撤回消息查询">' in render_prompt_section(
-        section,
+    assert '<section title="撤回消息查询">' in render_prompt_sections(
+        [section],
         mode=PromptRenderMode.CONVERSATION_XML,
     )
 
@@ -88,8 +88,8 @@ def test_recall_query_legacy_wrapper_and_section_preserve_wire() -> None:
     event = SimpleNamespace(is_private_chat=lambda: False)
 
     with_heading = harness._format_recalled_messages_for_natural_query(event)
-    body_only = render_prompt_section(
-        harness._format_recalled_messages_for_natural_query_prompt_section(event),
+    body_only = render_prompt_sections(
+        [harness._format_recalled_messages_for_natural_query_prompt_section(event)],
         mode=PromptRenderMode.BODY_ONLY,
     )
 
@@ -122,7 +122,7 @@ def test_prompt_diagnostics_prefers_typed_section_manifest() -> None:
     assert modules[0]["metadata"] == {"范围": "当前会话"}
 
 
-def test_prompt_diagnostics_preserves_manifest_priority_and_typed_content() -> None:
+def test_prompt_diagnostics_reads_persisted_manifest_text_without_coercion() -> None:
     harness = _PromptDiagnosticsHarness()
     manifest = [
         {
@@ -130,7 +130,7 @@ def test_prompt_diagnostics_preserves_manifest_priority_and_typed_content() -> N
             "title": "完整模拟状态",
             "source": "daily_state",
             "priority": 37,
-            "content": prompt_text("状态一", "状态二", separator="\n"),
+            "content": "状态一\n状态二",
             "chars": 7,
         }
     ]
@@ -144,6 +144,26 @@ def test_prompt_diagnostics_preserves_manifest_priority_and_typed_content() -> N
     assert modules[0]["priority"] == 37
     assert modules[0]["content"] == "状态一\n状态二"
     assert modules[0]["chars"] == 7
+
+
+def test_prompt_diagnostics_ignores_non_text_mapping_content() -> None:
+    harness = _PromptDiagnosticsHarness()
+    manifest = [
+        {
+            "key": "state.full",
+            "title": "完整模拟状态",
+            "source": "daily_state",
+            "content": prompt_text("状态一", "状态二", separator="\n"),
+        }
+    ]
+
+    modules = harness._normalize_prompt_injection_modules(
+        "不会用于反解析",
+        manifest,
+        legacy_heading_fallback=False,
+    )
+
+    assert modules == []
 
 
 @pytest.mark.asyncio

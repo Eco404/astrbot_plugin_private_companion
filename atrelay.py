@@ -128,14 +128,14 @@ from .logging_util import get_module_logger
 logger = get_module_logger(__name__)
 
 
-def _render_atrelay_prompt_section_compat(
+def _render_atrelay_prompt_section_labeled(
     section: PromptSection | None,
 ) -> str:
     if section is None:
         return ""
     return render_prompt_sections(
         [section],
-        mode=PromptRenderMode.LEGACY_BLOCK,
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
 
 
@@ -493,7 +493,7 @@ class AtRelayMixin:
         )
 
     def _atrelay_tool_instruction(self) -> str:
-        return _render_atrelay_prompt_section_compat(self._atrelay_tool_prompt_section())
+        return _render_atrelay_prompt_section_labeled(self._atrelay_tool_prompt_section())
 
     def _normalize_atrelay_relay_mode(self, value: Any) -> str:
         mode = _single_line(value, 24).lower()
@@ -1133,7 +1133,7 @@ class AtRelayMixin:
             current_text=current_text,
             limit=limit,
         )
-        return _render_atrelay_prompt_section_compat(section)
+        return _render_atrelay_prompt_section_labeled(section)
 
     def _format_recent_atrelay_context_prompt_section(
         self,

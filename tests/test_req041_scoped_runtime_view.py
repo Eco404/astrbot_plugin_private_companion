@@ -211,9 +211,9 @@ _ExpressionHarness._expression_voice_selection = _method_from(
         "runtime_persona_setting": runtime_persona_setting,
         "scoped_approved_expression_rules": scoped_approved_expression_rules,
         "prompt_section": prompt_section,
-        "_render_conversation_section_legacy": lambda section: render_prompt_sections(
+        "_render_conversation_section_labeled": lambda section: render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         ),
     },
 )

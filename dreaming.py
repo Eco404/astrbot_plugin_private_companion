@@ -13,7 +13,6 @@ from .persona_config import runtime_persona_setting
 from .conversation_prompt_section import (
     PromptRenderMode,
     PromptSection,
-    legacy_heading_token,
     prompt_section,
     render_prompt_sections,
 )
@@ -21,20 +20,6 @@ from .conversation_prompt_section import (
 
 def _render_dreaming_prompt(section: PromptSection) -> str:
     return render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY)
-
-
-def _render_dreaming_prompt_block(*, key: str, title: str, content: Any) -> str:
-    return render_prompt_sections(
-        [
-            prompt_section(
-                key=key,
-                title=title,
-                source="dreaming",
-                content=content,
-            )
-        ],
-        mode=PromptRenderMode.LEGACY_BLOCK,
-    )
 
 
 _ABSTRACT_DREAM_FRAGMENT_MARKERS = (
@@ -620,26 +605,57 @@ async def generate_enhanced_dream_pick(plugin, weather: dict[str, Any] | None = 
     if callable(formatter):
         worldview_adaptation = formatter()
     weather_text = plugin._weather_summary_text(weather or plugin.data.get("daily_weather", {}))
-    persona_block = _render_dreaming_prompt_block(
-        key="background.dream.generate.persona",
-        title="人格参考",
-        content=persona,
+    input_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.dream.generate.input",
+                title="本次输入",
+                source="dreaming",
+                content="",
+                children=(
+                    prompt_section(
+                        key="background.dream.generate.persona",
+                        title="人格参考",
+                        source="dreaming",
+                        content=persona,
+                    ),
+                ),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    input_block = legacy_heading_token("本次输入", newline=True) + persona_block
-    theme_block = _render_dreaming_prompt_block(
-        key="background.dream.generate.theme",
-        title="梦境主题",
-        content=f"{theme_name}：{theme_hint}",
+    theme_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.dream.generate.theme",
+                title="梦境主题",
+                source="dreaming",
+                content=f"{theme_name}：{theme_hint}",
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    fragments_block = _render_dreaming_prompt_block(
-        key="background.dream.generate.fragments",
-        title="碎片记忆",
-        content="\n".join(f"- {item}" for item in fragments),
+    fragments_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.dream.generate.fragments",
+                title="碎片记忆",
+                source="dreaming",
+                content="\n".join(f"- {item}" for item in fragments),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    weather_block = _render_dreaming_prompt_block(
-        key="background.dream.generate.weather",
-        title="天气",
-        content=weather_text,
+    weather_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.dream.generate.weather",
+                title="天气",
+                source="dreaming",
+                content=weather_text,
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
     prompt = prompt_section(
         key="background.dream.generate",
@@ -1102,38 +1118,74 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
     formatter = getattr(plugin, "_format_worldview_adaptation_prompt", None)
     if callable(formatter):
         worldview_adaptation = formatter()
-    input_block = _render_dreaming_prompt_block(
-        key="background.diary.generate.input",
-        title="本次输入",
-        content=f"日期：{today}",
+    input_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.diary.generate.input",
+                title="本次输入",
+                source="dreaming",
+                content=f"日期：{today}",
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    persona_block = _render_dreaming_prompt_block(
-        key="background.diary.generate.persona",
-        title="AstrBot 默认人格",
-        content=persona,
+    persona_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.diary.generate.persona",
+                title="AstrBot 默认人格",
+                source="dreaming",
+                content=persona,
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    identity_block = _render_dreaming_prompt_block(
-        key="background.diary.generate.identity",
-        title="生活身份补充",
-        content=schedule_persona or "（无）",
+    identity_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.diary.generate.identity",
+                title="生活身份补充",
+                source="dreaming",
+                content=schedule_persona or "（无）",
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    worldview_block = _render_dreaming_prompt_block(
-        key="background.diary.generate.worldview",
-        title="生活/世界观补充",
-        content=schedule_worldview or "（无）",
+    worldview_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.diary.generate.worldview",
+                title="生活/世界观补充",
+                source="dreaming",
+                content=schedule_worldview or "（无）",
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    evidence_block = _render_dreaming_prompt_block(
-        key="background.diary.generate.evidence",
-        title="今日经历账本",
-        content=evidence_text,
+    evidence_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.diary.generate.evidence",
+                title="今日经历账本",
+                source="dreaming",
+                content=evidence_text,
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    continuity_block = _render_dreaming_prompt_block(
-        key="background.diary.generate.continuity",
-        title="连续性记忆参考",
-        content=(
-            "以下内容只帮助保持关系、情绪和未完成线索的连贯，不是今天新发生的事件，也不是必须写入正文的清单：\n"
-            f"{continuity_memory_context or '（没有检索到足够相关的连续性记忆）'}"
-        ),
+    continuity_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.diary.generate.continuity",
+                title="连续性记忆参考",
+                source="dreaming",
+                content=(
+                    "以下内容只帮助保持关系、情绪和未完成线索的连贯，不是今天新发生的事件，也不是必须写入正文的清单：\n"
+                    f"{continuity_memory_context or '（没有检索到足够相关的连续性记忆）'}"
+                ),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
     prompt = prompt_section(
         key="background.diary.generate",

@@ -36,10 +36,35 @@ _PROMPT_RULE_DIRECT_SECTION_CALL = "direct_prompt_section_constructor"
 _PROMPT_RULE_LOOSE_SURFACE_ADD = "loose_prompt_surface_add"
 _PROMPT_RULE_LOOSE_PLAN_CALL = "loose_conversation_plan_call"
 _PROMPT_RULE_LEGACY_CONTROL_FLAG = "legacy_prompt_control_flag"
+_PROMPT_RULE_REMOVED_API = "removed_prompt_api"
+_PROMPT_RULE_DIRECT_REQUEST_WRITE = "direct_prompt_request_write"
+_PROMPT_RULE_SECTION_IN_CONTENT = "prompt_section_nested_in_content"
+_PROMPT_RULE_RAW_MAPPING_CONTENT = "raw_mapping_prompt_content"
 _LEGACY_HEADING_PATTERN = re.compile(r"【[^】\n]{1,100}】")
 _CONVERSATION_XML_PATTERN = re.compile(
     r"<private_companion_context\b|<section(?:\s|/?>)|<!\[CDATA\[",
     flags=re.I,
+)
+_REMOVED_PROMPT_SYMBOLS = frozenset(
+    {
+        "PhotoPromptSection",
+        "PromptValue",
+        "coerce_prompt_section",
+        "legacy_heading_token",
+        "prompt_value",
+        "render_prompt_section",
+        "render_partition_with_fragments",
+        "rendered_fragments",
+        "rendered_sections",
+    }
+)
+_REMOVED_PROMPT_METADATA = frozenset(
+    {
+        "legacy_heading_style",
+        "legacy_prefix",
+        "legacy_render_mode",
+        "legacy_separator_before",
+    }
 )
 
 def _prompt_allow(
@@ -68,18 +93,18 @@ _PROMPT_AUTHORING_ALLOWLIST: tuple[dict[str, object], ...] = (
     _prompt_allow(
         _PROMPT_RULE_LEGACY_HEADING,
         "conversation_prompt_section.py",
-        "legacy_heading_token",
+        "_plain_content",
         ("【{value}】",),
-        "canonical legacy heading token renderer",
-        "legacy heading wire format is retired",
+        "canonical typed heading-reference renderer",
+        "labeled background wire formats are retired",
     ),
     _prompt_allow(
         _PROMPT_RULE_LEGACY_HEADING,
         "conversation_prompt_section.py",
-        "_render_legacy",
+        "_render_labeled_section",
         ("【{value}】",),
-        "canonical LEGACY_BLOCK and LEGACY_INLINE renderer",
-        "legacy render modes are retired",
+        "canonical LABELED_BLOCK and LABELED_INLINE renderer",
+        "labeled background wire formats are retired",
     ),
     *(
         _prompt_allow(
@@ -93,10 +118,23 @@ _PROMPT_AUTHORING_ALLOWLIST: tuple[dict[str, object], ...] = (
         for owner in (
             "PromptSection.__deepcopy__",
             "prompt_section",
-            "coerce_prompt_section",
-            "_flatten_sections.append",
-            "render_prompt_section",
         )
+    ),
+    _prompt_allow(
+        _PROMPT_RULE_DIRECT_REQUEST_WRITE,
+        "conversation_injection_plan.py",
+        "ConversationInjectionPlan._render_system",
+        ("req.system_prompt",),
+        "canonical request-scoped system prompt renderer",
+        "the host provides a typed prompt placement API",
+    ),
+    _prompt_allow(
+        _PROMPT_RULE_DIRECT_REQUEST_WRITE,
+        "conversation_injection_plan.py",
+        "ConversationInjectionPlan.render_into",
+        ("req.prompt",),
+        "canonical request-scoped turn prompt renderer",
+        "the host provides a typed prompt placement API",
     ),
     *(
         _prompt_allow(
@@ -467,6 +505,12 @@ class _PromptAuthoringVisitor(ast.NodeVisitor):
         )
 
     def _check_text(self, node: ast.AST, text: str) -> None:
+        if text in _REMOVED_PROMPT_METADATA:
+            self._record(
+                rule=_PROMPT_RULE_REMOVED_API,
+                node=node,
+                token=text,
+            )
         for match in _LEGACY_HEADING_PATTERN.finditer(text):
             self._record(
                 rule=_PROMPT_RULE_LEGACY_HEADING,
@@ -491,6 +535,12 @@ class _PromptAuthoringVisitor(ast.NodeVisitor):
         node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> None:
         self.scope.append(node.name)
+        if node.name in _REMOVED_PROMPT_SYMBOLS:
+            self._record(
+                rule=_PROMPT_RULE_REMOVED_API,
+                node=node,
+                token=node.name,
+            )
         arguments = (
             *node.args.posonlyargs,
             *node.args.args,
@@ -531,12 +581,37 @@ class _PromptAuthoringVisitor(ast.NodeVisitor):
             self._check_text(node, composed)
         self.generic_visit(node)
 
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+        for alias in node.names:
+            if alias.name in _REMOVED_PROMPT_SYMBOLS:
+                self._record(
+                    rule=_PROMPT_RULE_REMOVED_API,
+                    node=node,
+                    token=alias.name,
+                )
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
+        if node.attr in {"LEGACY_BLOCK", "LEGACY_INLINE"}:
+            self._record(
+                rule=_PROMPT_RULE_REMOVED_API,
+                node=node,
+                token=node.attr,
+            )
+        self.generic_visit(node)
+
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         function_name = ""
         if isinstance(node.func, ast.Name):
             function_name = node.func.id
         elif isinstance(node.func, ast.Attribute):
             function_name = node.func.attr
+        if function_name in _REMOVED_PROMPT_SYMBOLS:
+            self._record(
+                rule=_PROMPT_RULE_REMOVED_API,
+                node=node,
+                token=function_name,
+            )
         if function_name == "prompt_section":
             keyword_names = {item.arg for item in node.keywords if item.arg}
             if node.args or not {"key", "title", "source"}.issubset(keyword_names):
@@ -545,12 +620,65 @@ class _PromptAuthoringVisitor(ast.NodeVisitor):
                     node=node,
                     token="positional arguments" if node.args else "missing key/title/source",
                 )
+            content_keyword = next(
+                (item for item in node.keywords if item.arg == "content"),
+                None,
+            )
+            if content_keyword is not None and isinstance(content_keyword.value, ast.Dict):
+                self._record(
+                    rule=_PROMPT_RULE_RAW_MAPPING_CONTENT,
+                    node=content_keyword.value,
+                    token="content={...}",
+                )
         elif function_name == "PromptSection":
             self._record(
                 rule=_PROMPT_RULE_DIRECT_SECTION_CALL,
                 node=node,
                 token="PromptSection constructor",
             )
+        elif function_name in {
+            "prompt_cdata",
+            "prompt_field",
+            "prompt_group",
+            "prompt_list",
+            "prompt_text",
+            "xml_element",
+        }:
+            nested_section = next(
+                (
+                    child
+                    for child in ast.walk(node)
+                    if child is not node
+                    and isinstance(child, ast.Call)
+                    and (
+                        (isinstance(child.func, ast.Name) and child.func.id == "prompt_section")
+                        or (
+                            isinstance(child.func, ast.Attribute)
+                            and child.func.attr == "prompt_section"
+                        )
+                    )
+                ),
+                None,
+            )
+            if nested_section is not None:
+                self._record(
+                    rule=_PROMPT_RULE_SECTION_IN_CONTENT,
+                    node=node,
+                    token=function_name,
+                )
+        if function_name == "setattr" and len(node.args) >= 2:
+            target, field = node.args[:2]
+            if (
+                isinstance(target, ast.Name)
+                and target.id in {"req", "request"}
+                and isinstance(field, ast.Constant)
+                and field.value in {"prompt", "system_prompt"}
+            ):
+                self._record(
+                    rule=_PROMPT_RULE_DIRECT_REQUEST_WRITE,
+                    node=node,
+                    token=f"{target.id}.{field.value}",
+                )
         if isinstance(node.func, ast.Attribute):
             receiver = ast.unparse(node.func.value)
             keyword_names = {item.arg for item in node.keywords if item.arg}
@@ -620,6 +748,32 @@ class _PromptAuthoringVisitor(ast.NodeVisitor):
                     if keyword.arg not in {"pattern", "flags"}:
                         self.visit(keyword.value)
                 return
+        self.generic_visit(node)
+
+    def _check_request_write_target(self, node: ast.AST, target: ast.AST) -> None:
+        if (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id in {"req", "request"}
+            and target.attr in {"prompt", "system_prompt"}
+        ):
+            self._record(
+                rule=_PROMPT_RULE_DIRECT_REQUEST_WRITE,
+                node=node,
+                token=f"{target.value.id}.{target.attr}",
+            )
+
+    def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
+        for target in node.targets:
+            self._check_request_write_target(node, target)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:  # noqa: N802
+        self._check_request_write_target(node, node.target)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:  # noqa: N802
+        self._check_request_write_target(node, node.target)
         self.generic_visit(node)
 
 

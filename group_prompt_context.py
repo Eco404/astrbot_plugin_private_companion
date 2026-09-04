@@ -622,18 +622,34 @@ def render_group_prompt_context(context: PromptSection | Mapping[str, Any]) -> s
     )
 
 
-def group_prompt_context_history_count(context: Mapping[str, Any] | None) -> int:
+def group_prompt_context_history_count(
+    context: PromptSection | Mapping[str, Any] | None,
+) -> int:
     """Return the number of concrete history messages in a structured section."""
 
-    if not isinstance(context, Mapping):
+    if isinstance(context, PromptSection):
+        root = context.content
+    elif isinstance(context, Mapping):
+        root = context.get("content")
+    else:
         return 0
-    root = context.get("content")
     if not isinstance(root, XmlElement) or root.tag != "group_context":
         return 0
-    for child in root.children:
-        if child.tag == "history":
-            return sum(1 for item in child.children if item.tag == "message")
-    return 0
+
+    def message_count(element: XmlElement) -> int:
+        if element.tag == "history":
+            return sum(
+                1
+                for item in element.children
+                if isinstance(item, XmlElement) and item.tag == "message"
+            )
+        return sum(
+            message_count(child)
+            for child in element.children
+            if isinstance(child, XmlElement)
+        )
+
+    return message_count(root)
 
 
 __all__ = [

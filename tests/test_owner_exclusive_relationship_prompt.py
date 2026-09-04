@@ -69,9 +69,13 @@ def _relationship_prompt_probe() -> type:
         "runtime_persona_setting": _runtime_persona_setting,
         "PromptSection": PromptSection,
         "prompt_section": prompt_section,
-        "_render_conversation_section_legacy": lambda section: render_prompt_sections(
-            [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+        "_render_conversation_section_labeled": lambda section: (
+            render_prompt_sections(
+                [section],
+                mode=PromptRenderMode.LABELED_BLOCK,
+            )
+            if section is not None
+            else ""
         ),
         "re": re,
         "unicodedata": unicodedata,

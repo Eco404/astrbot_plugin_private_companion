@@ -113,21 +113,21 @@ class CreativeReplyVisibilityTests(unittest.TestCase):
             "资料柜里有什么",
             {},
         )
-        self.assertEqual("资料柜创作区真实库存", section["title"])
+        self.assertEqual("资料柜创作区真实库存", section.title)
         self.assertEqual("creative.inventory_empty", section.key)
         self.assertEqual("daily_state", section.source)
-        self.assertNotIn("【资料柜创作区真实库存】", section["content"])
+        self.assertNotIn("【资料柜创作区真实库存】", section.content)
 
     def test_structured_creative_context_keeps_real_work_title(self):
         section = self.harness._format_hidden_creative_context_for_reply_prompt_section(
             "你写过书吗",
             {},
         )
-        self.assertEqual("私下创作近况", section["title"])
+        self.assertEqual("私下创作近况", section.title)
         self.assertEqual("creative.hidden_context", section.key)
         self.assertEqual("daily_state", section.source)
-        self.assertIn("标题：楼梯尽头", section["content"])
-        self.assertNotIn("标题：私下创作近况", section["content"])
+        self.assertIn("标题：楼梯尽头", section.content)
+        self.assertNotIn("标题：私下创作近况", section.content)
 
 
 if __name__ == "__main__":

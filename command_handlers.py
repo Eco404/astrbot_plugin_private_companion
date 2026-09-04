@@ -15,7 +15,13 @@ from typing import Any
 from astrbot.api.event import AstrMessageEvent
 
 from .constants import DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT
-from .conversation_prompt_section import PromptRenderMode, prompt_section, render_prompt_sections
+from .conversation_prompt_section import (
+    PhotoPromptContent,
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
 from .helpers import _flat_get, _missing_optional_model_dependency, _now_ts, _path_text, _photo_group_request_matches, _safe_float, _safe_int, _set_into_config, _single_line, _today_key
 from .logging_util import get_module_logger
 from .photo_generation_scope import PHOTO_GENERATION_SCOPE_LIMIT_KEYS
@@ -28,7 +34,6 @@ from .photo_reference_catalog import (
     load_catalog,
     validate_and_serialize,
 )
-from .photo_prompt_context import PhotoPromptSection
 from .persona_config import runtime_persona_setting
 from .runtime_config_dispatcher import dispatch_runtime_config_effects
 
@@ -3204,7 +3209,7 @@ class CommandHandlersMixin:
                             ),
                         )
                     ],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 )
             )
         index_lines: list[str] = []
@@ -3232,7 +3237,7 @@ class CommandHandlersMixin:
                             content="\n".join(index_lines),
                         )
                     ],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 )
             )
         return "\n\n".join(blocks)[:18000]
@@ -3335,7 +3340,7 @@ class CommandHandlersMixin:
                         content="\n".join(excerpt),
                     )
                 ],
-                mode=PromptRenderMode.LEGACY_BLOCK,
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
             if length + len(block) > max_chars:
                 remaining = max_chars - length
@@ -3561,7 +3566,7 @@ class CommandHandlersMixin:
         prompt = "\n\n".join(
             (
                 render_prompt_sections([instruction_section], mode=PromptRenderMode.BODY_ONLY),
-                render_prompt_sections(context_sections, mode=PromptRenderMode.LEGACY_BLOCK),
+                render_prompt_sections(context_sections, mode=PromptRenderMode.LABELED_BLOCK),
                 render_prompt_sections([output_section], mode=PromptRenderMode.BODY_ONLY),
             )
         )
@@ -4821,8 +4826,18 @@ class CommandHandlersMixin:
             has_reference=has_reference,
             memory_context=memory_context,
         )
-        combined_positive = ", ".join(section.positive for section in sections if section.positive)
-        combined_negative = ", ".join(section.negative for section in sections if section.negative)
+        combined_positive = ", ".join(
+            section.content.positive
+            for section in sections
+            if isinstance(section.content, PhotoPromptContent)
+            and section.content.positive
+        )
+        combined_negative = ", ".join(
+            section.content.negative
+            for section in sections
+            if isinstance(section.content, PhotoPromptContent)
+            and section.content.negative
+        )
         return _single_line(
             "Positive prompt: "
             + combined_positive
@@ -4839,7 +4854,7 @@ class CommandHandlersMixin:
         kind: str,
         has_reference: bool,
         memory_context: str = "",
-    ) -> tuple[PhotoPromptSection, ...]:
+    ) -> tuple[PromptSection, ...]:
         style_name, style_instruction = self._get_photo_style_instruction() if callable(getattr(self, "_get_photo_style_instruction", None)) else ("默认", "")
         style_prompt = (
             self._photo_style_prompt_en(style_name, style_instruction)
@@ -4980,52 +4995,72 @@ class CommandHandlersMixin:
                     ]
                 )
         sections = [
-            PhotoPromptSection(
-                name="user_request",
-                source="user_request",
-                positive=f"user request: {user_request}",
-                protected=True,
+            prompt_section(
+                key="photo.command.user_request",
+                title="user_request",
+                source="photo_prompt_context",
+                content=PhotoPromptContent(
+                    positive=f"user request: {user_request}",
+                    domain_source="user_request",
+                    protected=True,
+                ),
             )
         ]
         sections.append(
-            PhotoPromptSection(
-                name="natural_language_contract",
-                # This is a trusted workflow contract, not caller-supplied
-                # visual memory.  Freeze it for this task so the N-1 resolver
-                # cannot trim safety/composition rules as ambient context.
-                source="fixed_prompt",
-                positive=_single_line(
-                    ", ".join(
-                        part for part in positive if _single_line(part, 520)
+            prompt_section(
+                key="photo.command.natural_language_contract",
+                title="natural_language_contract",
+                source="photo_prompt_context",
+                content=PhotoPromptContent(
+                    # This is a trusted workflow contract, not caller-supplied
+                    # visual memory. Freeze it for this task so the N-1 resolver
+                    # cannot trim safety/composition rules as ambient context.
+                    positive=_single_line(
+                        ", ".join(
+                            part for part in positive if _single_line(part, 520)
+                        ),
+                        1400,
                     ),
-                    1400,
+                    negative=_single_line(", ".join(negative), 760),
+                    domain_source="fixed_prompt",
+                    protected=True,
                 ),
-                negative=_single_line(", ".join(negative), 760),
-                protected=True,
             )
         )
         if kind == "selfie":
             sections.append(
-                PhotoPromptSection(
-                    name="identity_continuity",
-                    source="visual_memory",
-                    positive=identity_continuity,
+                prompt_section(
+                    key="photo.command.identity_continuity",
+                    title="identity_continuity",
+                    source="photo_prompt_context",
+                    content=PhotoPromptContent(
+                        positive=identity_continuity,
+                        domain_source="visual_memory",
+                    ),
                 )
             )
         if visual_memory and kind != "edit":
             sections.append(
-                PhotoPromptSection(
-                    name="visual_memory",
-                    source="visual_memory",
-                    positive=f"visual continuity reference: {_single_line(visual_memory, 300)}",
+                prompt_section(
+                    key="photo.command.visual_memory",
+                    title="visual_memory",
+                    source="photo_prompt_context",
+                    content=PhotoPromptContent(
+                        positive=f"visual continuity reference: {_single_line(visual_memory, 300)}",
+                        domain_source="visual_memory",
+                    ),
                 )
             )
         if extra_prompt:
             sections.append(
-                PhotoPromptSection(
-                    name="natural_language_extra",
-                    source="fixed_prompt",
-                    positive=f"additional generation preference: {_single_line(extra_prompt, 420)}",
+                prompt_section(
+                    key="photo.command.natural_language_extra",
+                    title="natural_language_extra",
+                    source="photo_prompt_context",
+                    content=PhotoPromptContent(
+                        positive=f"additional generation preference: {_single_line(extra_prompt, 420)}",
+                        domain_source="fixed_prompt",
+                    ),
                 )
             )
         return tuple(sections)

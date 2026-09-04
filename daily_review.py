@@ -1626,8 +1626,6 @@ class DailyReviewMixin:
                 priority=20,
                 placement=PLACEMENT_DYNAMIC_SYSTEM,
             )
-        else:
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{text}".strip()
         recorder = getattr(self, "_record_request_prompt_fragment", None)
         if callable(recorder):
             try:

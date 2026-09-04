@@ -699,13 +699,13 @@ class IntegrationStatusMixin:
         rendered = [
             render_prompt_sections(
                 sections[:1],
-                mode=PromptRenderMode.LEGACY_BLOCK,
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
         ]
         rendered.extend(
             render_prompt_sections(
                 [section],
-                mode=PromptRenderMode.LEGACY_BLOCK,
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
             for section in sections[1:]
         )
@@ -721,7 +721,7 @@ class IntegrationStatusMixin:
 
     def _format_worldview_adaptation_prompt_sections(self) -> list[PromptSection]:
         section = self._format_worldview_adaptation_prompt_section()
-        if not str(section.get("content") or "").strip():
+        if not str(section.content or "").strip():
             return []
         sections = [section]
         knowledge_formatter = getattr(
@@ -737,7 +737,7 @@ class IntegrationStatusMixin:
             )
             if (
                 isinstance(knowledge_section, PromptSection)
-                and str(knowledge_section.get("content") or "").strip()
+                and str(knowledge_section.content or "").strip()
             ):
                 sections.append(knowledge_section)
         return sections
@@ -833,11 +833,11 @@ class IntegrationStatusMixin:
             return ""
         guidance = render_prompt_sections(
             sections[:1],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
         joke_boundary = render_prompt_sections(
             sections[1:],
-            mode=PromptRenderMode.LEGACY_INLINE,
+            mode=PromptRenderMode.LABELED_INLINE,
         )
         return "\n".join(part for part in (guidance, joke_boundary) if part)
 
@@ -1530,7 +1530,7 @@ class IntegrationStatusMixin:
         section = await self._format_environment_perception_prompt_section(event)
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     async def _format_environment_perception_prompt_section(

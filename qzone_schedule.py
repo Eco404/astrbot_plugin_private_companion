@@ -734,7 +734,7 @@ class QzoneScheduleMixin:
         rewrite_prompt = "\n\n".join(
             (
                 render_prompt_sections([prompt_section(key="qzone.length.instruction", title="说说字数改写", source="qzone_schedule", content=instruction)], mode=PromptRenderMode.BODY_ONLY),
-                render_prompt_sections([prompt_section(key="qzone.length.draft", title="原草稿", source="qzone_schedule", content=text)], mode=PromptRenderMode.LEGACY_BLOCK),
+                render_prompt_sections([prompt_section(key="qzone.length.draft", title="原草稿", source="qzone_schedule", content=text)], mode=PromptRenderMode.LABELED_BLOCK),
             )
         )
         try:
@@ -818,7 +818,7 @@ class QzoneScheduleMixin:
                         prompt_section(key="qzone.deduplicate.draft", title="原草稿", source="qzone_schedule", content=text),
                         prompt_section(key="qzone.deduplicate.context", title="原任务背景", source="qzone_schedule", content=_single_line(prompt, 600)),
                     ],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 ),
             )
         )
@@ -1028,7 +1028,7 @@ class QzoneScheduleMixin:
             if special_sections:
                 instruction_with_special += "\n" + render_prompt_sections(
                     special_sections,
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 )
             prompt = "\n\n".join(
                 part for part in (
@@ -1043,7 +1043,7 @@ class QzoneScheduleMixin:
                             prompt_section(key="qzone.publish.memory", title="我会牢牢记住你 公开可写生活参考", source="qzone_schedule", content=(memory_context or "暂无") + "\n使用方式：只选公开可写、不会泄露私聊或内部记忆来源的生活连续性。"),
                             prompt_section(key="qzone.publish.recent", title="最近说说去重", source="qzone_schedule", content=recent_publish_context or "暂无最近记录。"),
                         ],
-                        mode=PromptRenderMode.LEGACY_BLOCK,
+                        mode=PromptRenderMode.LABELED_BLOCK,
                     ),
                     relationship_authority_guard,
                     self._format_worldview_adaptation_prompt(),
@@ -1310,7 +1310,7 @@ class QzoneScheduleMixin:
                         prompt_section(key="qzone.emotional_vent.schedule", title="当前/附近日程", source="qzone_schedule", content=current_schedule_hint or "无明确日程"),
                         prompt_section(key="qzone.emotional_vent.reason", title="内部触发原因，只能作为情绪方向，禁止复述", source="qzone_schedule", content=reason or "情绪有点低落"),
                     ],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 ),
                 relationship_authority_guard,
                 self._format_worldview_adaptation_prompt(),

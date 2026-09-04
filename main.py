@@ -340,14 +340,14 @@ from .conversation_prompt_section import (
     ExactText,
     PromptRenderMode,
     PromptSection,
-    coerce_prompt_section,
     exact_text,
-    legacy_heading_token,
     prompt_cdata,
+    prompt_heading_ref,
     prompt_section,
+    render_prompt_content,
     render_prompt_sections,
 )
-from .prompt_surface import PromptSurface
+from .prompt_surface import CollectedPromptContext, PromptSurface
 from .passive_state_pipeline import inject_humanized_state as run_humanized_state_injection
 from .qzone_integration import QzoneMixin
 from .segmented_message import (
@@ -4315,14 +4315,14 @@ class PrivateCompanionPlugin(
         builder = getattr(integration, "format_health_prompt_section", None)
         if callable(builder):
             return builder(user, reason=reason)
-        legacy = integration.format_health_prompt(user, reason=reason)
-        if not legacy:
+        labeled = integration.format_health_prompt(user, reason=reason)
+        if not labeled:
             return None
         return prompt_section(
             key="health.care_hint",
             title="身体状态关心线索",
             source="body_monitor",
-            content=legacy,
+            content=labeled,
         )
 
     def plugin_identity_status(self) -> dict[str, Any]:
@@ -10952,7 +10952,7 @@ class PrivateCompanionPlugin(
         prompt = "\n\n".join(
             (
                 render_prompt_sections([intro_section], mode=PromptRenderMode.BODY_ONLY),
-                render_prompt_sections(context_sections, mode=PromptRenderMode.LEGACY_BLOCK),
+                render_prompt_sections(context_sections, mode=PromptRenderMode.LABELED_BLOCK),
                 render_prompt_sections([output_section], mode=PromptRenderMode.BODY_ONLY),
             )
         )
@@ -13275,7 +13275,7 @@ class PrivateCompanionPlugin(
         if marker in current_prompt or marker in current_turn_prompt:
             return
         environment_section = await self._format_environment_perception_prompt_section(event)
-        environment_injection = str(environment_section.get("content") or "")
+        environment_injection = str(environment_section.content or "")
         if environment_injection:
             placement = self._place_conversation_prompt_section(
                 req,
@@ -13283,9 +13283,6 @@ class PrivateCompanionPlugin(
                 environment_section,
                 priority=30,
             )
-            if placement == "none":
-                placement = "system_prompt"
-                req.system_prompt = f"{current_prompt}\n\n{marker}\n{environment_injection}".strip()
             await self._record_request_prompt_fragment(
                 event,
                 title="请求级环境感知注入",
@@ -13388,7 +13385,7 @@ class PrivateCompanionPlugin(
             return ""
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_proactive_voice_prompt_sections(self) -> list[PromptSection]:
@@ -13428,7 +13425,7 @@ class PrivateCompanionPlugin(
     def _format_proactive_voice_prompt(self) -> str:
         return render_prompt_sections(
             self._format_proactive_voice_prompt_sections(),
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_reply_style_prompt_section(self) -> PromptSection:
@@ -13470,7 +13467,7 @@ class PrivateCompanionPlugin(
         section = self._format_reply_style_prompt_section()
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     @staticmethod
@@ -13519,7 +13516,7 @@ class PrivateCompanionPlugin(
             return ""
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     async def _append_reply_style_to_request(
@@ -13558,9 +13555,6 @@ class PrivateCompanionPlugin(
             batch_section,
             priority=priority,
         )
-        if placement == "none":
-            placement = "system_prompt"
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{combined_prompt}".strip()
         await self._record_request_prompt_fragment(
             event,
             title="回复风格约束",
@@ -13619,7 +13613,7 @@ class PrivateCompanionPlugin(
             return ""
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     async def _append_group_high_intensity_reply_guard_to_request(
@@ -13645,9 +13639,6 @@ class PrivateCompanionPlugin(
             guard_section,
             priority=11,
         )
-        if placement == "none":
-            placement = "system_prompt"
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{guard_text}".strip()
         await self._record_request_prompt_fragment(
             event,
             title="群聊高强度短回复护栏",
@@ -14133,7 +14124,7 @@ class PrivateCompanionPlugin(
         marker = _single_line(marker, 120) or "<!-- private_companion_turn_fragment -->"
         plan = get_conversation_injection_plan(req)
         if plan is None:
-            return "none"
+            raise RuntimeError("conversation injection plan is unavailable")
         if not plan.contains_marker(marker):
             use_system_prompt = position == "system_prompt" and not force_dynamic
             plan.add(
@@ -14145,10 +14136,9 @@ class PrivateCompanionPlugin(
                     if use_system_prompt
                     else PLACEMENT_TURN_TAIL
                 ),
-                temporary=not use_system_prompt,
                 materialized=False,
             )
-        setattr(req, "_private_companion_turn_prompt_fragments", plan.legacy_turn_fragments())
+        setattr(req, "_private_companion_turn_prompt_fragments", plan.turn_fragments())
         plan.render_into(req, prefer_extra_user_content=True)
         if position == "system_prompt" and not force_dynamic:
             return "system_prompt"
@@ -14199,41 +14189,17 @@ class PrivateCompanionPlugin(
         """Materialize one authored system section without changing its wire shape."""
         if not isinstance(section, PromptSection):
             raise TypeError("conversation system block requires PromptSection")
-        visible_content = render_prompt_sections(
-            [section],
-            mode=(
-                PromptRenderMode.EXACT
-                if isinstance(section.content, ExactText)
-                else PromptRenderMode.CONVERSATION_XML
-            ),
-        )
         plan = get_conversation_injection_plan(req)
-        if plan is not None:
-            try:
-                return plan.materialize_system_block(
-                    req,
-                    section=section,
-                    marker=marker,
-                    priority=priority,
-                    placement=placement,
-                    metadata=metadata,
-                )
-            except RuntimeError as exc:
-                # AstrBot may freeze the request plan before a later hook runs.
-                # The marker is still safe to append directly once, preserving
-                # the wire prompt while avoiding a provider-facing hook failure.
-                if not plan.frozen:
-                    raise
-                current = str(getattr(req, "system_prompt", "") or "")
-                if marker in current:
-                    return False
-                rendered = f"{marker}\n{visible_content}".strip()
-                req.system_prompt = f"{current}\n\n{rendered}".strip() if current else rendered
-                return True
-        rendered = f"{marker}\n{visible_content}".strip()
-        current = str(getattr(req, "system_prompt", "") or "")
-        req.system_prompt = f"{current}\n\n{rendered}".strip() if current else rendered
-        return True
+        if plan is None:
+            raise RuntimeError("conversation injection plan is unavailable")
+        return plan.materialize_system_block(
+            req,
+            section=section,
+            marker=marker,
+            priority=priority,
+            placement=placement,
+            metadata=metadata,
+        )
 
     @staticmethod
     def _request_has_managed_prompt_marker(req: ProviderRequest, marker: str) -> bool:
@@ -14542,99 +14508,6 @@ class PrivateCompanionPlugin(
             len(repaired),
         )
 
-    def _remove_managed_turn_prompt_extra_part(self, req: ProviderRequest) -> None:
-        extra_parts = getattr(req, "extra_user_content_parts", None)
-        if not isinstance(extra_parts, list):
-            return
-        start_marker = "<!-- private_companion_turn_fragments_start -->"
-        end_marker = "<!-- private_companion_turn_fragments_end -->"
-        kept = []
-        for part in extra_parts:
-            text = ""
-            if isinstance(part, dict):
-                text = str(part.get("text") or part.get("content") or "")
-            else:
-                text = str(getattr(part, "text", "") or getattr(part, "content", "") or "")
-            if getattr(part, "_private_companion_turn_fragments", False):
-                continue
-            if start_marker in text and end_marker in text:
-                continue
-            kept.append(part)
-        req.extra_user_content_parts = kept
-
-    def _append_managed_turn_prompt_extra_part(self, req: ProviderRequest, text: str) -> bool:
-        content = str(text or "").strip()
-        if not content or TextPart is None:
-            return False
-        try:
-            extra_parts = getattr(req, "extra_user_content_parts", None)
-            if not isinstance(extra_parts, list):
-                req.extra_user_content_parts = []
-            part = TextPart(text=content)
-            mark_as_temp = getattr(part, "mark_as_temp", None)
-            if callable(mark_as_temp):
-                part = mark_as_temp()
-            try:
-                setattr(part, "_private_companion_turn_fragments", True)
-            except Exception:
-                pass
-            req.extra_user_content_parts.append(part)
-            setattr(req, "_private_companion_turn_prompt_placement", "extra_user_content_parts")
-            return True
-        except Exception as exc:
-            logger.debug("extra_user_content_parts 注入失败,回退 prompt: %s", _single_line(exc, 120))
-            return False
-
-    def _render_turn_prompt_fragments(self, req: ProviderRequest, *, prefer_extra_user_content: bool = False) -> bool:
-        plan = get_conversation_injection_plan(req, create=False)
-        if plan is not None:
-            plan.render_into(req, prefer_extra_user_content=prefer_extra_user_content)
-            return True
-        start_marker = "<!-- private_companion_turn_fragments_start -->"
-        end_marker = "<!-- private_companion_turn_fragments_end -->"
-        current = str(getattr(req, "prompt", "") or "")
-        base = re.sub(
-            rf"\n*\s*{re.escape(start_marker)}.*?{re.escape(end_marker)}\s*",
-            "\n\n",
-            current,
-            flags=re.DOTALL,
-        ).strip()
-        fragments = getattr(req, "_private_companion_turn_prompt_fragments", None)
-        if not isinstance(fragments, list) or not fragments:
-            setattr(req, "prompt", base)
-            self._remove_managed_turn_prompt_extra_part(req)
-            return True
-        seen_markers: set[str] = set()
-        seen_content: set[str] = set()
-        rendered_parts: list[str] = []
-        for item in sorted(
-            (frag for frag in fragments if isinstance(frag, dict)),
-            key=lambda frag: (_safe_int(frag.get("priority"), 50), _safe_int(frag.get("index"), 0)),
-        ):
-            marker = _single_line(item.get("marker"), 120)
-            content = str(item.get("content") or "").strip()
-            if not marker or not content:
-                continue
-            if marker in seen_markers or content in seen_content:
-                continue
-            seen_markers.add(marker)
-            seen_content.add(content)
-            rendered_parts.append(f"{marker}\n{content}")
-        if not rendered_parts:
-            setattr(req, "prompt", base)
-            self._remove_managed_turn_prompt_extra_part(req)
-            return True
-        managed = f"{start_marker}\n" + "\n\n".join(rendered_parts) + f"\n{end_marker}"
-        if prefer_extra_user_content:
-            setattr(req, "prompt", base)
-            self._remove_managed_turn_prompt_extra_part(req)
-            if self._append_managed_turn_prompt_extra_part(req, managed):
-                return True
-        setattr(req, "prompt", f"{base}\n\n{managed}".strip() if base else managed)
-        self._remove_managed_turn_prompt_extra_part(req)
-        setattr(req, "_private_companion_turn_prompt_placement", "prompt")
-        return True
-
     async def _record_request_prompt_fragment(
         self,
         event: AstrMessageEvent,
@@ -14682,7 +14555,10 @@ class PrivateCompanionPlugin(
             },
         )
 
-    async def _resolve_prompt_context_collector(self, spec: dict[str, Any]) -> dict[str, Any]:
+    async def _resolve_prompt_context_collector(
+        self,
+        spec: dict[str, Any],
+    ) -> CollectedPromptContext:
         key = _single_line(spec.get("key"), 80)
         title = _single_line(spec.get("title"), 80)
         source = _single_line(spec.get("source"), 80)
@@ -14699,64 +14575,26 @@ class PrivateCompanionPlugin(
             result = func()
             if asyncio.iscoroutine(result):
                 result = await asyncio.wait_for(result, timeout=timeout)
-            sections: list[PromptSection] = []
-            if isinstance(result, (list, tuple)):
-                for raw_section in result:
-                    resolved_section = coerce_prompt_section(raw_section)
-                    if resolved_section is None:
-                        continue
-                    section_content = render_prompt_sections(
-                        [resolved_section],
-                        mode=PromptRenderMode.BODY_ONLY,
-                    ).strip()
-                    if section_content:
-                        sections.append(
-                            prompt_section(
-                                key=resolved_section.key or f"{key}.{len(sections)}",
-                                title=resolved_section.title or title,
-                                source=resolved_section.source or source,
-                                content=resolved_section.content,
-                                children=resolved_section.children,
-                                metadata={**dict(resolved_section.metadata), **metadata},
-                            )
-                        )
-            section = coerce_prompt_section(result)
-            if section is not None:
-                content = render_prompt_sections(
-                    [section],
-                    mode=PromptRenderMode.BODY_ONLY,
-                ).strip()
-                if content:
-                    sections = [
-                        prompt_section(
-                            key=section.key or key,
-                            title=section.title or title,
-                            source=section.source or source,
-                            content=section.content,
-                            children=section.children,
-                            metadata={**dict(section.metadata), **metadata},
-                        )
-                    ]
-            elif sections:
-                content = "\n\n".join(
-                    render_prompt_sections(
-                        [item],
-                        mode=PromptRenderMode.BODY_ONLY,
-                    )
-                    for item in sections
-                )
+            if result is None:
+                sections: tuple[PromptSection, ...] = ()
+            elif isinstance(result, PromptSection):
+                sections = (result,)
+            elif isinstance(result, (list, tuple)) and all(
+                isinstance(item, PromptSection) for item in result
+            ):
+                sections = tuple(result)
             else:
-                content = str(result or "").strip()
-                if content:
-                    sections = [
-                        prompt_section(
-                            key=key,
-                            title=title,
-                            source=source,
-                            content=content,
-                            metadata=metadata,
-                        )
-                    ]
+                raise TypeError(
+                    f"prompt collector {key or source or 'unknown'} must return "
+                    "PromptSection, a PromptSection sequence, or None"
+                )
+            content = "\n\n".join(
+                render_prompt_sections(
+                    [item],
+                    mode=PromptRenderMode.BODY_ONLY,
+                )
+                for item in sections
+            ).strip()
             elapsed_ms = int((time.time() - started) * 1000)
             metadata.update(
                 {
@@ -14765,16 +14603,13 @@ class PrivateCompanionPlugin(
                     "字符数": len(content),
                 }
             )
-            return {
-                "key": key,
-                "title": title,
-                "source": source,
-                "priority": priority,
-                "content": content,
-                "sections": sections,
-                "metadata": metadata,
-                "status": "hit" if content else "empty",
-            }
+            return CollectedPromptContext(
+                key=key,
+                priority=priority,
+                sections=sections,
+                metadata=metadata,
+                status="hit" if content else "empty",
+            )
         except asyncio.TimeoutError:
             elapsed_ms = int((time.time() - started) * 1000)
             metadata.update({"耗时ms": elapsed_ms, "状态": "超时"})
@@ -14784,15 +14619,13 @@ class PrivateCompanionPlugin(
                 source or "-",
                 timeout,
             )
-            return {
-                "key": key,
-                "title": title,
-                "source": source,
-                "priority": priority,
-                "content": "",
-                "metadata": metadata,
-                "status": "timeout",
-            }
+            return CollectedPromptContext(
+                key=key,
+                priority=priority,
+                sections=(),
+                metadata=metadata,
+                status="timeout",
+            )
         except Exception as exc:
             elapsed_ms = int((time.time() - started) * 1000)
             metadata.update({"耗时ms": elapsed_ms, "状态": "失败", "错误": _single_line(exc, 120)})
@@ -14802,65 +14635,43 @@ class PrivateCompanionPlugin(
                 source or "-",
                 _single_line(exc, 120),
             )
-            return {
-                "key": key,
-                "title": title,
-                "source": source,
-                "priority": priority,
-                "content": "",
-                "metadata": metadata,
-                "status": "error",
-            }
+            return CollectedPromptContext(
+                key=key,
+                priority=priority,
+                sections=(),
+                metadata=metadata,
+                status="error",
+            )
 
-    async def _collect_prompt_contexts_parallel(self, specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def _collect_prompt_contexts_parallel(
+        self,
+        specs: list[dict[str, Any]],
+    ) -> list[CollectedPromptContext]:
         tasks = [self._resolve_prompt_context_collector(spec) for spec in specs if isinstance(spec, dict)]
         if not tasks:
             return []
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        collected: list[dict[str, Any]] = []
+        collected: list[CollectedPromptContext] = []
         for result in results:
-            if isinstance(result, dict):
+            if isinstance(result, CollectedPromptContext):
                 collected.append(result)
             elif isinstance(result, Exception):
                 logger.debug("请求上下文并行收集出现未捕获异常: %s", _single_line(result, 120))
         return collected
 
-    def _add_collected_prompt_contexts(self, prompt_surface: PromptSurface, collected: list[dict[str, Any]]) -> None:
-        for item_index, item in enumerate(collected):
-            if not isinstance(item, dict):
-                continue
-            sections = item.get("sections")
-            if isinstance(sections, list) and sections:
-                for index, raw_section in enumerate(sections):
-                    section = coerce_prompt_section(raw_section)
-                    if section is None or not render_prompt_sections(
-                        [section],
-                        mode=PromptRenderMode.BODY_ONLY,
-                    ).strip():
-                        continue
-                    prompt_surface.add(
-                        section,
-                        priority=_safe_int(item.get("priority"), 100, 0) + index,
-                    )
-                continue
-            content = str(item.get("content") or "").strip()
-            if not content:
-                continue
-            prompt_surface.add(
-                prompt_section(
-                    key=_single_line(item.get("key"), 80)
-                    or f"collector.fragment.{item_index}",
-                    title=_single_line(item.get("title"), 80) or "提示词片段",
-                    source=_single_line(item.get("source"), 80) or "collector",
-                    content=content,
-                    metadata=(
-                        item.get("metadata")
-                        if isinstance(item.get("metadata"), dict)
-                        else {}
-                    ),
-                ),
-                priority=_safe_int(item.get("priority"), 100, 0),
-            )
+    def _add_collected_prompt_contexts(
+        self,
+        prompt_surface: PromptSurface,
+        collected: list[CollectedPromptContext],
+    ) -> None:
+        for item in collected:
+            for index, section in enumerate(item.sections):
+                if not render_prompt_sections(
+                    [section],
+                    mode=PromptRenderMode.BODY_ONLY,
+                ).strip():
+                    continue
+                prompt_surface.add(section, priority=item.priority + index)
 
     def _expression_profile_prompt_metadata(
         self,
@@ -14896,7 +14707,7 @@ class PrivateCompanionPlugin(
         inbound_text: str,
         current_user: dict[str, Any],
         is_private_chat: bool,
-    ) -> list[dict[str, Any]]:
+    ) -> list[CollectedPromptContext]:
         specs: list[dict[str, Any]] = []
 
         def add_spec(
@@ -14946,10 +14757,19 @@ class PrivateCompanionPlugin(
             )
         )
 
-        async def current_state_memory_context() -> str:
+        async def current_state_memory_context() -> PromptSection:
+            def empty_section() -> PromptSection:
+                return prompt_section(
+                    key="memory.current_state",
+                    title="我会牢牢记住你 当前状态参考",
+                    source="memory_companion",
+                    content="",
+                    metadata={"范围": "当前私聊会话", "触发": "当前状态问答"},
+                )
+
             composer = getattr(self, "_memory_companion_compose_feature_context", None)
             if not callable(composer):
-                return ""
+                return empty_section()
             current_state_memory = await composer(
                 kind="current_state_reply",
                 query=(
@@ -14965,12 +14785,18 @@ class PrivateCompanionPlugin(
             )
             current_state_memory = str(current_state_memory or "").strip()
             if not current_state_memory:
-                return ""
-            return (
-                f"{current_state_memory}\n"
-                "使用方式：只把它当作回答当前状态、穿搭、吃饭、日程连续性的辅助证据；"
-                "优先服从本轮状态注入和当前会话中明确发生的时间线。尤其是近期明确换装、换地点或动作变化，"
-                "高于每日穿搭、旧日程和旧记忆，不得被它们覆盖。不要说“我查到/记忆里”。"
+                return empty_section()
+            return prompt_section(
+                key="memory.current_state",
+                title="我会牢牢记住你 当前状态参考",
+                source="memory_companion",
+                content=(
+                    f"{current_state_memory}\n"
+                    "使用方式：只把它当作回答当前状态、穿搭、吃饭、日程连续性的辅助证据；"
+                    "优先服从本轮状态注入和当前会话中明确发生的时间线。尤其是近期明确换装、换地点或动作变化，"
+                    "高于每日穿搭、旧日程和旧记忆，不得被它们覆盖。不要说“我查到/记忆里”。"
+                ),
+                metadata={"范围": "当前私聊会话", "触发": "当前状态问答"},
             )
 
         if is_private_chat and current_state_memory_needed:
@@ -15012,7 +14838,6 @@ class PrivateCompanionPlugin(
             lambda: self._format_bookshelf_secret_prompt_section(inbound_text, current_user),
             timeout=1.2,
         )
-        add_spec("bookshelf.reading", "资料柜阅读连续性", "bookshelf", 62, lambda: self._format_bookshelf_reading_context_for_reply(inbound_text, current_user))
         add_spec(
             "news.recent",
             "新闻阅读上下文",
@@ -15147,9 +14972,9 @@ class PrivateCompanionPlugin(
                     metadata={"范围": "全局抽象表达底色", "目标": expression_user_id},
                 )
 
-        async def timer_context() -> str:
+        async def timer_context() -> PromptSection | None:
             if not (self.enable_llm_timer_scheduling and is_private_chat):
-                return ""
+                return None
             try:
                 target_user_id = str(event.get_sender_id())
             except Exception:
@@ -15158,11 +14983,11 @@ class PrivateCompanionPlugin(
             if callable(resolver) and target_user_id:
                 target_user_id = resolver(event, target_user_id)
             if not target_user_id:
-                return ""
+                return None
             async with self._data_lock:
                 timer_user = dict(self._get_user(target_user_id))
                 enabled = bool(timer_user.get("enabled"))
-            return self._format_timer_scheduling_prompt_section(timer_user) if enabled else ""
+            return self._format_timer_scheduling_prompt_section(timer_user) if enabled else None
 
         add_spec("timer.scheduling", "临时预约与动作回访", "timer", 95, timer_context, timeout=0.5)
         return await self._collect_prompt_contexts_parallel(specs)
@@ -15179,7 +15004,7 @@ class PrivateCompanionPlugin(
         )
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     async def _format_passive_environment_prompt_section(
@@ -15243,8 +15068,15 @@ class PrivateCompanionPlugin(
         )
         if callable(platform_boundary_getter):
             platform_boundary = platform_boundary_getter(event)
-            resolved_boundary = coerce_prompt_section(platform_boundary)
-            if resolved_boundary is not None and str(resolved_boundary.content or "").strip():
+            if platform_boundary is not None and not isinstance(
+                platform_boundary,
+                PromptSection,
+            ):
+                raise TypeError("platform capability prompt must return PromptSection or None")
+            if isinstance(platform_boundary, PromptSection) and render_prompt_sections(
+                [platform_boundary],
+                mode=PromptRenderMode.BODY_ONLY,
+            ).strip():
                 boundary_sections.append(platform_boundary)
         boundary = render_prompt_sections(boundary_sections)
         boundary_batch = prompt_section(
@@ -15336,11 +15168,6 @@ class PrivateCompanionPlugin(
             section,
             priority=priority,
         )
-        if placement == "none":
-            current = str(getattr(req, "system_prompt", "") or "")
-            rendered = f"{marker}\n{visible}".strip()
-            req.system_prompt = f"{current}\n\n{rendered}".strip() if current else rendered
-            placement = "system_prompt"
         return placement, visible, authored
 
     async def _append_conditional_tool_instructions_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
@@ -15883,7 +15710,7 @@ class PrivateCompanionPlugin(
         section = self._format_private_routine_check_boundary_section(text)
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_private_routine_check_boundary_section(
@@ -16044,7 +15871,7 @@ class PrivateCompanionPlugin(
         )
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_private_passive_state_snapshot_section(
@@ -16155,7 +15982,7 @@ class PrivateCompanionPlugin(
         )
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_external_realtime_context_body(
@@ -16245,7 +16072,7 @@ class PrivateCompanionPlugin(
         section = self._private_passive_state_reply_policy_section()
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _private_passive_state_reply_policy_section(self) -> PromptSection:
@@ -16273,7 +16100,7 @@ class PrivateCompanionPlugin(
         )
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_private_passive_state_continuity_anchor_section(
@@ -16483,7 +16310,7 @@ class PrivateCompanionPlugin(
             "\n".join(
                 render_prompt_sections(
                     [section],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 )
                 for section in sections
             ),
@@ -16523,17 +16350,14 @@ class PrivateCompanionPlugin(
             return ""
 
         marker = "<!-- private_companion_period_boundary_v1 -->"
-        current_prompt = str(getattr(req, "system_prompt", "") or "")
         if self._request_has_managed_prompt_marker(req, marker):
             return boundary
-        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+        placement = self._place_conversation_prompt_section(
             req,
             marker,
             boundary_section,
             priority=89,
-        ) else "system_prompt"
-        if placement == "system_prompt":
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{boundary}".strip()
+        )
         await self._record_request_prompt_fragment(
             event,
             title="群聊经期互动边界",
@@ -16565,15 +16389,12 @@ class PrivateCompanionPlugin(
         marker = "<!-- private_companion_period_boundary_v1 -->"
         if self._request_has_managed_prompt_marker(req, marker):
             return boundary
-        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+        placement = self._place_conversation_prompt_section(
             req,
             marker,
             boundary_section,
             priority=89,
-        ) else "system_prompt"
-        if placement == "system_prompt":
-            current_prompt = str(getattr(req, "system_prompt", "") or "")
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{boundary}".strip()
+        )
         await self._record_request_prompt_fragment(
             event,
             title="私聊经期互动边界",
@@ -16621,7 +16442,7 @@ class PrivateCompanionPlugin(
             ]
         return render_prompt_sections(
             sections,
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_group_persona_denoise_body(
@@ -16758,9 +16579,6 @@ class PrivateCompanionPlugin(
             denoise_batch,
             priority=32,
         )
-        if placement == "none":
-            placement = "system_prompt"
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{denoise_text}".strip()
         await self._record_request_prompt_fragment(
             event,
             title="群聊人格降噪注入",
@@ -16967,7 +16785,7 @@ class PrivateCompanionPlugin(
             return ""
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _parse_direct_atrelay_request(self, text: str) -> dict[str, Any]:
@@ -17282,9 +17100,6 @@ class PrivateCompanionPlugin(
             summary_section,
             priority=86,
         )
-        if placement == "none":
-            placement = "system_prompt"
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{summary}".strip()
         await self._record_request_prompt_fragment(
             event,
             title="本轮转述目标摘要",
@@ -17334,9 +17149,6 @@ class PrivateCompanionPlugin(
             mention_section,
             priority=58,
         )
-        if placement == "none":
-            placement = "system_prompt"
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{mention_text}".strip()
         await self._record_request_prompt_fragment(
             event,
             title="本轮关系网提及注入",
@@ -17762,14 +17574,12 @@ class PrivateCompanionPlugin(
             source="daily_state",
             content=backlog_prompt,
         )
-        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+        placement = self._place_conversation_prompt_section(
             req,
             marker,
             backlog_section,
             priority=25,
-        ) else "system_prompt"
-        if placement == "system_prompt":
-            req.system_prompt = f"{req.system_prompt or ''}\n\n{marker}\n{backlog_prompt}".strip()
+        )
         await self._record_request_prompt_fragment(
             event,
             title="醒后补看私聊",
@@ -19212,7 +19022,8 @@ class PrivateCompanionPlugin(
         ).strip()
         annotated = (
             f"{description}\n\n{marker}\n"
-            f"{legacy_heading_token('提示词表达方式')}prompt 参数必须按下述格式书写：{instruction}\n"
+            f"{render_prompt_content(prompt_heading_ref('提示词表达方式'))}"
+            f"prompt 参数必须按下述格式书写：{instruction}\n"
             f"{marker}"
         ).strip()
         contract_section = prompt_section(
@@ -19231,7 +19042,6 @@ class PrivateCompanionPlugin(
                 marker=marker,
                 priority=10,
                 placement=PLACEMENT_TOOL_CONTRACT,
-                temporary=True,
                 materialized=True,
                 merge_policy="replace",
             )
@@ -20311,7 +20121,7 @@ class PrivateCompanionPlugin(
             )
             return render_prompt_sections(
                 sections,
-                mode=PromptRenderMode.LEGACY_BLOCK,
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
         if normalized in {"回复注入", "reply", "injection"}:
             await self._refresh_default_persona_prompt(getattr(event, "unified_msg_origin", "") if event is not None else "")

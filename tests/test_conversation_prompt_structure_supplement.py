@@ -67,7 +67,12 @@ class _WorldviewHarness(IntegrationStatusMixin):
 
     @staticmethod
     def _format_roleplay_knowledge_context_section(**_kwargs):
-        return prompt_section("AstrBot 知识库世界观参考", "世界资料")
+        return prompt_section(
+            key="worldview.astrbot_knowledge",
+            title="AstrBot 知识库世界观参考",
+            source="test",
+            content="世界资料",
+        )
 
 
 class _KnowledgeHarness(AstrBotKnowledgeMixin):
@@ -150,7 +155,12 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
         self.assertEqual("platform_compat", section.source)
         rendered = render_prompt_sections(
             [
-                prompt_section("能力边界", "通用能力约束"),
+                prompt_section(
+                    key="guard.capability_boundary",
+                    title="能力边界",
+                    source="test",
+                    content="通用能力约束",
+                ),
                 section,
             ]
         )
@@ -271,7 +281,12 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
             legacy = harness._format_recent_group_messages_for_private_image_prompt("user-1")
             rendered = render_prompt_sections(
                 [
-                    prompt_section("本轮图片回复边界", "优先回应当前图片。"),
+                    prompt_section(
+                        key="private.image_reply_boundary",
+                        title="本轮图片回复边界",
+                        source="test",
+                        content="优先回应当前图片。",
+                    ),
                     harness._format_recent_group_messages_for_private_image_prompt_section("user-1"),
                 ]
             )
@@ -283,7 +298,14 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
 
     def test_user_bracket_text_is_preserved(self) -> None:
         rendered = render_prompt_sections(
-            [prompt_section("引用内容", "用户原话是【这个括号要保留】")]
+            [
+                prompt_section(
+                    key="turn.quote",
+                    title="引用内容",
+                    source="test",
+                    content="用户原话是【这个括号要保留】",
+                )
+            ]
         )
 
         self.assertIn("【这个括号要保留】", rendered)

@@ -6,7 +6,10 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from astrbot_plugin_private_companion.conversation_prompt_section import prompt_section
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    prompt_section,
+    render_prompt_sections,
+)
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 from astrbot_plugin_private_companion.prompt_surface import PromptSurface
 
@@ -307,14 +310,19 @@ class CycleReplyContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(first_update[0])
         self.assertEqual(second_update, ("", False, "unchanged_light"))
-        self.assertIn("明确地拒绝或推迟", first_surface.render())
-        self.assertIn("明确地拒绝或推迟", second_surface.render())
-        second_fragment = second_surface.rendered_fragments()[0]
-        self.assertEqual(second_fragment["key"], "state.period_boundary")
-        self.assertEqual(second_fragment["priority"], 89)
+        first_rendered = render_prompt_sections(first_surface.sections())
+        second_rendered = render_prompt_sections(second_surface.sections())
+        self.assertIn("明确地拒绝或推迟", first_rendered)
+        self.assertIn("明确地拒绝或推迟", second_rendered)
+        second_fragment = second_surface.fragments()[0]
+        self.assertEqual(second_fragment.key, "state.period_boundary")
+        self.assertEqual(second_fragment.priority, 89)
         self.assertEqual(anchored_update[1:], (False, "continuity_anchor"))
         self.assertIn("【Bot 当下连续性】", anchored_update[0])
-        self.assertIn("明确地拒绝或推迟", anchored_surface.render())
+        self.assertIn(
+            "明确地拒绝或推迟",
+            render_prompt_sections(anchored_surface.sections()),
+        )
 
     def test_unchanged_private_state_gets_bounded_continuity_anchor_when_opted_in(
         self,

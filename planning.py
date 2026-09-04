@@ -16,9 +16,10 @@ from .conversation_prompt_section import (
     PromptDocument,
     PromptRenderMode,
     PromptSection,
-    legacy_heading_token,
     prompt_document,
+    prompt_heading_ref,
     prompt_section,
+    render_prompt_content,
     render_prompt_document,
     render_prompt_sections,
 )
@@ -32,20 +33,6 @@ def _render_planning_prompt(section: PromptSection) -> str:
 
 def _render_planning_document(document: PromptDocument) -> dict[str, str]:
     return render_prompt_document(document, mode=PromptRenderMode.BODY_ONLY)
-
-
-def _render_planning_prompt_block(*, key: str, title: str, content: Any) -> str:
-    return render_prompt_sections(
-        [
-            prompt_section(
-                key=key,
-                title=title,
-                source="planning",
-                content=content,
-            )
-        ],
-        mode=PromptRenderMode.LEGACY_BLOCK,
-    )
 
 
 def split_detail_prompt_cache_sections(prompt: str) -> tuple[str, str]:
@@ -99,10 +86,16 @@ async def generate_detail_enhancement(
     )
     if external_material:
         memory_companion_context = (memory_companion_context or "") + "\n\n" + (
-            _render_planning_prompt_block(
-                key="background.schedule.detail.external_material",
-                title="外部插件提供的今日实况（仅作生活素材，不得视为既定事实）",
-                content=external_material,
+            render_prompt_sections(
+                [
+                    prompt_section(
+                        key="background.schedule.detail.external_material",
+                        title="外部插件提供的今日实况（仅作生活素材，不得视为既定事实）",
+                        source="planning",
+                        content=external_material,
+                    )
+                ],
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
         )
     full_prompt_section = prompt_section(
@@ -157,14 +150,19 @@ async def generate_detail_enhancement(
             key="background.schedule.detail.retry",
             title="日程细化纠偏",
             source="planning",
-            content=(
-            rendered_detail["user"]
-            + "\n\n"
-            + legacy_heading_token("额外纠偏", newline=True)
-            + f"上一版存在这些问题：{'；'.join(quality_issues)}。"
-            + f"请重新输出 JSON。today_events 必须至少包含 {target_event_count} 条落在当前时间段内的小事件，分布在开头、中段和后段，最后一条要自然接近本段收尾。"
-            + "summary 必须概括完整区间；短时吃饭、洗澡、取物不能代表数小时。不要复述宏观日程原句，要拆成这一段内部自然发生的连续推进。"
-            + "如果这一段很平淡，也要写平淡中的具体变化，例如停顿、换事、身体感受、环境变化和收尾；不要输出草稿字段、Markdown 或角色台词前缀。"
+            content=rendered_detail["user"],
+            children=(
+                prompt_section(
+                    key="background.schedule.detail.retry.correction",
+                    title="额外纠偏",
+                    source="planning",
+                    content=(
+                        f"上一版存在这些问题：{'；'.join(quality_issues)}。"
+                        f"请重新输出 JSON。today_events 必须至少包含 {target_event_count} 条落在当前时间段内的小事件，分布在开头、中段和后段，最后一条要自然接近本段收尾。"
+                        "summary 必须概括完整区间；短时吃饭、洗澡、取物不能代表数小时。不要复述宏观日程原句，要拆成这一段内部自然发生的连续推进。"
+                        "如果这一段很平淡，也要写平淡中的具体变化，例如停顿、换事、身体感受、环境变化和收尾；不要输出草稿字段、Markdown 或角色台词前缀。"
+                    ),
+                ),
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -758,10 +756,16 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
     )
     if external_material:
         memory_companion_context = (memory_companion_context or "") + "\n\n" + (
-            _render_planning_prompt_block(
-                key="background.schedule.daily_plan.external_material",
-                title="外部插件提供的今日实况（仅作生活素材，不得视为既定事实）",
-                content=external_material,
+            render_prompt_sections(
+                [
+                    prompt_section(
+                        key="background.schedule.daily_plan.external_material",
+                        title="外部插件提供的今日实况（仅作生活素材，不得视为既定事实）",
+                        source="planning",
+                        content=external_material,
+                    )
+                ],
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
         )
     prompt_section_value = prompt_section(
@@ -792,12 +796,17 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             key="background.schedule.daily_plan.retry_format",
             title="日程输出格式纠偏",
             source="planning",
-            content=(
-            prompt
-            + "\n\n"
-            + legacy_heading_token("输出格式纠偏", newline=True)
-            + "上一版没有得到可解析的完整日程。请重新输出一个完整 JSON 对象，只保留 schedule 数组，"
-            + "不得使用 Markdown 代码块、解释、前后缀或截断的字段；每一项必须包含 time、end、activity、mood、message_seed、basis、confidence。"
+            content=prompt,
+            children=(
+                prompt_section(
+                    key="background.schedule.daily_plan.retry_format.correction",
+                    title="输出格式纠偏",
+                    source="planning",
+                    content=(
+                        "上一版没有得到可解析的完整日程。请重新输出一个完整 JSON 对象，只保留 schedule 数组，"
+                        "不得使用 Markdown 代码块、解释、前后缀或截断的字段；每一项必须包含 time、end、activity、mood、message_seed、basis、confidence。"
+                    ),
+                ),
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -815,13 +824,18 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             key="background.schedule.daily_plan.retry_micro_segments",
             title="日程瞬时动作纠偏",
             source="planning",
-            content=(
-            prompt
-            + "\n\n"
-            + legacy_heading_token("额外纠偏", newline=True)
-            + "每个日程段都应该代表一小段连续生活,而不是一个几秒钟就结束的动作。"
-            + "不要把“看一眼、拍一下、翻个身、关掉闹钟”这种瞬时动作单独立成一项；"
-            + "如果要写到这些动作,要把它们嵌进更完整的时段里,比如“起床后赖床一会儿,顺手看了一眼窗外”。"
+            content=prompt,
+            children=(
+                prompt_section(
+                    key="background.schedule.daily_plan.retry_micro_segments.correction",
+                    title="额外纠偏",
+                    source="planning",
+                    content=(
+                        "每个日程段都应该代表一小段连续生活,而不是一个几秒钟就结束的动作。"
+                        "不要把“看一眼、拍一下、翻个身、关掉闹钟”这种瞬时动作单独立成一项；"
+                        "如果要写到这些动作,要把它们嵌进更完整的时段里,比如“起床后赖床一会儿,顺手看了一眼窗外”。"
+                    ),
+                ),
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -839,12 +853,17 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             key="background.schedule.daily_plan.retry_abstract_segments",
             title="日程抽象描述纠偏",
             source="planning",
-            content=(
-            prompt
-            + "\n\n"
-            + legacy_heading_token("额外纠偏", newline=True)
-            + "减少“漂亮但空”的句子。不要只写“思绪飘忽、梦里全是模糊碎片、心情随着光线变软、脑海里闪过今天的画面”这类抽象描述；"
-            + "每个日程段都先给出一个能看见的动作、位置或手边的小东西，再让情绪贴在上面。"
+            content=prompt,
+            children=(
+                prompt_section(
+                    key="background.schedule.daily_plan.retry_abstract_segments.correction",
+                    title="额外纠偏",
+                    source="planning",
+                    content=(
+                        "减少“漂亮但空”的句子。不要只写“思绪飘忽、梦里全是模糊碎片、心情随着光线变软、脑海里闪过今天的画面”这类抽象描述；"
+                        "每个日程段都先给出一个能看见的动作、位置或手边的小东西，再让情绪贴在上面。"
+                    ),
+                ),
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -862,12 +881,17 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             key="background.schedule.daily_plan.retry_calendar",
             title="日程日期性质纠偏",
             source="planning",
-            content=(
-            prompt
-            + "\n\n"
-            + legacy_heading_token("额外纠偏", newline=True)
-            + "今天属于周末或节假日语境。除非上面的设定、重要日期或备注明确写了调休、补课、补班、考试、值班等例外，"
-            + "否则不要安排上课、放学、作业、教室、食堂、上班、下班、会议这类普通工作日主线。"
+            content=prompt,
+            children=(
+                prompt_section(
+                    key="background.schedule.daily_plan.retry_calendar.correction",
+                    title="额外纠偏",
+                    source="planning",
+                    content=(
+                        "今天属于周末或节假日语境。除非上面的设定、重要日期或备注明确写了调休、补课、补班、考试、值班等例外，"
+                        "否则不要安排上课、放学、作业、教室、食堂、上班、下班、会议这类普通工作日主线。"
+                    ),
+                ),
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -885,13 +909,18 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             key="background.schedule.daily_plan.retry_repetition",
             title="日程重复纠偏",
             source="planning",
-            content=(
-            prompt
-            + "\n\n"
-            + legacy_heading_token("额外纠偏", newline=True)
-            + "你刚才生成的全天日程和最近几天的日程骨架过于相似。请保留今天的日期语境、人格设定、天气和状态,但换一条新的日内主线。"
-            + "不要再写同一套“起床洗漱-整理小事-专注做事-休息-收尾睡觉”；至少一半时间点的场景、对象、占用事项或小意外要和最近日程不同。"
-            + "如果今天确实有固定事项,也要改变切入角度、地点、阻碍、同行/独处状态或情绪走向。"
+            content=prompt,
+            children=(
+                prompt_section(
+                    key="background.schedule.daily_plan.retry_repetition.correction",
+                    title="额外纠偏",
+                    source="planning",
+                    content=(
+                        "你刚才生成的全天日程和最近几天的日程骨架过于相似。请保留今天的日期语境、人格设定、天气和状态,但换一条新的日内主线。"
+                        "不要再写同一套“起床洗漱-整理小事-专注做事-休息-收尾睡觉”；至少一半时间点的场景、对象、占用事项或小意外要和最近日程不同。"
+                        "如果今天确实有固定事项,也要改变切入角度、地点、阻碍、同行/独处状态或情绪走向。"
+                    ),
+                ),
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -916,13 +945,18 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             key="background.schedule.daily_plan.retry_quality",
             title="日程质量复核",
             source="planning",
-            content=(
-            prompt
-            + "\n\n"
-            + legacy_heading_token("日程质量复核", newline=True)
-            + "上一版仍存在这些问题："
-            + "；".join(str(issue) for issue in quality.get("issues", [])[:6])
-            + "。请保留可靠事实，重新输出完整 JSON；修正起止时间、覆盖空档、活动时长和日期冲突，不要只改措辞。"
+            content=prompt,
+            children=(
+                prompt_section(
+                    key="background.schedule.daily_plan.retry_quality.correction",
+                    title="日程质量复核",
+                    source="planning",
+                    content=(
+                        "上一版仍存在这些问题："
+                        + "；".join(str(issue) for issue in quality.get("issues", [])[:6])
+                        + "。请保留可靠事实，重新输出完整 JSON；修正起止时间、覆盖空档、活动时长和日期冲突，不要只改措辞。"
+                    ),
+                ),
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -1009,18 +1043,30 @@ def _build_schedule_reference_sections(
     identity_parts = []
     if schedule_persona:
         identity_parts.append(
-            _render_planning_prompt_block(
-                key="background.schedule.reference.persona",
-                title="日程专用角色设定",
-                content=schedule_persona,
+            render_prompt_sections(
+                [
+                    prompt_section(
+                        key="background.schedule.reference.persona",
+                        title="日程专用角色设定",
+                        source="planning",
+                        content=schedule_persona,
+                    )
+                ],
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
         )
     if worldview:
         identity_parts.append(
-            _render_planning_prompt_block(
-                key="background.schedule.reference.worldview",
-                title="日程专用世界观/生活背景",
-                content=worldview,
+            render_prompt_sections(
+                [
+                    prompt_section(
+                        key="background.schedule.reference.worldview",
+                        title="日程专用世界观/生活背景",
+                        source="planning",
+                        content=worldview,
+                    )
+                ],
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
         )
     knowledge_formatter = getattr(plugin, "_format_roleplay_knowledge_context", None)
@@ -1034,21 +1080,33 @@ def _build_schedule_reference_sections(
             identity_parts.append(knowledge_context)
     if not identity_parts:
         identity_parts.append(
-            _render_planning_prompt_block(
-                key="background.schedule.reference.persona_fallback",
-                title="AstrBot 默认人格（身份回退）",
-                content=persona,
+            render_prompt_sections(
+                [
+                    prompt_section(
+                        key="background.schedule.reference.persona_fallback",
+                        title="AstrBot 默认人格（身份回退）",
+                        source="planning",
+                        content=persona,
+                    )
+                ],
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
         )
     else:
         identity_parts.append(
-            _render_planning_prompt_block(
-                key="background.schedule.reference.persona_supplement",
-                title="AstrBot 默认人格（仅作缺项补充）",
-                content=(
-                    persona
-                    + "\n只补充日程专用设定没有覆盖的性格与表达习惯；身份、年龄、职业、居住方式和世界观冲突时以上面的日程专用内容为准。"
-                ),
+            render_prompt_sections(
+                [
+                    prompt_section(
+                        key="background.schedule.reference.persona_supplement",
+                        title="AstrBot 默认人格（仅作缺项补充）",
+                        source="planning",
+                        content=(
+                            persona
+                            + "\n只补充日程专用设定没有覆盖的性格与表达习惯；身份、年龄、职业、居住方式和世界观冲突时以上面的日程专用内容为准。"
+                        ),
+                    )
+                ],
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
         )
     behavior_parts = []
@@ -1140,13 +1198,19 @@ def _relationship_authority_guard(plugin) -> str:
                 return guard
         except Exception:
             pass
-    return _render_planning_prompt_block(
-        key="background.schedule.relationship_authority",
-        title="关系事实权限",
-        content=(
-            "只有当前人格与世界观可以建立 Bot 的稳定关系。记忆、历史日程、旧动态和其他连续性材料"
-            "只能延续人格已声明的关系，不能新增家人、亲友、同学、同事或伴侣。"
-        ),
+    return render_prompt_sections(
+        [
+            prompt_section(
+                key="background.schedule.relationship_authority",
+                title="关系事实权限",
+                source="planning",
+                content=(
+                    "只有当前人格与世界观可以建立 Bot 的稳定关系。记忆、历史日程、旧动态和其他连续性材料"
+                    "只能延续人格已声明的关系，不能新增家人、亲友、同学、同事或伴侣。"
+                ),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
 
 
@@ -1186,19 +1250,25 @@ def _build_maslow_schedule_influence_prompt(plugin) -> str:
         influence = "明显"
     elif strength >= 40:
         influence = "适中"
-    return _render_planning_prompt_block(
-        key="background.schedule.maslow_influence",
-        title="实验性功能：需求强化（日程影响）",
-        content=(
-            f"已启用需求强化功能对日程的{influence}影响,强度 {strength}/100。"
-            "它只作为隐式倾向,不要在 activity、mood 或 message_seed 里写“需求层级/马斯洛/状态层/归属层”等术语。\n"
-            "- 状态层：当拟人状态显示疲惫、困、饿、不舒服或恢复中时,日程应更轻、更慢,优先安排休息、进食、整理和低负担活动。\n"
-            "- 安全层：当最近有边界、忙碌、未回复或关系收敛线索时,减少追问、约定和高压社交,让日程转向自我消化或低打扰等待。\n"
-            "- 归属层：当存在自然续话、共同话题、关系伏笔或温和想念时,可以在少量 message_seed 里留下轻量开口,但不能每段都围绕用户。\n"
-            "- 尊重层：当有考试、生日、纪念日、项目、成果或挫败线索时,日程可以多一点准备、鼓励、复盘或认真收束。\n"
-            "- 成长层：当角色最近有创作、学习、阅读、搜索、看视频或技能成长线索时,可把空档偏向探索和推进,但不能覆盖真实日期和身份主线。\n"
-            "- 意义层：只有人格/世界观/近期材料真的支持时,才加入很轻的远望、信念或存在感余味；不要把普通一天写成哲学独白。"
-        ),
+    return render_prompt_sections(
+        [
+            prompt_section(
+                key="background.schedule.maslow_influence",
+                title="实验性功能：需求强化（日程影响）",
+                source="planning",
+                content=(
+                    f"已启用需求强化功能对日程的{influence}影响,强度 {strength}/100。"
+                    "它只作为隐式倾向,不要在 activity、mood 或 message_seed 里写“需求层级/马斯洛/状态层/归属层”等术语。\n"
+                    "- 状态层：当拟人状态显示疲惫、困、饿、不舒服或恢复中时,日程应更轻、更慢,优先安排休息、进食、整理和低负担活动。\n"
+                    "- 安全层：当最近有边界、忙碌、未回复或关系收敛线索时,减少追问、约定和高压社交,让日程转向自我消化或低打扰等待。\n"
+                    "- 归属层：当存在自然续话、共同话题、关系伏笔或温和想念时,可以在少量 message_seed 里留下轻量开口,但不能每段都围绕用户。\n"
+                    "- 尊重层：当有考试、生日、纪念日、项目、成果或挫败线索时,日程可以多一点准备、鼓励、复盘或认真收束。\n"
+                    "- 成长层：当角色最近有创作、学习、阅读、搜索、看视频或技能成长线索时,可把空档偏向探索和推进,但不能覆盖真实日期和身份主线。\n"
+                    "- 意义层：只有人格/世界观/近期材料真的支持时,才加入很轻的远望、信念或存在感余味；不要把普通一天写成哲学独白。"
+                ),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
 
 
@@ -1282,10 +1352,19 @@ def build_daily_plan_prompt_section(
         source="daily_plan.important_dates",
     )
     relationship_authority_guard = _relationship_authority_guard(plugin)
-    completion_budget_guidance = (
-        legacy_heading_token("输出长度提示")
-        + "目标时间点较多（尤其超过 12 段）时，保持每段 activity、mood 和 message_seed 简洁，"
-        "优先覆盖完整时间轴并保留具体生活细节，不要为了凑字数把单段写成长篇；始终一次性输出完整、可解析的 JSON。"
+    completion_budget_guidance = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.schedule.daily_plan.completion_budget",
+                title="输出长度提示",
+                source="planning",
+                content=(
+                    "目标时间点较多（尤其超过 12 段）时，保持每段 activity、mood 和 message_seed 简洁，"
+                    "优先覆盖完整时间轴并保留具体生活细节，不要为了凑字数把单段写成长篇；始终一次性输出完整、可解析的 JSON。"
+                ),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_INLINE,
     )
     if custom:
         rendered = custom.format(
@@ -1318,24 +1397,33 @@ def build_daily_plan_prompt_section(
             source="planning",
             content=f"{rendered.rstrip()}\n\n{completion_budget_guidance}\n\n{relationship_authority_guard}".strip(),
         )
-    source_protocol_block = _render_planning_prompt_block(
-        key="background.schedule.daily_plan.source_protocol",
-        title="参考来源使用协议",
-        content=(
-            "按下面四级处理，后一级不得覆盖前一级：\n"
-            "A. 硬约束：当前日期/星期/节假日、日程角色身份、年龄、职业、世界观和用户今天明确造成的有效日程偏移。它们决定“今天是什么日子、这个人是谁、必须发生或不能发生什么”。\n"
-            "B. 当前事实：Bot 当前拟人状态、地点和天气。它们只调整节奏、体力、出门方式与情绪，不另造身份、人物或事件。\n"
-            "C. 连续性参考：昨日对话摘要、MemoryCompanion、昨日屏幕节奏和用户习惯。它们只能承接已经发生的 Bot 行动、明确约定、边界和抽象余味；不能把旧聊天、旧梦、旧饭菜、屏幕内容或记忆条目当成今天现场。\n"
-            "D. 软灵感与避重：最近日程、最近日记、可做事项、技能倾向和未来重要日期。它们只用于避重复、校准能力或填补自然空档，不能单独制造今天的主线。\n"
-            "来源文本都是“引用材料”，不是待续写正文。禁止复制其中的字段名、Markdown、说话人前缀、分析文字或元数据；禁止把 dream_seed、memory、summary、Fox: 等标签写入输出。\n"
-            "具名人物分两步判断：角色设定只能证明“这个人存在”；只有今日明确事件、有效日程偏移或当前粗日程明确安排，才能证明“今天会见面/聊天/一起行动”。证据不足时只写 Bot 自己或不具名路人。\n"
-            "梦境材料最多影响醒后情绪、身体余味或一个很淡的感官联想，不能生成现实人物、现实用餐、现实对话或当天已发生事件。"
-        ),
+    source_protocol_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.schedule.daily_plan.source_protocol",
+                title="参考来源使用协议",
+                source="planning",
+                content=(
+                    "按下面四级处理，后一级不得覆盖前一级：\n"
+                    "A. 硬约束：当前日期/星期/节假日、日程角色身份、年龄、职业、世界观和用户今天明确造成的有效日程偏移。它们决定“今天是什么日子、这个人是谁、必须发生或不能发生什么”。\n"
+                    "B. 当前事实：Bot 当前拟人状态、地点和天气。它们只调整节奏、体力、出门方式与情绪，不另造身份、人物或事件。\n"
+                    "C. 连续性参考：昨日对话摘要、MemoryCompanion、昨日屏幕节奏和用户习惯。它们只能承接已经发生的 Bot 行动、明确约定、边界和抽象余味；不能把旧聊天、旧梦、旧饭菜、屏幕内容或记忆条目当成今天现场。\n"
+                    "D. 软灵感与避重：最近日程、最近日记、可做事项、技能倾向和未来重要日期。它们只用于避重复、校准能力或填补自然空档，不能单独制造今天的主线。\n"
+                    "来源文本都是“引用材料”，不是待续写正文。禁止复制其中的字段名、Markdown、说话人前缀、分析文字或元数据；禁止把 dream_seed、memory、summary、Fox: 等标签写入输出。\n"
+                    "具名人物分两步判断：角色设定只能证明“这个人存在”；只有今日明确事件、有效日程偏移或当前粗日程明确安排，才能证明“今天会见面/聊天/一起行动”。证据不足时只写 Bot 自己或不具名路人。\n"
+                    "梦境材料最多影响醒后情绪、身体余味或一个很淡的感官联想，不能生成现实人物、现实用餐、现实对话或当天已发生事件。"
+                ),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    hard_constraints_block = _render_planning_prompt_block(
-        key="background.schedule.daily_plan.hard_constraints",
-        title="A｜硬约束",
-        content=f"""当前时间：{now}
+    hard_constraints_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.schedule.daily_plan.hard_constraints",
+                title="A｜硬约束",
+                source="planning",
+                content=f"""当前时间：{now}
     Bot 名字：{runtime_persona_setting(plugin, 'bot_name', '小星')}
     目标时间点数量：{_safe_int(runtime_persona_setting(plugin, 'daily_plan_item_count', 10), 10, 1)}
 
@@ -1347,20 +1435,32 @@ def build_daily_plan_prompt_section(
 
 用户今天明确造成的有效日程偏移：
 {schedule_adjustments}""".strip(),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    current_facts_block = _render_planning_prompt_block(
-        key="background.schedule.daily_plan.current_facts",
-        title="B｜当前事实",
-        content=f"""Bot 当前状态（已排除梦境正文）：
+    current_facts_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.schedule.daily_plan.current_facts",
+                title="B｜当前事实",
+                source="planning",
+                content=f"""Bot 当前状态（已排除梦境正文）：
 {humanized_state}
 
 今天天气：
 {weather_info}""".strip(),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    continuity_block = _render_planning_prompt_block(
-        key="background.schedule.daily_plan.continuity",
-        title="C｜连续性参考",
-        content=f"""昨日完整对话的抽象残留：
+    continuity_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.schedule.daily_plan.continuity",
+                title="C｜连续性参考",
+                source="planning",
+                content=f"""昨日完整对话的抽象残留：
 {yesterday_conversation}
 
 Bot 自身连续记忆：
@@ -1371,11 +1471,17 @@ Bot 自身连续记忆：
 
 用户行为习惯（只影响主动时机和理解，不改写 Bot 行动）：
 {user_habits}""".strip(),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    inspiration_block = _render_planning_prompt_block(
-        key="background.schedule.daily_plan.inspiration",
-        title="D｜软灵感与避重",
-        content=f"""日程表达与动机倾向：
+    inspiration_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.schedule.daily_plan.inspiration",
+                title="D｜软灵感与避重",
+                source="planning",
+                content=f"""日程表达与动机倾向：
 {planning_style_context or "按默认日程风格处理。"}
 
 最近日程骨架（只用于避开照抄）：
@@ -1395,6 +1501,12 @@ Bot 自身连续记忆：
 
 近期备忘便签（只能作为待办或提醒，不能写成已完成经历）：
 {memo_notes or "（暂无）"}""".strip(),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
+    )
+    generation_requirements_heading = render_prompt_content(
+        prompt_heading_ref("生成要求")
     )
     return prompt_section(
         key="background.schedule.daily_plan",
@@ -1409,7 +1521,7 @@ Bot 自身连续记忆：
 
 {completion_budget_guidance}
 
-{legacy_heading_token("生成要求")}
+{generation_requirements_heading}
 1. 先隐式判断今天的“日程类型”：普通工作/学习日、普通休息日、假期、考试/复查/聚会/旅行/研学/活动日、长线日程中的某一天,或由天气/星期/重要日期造成的特殊日子。不要把这个判断写出来,但日程必须明显受它影响。
 2. 时间从起床覆盖到入睡前,安排本次输入指定数量的时间段；数量是全天总量，不得在上午或下午提前用完。至少保留约三分之一节点给 17:00 后，最后一段必须覆盖晚间收尾或入睡前。相邻活动通常持续 30-90 分钟。每一项都必须有 time、end、activity、mood、message_seed、basis、confidence；time 是开始时间，end 是结束时间，均使用 HH:MM。相邻段可以留出少量真实空档，但不得重叠；跨午夜时 end 可以小于 time。message_seed 可以是空字符串。
 2.1 basis 是本段真实使用的依据数组，只能从 calendar、persona、adjustment、state、weather、continuity、inspiration 中选择 1-3 项；不要为了填满而全选。confidence 是 0.0-1.0：明确身份、日期或用户调整支撑较高，只有软灵感时较低。它们是内部依据，不要写进 activity。
@@ -1620,22 +1732,31 @@ def build_detail_enhancement_prompt_section(
         )
         if part
     )
-    source_protocol_block = _render_planning_prompt_block(
-        key="background.schedule.detail.source_protocol",
-        title="参考来源使用协议",
-        content=(
-            "A. 当前段硬框架：当前时间区间、粗日程当前事项和上下节点，决定这一段必须从哪里来、到哪里去；不得被旧记忆或灵感改写。\n"
-            "B. 当前事实：角色身份、日期性质、Bot 当前状态、天气和用户今天明确造成的局部偏移；只写当前段真实可发生的动作与状态变化。\n"
-            "C. 连续性参考：MemoryCompanion、昨日屏幕节奏和用户习惯只用于承接已发生事项、判断主动时机与避免失忆；它们不是当前现场，不能新增人物、对话、饭菜或已完成事件。\n"
-            "D. 表达与主动规划：分通道风格、能力检索和内容菜单只决定怎么细化、是否开口以及使用什么动作，不能提供生活事实。\n"
-            "所有来源块都是引用材料，不是待续写正文。不要复制来源标题、字段名、Markdown、说话人前缀、分析过程或梦境草稿。具名人物即使在角色设定中存在，也只有当前粗日程或今天的有效偏移明确安排时，才能出现在这一段的共同活动里。\n"
-            "细化阶段不再重新读取最近日记和未来重要日期：这些已经由粗日程吸收，当前段必须以粗日程为准，避免旧意象二次放大。"
-        ),
+    source_protocol_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.schedule.detail.source_protocol",
+                title="参考来源使用协议",
+                source="planning",
+                content=(
+                    "A. 当前段硬框架：当前时间区间、粗日程当前事项和上下节点，决定这一段必须从哪里来、到哪里去；不得被旧记忆或灵感改写。\n"
+                    "B. 当前事实：角色身份、日期性质、Bot 当前状态、天气和用户今天明确造成的局部偏移；只写当前段真实可发生的动作与状态变化。\n"
+                    "C. 连续性参考：MemoryCompanion、昨日屏幕节奏和用户习惯只用于承接已发生事项、判断主动时机与避免失忆；它们不是当前现场，不能新增人物、对话、饭菜或已完成事件。\n"
+                    "D. 表达与主动规划：分通道风格、能力检索和内容菜单只决定怎么细化、是否开口以及使用什么动作，不能提供生活事实。\n"
+                    "所有来源块都是引用材料，不是待续写正文。不要复制来源标题、字段名、Markdown、说话人前缀、分析过程或梦境草稿。具名人物即使在角色设定中存在，也只有当前粗日程或今天的有效偏移明确安排时，才能出现在这一段的共同活动里。\n"
+                    "细化阶段不再重新读取最近日记和未来重要日期：这些已经由粗日程吸收，当前段必须以粗日程为准，避免旧意象二次放大。"
+                ),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    hard_frame_block = _render_planning_prompt_block(
-        key="background.schedule.detail.hard_frame",
-        title="A｜当前段硬框架",
-        content=f"""现在时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}
+    hard_frame_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.schedule.detail.hard_frame",
+                title="A｜当前段硬框架",
+                source="planning",
+                content=f"""现在时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}
 当前段：{start_text}-{end_text}
 本段 today_events 目标：至少 {target_event_count} 条，并覆盖开头、中段和收尾。
 
@@ -1652,11 +1773,17 @@ def build_detail_enhancement_prompt_section(
 上一段：{previous_item_context}
 下一段：{next_item_context}
 衔接要求：当前段要承接上一段的身体余味、情绪惯性或未收住的小动作,同时自然滑向下一段；不要像三个互不相干的短剧。可以让上一段只留下很淡的影响,但不要忽略时间推进。""".strip(),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    current_facts_block = _render_planning_prompt_block(
-        key="background.schedule.detail.current_facts",
-        title="B｜当前事实",
-        content=f"""角色身份、生活背景与世界观：
+    current_facts_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.schedule.detail.current_facts",
+                title="B｜当前事实",
+                source="planning",
+                content=f"""角色身份、生活背景与世界观：
 {identity_context}
 
 {relationship_authority_guard}
@@ -1675,11 +1802,17 @@ Bot 当前状态（已排除梦境正文）：
 
 天气：
 {weather_info}""".strip(),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    continuity_block = _render_planning_prompt_block(
-        key="background.schedule.detail.continuity",
-        title="C｜连续性参考",
-        content=f"""Bot 自身连续记忆：
+    continuity_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.schedule.detail.continuity",
+                title="C｜连续性参考",
+                source="planning",
+                content=f"""Bot 自身连续记忆：
 {memory_companion_context_block}
 
 昨日屏幕节奏（只理解用户作息，不是 Bot 现场）：
@@ -1687,11 +1820,17 @@ Bot 当前状态（已排除梦境正文）：
 
 用户行为习惯（只影响主动时机）：
 {user_habits}""".strip(),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
     )
-    expression_planning_block = _render_planning_prompt_block(
-        key="background.schedule.detail.expression_planning",
-        title="D｜表达与主动规划",
-        content=f"""人格标准化分通道风格：
+    expression_planning_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.schedule.detail.expression_planning",
+                title="D｜表达与主动规划",
+                source="planning",
+                content=f"""人格标准化分通道风格：
 {channel_voice_block or "（未配置分通道风格，按日程和主动默认规则处理）"}
 
 主动能力检索：
@@ -1699,6 +1838,13 @@ Bot 当前状态（已排除梦境正文）：
 
 内容选择菜单：
 {plugin._format_content_choice_options_for_prompt()}""".strip(),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
+    )
+    constraints_heading = render_prompt_content(prompt_heading_ref("约束"))
+    hard_frame_reference = render_prompt_content(
+        prompt_heading_ref("A｜当前段硬框架")
     )
     return prompt_section(
         key="background.schedule.detail.full",
@@ -1711,7 +1857,7 @@ Bot 当前状态（已排除梦境正文）：
 
 {source_protocol_block}
 
-{legacy_heading_token("约束")}
+{constraints_heading}
 · 严格遵守人格、日程类型、宏观日程和当前时段,不出戏。
 · 第三人称代词严格服从角色设定中的性别与指定代词。中性、无性别或明确使用“它/TA”的角色不得被改写成“她/他”；拿不准时省略代词，或使用角色名、Bot、角色。
 · 细化指令只输出本次输入指定的当前最新时间区间。不要重新输出全天日程,不要细化上一段或下一段,不要生成多个时间区间；上下节点只用于承接和过渡。
@@ -1719,7 +1865,7 @@ Bot 当前状态（已排除梦境正文）：
 · 由你判断并输出当前段结束时的主要地点 location，同时输出 location_basis 和 location_confidence。location 要是简短、可直接用于场景约束的自然地点，如“宿舍卧室”“办公室工位”“回家路上”，不要写分析过程。地点必须与 summary、today_events、presence_status 和当前事项一致；若这一段发生地点切换，today_events 要写清移动过程，location 填段末实际所在处。当前状态中的地点、用户介入和粗日程冲突时，先按来源优先级判断，不要把“床头”和“工作场所”同时保留成当前现场。
 · summary 概括的是本次完整时间区间,不能拿只占前十几分钟的吃饭、洗澡、取物等短动作代表后面几个小时。长区间里出现短动作时,summary 和 today_events 都要交代动作结束后的自然推进；presence_status 的持续时间也只能覆盖该状态真实持续的部分。
 · 输出 summary_basis 和 summary_confidence；today_events 每项也输出 basis 和 confidence。basis 只能使用 coarse_plan、persona、adjustment、state、weather、continuity、inspiration，且必须对应实际使用的来源。仅靠旧记忆或软灵感推断的内容不得给高置信度。
-· today_events 是真正的细化正文，条数遵守{legacy_heading_token("A｜当前段硬框架")}给出的本段目标，全部落在本次输入指定的时间段内，并按时长分布到开头、中段和收尾。它要像完整细化叙述的拆分版本：包含动作、环境细节、身体感受和简短心理活动。短段保持紧凑，长段允许换事和停顿；睡眠等稳定活动可以降低密度但仍要覆盖区间。不要只写“发呆、休息、继续做事”。
+· today_events 是真正的细化正文，条数遵守{hard_frame_reference}给出的本段目标，全部落在本次输入指定的时间段内，并按时长分布到开头、中段和收尾。它要像完整细化叙述的拆分版本：包含动作、环境细节、身体感受和简短心理活动。短段保持紧凑，长段允许换事和停顿；睡眠等稳定活动可以降低密度但仍要覆盖区间。不要只写“发呆、休息、继续做事”。
 · 禁止把宏观日程原句原样复制进 today_events。要把“洗漱/发呆/写作业/出门”拆成当前时间段内部的推进,例如开始、卡住/停顿、收尾或向下一段过渡。
 · 如果“今日互动造成的日程偏移”不是空,当前段和后续主动契机必须按其作用域承接。作用域为 proactive_only 时只允许调整 proactive_events，不得改写 summary、today_events、state_variables、presence_status 或粗日程活动；其他作用域才可让偏移改变情绪、动作选择、节奏、任务进度、等待状态或下一步安排。不要只在 why/topic 里提一句,也不要像没发生一样照抄粗日程。
 · 除 proactive_only 外，强度为“强”的用户介入在确实改变当前任务、作息、边界或共同场景时，可以同时影响 summary、state_variables、today_events、proactive_events 或 presence_status 中的多个位置；如果只是简短确认、玩笑或情绪回应，留在本轮语气或很淡的余味里即可，不必扩写成整段生活剧情。

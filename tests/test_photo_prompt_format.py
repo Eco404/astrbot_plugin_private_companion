@@ -8,11 +8,37 @@ import unittest
 from pathlib import Path
 
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
-from astrbot_plugin_private_companion.photo_prompt_context import PhotoPromptSection
 from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PhotoPromptContent,
+    PromptSection,
+    prompt_section,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _photo_section(
+    name: str,
+    source: str,
+    positive: str = "",
+    negative: str = "",
+    protected: bool = False,
+    sanitize_conflicts: bool | None = None,
+) -> PromptSection:
+    return prompt_section(
+        key=f"photo.test.{source}.{name}",
+        title=name,
+        source="photo_prompt_context",
+        content=PhotoPromptContent(
+            positive=positive,
+            negative=negative,
+            domain_source=source,
+            protected=protected,
+            sanitize_conflicts=sanitize_conflicts,
+        ),
+    )
 
 
 class _PromptFormatHarness(ProactiveMessageMixin):
@@ -132,8 +158,8 @@ class PhotoPromptFormatTests(unittest.TestCase):
         self.harness.photo_generation_negative_prompt_mode = "safe_default"
         self.harness.photo_generation_negative_prompt = "custom global"
         sections = (
-            PhotoPromptSection("user_request", "user_request", negative="no rain", protected=True),
-            PhotoPromptSection("natural_language_contract", "composition", negative="nsfw, watermark"),
+            _photo_section("user_request", "user_request", negative="no rain", protected=True),
+            _photo_section("natural_language_contract", "composition", negative="nsfw, watermark"),
         )
 
         resolved = self.harness._apply_photo_generation_negative_prompt_policy(sections, "selfie")
@@ -145,15 +171,15 @@ class PhotoPromptFormatTests(unittest.TestCase):
         self.harness.photo_generation_negative_prompt = "Negative prompt: lowres, watermark"
         self.harness.photo_generation_selfie_negative_prompt = "bad hands\nLOWRES"
         sections = (
-            PhotoPromptSection("natural_language_contract", "composition", negative="nsfw"),
+            _photo_section("natural_language_contract", "composition", negative="nsfw"),
         )
 
         resolved = self.harness._apply_photo_generation_negative_prompt_policy(sections, "portrait")
 
-        self.assertEqual(resolved[0].negative, "nsfw")
-        self.assertEqual(resolved[-1].name, "custom_negative_prompt")
-        self.assertEqual(resolved[-1].negative, "lowres, watermark, bad hands")
-        self.assertTrue(resolved[-1].protected)
+        self.assertEqual(resolved[0].content.negative, "nsfw")
+        self.assertEqual(resolved[-1].title, "custom_negative_prompt")
+        self.assertEqual(resolved[-1].content.negative, "lowres, watermark, bad hands")
+        self.assertTrue(resolved[-1].content.protected)
 
     def test_negative_and_fixed_prompts_use_active_persona_settings(self) -> None:
         self.harness.photo_generation_negative_prompt_mode = "merge"
@@ -169,7 +195,7 @@ class PhotoPromptFormatTests(unittest.TestCase):
             }
         )
         sections = (
-            PhotoPromptSection("natural_language_contract", "composition", negative="nsfw"),
+            _photo_section("natural_language_contract", "composition", negative="nsfw"),
         )
 
         resolved = self.harness._apply_photo_generation_negative_prompt_policy(
@@ -180,32 +206,32 @@ class PhotoPromptFormatTests(unittest.TestCase):
             "selfie"
         )
 
-        self.assertEqual("persona global, persona scoped", resolved[-1].negative)
-        self.assertIn("persona fixed", fixed.positive)
-        self.assertNotIn("primary fixed", fixed.positive)
+        self.assertEqual("persona global, persona scoped", resolved[-1].content.negative)
+        self.assertIn("persona fixed", fixed.content.positive)
+        self.assertNotIn("primary fixed", fixed.content.positive)
 
     def test_negative_prompt_replace_only_removes_system_base_sections(self) -> None:
         self.harness.photo_generation_negative_prompt_mode = "replace"
         self.harness.photo_generation_negative_prompt = "custom global"
         self.harness.photo_generation_selfie_negative_prompt = "portrait artifact"
         sections = (
-            PhotoPromptSection("user_request", "user_request", negative="no rain", protected=True),
-            PhotoPromptSection("wardrobe_decision", "wardrobe_decision", negative="pajamas"),
-            PhotoPromptSection("natural_language_contract", "composition", negative="nsfw, watermark"),
-            PhotoPromptSection("composition", "composition", negative="duplicate character"),
-            PhotoPromptSection("subject_count", "composition", negative="multiple people"),
+            _photo_section("user_request", "user_request", negative="no rain", protected=True),
+            _photo_section("wardrobe_decision", "wardrobe_decision", negative="pajamas"),
+            _photo_section("natural_language_contract", "composition", negative="nsfw, watermark"),
+            _photo_section("composition", "composition", negative="duplicate character"),
+            _photo_section("subject_count", "composition", negative="multiple people"),
         )
 
         resolved = self.harness._apply_photo_generation_negative_prompt_policy(sections, "selfie")
-        by_name = {section.name: section for section in resolved}
+        by_name = {section.title: section for section in resolved}
 
-        self.assertEqual(by_name["user_request"].negative, "no rain")
-        self.assertEqual(by_name["wardrobe_decision"].negative, "pajamas")
-        self.assertEqual(by_name["natural_language_contract"].negative, "")
-        self.assertEqual(by_name["composition"].negative, "")
-        self.assertEqual(by_name["subject_count"].negative, "")
+        self.assertEqual(by_name["user_request"].content.negative, "no rain")
+        self.assertEqual(by_name["wardrobe_decision"].content.negative, "pajamas")
+        self.assertEqual(by_name["natural_language_contract"].content.negative, "")
+        self.assertEqual(by_name["composition"].content.negative, "")
+        self.assertEqual(by_name["subject_count"].content.negative, "")
         self.assertEqual(
-            by_name["custom_negative_prompt"].negative,
+            by_name["custom_negative_prompt"].content.negative,
             "custom global, portrait artifact",
         )
 
@@ -346,9 +372,9 @@ class PhotoPromptFormatTests(unittest.TestCase):
             )
             self.assertEqual(audit["scope"], scope)
             self.assertEqual(audit["config_key"], config_key)
-            self.assertIn(marker, section.positive)
-            self.assertTrue(section.protected)
-            self.assertTrue(section.sanitize_conflicts)
+            self.assertIn(marker, section.content.positive)
+            self.assertTrue(section.content.protected)
+            self.assertTrue(section.content.sanitize_conflicts)
 
         script = (ROOT / "pages" / "陪伴面板" / "app.js").read_text(encoding="utf-8")
         for key in keys:

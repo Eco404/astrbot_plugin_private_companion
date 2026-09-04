@@ -20,7 +20,33 @@ from astrbot_plugin_private_companion.image_companion_bridge import (
 from astrbot_plugin_private_companion.photo_reference_catalog import (
     load_catalog as load_private_catalog,
 )
-from astrbot_plugin_private_companion.photo_prompt_context import PhotoPromptSection
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PhotoPromptContent,
+    PromptSection,
+    prompt_section,
+)
+
+
+def _photo_section(
+    name: str,
+    source: str,
+    positive: str = "",
+    negative: str = "",
+    protected: bool = False,
+    sanitize_conflicts: bool | None = None,
+) -> PromptSection:
+    return prompt_section(
+        key=f"photo.test.{source}.{name}",
+        title=name,
+        source="photo_prompt_context",
+        content=PhotoPromptContent(
+            positive=positive,
+            negative=negative,
+            domain_source=source,
+            protected=protected,
+            sanitize_conflicts=sanitize_conflicts,
+        ),
+    )
 
 
 class _BridgeHarness(ImageCompanionBridgeMixin):
@@ -28,7 +54,7 @@ class _BridgeHarness(ImageCompanionBridgeMixin):
 
 
 def test_image_task_builder_serializes_canonical_photo_section_to_existing_fields() -> None:
-    section = PhotoPromptSection(
+    section = _photo_section(
         "scene",
         "scene_context",
         positive="rainy window",
@@ -37,7 +63,7 @@ def test_image_task_builder_serializes_canonical_photo_section_to_existing_field
         sanitize_conflicts=False,
     )
 
-    serialized = _BridgeHarness._image_prompt_sections([section.to_prompt_section()])
+    serialized = _BridgeHarness._image_prompt_sections([section])
 
     assert serialized == [
         {

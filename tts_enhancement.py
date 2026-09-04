@@ -29,7 +29,6 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .conversation_injection_plan import (
     PLACEMENT_DYNAMIC_SYSTEM,
-    PLACEMENT_TOOL_CONTRACT,
     get_conversation_injection_plan,
 )
 from .conversation_prompt_section import (
@@ -95,7 +94,7 @@ def build_tts_spoken_conversion_prompts(
     rendered = render_prompt_document(
         document,
         system_mode=PromptRenderMode.BODY_ONLY,
-        user_mode=PromptRenderMode.LEGACY_BLOCK,
+        user_mode=PromptRenderMode.LABELED_BLOCK,
     )
     return rendered["system"], rendered["user"]
 
@@ -2581,7 +2580,7 @@ TTS 朗读文本：
     def _build_tts_rule_prompt(self, provider_kind: str = "generic", *, event: Any = None) -> str:
         return render_prompt_sections(
             [self._build_tts_rule_prompt_section(provider_kind, event=event)],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _legacy_nondefault_tts_prompt(self) -> str:
@@ -2758,7 +2757,7 @@ TTS 朗读文本：
                     turn_voice_language=turn_voice_language,
                 )
             ],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     async def apply_tts_enhancement_request(self, event: Any, req: Any) -> None:
@@ -2783,25 +2782,6 @@ TTS 朗读文本：
         marker = "<!-- private_companion_tts_enhancement_v1 -->"
         prompt = str(getattr(req, "system_prompt", "") or "")
 
-        def register_materialized_tts_fragment(
-            fragment_marker: str,
-            section: PromptSection,
-            *,
-            priority: int = 55,
-            placement: str = PLACEMENT_DYNAMIC_SYSTEM,
-        ) -> None:
-            plan = get_conversation_injection_plan(req)
-            if plan is None or plan.contains_marker(fragment_marker):
-                return
-            plan.add(
-                section=section,
-                marker=fragment_marker,
-                priority=priority,
-                placement=placement,
-                temporary=False,
-                materialized=True,
-            )
-
         def append_dynamic_tts_fragment(
             fragment_marker: str,
             section: PromptSection,
@@ -2816,10 +2796,6 @@ TTS 朗读文本：
                     section,
                     priority=priority,
                 )
-            text = render_prompt_sections(
-                [section],
-                mode=PromptRenderMode.BODY_ONLY,
-            )
             helper = getattr(self, "_append_turn_prompt_fragment_by_position", None)
             if callable(helper):
                 try:
@@ -2832,12 +2808,13 @@ TTS 朗读文本：
                         return "prompt"
                 except Exception as exc:
                     logger.debug("TTS 指定位置动态注入失败,回退 system_prompt: %s", _single_line(exc, 120))
-            req.system_prompt = (
-                f"{getattr(req, 'system_prompt', '') or ''}\n\n{fragment_marker}\n{text}"
-            ).strip()
-            register_materialized_tts_fragment(
-                fragment_marker,
-                section,
+            plan = get_conversation_injection_plan(req)
+            if plan is None:
+                return "none"
+            plan.materialize_system_block(
+                req,
+                section=section,
+                marker=fragment_marker,
                 priority=priority,
                 placement=PLACEMENT_DYNAMIC_SYSTEM,
             )
@@ -2984,22 +2961,24 @@ TTS 朗读文本：
             )
             rule_prompt = render_prompt_sections(
                 [authored_rule_section],
-                mode=PromptRenderMode.LEGACY_BLOCK,
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
             rule_section = prompt_section(
                 key=authored_rule_section.key,
                 title=authored_rule_section.title,
                 source=authored_rule_section.source,
-                content=exact_text(rule_prompt),
+                content=exact_text(f"{marker}\n{rule_prompt}"),
                 metadata=authored_rule_section.metadata,
             )
-            req.system_prompt = f"{prompt}\n\n{marker}\n{rule_prompt}".strip()
-            register_materialized_tts_fragment(
-                marker,
-                rule_section,
-                priority=20,
-                placement=PLACEMENT_TOOL_CONTRACT,
-            )
+            plan = get_conversation_injection_plan(req)
+            if plan is not None:
+                plan.materialize_system_block(
+                    req,
+                    section=rule_section,
+                    marker=marker,
+                    priority=20,
+                    placement=PLACEMENT_DYNAMIC_SYSTEM,
+                )
             await record_tts_fragment("TTS 基础规则注入", "tts.rule", rule_prompt)
         elif marker not in prompt and mode == "postprocess" and not strong_block_reason:
             authored_postprocess_section = self._build_tts_postprocess_mode_prompt_section(
@@ -3009,22 +2988,24 @@ TTS 朗读文本：
             )
             postprocess_prompt = render_prompt_sections(
                 [authored_postprocess_section],
-                mode=PromptRenderMode.LEGACY_BLOCK,
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
             postprocess_section = prompt_section(
                 key=authored_postprocess_section.key,
                 title=authored_postprocess_section.title,
                 source=authored_postprocess_section.source,
-                content=exact_text(postprocess_prompt),
+                content=exact_text(f"{marker}\n{postprocess_prompt}"),
                 metadata=authored_postprocess_section.metadata,
             )
-            req.system_prompt = f"{prompt}\n\n{marker}\n{postprocess_prompt}".strip()
-            register_materialized_tts_fragment(
-                marker,
-                postprocess_section,
-                priority=20,
-                placement=PLACEMENT_TOOL_CONTRACT,
-            )
+            plan = get_conversation_injection_plan(req)
+            if plan is not None:
+                plan.materialize_system_block(
+                    req,
+                    section=postprocess_section,
+                    marker=marker,
+                    priority=20,
+                    placement=PLACEMENT_DYNAMIC_SYSTEM,
+                )
             await record_tts_fragment("TTS 后处理模式注入", "tts.rule", postprocess_prompt, mode="postprocess")
         if strong_block_reason:
             reverse_prompt = (

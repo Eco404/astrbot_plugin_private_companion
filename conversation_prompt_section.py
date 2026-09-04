@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import string
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -18,20 +19,19 @@ class PromptRenderMode(str, Enum):
     """Wire formats supported by the canonical prompt renderer."""
 
     CONVERSATION_XML = "conversation_xml"
-    LEGACY_BLOCK = "legacy_block"
-    LEGACY_INLINE = "legacy_inline"
+    LABELED_BLOCK = "labeled_block"
+    LABELED_INLINE = "labeled_inline"
     BODY_ONLY = "body_only"
     EXACT = "exact"
     PHOTO_PROMPT = "photo_prompt"
 
 
-@dataclass(frozen=True, slots=True)
-class PromptValue:
-    """One dynamic value and its provenance/trust annotation."""
+class PromptLabelStyle(str, Enum):
+    """Non-canonical labels required by existing background prompt wires."""
 
-    value: Any
-    trust: str = ""
-    source: str = ""
+    SQUARE = "square"
+    COLON = "colon"
+    FULLWIDTH_COLON = "fullwidth_colon"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +40,19 @@ class PromptText:
 
     parts: tuple[Any, ...]
     separator: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PromptHeadingRef:
+    """A typed reference to a labeled heading inside prompt body text."""
+
+    title: str
+    newline: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "title", _validate_prompt_title(self.title))
+        if not isinstance(self.newline, bool):
+            raise TypeError("prompt heading reference newline must be bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,8 +93,13 @@ class PromptTemplate:
             raise ValueError(f"missing prompt template variables: {', '.join(missing)}")
         if unused:
             raise ValueError(f"unused prompt template variables: {', '.join(unused)}")
+        for name, value in variables.items():
+            _validate_prompt_content(
+                value,
+                location=f"template variable {name!r}",
+            )
         object.__setattr__(self, "template", template)
-        object.__setattr__(self, "variables", variables)
+        object.__setattr__(self, "variables", MappingProxyType(variables))
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +121,74 @@ class ExactText:
 
 
 @dataclass(frozen=True, slots=True)
+class PhotoPromptContent:
+    """Typed positive/negative payload owned by the photo prompt domain."""
+
+    positive: str = ""
+    negative: str = ""
+    domain_source: str = ""
+    protected: bool = False
+    sanitize_conflicts: bool | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.positive, str):
+            raise TypeError("photo prompt positive content must be str")
+        if not isinstance(self.negative, str):
+            raise TypeError("photo prompt negative content must be str")
+        if not isinstance(self.domain_source, str) or not self.domain_source:
+            raise ValueError("photo prompt domain source must be a non-empty str")
+        if not isinstance(self.protected, bool):
+            raise TypeError("photo prompt protected flag must be bool")
+        if self.sanitize_conflicts is not None and not isinstance(
+            self.sanitize_conflicts,
+            bool,
+        ):
+            raise TypeError("photo prompt sanitize_conflicts must be bool or None")
+
+
+@dataclass(frozen=True, slots=True)
+class PromptLabel:
+    """One typed label override for a document part."""
+
+    style: PromptLabelStyle
+    separator: ExactText = field(default_factory=lambda: ExactText("\n"))
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.style, PromptLabelStyle):
+            raise TypeError("prompt label style must be PromptLabelStyle")
+        if not isinstance(self.separator, ExactText):
+            raise TypeError("prompt label separator must be ExactText")
+
+
+@dataclass(frozen=True, slots=True)
+class PromptRenderSpec:
+    """Typed wire-layout controls for one prompt document part."""
+
+    mode: PromptRenderMode | None = None
+    label: PromptLabel | None = None
+    prefix: ExactText | None = None
+    prefix_separator: ExactText = field(default_factory=lambda: ExactText("\n"))
+    separator_before: ExactText = field(default_factory=lambda: ExactText("\n\n"))
+    trim: bool = False
+
+    def __post_init__(self) -> None:
+        if self.mode is not None and not isinstance(self.mode, PromptRenderMode):
+            raise TypeError("prompt render spec mode must be PromptRenderMode or None")
+        if self.label is not None and not isinstance(self.label, PromptLabel):
+            raise TypeError("prompt render spec label must be PromptLabel or None")
+        if self.prefix is not None and not isinstance(self.prefix, ExactText):
+            raise TypeError("prompt render spec prefix must be ExactText or None")
+        if not isinstance(self.prefix_separator, ExactText):
+            raise TypeError("prompt render spec prefix separator must be ExactText")
+        if not isinstance(self.separator_before, ExactText):
+            raise TypeError("prompt render spec separator must be ExactText")
+        if not isinstance(self.trim, bool):
+            raise TypeError("prompt render spec trim must be bool")
+        if self.label is not None and self.mode not in {None, PromptRenderMode.BODY_ONLY}:
+            raise ValueError("prompt label overrides require body-only rendering")
+
+
+@dataclass(frozen=True, slots=True)
 class PromptField:
     """One named structured field."""
 
@@ -110,7 +196,11 @@ class PromptField:
     value: Any
 
     def __post_init__(self) -> None:
-        _validate_xml_name(self.name, kind="prompt field")
+        object.__setattr__(
+            self,
+            "name",
+            _validate_xml_name(self.name, kind="prompt field"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,8 +214,16 @@ class PromptList:
     separator: str = "\n"
 
     def __post_init__(self) -> None:
-        _validate_xml_name(self.tag, kind="prompt list")
-        _validate_xml_name(self.item_tag, kind="prompt list item")
+        object.__setattr__(
+            self,
+            "tag",
+            _validate_xml_name(self.tag, kind="prompt list"),
+        )
+        object.__setattr__(
+            self,
+            "item_tag",
+            _validate_xml_name(self.item_tag, kind="prompt list item"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,13 +236,12 @@ class XmlElement:
     children: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
-        _validate_xml_name(self.tag, kind="XML element")
+        tag = _validate_xml_name(self.tag, kind="XML element")
         if not isinstance(self.attrs, Mapping):
             raise TypeError("XML attributes must be a mapping")
         normalized_attrs: dict[str, Any] = {}
         for key, value in self.attrs.items():
-            normalized_key = str(key or "")
-            _validate_xml_name(normalized_key, kind="XML attribute")
+            normalized_key = _validate_xml_name(key, kind="XML attribute")
             if isinstance(
                 value,
                 (
@@ -160,106 +257,83 @@ class XmlElement:
                 ),
             ):
                 raise TypeError(f"XML attribute {key!r} must be scalar")
-            normalized_attrs[normalized_key] = value.value if isinstance(value, PromptValue) else value
+            if value is not None and not isinstance(value, (str, bool, int, float)):
+                raise TypeError(f"XML attribute {key!r} must be scalar")
+            normalized_attrs[normalized_key] = value
         normalized_children = tuple(self.children)
         allowed_children = (
             XmlElement,
             PromptGroup,
+            PromptHeadingRef,
             PromptText,
             PromptTemplate,
             PromptCData,
-            PromptValue,
             ExactText,
             str,
         )
         if not all(isinstance(child, allowed_children) for child in normalized_children):
             raise TypeError("XML children must be typed prompt content")
-        object.__setattr__(self, "tag", str(self.tag))
-        object.__setattr__(self, "attrs", normalized_attrs)
+        object.__setattr__(self, "tag", tag)
+        object.__setattr__(self, "attrs", MappingProxyType(normalized_attrs))
         object.__setattr__(self, "children", normalized_children)
 
 
-class PromptSection(dict[str, Any]):
-    """Canonical authored prompt unit.
+@dataclass(frozen=True, slots=True)
+class PromptSection:
+    """One strictly identified, immutable prompt-authoring unit."""
 
-    ``title`` and ``content`` remain first for compatibility with the original
-    direct ``PromptSection(title, content)`` constructor. New production code
-    should use :func:`prompt_section` with explicit ``key`` and ``source``.
-    """
+    key: str
+    title: str
+    source: str
+    content: Any
+    children: tuple["PromptSection", ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
-    def __init__(
-        self,
-        title: Any,
-        content: Any,
-        key: Any = "",
-        source: Any = "",
-        children: Iterable[Any] = (),
-        metadata: Mapping[str, Any] | None = None,
-    ) -> None:
-        if metadata is not None and not isinstance(metadata, Mapping):
+    def __post_init__(self) -> None:
+        key = _validate_prompt_identity(self.key, kind="key", limit=160)
+        title = _validate_prompt_title(self.title)
+        source = _validate_prompt_identity(self.source, kind="source", limit=80)
+        children = tuple(self.children)
+        if not all(isinstance(child, PromptSection) for child in children):
+            raise TypeError("prompt section children must contain only PromptSection values")
+        if not isinstance(self.metadata, Mapping):
             raise TypeError("prompt section metadata must be a mapping")
-        dict.__init__(self, title=_normalize_title(title), content=content)
-        self._key = _normalize_identity(key, limit=160)
-        self._source = _normalize_identity(source, limit=80)
-        self._children = tuple(children)
-        self._metadata = MappingProxyType(dict(metadata or {}))
-
-    @property
-    def title(self) -> str:
-        return dict.__getitem__(self, "title")
-
-    @property
-    def content(self) -> Any:
-        return dict.__getitem__(self, "content")
-
-    @property
-    def key(self) -> str:
-        return self._key
-
-    @property
-    def source(self) -> str:
-        return self._source
-
-    @property
-    def children(self) -> tuple[Any, ...]:
-        return self._children
-
-    @property
-    def metadata(self) -> Mapping[str, Any]:
-        return self._metadata
+        _validate_prompt_content(self.content, location=f"section {key!r} content")
+        object.__setattr__(self, "key", key)
+        object.__setattr__(self, "title", title)
+        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "children", children)
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
     def __copy__(self) -> "PromptSection":
         return self
 
     def __deepcopy__(self, memo: dict[int, Any]) -> "PromptSection":
         return PromptSection(
-            title=self.title,
-            content=copy.deepcopy(self.content, memo),
             key=self.key,
+            title=self.title,
             source=self.source,
+            content=copy.deepcopy(self.content, memo),
             children=copy.deepcopy(self.children, memo),
             metadata=copy.deepcopy(dict(self.metadata), memo),
         )
 
-    def __repr__(self) -> str:
-        return (
-            "PromptSection("
-            f"key={self.key!r}, title={self.title!r}, source={self.source!r}, "
-            f"content={self.content!r}, children={self.children!r}, metadata={dict(self.metadata)!r})"
-        )
 
-    @staticmethod
-    def _immutable(*_args: Any, **_kwargs: Any) -> None:
-        raise TypeError("PromptSection is immutable")
+@dataclass(frozen=True, slots=True)
+class PromptDocumentPart:
+    """One authored section plus its sink-specific rendering contract."""
 
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable
-    setdefault = _immutable
-    update = _immutable
-    __ior__ = _immutable
+    section: PromptSection
+    render_spec: PromptRenderSpec | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.section, PromptSection):
+            raise TypeError("prompt document part requires PromptSection")
+        if self.render_spec is not None and not isinstance(
+            self.render_spec,
+            PromptRenderSpec,
+        ):
+            raise TypeError("prompt document part render spec must be PromptRenderSpec or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +342,10 @@ class PromptDocument:
 
     system: tuple[PromptSection, ...] = ()
     user: tuple[PromptSection, ...] = ()
+    system_parts: tuple[PromptDocumentPart, ...] = ()
+    user_parts: tuple[PromptDocumentPart, ...] = ()
+    system_render: PromptRenderSpec | None = None
+    user_render: PromptRenderSpec | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -275,41 +353,120 @@ class PromptDocument:
         user_sections = tuple(self.user)
         if not all(isinstance(item, PromptSection) for item in (*system_sections, *user_sections)):
             raise TypeError("prompt document channels must contain PromptSection instances")
+        system_parts = tuple(self.system_parts) or tuple(
+            PromptDocumentPart(section=section) for section in system_sections
+        )
+        user_parts = tuple(self.user_parts) or tuple(
+            PromptDocumentPart(section=section) for section in user_sections
+        )
+        if not all(
+            isinstance(item, PromptDocumentPart)
+            for item in (*system_parts, *user_parts)
+        ):
+            raise TypeError("prompt document parts must contain PromptDocumentPart instances")
+        if tuple(part.section for part in system_parts) != system_sections:
+            raise ValueError("prompt document system parts do not match system sections")
+        if tuple(part.section for part in user_parts) != user_sections:
+            raise ValueError("prompt document user parts do not match user sections")
+        if self.system_render is not None and not isinstance(
+            self.system_render,
+            PromptRenderSpec,
+        ):
+            raise TypeError("prompt document system render must be PromptRenderSpec or None")
+        if self.user_render is not None and not isinstance(
+            self.user_render,
+            PromptRenderSpec,
+        ):
+            raise TypeError("prompt document user render must be PromptRenderSpec or None")
         if not isinstance(self.metadata, Mapping):
             raise TypeError("prompt document metadata must be a mapping")
         object.__setattr__(self, "system", system_sections)
         object.__setattr__(self, "user", user_sections)
+        object.__setattr__(self, "system_parts", system_parts)
+        object.__setattr__(self, "user_parts", user_parts)
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
 def _validate_xml_name(value: Any, *, kind: str) -> str:
-    text = str(value or "")
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", text):
+    if not isinstance(value, str):
+        raise TypeError(f"{kind} must be str")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", value):
         raise ValueError(f"invalid {kind} name: {value!r}")
-    return text
+    return value
 
 
-def _normalize_identity(value: Any, *, limit: int) -> str:
-    return " ".join(str(value or "").split()).strip()[:limit]
-
-
-def _validate_prompt_identity(value: str, *, kind: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9_.:-]+", value):
+def _validate_prompt_identity(value: Any, *, kind: str, limit: int) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"prompt {kind} must be str")
+    if not value or len(value) > limit or not re.fullmatch(r"[A-Za-z0-9_.:-]+", value):
         raise ValueError(f"invalid prompt {kind}: {value!r}")
     return value
 
 
-def _normalize_title(value: Any) -> str:
-    normalized = _normalize_identity(value, limit=80)
-    return normalized or "提示词片段"
+def _validate_prompt_title(value: Any) -> str:
+    if not isinstance(value, str):
+        raise TypeError("prompt title must be str")
+    if (
+        not value
+        or len(value) > 80
+        or value != value.strip()
+        or any(char in value for char in "\r\n\t")
+    ):
+        raise ValueError(f"invalid prompt title: {value!r}")
+    return value
 
 
-def prompt_value(value: Any, *, trust: str = "", source: str = "") -> PromptValue:
-    return PromptValue(value=value, trust=_normalize_identity(trust, limit=80), source=_normalize_identity(source, limit=80))
+def _validate_prompt_content(value: Any, *, location: str) -> None:
+    if isinstance(value, PromptSection):
+        raise TypeError(f"{location} cannot contain PromptSection; use children")
+    if isinstance(value, Mapping):
+        raise TypeError(f"{location} cannot contain raw Mapping content")
+    if isinstance(value, (PromptText, PromptGroup)):
+        for index, item in enumerate(value.parts):
+            _validate_prompt_content(item, location=f"{location} part {index}")
+        return
+    if isinstance(value, PromptHeadingRef):
+        return
+    if isinstance(value, PhotoPromptContent):
+        return
+    if isinstance(value, PromptTemplate):
+        for name, item in value.variables.items():
+            _validate_prompt_content(
+                item,
+                location=f"{location} variable {name!r}",
+            )
+        return
+    if isinstance(value, PromptCData):
+        _validate_prompt_content(value.content, location=f"{location} CDATA")
+        return
+    if isinstance(value, PromptField):
+        _validate_prompt_content(value.value, location=f"{location} field {value.name!r}")
+        return
+    if isinstance(value, PromptList):
+        for index, item in enumerate(value.items):
+            _validate_prompt_content(item, location=f"{location} item {index}")
+        return
+    if isinstance(value, XmlElement):
+        if value.text is not None:
+            _validate_prompt_content(value.text, location=f"{location} XML text")
+        for index, child in enumerate(value.children):
+            _validate_prompt_content(child, location=f"{location} XML child {index}")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _validate_prompt_content(item, location=f"{location} item {index}")
+        return
+    if value is None or isinstance(value, (str, bool, int, float, ExactText)):
+        return
+    raise TypeError(f"{location} has unsupported type {type(value).__name__}")
 
 
 def prompt_text(*parts: Any, separator: str = "") -> PromptText:
     return PromptText(parts=tuple(parts), separator=str(separator))
+
+
+def prompt_heading_ref(title: str, *, newline: bool = False) -> PromptHeadingRef:
+    return PromptHeadingRef(title=title, newline=newline)
 
 
 def prompt_group(*parts: Any, separator: str = "\n\n") -> PromptGroup:
@@ -322,15 +479,6 @@ def prompt_cdata(content: Any) -> PromptCData:
 
 def exact_text(text: str) -> ExactText:
     return ExactText(text=text)
-
-
-def legacy_heading_token(title: Any, *, newline: bool = False) -> str:
-    """Render one legacy heading token for protocols that still parse it."""
-
-    normalized = _normalize_identity(title, limit=80)
-    if not normalized:
-        raise ValueError("legacy heading token requires a non-empty title")
-    return f"【{normalized}】" + ("\n" if newline else "")
 
 
 def prompt_field(name: str, value: Any) -> PromptField:
@@ -358,99 +506,80 @@ _MISSING = object()
 
 
 def prompt_section(
-    *args: Any,
-    key: Any = "",
-    title: Any = _MISSING,
-    source: Any = "",
+    *,
+    key: str,
+    title: str,
+    source: str,
     content: Any = _MISSING,
     template: str | None = None,
     variables: Mapping[str, Any] | None = None,
-    children: Iterable[Any] = (),
+    children: Iterable[PromptSection] = (),
     metadata: Mapping[str, Any] | None = None,
 ) -> PromptSection:
-    """Create one canonical prompt section.
+    """Create one strictly identified canonical prompt section."""
 
-    ``prompt_section(title, content)`` remains a migration adapter. New code
-    must use keyword arguments and provide stable ``key`` and ``source``.
-    """
-
-    legacy_call = bool(args)
-    if legacy_call:
-        if len(args) != 2 or title is not _MISSING or content is not _MISSING:
-            raise TypeError("legacy prompt_section accepts exactly title and content")
-        title, content = args
-    if title is _MISSING:
-        raise TypeError("prompt_section requires title")
     if template is not None and content is not _MISSING:
         raise TypeError("prompt_section accepts either content or template, not both")
     if template is not None:
-        content = PromptTemplate(template=str(template), variables=dict(variables or {}))
+        if not isinstance(template, str):
+            raise TypeError("prompt section template must be str")
+        content = PromptTemplate(template=template, variables=dict(variables or {}))
     elif variables:
         raise TypeError("prompt_section variables require template")
     elif content is _MISSING:
         raise TypeError("prompt_section requires content or template")
-
-    normalized_key = _normalize_identity(key, limit=160)
-    normalized_source = _normalize_identity(source, limit=80)
-    if not legacy_call and (not normalized_key or not normalized_source):
-        raise ValueError("new prompt sections require key and source")
-    if bool(normalized_key) != bool(normalized_source):
-        raise ValueError("new prompt sections require both key and source")
-    if not legacy_call:
-        if not _normalize_identity(title, limit=80):
-            raise ValueError("new prompt sections require a non-empty title")
-        _validate_prompt_identity(normalized_key, kind="key")
-        _validate_prompt_identity(normalized_source, kind="source")
-
-    normalized_children: list[Any] = []
-    for child in children:
-        section = coerce_prompt_section(child)
-        if section is not None:
-            normalized_children.append(section)
-            continue
-        if isinstance(
-            child,
-            (
-                str,
-                PromptGroup,
-                PromptText,
-                PromptTemplate,
-                PromptValue,
-                PromptList,
-                PromptField,
-                XmlElement,
-                PromptCData,
-            ),
-        ):
-            normalized_children.append(child)
-            continue
-        raise TypeError("prompt section children must be prompt content or PromptSection values")
     return PromptSection(
-        title=_normalize_title(title),
+        key=key,
+        title=title,
+        source=source,
         content=content,
-        key=normalized_key,
-        source=normalized_source,
-        children=tuple(normalized_children),
+        children=tuple(children),
         metadata=dict(metadata or {}),
     )
 
 
 def prompt_document(
     *,
-    system: Iterable[PromptSection | Mapping[str, Any]] = (),
-    user: Iterable[PromptSection | Mapping[str, Any]] = (),
+    system: Iterable[PromptSection | PromptDocumentPart] = (),
+    user: Iterable[PromptSection | PromptDocumentPart] = (),
+    system_render: PromptRenderSpec | None = None,
+    user_render: PromptRenderSpec | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> PromptDocument:
-    def normalize(items: Iterable[PromptSection | Mapping[str, Any]]) -> tuple[PromptSection, ...]:
-        result: list[PromptSection] = []
-        for item in items:
-            section = coerce_prompt_section(item)
-            if section is None:
-                raise TypeError("prompt document channels must contain prompt sections")
-            result.append(section)
-        return tuple(result)
+    def normalize(
+        values: Iterable[PromptSection | PromptDocumentPart],
+    ) -> tuple[tuple[PromptSection, ...], tuple[PromptDocumentPart, ...]]:
+        parts: list[PromptDocumentPart] = []
+        for value in values:
+            if isinstance(value, PromptSection):
+                parts.append(PromptDocumentPart(section=value))
+            elif isinstance(value, PromptDocumentPart):
+                parts.append(value)
+            else:
+                raise TypeError(
+                    "prompt document channels require PromptSection or PromptDocumentPart values"
+                )
+        return tuple(part.section for part in parts), tuple(parts)
 
-    return PromptDocument(system=normalize(system), user=normalize(user), metadata=dict(metadata or {}))
+    system_sections, system_parts = normalize(system)
+    user_sections, user_parts = normalize(user)
+    return PromptDocument(
+        system=system_sections,
+        user=user_sections,
+        system_parts=system_parts,
+        user_parts=user_parts,
+        system_render=system_render,
+        user_render=user_render,
+        metadata=dict(metadata or {}),
+    )
+
+
+def prompt_document_part(
+    section: PromptSection,
+    *,
+    render_spec: PromptRenderSpec | None = None,
+) -> PromptDocumentPart:
+    return PromptDocumentPart(section=section, render_spec=render_spec)
 
 
 def xml_element(
@@ -460,45 +589,23 @@ def xml_element(
     text: Any = None,
     children: Iterable[Any] = (),
 ) -> XmlElement:
-    return XmlElement(tag=str(tag or "").strip(), attrs=dict(attrs or {}), text=text, children=tuple(children))
-
-
-def coerce_prompt_section(value: Any) -> PromptSection | None:
-    """Normalize a PromptSection or a legacy ``{title, content}`` mapping."""
-
-    if isinstance(value, PromptSection):
-        return value
-    if isinstance(value, Mapping) and "title" in value and "content" in value:
-        children: list[PromptSection] = []
-        for child in value.get("children") or ():
-            normalized = coerce_prompt_section(child)
-            if normalized is not None:
-                children.append(normalized)
-        return PromptSection(
-            title=_normalize_title(value.get("title")),
-            content=value.get("content"),
-            key=_normalize_identity(value.get("key"), limit=160),
-            source=_normalize_identity(value.get("source"), limit=80),
-            children=tuple(children),
-            metadata=dict(value.get("metadata") or {}),
-        )
-    return None
-
-
-def title_for_prompt_key(key: Any, explicit_title: Any = "") -> str:
-    del key
-    return _normalize_title(explicit_title)
+    return XmlElement(
+        tag=tag,
+        attrs=dict(attrs or {}),
+        text=text,
+        children=tuple(children),
+    )
 
 
 def _has_content(value: Any) -> bool:
     if value is None:
         return False
-    if isinstance(value, PromptValue):
-        return _has_content(value.value)
     if isinstance(value, PromptCData):
         return _has_content(value.content)
     if isinstance(value, ExactText):
         return bool(value.text)
+    if isinstance(value, PhotoPromptContent):
+        return bool(value.positive or value.negative)
     if isinstance(value, PromptTemplate):
         return bool(value.template)
     if isinstance(value, PromptGroup):
@@ -511,14 +618,12 @@ def _has_content(value: Any) -> bool:
         return bool(value.items)
     if isinstance(value, str):
         return bool(value.strip())
-    if isinstance(value, (Mapping, list, tuple)):
+    if isinstance(value, (list, tuple)):
         return bool(value)
     return True
 
 
 def _xml_string(value: Any) -> str:
-    if isinstance(value, PromptValue):
-        value = value.value
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -544,15 +649,9 @@ def _xml_attribute(value: Any) -> str:
     return escape(_xml_string(value), {'"': "&quot;", "'": "&apos;"})
 
 
-def _legacy_mapping_text(value: Mapping[Any, Any]) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
-
-
 def _plain_content(value: Any) -> str:
     if value is None:
         return ""
-    if isinstance(value, PromptValue):
-        return _plain_content(value.value)
     if isinstance(value, ExactText):
         return value.text
     if isinstance(value, PromptCData):
@@ -564,8 +663,10 @@ def _plain_content(value: Any) -> str:
             if field_name is not None:
                 parts.append(_plain_content(value.variables[field_name]))
         return "".join(parts)
-    if isinstance(value, PromptSection):
-        return _render_legacy([value], inline=False)
+    if isinstance(value, PromptHeadingRef):
+        return f"【{value.title}】" + ("\n" if value.newline else "")
+    if isinstance(value, PhotoPromptContent):
+        raise TypeError("PhotoPromptContent requires PHOTO_PROMPT rendering")
     if isinstance(value, PromptGroup):
         return value.separator.join(_plain_content(part) for part in value.parts)
     if isinstance(value, PromptText):
@@ -577,7 +678,7 @@ def _plain_content(value: Any) -> str:
     if isinstance(value, XmlElement):
         return _render_xml_element(value)
     if isinstance(value, Mapping):
-        return _legacy_mapping_text(value)
+        raise TypeError("raw Mapping is not prompt content; serialize it explicitly")
     if isinstance(value, (list, tuple)):
         return "\n".join(_plain_content(item) for item in value)
     if isinstance(value, bool):
@@ -587,13 +688,6 @@ def _plain_content(value: Any) -> str:
 
 def _cdata_text(value: Any) -> str:
     return _xml_string(_plain_content(value)).replace("]]>", "]]]]><![CDATA[>")
-
-
-def _xml_tag(value: Any, fallback: str = "item") -> str:
-    text = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(value or "")).strip("_.-")
-    if not text or not re.match(r"^[A-Za-z_]", text):
-        return fallback
-    return text
 
 
 def _list_item_tag(parent: str) -> str:
@@ -606,7 +700,7 @@ def _list_item_tag(parent: str) -> str:
 
 
 def _render_xml_value(tag: str, value: Any) -> str:
-    safe_tag = _xml_tag(tag)
+    safe_tag = _validate_xml_name(tag, kind="XML value")
     if isinstance(value, PromptField):
         return _render_xml_value(value.name, value.value)
     if isinstance(value, PromptList):
@@ -615,8 +709,7 @@ def _render_xml_value(tag: str, value: Any) -> str:
     if isinstance(value, XmlElement):
         return f"<{safe_tag}>{_render_xml_element(value)}</{safe_tag}>"
     if isinstance(value, Mapping):
-        body = "".join(_render_xml_value(str(key), item) for key, item in value.items())
-        return f"<{safe_tag}>{body}</{safe_tag}>"
+        raise TypeError("raw Mapping is not XML prompt content; use typed XML nodes")
     if isinstance(value, (list, tuple)):
         item_tag = _list_item_tag(safe_tag)
         body = "".join(_render_xml_value(item_tag, item) for item in value)
@@ -662,7 +755,7 @@ def _render_xml_content(value: Any) -> str:
         separator = _xml_text(value.separator)
         return separator.join(_render_xml_content(item) for item in value.parts)
     if isinstance(value, PromptSection):
-        return _render_xml_section(value)
+        raise TypeError("nested PromptSection must be declared through children")
     if isinstance(value, XmlElement):
         return _render_xml_element(value)
     if isinstance(value, PromptField):
@@ -670,44 +763,10 @@ def _render_xml_content(value: Any) -> str:
     if isinstance(value, PromptList):
         return _render_xml_value(value.tag, value)
     if isinstance(value, Mapping):
-        return "".join(_render_xml_value(str(key), item) for key, item in value.items())
+        raise TypeError("raw Mapping is not XML prompt content; use typed XML nodes")
     if isinstance(value, (list, tuple)):
         return "".join(_render_xml_value("item", item) for item in value)
     return _xml_text(_plain_content(value))
-
-
-def _flatten_sections(sections: Iterable[PromptSection | Mapping[str, Any]]) -> list[PromptSection]:
-    result: list[PromptSection] = []
-
-    def append(raw: PromptSection | Mapping[str, Any]) -> None:
-        section = coerce_prompt_section(raw)
-        if section is None:
-            return
-        content_children = tuple(
-            child for child in section.children if not isinstance(child, PromptSection)
-        )
-        section_children = tuple(
-            child for child in section.children if isinstance(child, PromptSection)
-        )
-        content = section.content
-        if content_children:
-            content = prompt_text(content, *content_children, separator="\n")
-        if _has_content(content):
-            result.append(
-                PromptSection(
-                    title=section.title,
-                    content=content,
-                    key=section.key,
-                    source=section.source,
-                    metadata=section.metadata,
-                )
-            )
-        for child in section_children:
-            append(child)
-
-    for raw in sections:
-        append(raw)
-    return result
 
 
 def _coerce_render_mode(value: PromptRenderMode | str) -> PromptRenderMode:
@@ -721,38 +780,75 @@ def _coerce_render_mode(value: PromptRenderMode | str) -> PromptRenderMode:
 
 
 def _render_conversation_xml(sections: Sequence[PromptSection]) -> str:
-    if not sections:
+    visible = tuple(section for section in sections if _section_has_content(section))
+    if not visible:
         return ""
-    body = "".join(_render_xml_section(section) for section in sections)
+    body = "".join(_render_xml_section(section) for section in visible)
     return f"<private_companion_context>{body}</private_companion_context>"
+
+
+def _section_has_content(section: PromptSection) -> bool:
+    return _has_content(section.content) or any(
+        _section_has_content(child) for child in section.children
+    )
 
 
 def _render_xml_section(section: PromptSection) -> str:
     body = _render_xml_content(section.content)
     body += "".join(
         _render_xml_section(child)
-        if isinstance(child, PromptSection)
-        else _render_xml_content(child)
         for child in section.children
+        if _section_has_content(child)
     )
     return f'<section title="{_xml_attribute(section.title)}">{body}</section>'
 
 
-def _render_legacy(sections: Sequence[PromptSection], *, inline: bool) -> str:
+def _render_labeled_section(section: PromptSection, *, inline: bool) -> str:
+    if not _section_has_content(section):
+        return ""
     separator = "" if inline else "\n"
+    body = _plain_content(section.content)
+    child_blocks = [
+        _render_labeled_section(child, inline=False)
+        for child in section.children
+        if _section_has_content(child)
+    ]
+    content = "\n\n".join(part for part in (body, *child_blocks) if part)
+    return f"【{section.title}】{separator}{content}"
+
+
+def _render_labeled(sections: Sequence[PromptSection], *, inline: bool) -> str:
     return "\n\n".join(
-        f"【{section.title}】{separator}{_plain_content(section.content)}"
+        _render_labeled_section(section, inline=inline)
         for section in sections
     )
 
 
+def _render_body_section(section: PromptSection) -> str:
+    if not _section_has_content(section):
+        return ""
+    body = _plain_content(section.content)
+    child_blocks = [
+        _render_labeled_section(child, inline=False)
+        for child in section.children
+        if _section_has_content(child)
+    ]
+    return "\n\n".join(part for part in (body, *child_blocks) if part)
+
+
 def _render_body_only(sections: Sequence[PromptSection]) -> str:
-    return "\n\n".join(_plain_content(section.content) for section in sections)
+    return "\n\n".join(
+        content
+        for section in sections
+        if (content := _render_body_section(section))
+    )
 
 
 def _render_exact(sections: Sequence[PromptSection]) -> str:
     bodies: list[str] = []
     for section in sections:
+        if section.children:
+            raise TypeError("exact render mode does not support child sections")
         if not isinstance(section.content, ExactText):
             raise TypeError("exact render mode requires ExactText content")
         bodies.append(section.content.text)
@@ -763,13 +859,127 @@ def _render_photo_prompt(sections: Sequence[PromptSection]) -> str:
     """Render an already-authoritative photo payload without XML semantics.
 
     The photo pipeline owns positive/negative ordering and NAI weights. During
-    migration it supplies those bytes as ExactText; a later adapter can carry
-    the richer PhotoPromptSection payload without changing this public mode.
+    Complete assembled wires may use ExactText, while authored photo sections
+    carry PhotoPromptContent without changing this public mode.
     """
 
-    if all(isinstance(section.content, ExactText) for section in sections):
-        return _render_exact(sections)
-    return _render_body_only(sections)
+    if any(section.children for section in sections):
+        raise TypeError("photo prompt render mode does not support child sections")
+    bodies: list[str] = []
+    for section in sections:
+        if isinstance(section.content, ExactText):
+            bodies.append(section.content.text)
+        elif isinstance(section.content, PhotoPromptContent):
+            bodies.append(section.content.positive)
+        else:
+            bodies.append(_render_body_section(section))
+    return "\n\n".join(body for body in bodies if body)
+
+
+def _fingerprint_scalar(value: Any) -> list[Any]:
+    if value is None:
+        return ["none"]
+    if isinstance(value, bool):
+        return ["bool", value]
+    if isinstance(value, int):
+        return ["int", str(value)]
+    if isinstance(value, float):
+        return ["float", value.hex()]
+    if isinstance(value, str):
+        return ["str", value]
+    raise TypeError(f"unsupported fingerprint scalar: {type(value).__name__}")
+
+
+def _fingerprint_content(value: Any) -> Any:
+    if isinstance(value, PromptText):
+        return [
+            "text",
+            value.separator,
+            [_fingerprint_content(item) for item in value.parts],
+        ]
+    if isinstance(value, PromptGroup):
+        return [
+            "group",
+            value.separator,
+            [_fingerprint_content(item) for item in value.parts],
+        ]
+    if isinstance(value, PromptTemplate):
+        return [
+            "template",
+            value.template,
+            [
+                [name, _fingerprint_content(item)]
+                for name, item in sorted(value.variables.items())
+            ],
+        ]
+    if isinstance(value, PromptHeadingRef):
+        return ["heading_ref", value.title, value.newline]
+    if isinstance(value, PhotoPromptContent):
+        return [
+            "photo_prompt",
+            value.positive,
+            value.negative,
+            value.domain_source,
+            value.protected,
+            value.sanitize_conflicts,
+        ]
+    if isinstance(value, PromptCData):
+        return ["cdata", _fingerprint_content(value.content)]
+    if isinstance(value, ExactText):
+        return ["exact", value.text]
+    if isinstance(value, PromptField):
+        return ["field", value.name, _fingerprint_content(value.value)]
+    if isinstance(value, PromptList):
+        return [
+            "list_node",
+            value.tag,
+            value.item_tag,
+            value.prefix,
+            value.separator,
+            [_fingerprint_content(item) for item in value.items],
+        ]
+    if isinstance(value, XmlElement):
+        return [
+            "xml",
+            value.tag,
+            [
+                [name, _fingerprint_scalar(item)]
+                for name, item in sorted(value.attrs.items())
+            ],
+            _fingerprint_content(value.text) if value.text is not None else None,
+            [_fingerprint_content(item) for item in value.children],
+        ]
+    if isinstance(value, list):
+        return ["list", [_fingerprint_content(item) for item in value]]
+    if isinstance(value, tuple):
+        return ["tuple", [_fingerprint_content(item) for item in value]]
+    if isinstance(value, Mapping):
+        raise TypeError("raw Mapping is not prompt content")
+    return _fingerprint_scalar(value)
+
+
+def _fingerprint_section_payload(section: PromptSection) -> list[Any]:
+    return [
+        "section",
+        section.key,
+        section.title,
+        section.source,
+        _fingerprint_content(section.content),
+        [_fingerprint_section_payload(child) for child in section.children],
+    ]
+
+
+def prompt_section_fingerprint(section: PromptSection) -> str:
+    """Return a stable metadata-independent fingerprint for one section tree."""
+
+    if not isinstance(section, PromptSection):
+        raise TypeError("prompt_section_fingerprint requires PromptSection")
+    payload = json.dumps(
+        _fingerprint_section_payload(section),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def render_prompt_content(
@@ -779,7 +989,10 @@ def render_prompt_content(
 ) -> str:
     """Render one typed content node without inventing a section identity."""
 
+    _validate_prompt_content(content, location="prompt content")
     render_mode = _coerce_render_mode(mode)
+    if isinstance(content, PhotoPromptContent) and render_mode is not PromptRenderMode.PHOTO_PROMPT:
+        raise TypeError("PhotoPromptContent requires PHOTO_PROMPT rendering")
     if render_mode is PromptRenderMode.BODY_ONLY:
         return _plain_content(content)
     if render_mode is PromptRenderMode.CONVERSATION_XML:
@@ -789,39 +1002,31 @@ def render_prompt_content(
             raise TypeError("exact render mode requires ExactText content")
         return content.text
     if render_mode is PromptRenderMode.PHOTO_PROMPT:
-        return content.text if isinstance(content, ExactText) else _plain_content(content)
-    raise ValueError("legacy prompt content requires a section title")
-
-
-def render_prompt_section(
-    title_or_section: Any,
-    content: Any = _MISSING,
-    *,
-    mode: PromptRenderMode | str = PromptRenderMode.CONVERSATION_XML,
-) -> str:
-    section = coerce_prompt_section(title_or_section)
-    if section is None:
-        if content is _MISSING:
-            raise TypeError("render_prompt_section requires a section or title and content")
-        section = PromptSection(_normalize_title(title_or_section), content)
-    return render_prompt_sections([section], mode=mode)
+        if isinstance(content, ExactText):
+            return content.text
+        if isinstance(content, PhotoPromptContent):
+            return content.positive
+        return _plain_content(content)
+    raise ValueError("labeled prompt content requires a section title")
 
 
 def render_prompt_sections(
-    sections: Iterable[PromptSection | Mapping[str, Any]],
+    sections: Iterable[PromptSection],
     *,
     mode: PromptRenderMode | str = PromptRenderMode.CONVERSATION_XML,
 ) -> str:
     """Render authored sections without changing business-content spacing."""
 
-    payload = _flatten_sections(sections)
+    payload = tuple(sections)
+    if not all(isinstance(section, PromptSection) for section in payload):
+        raise TypeError("render_prompt_sections requires PromptSection values")
     render_mode = _coerce_render_mode(mode)
     if render_mode is PromptRenderMode.CONVERSATION_XML:
         return _render_conversation_xml(payload)
-    if render_mode is PromptRenderMode.LEGACY_BLOCK:
-        return _render_legacy(payload, inline=False)
-    if render_mode is PromptRenderMode.LEGACY_INLINE:
-        return _render_legacy(payload, inline=True)
+    if render_mode is PromptRenderMode.LABELED_BLOCK:
+        return _render_labeled(payload, inline=False)
+    if render_mode is PromptRenderMode.LABELED_INLINE:
+        return _render_labeled(payload, inline=True)
     if render_mode is PromptRenderMode.BODY_ONLY:
         return _render_body_only(payload)
     if render_mode is PromptRenderMode.EXACT:
@@ -831,12 +1036,70 @@ def render_prompt_sections(
     raise AssertionError(f"unhandled prompt render mode: {render_mode}")
 
 
+def _render_prompt_label(section: PromptSection, label: PromptLabel) -> str:
+    if label.style is PromptLabelStyle.SQUARE:
+        return f"[{section.title}]"
+    if label.style is PromptLabelStyle.COLON:
+        return f"{section.title}:"
+    if label.style is PromptLabelStyle.FULLWIDTH_COLON:
+        return f"{section.title}："
+    raise AssertionError(f"unhandled prompt label style: {label.style}")
+
+
+def _render_prompt_document_channel(
+    parts: Sequence[PromptDocumentPart],
+    *,
+    default_mode: PromptRenderMode | str,
+    default_spec: PromptRenderSpec | None,
+) -> str:
+    if not parts:
+        return ""
+    if default_spec is None and all(part.render_spec is None for part in parts):
+        return render_prompt_sections(
+            (part.section for part in parts),
+            mode=default_mode,
+        )
+
+    inherited_mode = _coerce_render_mode(default_mode)
+    rendered_document = ""
+    for part in parts:
+        spec = part.render_spec or default_spec or PromptRenderSpec()
+        mode = spec.mode or inherited_mode
+        if spec.label is not None:
+            body = render_prompt_sections(
+                (part.section,),
+                mode=PromptRenderMode.BODY_ONLY,
+            )
+            label = _render_prompt_label(part.section, spec.label)
+            rendered = (
+                f"{label}{spec.label.separator.text}{body}"
+                if body
+                else label
+            )
+        else:
+            rendered = render_prompt_sections((part.section,), mode=mode)
+        if spec.trim:
+            rendered = rendered.strip()
+        if spec.prefix is not None and rendered:
+            rendered = (
+                f"{spec.prefix.text}{spec.prefix_separator.text}{rendered}"
+            )
+        if not rendered:
+            continue
+        rendered_document = (
+            f"{rendered_document}{spec.separator_before.text}{rendered}"
+            if rendered_document
+            else rendered
+        )
+    return rendered_document
+
+
 def render_prompt_document(
     document: PromptDocument,
     *,
     mode: PromptRenderMode | str | None = None,
-    system_mode: PromptRenderMode | str = PromptRenderMode.LEGACY_BLOCK,
-    user_mode: PromptRenderMode | str = PromptRenderMode.LEGACY_BLOCK,
+    system_mode: PromptRenderMode | str = PromptRenderMode.LABELED_BLOCK,
+    user_mode: PromptRenderMode | str = PromptRenderMode.LABELED_BLOCK,
 ) -> dict[str, str]:
     if not isinstance(document, PromptDocument):
         raise TypeError("render_prompt_document requires PromptDocument")
@@ -844,8 +1107,16 @@ def render_prompt_document(
         system_mode = mode
         user_mode = mode
     return {
-        "system": render_prompt_sections(document.system, mode=system_mode),
-        "user": render_prompt_sections(document.user, mode=user_mode),
+        "system": _render_prompt_document_channel(
+            document.system_parts,
+            default_mode=system_mode,
+            default_spec=document.system_render,
+        ),
+        "user": _render_prompt_document_channel(
+            document.user_parts,
+            default_mode=user_mode,
+            default_spec=document.user_render,
+        ),
     }
 
 
@@ -853,30 +1124,33 @@ __all__ = [
     "ExactText",
     "PromptCData",
     "PromptDocument",
+    "PromptDocumentPart",
     "PromptField",
     "PromptGroup",
+    "PromptHeadingRef",
+    "PromptLabel",
+    "PromptLabelStyle",
     "PromptList",
+    "PhotoPromptContent",
     "PromptRenderMode",
+    "PromptRenderSpec",
     "PromptSection",
     "PromptTemplate",
     "PromptText",
-    "PromptValue",
     "XmlElement",
-    "coerce_prompt_section",
     "exact_text",
-    "legacy_heading_token",
     "prompt_cdata",
     "prompt_document",
+    "prompt_document_part",
     "prompt_field",
     "prompt_group",
+    "prompt_heading_ref",
     "prompt_list",
     "prompt_section",
+    "prompt_section_fingerprint",
     "prompt_text",
-    "prompt_value",
     "render_prompt_document",
     "render_prompt_content",
-    "render_prompt_section",
     "render_prompt_sections",
-    "title_for_prompt_key",
     "xml_element",
 ]

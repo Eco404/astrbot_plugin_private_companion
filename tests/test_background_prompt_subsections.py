@@ -36,15 +36,34 @@ def test_planning_cache_parser_retains_legacy_marker_literal() -> None:
     assert 'marker = "【A｜当前段硬框架】"' in source
 
 
-def test_background_subsection_helpers_use_canonical_legacy_renderer() -> None:
+def test_background_subsection_adapters_accept_typed_sections() -> None:
     helpers = (
-        creative._render_creative_prompt_block,
-        dreaming._render_dreaming_prompt_block,
-        planning._render_planning_prompt_block,
-        user_memory._render_user_memory_prompt_block,
+        creative._render_creative_labeled_section,
+        user_memory._render_user_memory_labeled_section,
     )
 
     for helper in helpers:
         source = inspect.getsource(helper)
-        assert "prompt_section(" in source
-        assert "PromptRenderMode.LEGACY_BLOCK" in source
+        assert "PromptRenderMode.LABELED_BLOCK" in source
+        assert "prompt_section(" not in source
+
+
+def test_planning_and_dreaming_construct_labeled_sections_at_production_sites() -> None:
+    assert not hasattr(planning, "_render_planning_prompt_block")
+    assert not hasattr(dreaming, "_render_dreaming_prompt_block")
+
+    producers = (
+        dreaming.generate_enhanced_dream_pick,
+        dreaming.generate_daily_diary,
+        planning.generate_detail_enhancement,
+        planning.generate_daily_plan,
+        planning._build_schedule_reference_sections,
+        planning._relationship_authority_guard,
+        planning._build_maslow_schedule_influence_prompt,
+        planning.build_daily_plan_prompt_section,
+        planning.build_detail_enhancement_prompt_section,
+    )
+    for producer in producers:
+        source = inspect.getsource(producer)
+        assert "prompt_section(" in source, producer.__qualname__
+        assert "PromptRenderMode.LABELED_BLOCK" in source, producer.__qualname__

@@ -119,7 +119,7 @@ class GroupPromptContextTests(unittest.TestCase):
             ["datetime", "weekday", "is_workday", "id", "name", "role", "content"],
             list(history[0]),
         )
-        self.assertNotIn("version", context)
+        self.assertNotIn("version", group.attrib)
         self.assertNotIn("message_id", current_element.attrib)
         self.assertTrue(all("kind" not in item and "reply_to" not in item for item in history))
         scene = group.find("./scene")

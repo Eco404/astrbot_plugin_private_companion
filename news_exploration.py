@@ -3153,7 +3153,7 @@ class NewsExplorationMixin:
                         ),
                         prompt_section(key="external_event.current_self", title="Bot 当前短时状态", source="news_exploration", content=current_self_context),
                     ],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 ),
             )
             if part
@@ -4636,7 +4636,7 @@ class NewsExplorationMixin:
                         prompt_section(key="web_exploration.context", title="当前上下文", source="news_exploration", content=self._web_exploration_recent_context()),
                         prompt_section(key="web_exploration.hot_candidates", title="公开热点候选", source="news_exploration", content=hot_context or "暂无可用热点候选"),
                     ],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 ),
             )
         )

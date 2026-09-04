@@ -7,7 +7,9 @@ from typing import Any
 
 
 from .conversation_injection_plan import (
+    PLACEMENT_DYNAMIC_SYSTEM,
     PLACEMENT_STABLE_SYSTEM,
+    PLACEMENT_TURN_TAIL,
     get_conversation_injection_plan,
 )
 from .conversation_prompt_section import PromptSection, prompt_section, render_prompt_sections
@@ -124,35 +126,36 @@ async def inject_humanized_state(
         priority: int,
         force_dynamic: bool = False,
     ) -> str:
-        placer = getattr(self, "_place_conversation_prompt_section", None)
-        if callable(placer):
-            return str(
-                placer(
-                    req,
-                    marker,
-                    section,
-                    priority=priority,
-                    force_dynamic=force_dynamic,
-                )
-                or "none"
-            )
-        legacy_appender = getattr(self, "_append_turn_prompt_fragment_by_position", None)
-        appended = bool(
-            callable(legacy_appender)
-            and legacy_appender(
-                req,
-                marker,
-                section,
+        position = str(
+            runtime_persona_setting(self, "passive_injection_position", "prompt")
+            or "prompt"
+        ).strip().lower()
+        normalizer = getattr(self, "_normalize_passive_injection_position", None)
+        if callable(normalizer):
+            position = str(normalizer(position) or "prompt")
+        use_system_prompt = position == "system_prompt" and not force_dynamic
+        plan = get_conversation_injection_plan(req)
+        if plan is None:
+            raise RuntimeError("conversation injection plan is unavailable")
+        if not plan.contains_marker(marker):
+            plan.add(
+                section=section,
+                marker=marker,
                 priority=priority,
-                force_dynamic=force_dynamic,
+                placement=(
+                    PLACEMENT_DYNAMIC_SYSTEM
+                    if use_system_prompt
+                    else PLACEMENT_TURN_TAIL
+                ),
+                materialized=False,
             )
+        plan.render_into(req, prefer_extra_user_content=True)
+        if use_system_prompt:
+            return "system_prompt"
+        return str(
+            getattr(req, "_private_companion_turn_prompt_placement", "prompt")
+            or "prompt"
         )
-        if appended:
-            return "prompt"
-        rendered = render_prompt_sections([section])
-        current = str(getattr(req, "system_prompt", "") or "")
-        req.system_prompt = f"{current}\n\n{marker}\n{rendered}".strip()
-        return "system_prompt"
 
     if not self.enabled:
         return
@@ -449,11 +452,6 @@ async def inject_humanized_state(
                         expression_section,
                         priority=58,
                     )
-                    if placement == "none":
-                        placement = "system_prompt"
-                        req.system_prompt = (
-                            f"{current_prompt}\n\n{expression_marker}\n{expression_voice}"
-                        ).strip()
                     await self._record_request_prompt_fragment(
                         event,
                         title="群聊表达底色注入",
@@ -560,39 +558,15 @@ async def inject_humanized_state(
                         if recall_section.content:
                             extra_sections.append(recall_section)
                     passive_group_formatter = getattr(self, "_format_group_passive_reply_context_for_prompt", None)
-                    if callable(passive_group_formatter):
-                        group_context = passive_group_formatter(group, sender_id, str(event.message_str or ""))
-                    else:
-                        group_context = prompt_section(
-                            key="group.context",
-                            title="群聊上下文",
-                            source="group",
-                            content=self._format_group_context_for_prompt(
-                                group,
-                                sender_id,
-                                str(event.message_str or ""),
-                            ),
-                        )
-                    group_context_section: PromptSection | None = None
-                    if isinstance(group_context, PromptSection):
-                        group_context_section = group_context
-                    elif isinstance(group_context, dict) and set(group_context) == {"title", "content"}:
-                        resolved_group_context = prompt_section(
-                            title=group_context.get("title") or "群聊上下文",
-                            content=group_context.get("content"),
-                            key=getattr(group_context, "key", "") or "group.context",
-                            source=getattr(group_context, "source", "") or "group",
-                            children=getattr(group_context, "children", ()),
-                            metadata=getattr(group_context, "metadata", {}),
-                        )
-                        group_context_section = resolved_group_context
-                    elif group_context:
-                        group_context_section = prompt_section(
-                            key="group.context",
-                            title="群聊上下文",
-                            source="group",
-                            content=str(group_context),
-                        )
+                    if not callable(passive_group_formatter):
+                        raise TypeError("group prompt context producer must return PromptSection")
+                    group_context_section = passive_group_formatter(
+                        group,
+                        sender_id,
+                        str(event.message_str or ""),
+                    )
+                    if not isinstance(group_context_section, PromptSection):
+                        raise TypeError("group prompt context producer must return PromptSection")
                     group_sections: list[PromptSection] = []
                     if slang_embedding_section is not None and slang_embedding_section.content:
                         group_sections.append(slang_embedding_section)
@@ -624,7 +598,7 @@ async def inject_humanized_state(
                     realtime_formatter = getattr(self, "_format_external_realtime_prompt_section", None)
                     if callable(realtime_formatter):
                         realtime_section = realtime_formatter({}, public=True)
-                        realtime_context = str(realtime_section.get("content") or "")
+                        realtime_context = str(realtime_section.content or "")
                         if realtime_context:
                             group_sections.insert(0, realtime_section)
                     if group_context_section is not None:
@@ -642,11 +616,6 @@ async def inject_humanized_state(
                         group_context_batch,
                         priority=GROUP_CONTEXT_FINAL_PRIORITY,
                     )
-                    if placement == "none":
-                        placement = "system_prompt"
-                        req.system_prompt = (
-                            f"{current_prompt}\n\n{marker}\n{group_context_text}"
-                        ).strip()
                     if group_prompt_context_history_count(group_context_section) > 0:
                         try:
                             setattr(event, GROUP_HISTORY_INJECTED_ATTR, True)
@@ -688,9 +657,6 @@ async def inject_humanized_state(
                     recall_section,
                     priority=66,
                 )
-                if placement == "none":
-                    placement = "system_prompt"
-                    req.system_prompt = f"{req.system_prompt or ''}\n\n{recall_marker}\n{recall_context}".strip()
                 await self._record_request_prompt_fragment(
                     event,
                     title="历史召回查询注入",
@@ -717,9 +683,6 @@ async def inject_humanized_state(
                     timeline_section,
                     priority=67,
                 )
-                if placement == "none":
-                    placement = "system_prompt"
-                    req.system_prompt = f"{req.system_prompt or ''}\n\n{timeline_marker}\n{self_timeline_context}".strip()
                 await self._record_request_prompt_fragment(
                     event,
                     title="自我时间线检索",
@@ -784,7 +747,7 @@ async def inject_humanized_state(
         priority=8,
     )
     reply_style_section = self._format_reply_style_prompt_section()
-    reply_style_prompt = str(reply_style_section.get("content") or "")
+    reply_style_prompt = str(reply_style_section.content or "")
     if reply_style_prompt:
         prompt_surface.add(
             reply_style_section,
@@ -794,7 +757,7 @@ async def inject_humanized_state(
     if outfit_section.content:
         prompt_surface.add(outfit_section, priority=13)
     routine_check_section = self._format_private_routine_check_boundary_section(inbound_text)
-    routine_check_boundary = str(routine_check_section.get("content") or "")
+    routine_check_boundary = str(routine_check_section.content or "")
     if routine_check_boundary:
         prompt_surface.add(
             routine_check_section,
@@ -919,7 +882,7 @@ async def inject_humanized_state(
                     limit=4,
                 )
             )
-            memo_notes = str(memo_section.get("content") or "")
+            memo_notes = str(memo_section.content or "")
             if memo_query and not memo_notes:
                 memo_notes = "当前没有进行中的便签。不要编造便签内容。"
                 memo_section = prompt_section(
@@ -939,7 +902,7 @@ async def inject_humanized_state(
             else []
         )
         for index, worldview_section in enumerate(worldview_sections):
-            worldview_context = str(worldview_section.get("content") or "")
+            worldview_context = str(worldview_section.content or "")
             worldview_context = self._sanitize_owner_environment_context_for_private_user(
                 worldview_context,
                 current_user,
@@ -962,7 +925,7 @@ async def inject_humanized_state(
     realtime_formatter = getattr(self, "_format_external_realtime_prompt_section", None)
     if callable(realtime_formatter):
         realtime_section = realtime_formatter(current_user, public=False)
-        realtime_context = str(realtime_section.get("content") or "")
+        realtime_context = str(realtime_section.content or "")
         if realtime_context:
             # Render after daily schedule and recall fragments so the current
             # realtime fact is the last authoritative context.
@@ -1013,7 +976,7 @@ async def inject_humanized_state(
         event,
         lightweight=lightweight_passive,
     )
-    environment_fragment = str(environment_section.get("content") or "")
+    environment_fragment = str(environment_section.content or "")
     environment_fragment = self._sanitize_owner_environment_context_for_private_user(environment_fragment, current_user)
     if environment_fragment:
         prompt_surface.add(
@@ -1536,9 +1499,13 @@ async def inject_humanized_state(
         )
         creative_reply_context = next(
             (
-                str(item.get("content") or "").strip()
+                render_prompt_sections(
+                    [section],
+                    mode="body_only",
+                ).strip()
                 for item in collected_contexts
-                if isinstance(item, dict) and _single_line(item.get("key"), 80) == "creative.hidden"
+                for section in item.sections
+                if section.key == "creative.hidden"
             ),
             "",
         )
@@ -1549,23 +1516,39 @@ async def inject_humanized_state(
     static_sections, dynamic_sections = prompt_surface.partition_sections(
         lambda fragment: fragment.normalized_key() in static_fragment_keys
     )
-    (
-        static_injection,
-        dynamic_injection,
-        static_prompt_modules,
-        dynamic_prompt_modules,
-    ) = prompt_surface.render_partition_with_fragments(
-        lambda fragment: fragment.normalized_key() in static_fragment_keys
+    static_batch = (
+        prompt_section(
+            key="passive.static",
+            title="稳定回复约束",
+            source="passive_state",
+            content="",
+            children=static_sections,
+        )
+        if static_sections
+        else None
     )
-    injection = "\n\n".join(part for part in (static_injection, dynamic_injection) if part)
+    dynamic_batch = (
+        prompt_section(
+            key="passive.dynamic",
+            title="本轮回复上下文",
+            source="passive_state",
+            content="",
+            children=dynamic_sections,
+        )
+        if dynamic_sections
+        else None
+    )
+    injection_sections = tuple(
+        section for section in (static_batch, dynamic_batch) if section is not None
+    )
+    injection = render_prompt_sections(injection_sections)
     static_marker = "<!-- private_companion_static_v1 -->"
     marker = "<!-- private_companion_state_v1 -->"
-    current_prompt = req.system_prompt or ""
     if self._request_has_managed_prompt_marker(req, marker):
         log_bookshelf_secret_skip("state_marker_already_present", current_user, inbound_text)
         await self._append_conditional_tool_instructions_to_request(event, req)
         return
-    if not injection:
+    if not injection_sections:
         logger.debug("被动状态提示词片段为空,跳过状态 marker 注入")
         log_bookshelf_secret_skip("empty_passive_injection", current_user, inbound_text)
         await self._append_conditional_tool_instructions_to_request(event, req)
@@ -1573,52 +1556,27 @@ async def inject_humanized_state(
     static_placement = ""
     dynamic_placement = ""
     conversation_plan = get_conversation_injection_plan(req)
-    if static_injection and not self._request_has_managed_prompt_marker(req, static_marker):
+    if conversation_plan is None:
+        raise RuntimeError("conversation injection plan is unavailable")
+    if static_batch is not None and not self._request_has_managed_prompt_marker(req, static_marker):
         static_placement = "system_prompt"
-        if conversation_plan is not None:
-            conversation_plan.add(
-                section=prompt_section(
-                    key="passive.static",
-                    title="稳定回复约束",
-                    source="passive_state",
-                    content="",
-                    children=static_sections,
-                ),
-                marker=static_marker,
-                priority=12,
-                placement=PLACEMENT_STABLE_SYSTEM,
-                temporary=False,
-                materialized=False,
-                metadata={"batch": True},
-                children=static_prompt_modules,
-            )
-            conversation_plan.render_into(req, prefer_extra_user_content=True)
-        else:
-            current_prompt = req.system_prompt or ""
-            req.system_prompt = f"{current_prompt}\n\n{static_marker}\n{static_injection}".strip()
-    if dynamic_injection:
-        dynamic_batch = prompt_section(
-            key="passive.dynamic",
-            title="本轮回复上下文",
-            source="passive_state",
-            content="",
-            children=dynamic_sections,
+        conversation_plan.add(
+            section=static_batch,
+            marker=static_marker,
+            priority=12,
+            placement=PLACEMENT_STABLE_SYSTEM,
+            materialized=False,
+            metadata={"batch": True},
         )
+    if dynamic_batch is not None:
         dynamic_placement = place_section(
             marker,
             dynamic_batch,
             priority=40,
         )
-        if dynamic_placement == "none":
-            dynamic_placement = "system_prompt"
-            current_prompt = req.system_prompt or ""
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{dynamic_injection}".strip()
-        if conversation_plan is not None:
-            conversation_plan.annotate_marker(
-                marker,
-                metadata={"batch": True},
-                children=dynamic_prompt_modules,
-            )
+        conversation_plan.annotate_marker(marker, metadata={"batch": True})
+    elif static_batch is not None:
+        conversation_plan.render_into(req, prefer_extra_user_content=True)
     injection_placement = "+".join(part for part in (static_placement, dynamic_placement) if part) or "none"
     await self._append_conditional_tool_instructions_to_request(event, req)
     state_log_parts = [
@@ -1657,7 +1615,7 @@ async def inject_humanized_state(
             trace_id=self._prompt_injection_trace_id_for_event(event),
             message_preview=self._prompt_injection_message_preview_for_event(event),
             sender_label=self._prompt_injection_sender_label_for_event(event),
-            section_manifest=prompt_surface.rendered_sections(),
+            section_manifest=injection_sections,
             metadata={
                 "状态": "｜".join(state_log_parts),
                 # Keep the legacy key for consumers that already read it, but
@@ -1674,6 +1632,7 @@ async def inject_humanized_state(
                 "状态触发": state_update_reason,
                 "会话": _single_line(getattr(event, "unified_msg_origin", ""), 160) or "unknown",
                 "发送者": _single_line(self._event_sender_id(event), 80),
+                "key冲突": len(prompt_surface.conflicts()),
             },
         )
     logger.info(

@@ -678,7 +678,7 @@ class ProactiveMixin(UserRestGateMixin):
     def _proactive_route_prompt(self, user: dict[str, Any], *, reason: Any = "", source: Any = "") -> str:
         return render_prompt_sections(
             [self._proactive_route_prompt_section(user, reason=reason, source=source)],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _prepare_proactive_route_candidate(
@@ -1882,7 +1882,7 @@ class ProactiveMixin(UserRestGateMixin):
     def _format_private_user_boundary_hint(self, user: dict[str, Any]) -> str:
         return render_prompt_sections(
             [self._format_private_user_boundary_prompt_section(user)],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _friend_sensitive_proactive_reason(self, reason: Any) -> bool:

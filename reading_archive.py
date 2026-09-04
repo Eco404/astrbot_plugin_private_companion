@@ -226,7 +226,7 @@ class ReadingArchiveMixin:
     async def _format_bookshelf_secret_for_prompt(self, inbound_text: str = "", user: dict[str, Any] | None = None) -> str:
         return render_prompt_sections(
             [await self._format_bookshelf_secret_prompt_section(inbound_text, user)],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     async def _format_bookshelf_secret_prompt_section(

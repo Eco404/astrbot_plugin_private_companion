@@ -21,22 +21,24 @@ from .conversation_prompt_section import (
     PromptSection,
     PromptTemplate,
     PromptText,
-    PromptValue,
     XmlElement,
     exact_text,
     prompt_group,
     prompt_section,
+    prompt_section_fingerprint,
     render_prompt_content,
     render_prompt_sections,
 )
+from .logging_util import get_module_logger
+
+
+logger = get_module_logger(__name__)
 
 PLAN_ATTR = "_private_companion_conversation_injection_plan"
-LEGACY_TURN_FRAGMENTS_ATTR = "_private_companion_turn_prompt_fragments"
+TURN_FRAGMENTS_ATTR = "_private_companion_turn_prompt_fragments"
 TURN_PLACEMENT_ATTR = "_private_companion_turn_prompt_placement"
 TURN_PART_ATTR = "_private_companion_turn_fragments"
 TURN_TEXT_ATTR = "_private_companion_conversation_plan_turn_text"
-TURN_START_MARKER = "<!-- private_companion_turn_fragments_start -->"
-TURN_END_MARKER = "<!-- private_companion_turn_fragments_end -->"
 
 PLACEMENT_STABLE_SYSTEM = "stable_system"
 PLACEMENT_DYNAMIC_SYSTEM = "dynamic_system"
@@ -75,7 +77,6 @@ def _content_text(value: Any) -> str:
             PromptList,
             PromptTemplate,
             PromptText,
-            PromptValue,
             XmlElement,
         ),
     ):
@@ -98,12 +99,11 @@ class ConversationInjectionBlock:
     marker: str
     priority: int = 50
     placement: str = PLACEMENT_TURN_TAIL
-    temporary: bool = True
     merge_policy: str = "first"
     materialized: bool = False
     index: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
-    children: list[dict[str, Any]] = field(default_factory=list)
+    conflicts: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def key(self) -> str:
@@ -132,7 +132,6 @@ class ConversationInjectionBlock:
                 PromptList,
                 PromptTemplate,
                 PromptText,
-                PromptValue,
                 XmlElement,
             ),
         ):
@@ -159,26 +158,30 @@ class ConversationInjectionBlock:
         )
 
     @staticmethod
-    def _manifest_children(
-        children: Iterable[dict[str, Any]],
+    def _manifest_section(
+        section: PromptSection,
         *,
         include_content: bool,
-    ) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
-        for raw in children:
-            if not isinstance(raw, dict):
-                continue
-            item = copy.deepcopy(raw)
-            content = str(item.pop("content", "") or "")
-            if content:
-                item["chars"] = len(content)
-                item["sha256"] = hashlib.sha256(
-                    content.encode("utf-8", "ignore")
-                ).hexdigest()
-                if include_content:
-                    item["content"] = content
-            result.append(item)
-        return result
+    ) -> dict[str, Any]:
+        body = render_prompt_content(section.content, mode=PromptRenderMode.BODY_ONLY)
+        item: dict[str, Any] = {
+            "key": section.key,
+            "source": section.source,
+            "title": section.title,
+            "chars": len(body),
+            "sha256": hashlib.sha256(body.encode("utf-8", "ignore")).hexdigest(),
+            "metadata": copy.deepcopy(dict(section.metadata)),
+            "children": [
+                ConversationInjectionBlock._manifest_section(
+                    child,
+                    include_content=include_content,
+                )
+                for child in section.children
+            ],
+        }
+        if include_content:
+            item["content"] = body
+        return item
 
     def manifest_item(self, *, include_content: bool = False) -> dict[str, Any]:
         authored_content = self.content
@@ -189,17 +192,17 @@ class ConversationInjectionBlock:
             "title": self.title,
             "priority": self.priority,
             "placement": self.placement,
-            "temporary": self.temporary,
             "merge_policy": self.merge_policy,
             "materialized": self.materialized,
             "index": self.index,
             "chars": len(_content_text(authored_content)),
             "sha256": hashlib.sha256(_content_bytes(authored_content)).hexdigest(),
             "metadata": copy.deepcopy(self.metadata),
-            "children": self._manifest_children(
-                self.children,
-                include_content=include_content,
-            ),
+            "children": [
+                self._manifest_section(child, include_content=include_content)
+                for child in self.section.children
+            ],
+            "conflicts": copy.deepcopy(self.conflicts),
         }
         if include_content:
             item["content"] = copy.deepcopy(self.content)
@@ -209,12 +212,13 @@ class ConversationInjectionBlock:
 class ConversationInjectionPlan:
     """Own prompt blocks for one ProviderRequest and render them deterministically."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, strict_conflicts: bool = False) -> None:
         self._blocks: list[ConversationInjectionBlock] = []
         self._by_key: dict[str, ConversationInjectionBlock] = {}
         self._next_index = 0
         self._frozen = False
         self._prefer_extra_user_content = True
+        self._strict_conflicts = bool(strict_conflicts)
 
     @property
     def frozen(self) -> bool:
@@ -230,11 +234,9 @@ class ConversationInjectionPlan:
         marker: str = "",
         priority: int = 50,
         placement: str = PLACEMENT_TURN_TAIL,
-        temporary: bool = True,
         merge_policy: str = "first",
         materialized: bool = False,
         metadata: dict[str, Any] | None = None,
-        children: Iterable[dict[str, Any]] | None = None,
     ) -> ConversationInjectionBlock | None:
         if self._frozen:
             raise RuntimeError("conversation injection plan is frozen")
@@ -242,7 +244,7 @@ class ConversationInjectionPlan:
         if not isinstance(section, PromptSection):
             raise TypeError("ConversationInjectionPlan.add requires PromptSection")
         authored = section
-        normalized_key = _clean_key(authored.key, "")
+        normalized_key = authored.key
         if not normalized_key or not authored.source:
             raise ValueError("conversation injection sections require key and source")
         normalized_placement = str(placement or "").strip().lower()
@@ -262,6 +264,7 @@ class ConversationInjectionPlan:
             raise TypeError("tool contract placement requires ExactText content")
 
         existing = self._by_key.get(normalized_key)
+        existing_by_marker = False
         if existing is None and normalized_marker:
             existing = next(
                 (
@@ -271,11 +274,33 @@ class ConversationInjectionPlan:
                 ),
                 None,
             )
-            if existing is not None:
-                self._by_key[normalized_key] = existing
-        child_items = [copy.deepcopy(item) for item in (children or []) if isinstance(item, dict)]
+            existing_by_marker = existing is not None
         if existing is not None:
+            old_fingerprint = prompt_section_fingerprint(existing.section)
+            new_fingerprint = prompt_section_fingerprint(authored)
+            if old_fingerprint == new_fingerprint:
+                return existing
             if normalized_merge == "first":
+                conflict = {
+                    "kind": "key" if existing.key == normalized_key else "marker",
+                    "key": normalized_key,
+                    "marker": normalized_marker,
+                    "existing_source": existing.source,
+                    "incoming_source": authored.source,
+                    "existing_sha256": old_fingerprint,
+                    "incoming_sha256": new_fingerprint,
+                }
+                if self._strict_conflicts:
+                    raise ValueError(
+                        f"conversation prompt key conflict: {normalized_key}"
+                    )
+                existing.conflicts.append(conflict)
+                logger.warning(
+                    "主对话提示词 key 冲突,保留首个片段: key=%s existing=%s incoming=%s",
+                    normalized_key,
+                    existing.source,
+                    authored.source,
+                )
                 return existing
             if normalized_merge == "append":
                 existing_text = _content_text(existing.section.content)
@@ -296,19 +321,21 @@ class ConversationInjectionPlan:
                         content=merged_content,
                         children=merged_children,
                     )
-                existing.children.extend(child_items)
                 if metadata:
                     existing.metadata.update(copy.deepcopy(metadata))
                 return existing
+            old_key = existing.key
             existing.marker = normalized_marker
             existing.section = authored
             existing.priority = int(priority)
             existing.placement = normalized_placement
-            existing.temporary = bool(temporary)
             existing.merge_policy = normalized_merge
             existing.materialized = bool(materialized)
             existing.metadata = copy.deepcopy(metadata or {})
-            existing.children = child_items
+            existing.conflicts = []
+            if existing_by_marker and old_key != normalized_key:
+                self._by_key.pop(old_key, None)
+                self._by_key[normalized_key] = existing
             return existing
 
         block = ConversationInjectionBlock(
@@ -316,12 +343,10 @@ class ConversationInjectionPlan:
             marker=normalized_marker,
             priority=int(priority),
             placement=normalized_placement,
-            temporary=bool(temporary),
             merge_policy=normalized_merge,
             materialized=bool(materialized),
             index=self._next_index,
             metadata=copy.deepcopy(metadata or {}),
-            children=child_items,
         )
         self._next_index += 1
         self._blocks.append(block)
@@ -333,7 +358,6 @@ class ConversationInjectionPlan:
         marker: str,
         *,
         metadata: dict[str, Any] | None = None,
-        children: Iterable[dict[str, Any]] | None = None,
     ) -> bool:
         marker_text = _clean_key(marker, "")
         target = next((block for block in self._blocks if block.marker == marker_text), None)
@@ -341,8 +365,6 @@ class ConversationInjectionPlan:
             return False
         if metadata:
             target.metadata.update(copy.deepcopy(metadata))
-        if children is not None:
-            target.children = [copy.deepcopy(item) for item in children if isinstance(item, dict)]
         return True
 
     def materialize_system_block(
@@ -359,25 +381,27 @@ class ConversationInjectionPlan:
 
         if not isinstance(section, PromptSection):
             raise TypeError("materialize_system_block requires PromptSection")
-        normalized_key = _clean_key(section.key, "")
-        if self.contains_key(normalized_key) or self.contains_marker(marker):
-            return False
+        existing = self._by_key.get(section.key)
+        if existing is None and marker:
+            existing = next(
+                (block for block in self._blocks if block.marker == _clean_key(marker, "")),
+                None,
+            )
         common = {
             "marker": _clean_key(marker, ""),
             "priority": priority,
             "placement": placement,
-            "temporary": False,
             "materialized": True,
             "metadata": {"materialized_by_plan": True, **copy.deepcopy(metadata or {})},
         }
         block = self.add(section=section, **common)
-        if block is None:
+        if block is None or block is existing:
             return False
         self._render_system(req)
         return True
 
     def contains_key(self, key: str) -> bool:
-        return _clean_key(key, "") in self._by_key
+        return key in self._by_key
 
     def contains_marker(self, marker: str) -> bool:
         marker_text = _clean_key(marker, "")
@@ -408,7 +432,7 @@ class ConversationInjectionPlan:
             selected = [block for block in selected if not block.materialized]
         return sorted(selected, key=lambda block: (block.priority, block.index))
 
-    def legacy_turn_fragments(self) -> list[dict[str, Any]]:
+    def turn_fragments(self) -> list[dict[str, Any]]:
         fragments: list[dict[str, Any]] = []
         seen_markers: set[str] = set()
         for block in self.blocks(placement=PLACEMENT_TURN_TAIL, include_materialized=False):
@@ -503,13 +527,6 @@ class ConversationInjectionPlan:
         for part in parts:
             if bool(getattr(part, TURN_PART_ATTR, False)):
                 continue
-            raw = str(
-                part.get("text") or part.get("content") or ""
-                if isinstance(part, dict)
-                else getattr(part, "text", "") or getattr(part, "content", "") or ""
-            )
-            if TURN_START_MARKER in raw and TURN_END_MARKER in raw:
-                continue
             kept.append(part)
         req.extra_user_content_parts = kept
 
@@ -523,13 +540,7 @@ class ConversationInjectionPlan:
                 current = current[: -(len(previous) + 2)].rstrip()
             elif previous in current:
                 current = self._remove_once(current, previous)
-        # Compatibility cleanup for requests rendered by older plugin versions.
-        return re.sub(
-            rf"\n*\s*{re.escape(TURN_START_MARKER)}.*?{re.escape(TURN_END_MARKER)}\s*",
-            "\n\n",
-            current,
-            flags=re.DOTALL,
-        ).strip()
+        return current.strip()
 
     def _render_system(self, req: Any) -> None:
         current = str(getattr(req, "system_prompt", "") or "")
@@ -559,8 +570,8 @@ class ConversationInjectionPlan:
             self._prefer_extra_user_content = bool(prefer_extra_user_content)
         self._render_system(req)
         base = self._base_prompt(req)
-        fragments = self.legacy_turn_fragments()
-        setattr(req, LEGACY_TURN_FRAGMENTS_ATTR, copy.deepcopy(fragments))
+        fragments = self.turn_fragments()
+        setattr(req, TURN_FRAGMENTS_ATTR, copy.deepcopy(fragments))
         if not fragments:
             req.prompt = base
             self._remove_owned_turn_part(req)

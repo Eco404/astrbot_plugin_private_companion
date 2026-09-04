@@ -501,7 +501,7 @@ class BalanceAwarenessMixin:
         return (
             render_prompt_sections(
                 [section],
-                mode=PromptRenderMode.LEGACY_BLOCK,
+                mode=PromptRenderMode.LABELED_BLOCK,
             )
             if section is not None
             else ""

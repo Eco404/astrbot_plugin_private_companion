@@ -4,6 +4,7 @@ from __future__ import annotations
 import unittest
 
 from astrbot_plugin_private_companion.command_handlers import CommandHandlersMixin
+from astrbot_plugin_private_companion.conversation_prompt_section import PhotoPromptContent
 
 
 class _NaturalPhotoPromptHarness(CommandHandlersMixin):
@@ -98,13 +99,14 @@ class NaturalPhotoWardrobePromptTests(unittest.TestCase):
             * 8,
         )
 
-        by_name = {section.name: section for section in sections}
-        self.assertEqual(by_name["natural_language_contract"].source, "fixed_prompt")
+        self.assertTrue(all(isinstance(section.content, PhotoPromptContent) for section in sections))
+        by_name = {section.title: section.content for section in sections}
+        self.assertEqual(by_name["natural_language_contract"].domain_source, "fixed_prompt")
         self.assertTrue(by_name["natural_language_contract"].protected)
         visual_chars = sum(
-            len(section.positive) + len(section.negative)
+            len(section.content.positive) + len(section.content.negative)
             for section in sections
-            if section.source not in {"user_request", "fixed_prompt"}
+            if section.content.domain_source not in {"user_request", "fixed_prompt"}
         )
         self.assertLessEqual(visual_chars, 500)
         self.assertLessEqual(

@@ -56,7 +56,6 @@ class _PlanAppendHarness:
             marker=marker,
             priority=priority,
             placement=PLACEMENT_TURN_TAIL,
-            temporary=True,
         )
         plan.render_into(req, prefer_extra_user_content=True)
         return True
@@ -110,7 +109,6 @@ class _GroupGuardSystemPlanHarness(_GroupGuardHarness):
             marker=marker,
             priority=priority,
             placement=PLACEMENT_DYNAMIC_SYSTEM,
-            temporary=False,
             materialized=True,
         )
         return False
@@ -329,7 +327,7 @@ class ConversationInjectionPlanStage2Tests(unittest.IsolatedAsyncioTestCase):
         plan.render_into(req)
         self.assertEqual(before, req.system_prompt)
 
-    async def test_daily_review_direct_system_write_is_registered_as_materialized(self) -> None:
+    async def test_daily_review_plan_materialization_is_idempotent(self) -> None:
         req = _request()
 
         await _DailyReviewHarness()._append_daily_review_guidance_to_request(object(), req)
@@ -343,7 +341,7 @@ class ConversationInjectionPlanStage2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(item["materialized"])
         self.assertIn("short reply", item["content"])
 
-    async def test_member_safety_direct_system_write_is_registered_as_materialized(self) -> None:
+    async def test_member_safety_exact_plan_materialization_is_idempotent(self) -> None:
         req = _request()
         event = _SafetyEvent()
 
@@ -354,9 +352,10 @@ class ConversationInjectionPlanStage2Tests(unittest.IsolatedAsyncioTestCase):
         before = req.system_prompt
         plan.render_into(req)
         self.assertEqual(before, req.system_prompt)
-        self.assertEqual("tool_contract", item["placement"])
+        self.assertEqual(PLACEMENT_DYNAMIC_SYSTEM, item["placement"])
         self.assertTrue(item["materialized"])
         self.assertIsInstance(plan.blocks()[0].section.content, ExactText)
+        self.assertIn("private_companion_member_safety_hidden_marker_v1", item["content"])
         self.assertIn("标签完全可选", item["content"])
 
 

@@ -94,7 +94,7 @@ class RealityCompanionBridgeMixin:
         section = self._format_reality_touch_continuity_context_prompt_section(user)
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_reality_touch_continuity_context_prompt_section(

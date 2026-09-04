@@ -1073,7 +1073,7 @@ class SceneContextMixin:
         section = self._format_mobile_user_location_context_prompt_section(user)
         return render_prompt_sections(
             [section],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _format_mobile_user_location_context_prompt_section(
@@ -1477,7 +1477,7 @@ class SceneContextMixin:
     def _format_mobile_user_location_context_for_proactive(self, user: dict[str, Any] | None) -> str:
         section = self._format_mobile_user_location_context_for_proactive_prompt_section(user)
         return (
-            render_prompt_sections([section], mode=PromptRenderMode.LEGACY_BLOCK)
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
             if section is not None
             else ""
         )

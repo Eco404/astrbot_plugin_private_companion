@@ -184,10 +184,11 @@ class GroupShareFactGroundingTests(unittest.TestCase):
             event_umo="default:FriendMessage:10001",
             now=2100,
         )
-        self.assertEqual("群聊主动消息追问的事实边界", section["title"])
+        self.assertIsNotNone(section)
+        self.assertEqual("群聊主动消息追问的事实边界", section.title)
         self.assertEqual("group_share.reply_boundary", section.key)
         self.assertEqual("group_observation", section.source)
-        self.assertNotIn("【群聊主动消息追问的事实边界】", section["content"])
+        self.assertNotIn("【群聊主动消息追问的事实边界】", section.content)
 
     def test_source_snapshot_is_not_injected_into_another_session(self) -> None:
         user = {

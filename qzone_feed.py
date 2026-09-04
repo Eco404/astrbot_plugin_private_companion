@@ -536,7 +536,7 @@ class QzoneFeedMixin:
                         prompt_section(key="qzone.comment.author", title="作者", source="qzone_feed", content=_single_line(getattr(post, "name", ""), 40) or _single_line(getattr(post, "uin", ""), 40) or "对方"),
                         prompt_section(key="qzone.comment.post", title="说说内容", source="qzone_feed", content=_single_line(getattr(post, "text", "") or getattr(post, "rt_con", ""), 240) or "无文本"),
                     ],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 ),
             )
         )

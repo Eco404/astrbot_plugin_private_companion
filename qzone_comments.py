@@ -213,7 +213,7 @@ class QzoneCommentMixin:
     def _qzone_comment_author_context(self, comment: Any) -> str:
         return render_prompt_sections(
             [self._qzone_comment_author_prompt_section(comment)],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _qzone_comment_author_prompt_section(self, comment: Any):
@@ -284,7 +284,7 @@ class QzoneCommentMixin:
     def _qzone_post_brief_context(self, post: Any) -> str:
         return render_prompt_sections(
             [self._qzone_post_brief_prompt_section(post)],
-            mode=PromptRenderMode.LEGACY_BLOCK,
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _qzone_post_brief_prompt_section(self, post: Any):
@@ -372,7 +372,7 @@ class QzoneCommentMixin:
                         ),
                         prompt_section(key="qzone.comment_reply.content", title="评论内容", source="qzone_comments", content=content),
                     ],
-                    mode=PromptRenderMode.LEGACY_BLOCK,
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 ),
             )
         )
