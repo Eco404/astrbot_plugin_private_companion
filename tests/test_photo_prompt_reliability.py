@@ -11,6 +11,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 from astrbot_plugin_private_companion.command_handlers import CommandHandlersMixin
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PhotoPromptContent,
+    PromptSection,
+    prompt_section,
+)
 
 if find_spec("astrbot_plugin_image_companion") is not None:
     from astrbot_plugin_image_companion.image_runtime import (
@@ -19,7 +24,7 @@ if find_spec("astrbot_plugin_image_companion") is not None:
         ProactiveMessageMixin,
     )
     from astrbot_plugin_image_companion.photo_prompt_context import (
-        PhotoPromptSection,
+        PhotoPromptSection as _photo_section,
         resolve_photo_prompt_context,
     )
     from astrbot_plugin_image_companion.photo_wardrobe_decision import (
@@ -33,13 +38,44 @@ else:
         ProactiveMessageMixin,
     )
     from astrbot_plugin_private_companion.photo_prompt_context import (
-        PhotoPromptSection,
         resolve_photo_prompt_context,
     )
     from astrbot_plugin_private_companion.photo_wardrobe_decision import (
         analyze_photo_wardrobe,
         resolve_photo_wardrobe_decision,
     )
+
+    def _photo_section(
+        name: str,
+        source: str,
+        positive: str = "",
+        negative: str = "",
+        protected: bool = False,
+        sanitize_conflicts: bool | None = None,
+    ) -> PromptSection:
+        return prompt_section(
+            key=f"photo.test.{source}.{name}",
+            title=name,
+            source="photo_prompt_context",
+            content=PhotoPromptContent(
+                positive=positive,
+                negative=negative,
+                domain_source=source,
+                protected=protected,
+                sanitize_conflicts=sanitize_conflicts,
+            ),
+        )
+
+
+def _photo_name(section: object) -> str:
+    content = getattr(section, "content", None)
+    return str(section.title if isinstance(content, PhotoPromptContent) else section.name)
+
+
+def _photo_value(section: object, field: str) -> str:
+    content = getattr(section, "content", None)
+    owner = content if isinstance(content, PhotoPromptContent) else section
+    return str(getattr(owner, field, "") or "")
 
 
 class _PhotoReliabilityHarness(CommandHandlersMixin, ProactiveMessageMixin):
@@ -132,12 +168,12 @@ class _PhotoReliabilityHarness(CommandHandlersMixin, ProactiveMessageMixin):
             user_positive,
         )
         sections = (
-            PhotoPromptSection("user_request", "user_request", user_positive, user_negative, True),
-            PhotoPromptSection("wardrobe_decision", "wardrobe_decision", wardrobe_positive, wardrobe_negative),
-            PhotoPromptSection("scene_context", "scene_context", scene_hint),
-            PhotoPromptSection("scene_preset", "preset", preset_section),
-            PhotoPromptSection("composition", "composition", composition_positive, composition_negative),
-            PhotoPromptSection("recent_continuity", "recent_continuity", continuity_section),
+            _photo_section("user_request", "user_request", user_positive, user_negative, True),
+            _photo_section("wardrobe_decision", "wardrobe_decision", wardrobe_positive, wardrobe_negative),
+            _photo_section("scene_context", "scene_context", scene_hint),
+            _photo_section("scene_preset", "preset", preset_section),
+            _photo_section("composition", "composition", composition_positive, composition_negative),
+            _photo_section("recent_continuity", "recent_continuity", continuity_section),
         )
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
@@ -146,13 +182,14 @@ class _PhotoReliabilityHarness(CommandHandlersMixin, ProactiveMessageMixin):
             workflow_kind=workflow_kind,
             reference=reference,
         )
-        by_name = {section.name: section for section in resolved.prompt_sections}
+        by_name = {_photo_name(section): section for section in resolved.prompt_sections}
 
         def joined(*names: str, negative: bool = False) -> str:
             return "\n".join(
-                getattr(by_name[name], "negative" if negative else "positive")
+                _photo_value(by_name[name], "negative" if negative else "positive")
                 for name in names
-                if name in by_name and getattr(by_name[name], "negative" if negative else "positive")
+                if name in by_name
+                and _photo_value(by_name[name], "negative" if negative else "positive")
             )
 
         return resolved.final_prompt, {
@@ -586,17 +623,17 @@ class PhotoPromptReliabilityTests(unittest.IsolatedAsyncioTestCase):
             resolved = resolve_photo_prompt_context(
                 wardrobe=wardrobe,
                 sections=(
-                    PhotoPromptSection(
+                    _photo_section(
                         "scene_context",
                         "scene_context",
                         "今日穿搭：white shirt and navy blazer.",
                     ),
-                    PhotoPromptSection(
+                    _photo_section(
                         "scene_preset",
                         "preset",
                         "Scene preset: daily outfit portrait: polished commuter layers.",
                     ),
-                    PhotoPromptSection("negative", "user_request", negative="watermark", protected=True),
+                    _photo_section("negative", "user_request", negative="watermark", protected=True),
                 ),
                 prompt_format="traditional",
                 workflow_kind="selfie",
@@ -629,12 +666,12 @@ class PhotoPromptReliabilityTests(unittest.IsolatedAsyncioTestCase):
             resolved = resolve_photo_prompt_context(
                 wardrobe=wardrobe,
                 sections=(
-                    PhotoPromptSection(
+                    _photo_section(
                         "scene_preset",
                         "preset",
                         "Scene preset: home sleepwear portrait with soft bedtime loungewear.",
                     ),
-                    PhotoPromptSection("negative", "user_request", negative="watermark", protected=True),
+                    _photo_section("negative", "user_request", negative="watermark", protected=True),
                 ),
                 prompt_format="traditional",
                 workflow_kind="selfie",

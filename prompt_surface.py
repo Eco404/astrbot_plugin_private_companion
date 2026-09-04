@@ -1,167 +1,188 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
 from .conversation_prompt_section import (
     PromptSection,
-    coerce_prompt_section,
-    render_prompt_sections,
-    title_for_prompt_key,
+    prompt_group,
+    prompt_section,
+    prompt_section_fingerprint,
 )
-from .helpers import _single_line
+from .logging_util import get_module_logger
 
 
-@dataclass
+logger = get_module_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
 class PromptFragment:
-    key: str
-    content: Any
-    title: str = ""
+    """One authored section plus surface-local ordering metadata."""
+
+    section: PromptSection
     priority: int = 100
-    source: str = ""
     index: int = 0
-    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def key(self) -> str:
+        return self.section.key
+
+    @property
+    def content(self) -> Any:
+        return self.section.content
+
+    @property
+    def title(self) -> str:
+        return self.section.title
+
+    @property
+    def source(self) -> str:
+        return self.section.source
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return dict(self.section.metadata)
 
     def normalized_key(self) -> str:
-        return _single_line(self.key or self.source or "fragment", 80)
+        return self.section.key
+
+
+@dataclass(frozen=True, slots=True)
+class CollectedPromptContext:
+    """Typed result from one bounded asynchronous prompt collector."""
+
+    key: str
+    priority: int
+    sections: tuple[PromptSection, ...]
+    status: str
+    metadata: dict[str, Any]
 
 
 class PromptSurface:
-    """Collects prompt fragments before rendering them into one injection block."""
+    """Collect authored sections before request-level placement and rendering."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, strict_conflicts: bool = False) -> None:
         self._fragments: list[PromptFragment] = []
+        self._by_key: dict[str, PromptFragment] = {}
+        self._conflicts: list[dict[str, object]] = []
         self._next_index = 0
+        self._strict_conflicts = bool(strict_conflicts)
 
     def add(
         self,
-        key: str,
-        content: Any,
+        section: PromptSection,
         *,
         priority: int = 100,
-        source: str = "",
-        title: str = "",
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        section = coerce_prompt_section(content)
-        body = section.content if section is not None else content
-        if body is None or (isinstance(body, str) and not body.strip()):
-            return
-        resolved_title = title_for_prompt_key(
-            key,
-            title or (section.title if section is not None else ""),
-        )
-        self._fragments.append(
-            PromptFragment(
-                key=key,
-                content=body,
-                title=resolved_title,
-                priority=priority,
-                source=source,
-                index=self._next_index,
-                metadata=dict(metadata or {}),
-            )
-        )
-        self._next_index += 1
+        merge_policy: str = "first",
+    ) -> PromptFragment | None:
+        """Add one fully authored section."""
 
-    def extend(self, fragments: Iterable[PromptFragment]) -> None:
+        if not isinstance(section, PromptSection):
+            raise TypeError("PromptSurface.add requires PromptSection")
+        if not section.key or not section.source:
+            raise ValueError("PromptSurface requires a section with key and source")
+        if (
+            section.content is None
+            or (isinstance(section.content, str) and not section.content.strip())
+        ) and not section.children:
+            return None
+        policy = str(merge_policy or "first").strip().lower()
+        if policy not in {"first", "replace", "append"}:
+            raise ValueError(f"unsupported prompt surface merge policy: {merge_policy}")
+        existing = self._by_key.get(section.key)
+        if existing is not None:
+            old_fingerprint = prompt_section_fingerprint(existing.section)
+            new_fingerprint = prompt_section_fingerprint(section)
+            if old_fingerprint == new_fingerprint:
+                return existing
+            if policy == "first":
+                conflict = {
+                    "key": section.key,
+                    "existing_source": existing.section.source,
+                    "incoming_source": section.source,
+                    "existing_sha256": old_fingerprint,
+                    "incoming_sha256": new_fingerprint,
+                }
+                if self._strict_conflicts:
+                    raise ValueError(f"prompt surface key conflict: {section.key}")
+                self._conflicts.append(conflict)
+                logger.warning(
+                    "PromptSurface key 冲突,保留首个片段: key=%s existing=%s incoming=%s",
+                    section.key,
+                    existing.section.source,
+                    section.source,
+                )
+                return existing
+            if policy == "replace":
+                replacement = PromptFragment(
+                    section=section,
+                    priority=int(priority),
+                    index=existing.index,
+                )
+                self._fragments[self._fragments.index(existing)] = replacement
+                self._by_key[section.key] = replacement
+                return replacement
+            merged_content = existing.section.content
+            if existing.section.content != section.content:
+                merged_content = prompt_group(
+                    existing.section.content,
+                    section.content,
+                    separator="\n\n",
+                )
+            merged = prompt_section(
+                key=existing.section.key,
+                title=existing.section.title,
+                source=existing.section.source,
+                content=merged_content,
+                children=(*existing.section.children, *section.children),
+                metadata=existing.section.metadata,
+            )
+            replacement = PromptFragment(
+                section=merged,
+                priority=existing.priority,
+                index=existing.index,
+            )
+            self._fragments[self._fragments.index(existing)] = replacement
+            self._by_key[section.key] = replacement
+            return replacement
+        fragment = PromptFragment(
+            section=section,
+            priority=int(priority),
+            index=self._next_index,
+        )
+        self._fragments.append(fragment)
+        self._by_key[section.key] = fragment
+        self._next_index += 1
+        return fragment
+
+    def extend(self, fragments: Iterable[PromptFragment | PromptSection]) -> None:
         for fragment in fragments:
             if isinstance(fragment, PromptFragment):
-                self.add(
-                    fragment.key,
-                    fragment.content,
-                    priority=fragment.priority,
-                    source=fragment.source,
-                    title=fragment.title,
-                    metadata=fragment.metadata,
-                )
+                self.add(fragment.section, priority=fragment.priority)
+            elif isinstance(fragment, PromptSection):
+                self.add(fragment)
+            else:
+                raise TypeError("PromptSurface.extend requires PromptFragment or PromptSection values")
 
-    def _rendered_fragments(self) -> list[PromptFragment]:
-        seen_keys: set[str] = set()
-        seen_content: set[str] = set()
-        rendered: list[PromptFragment] = []
-        for fragment in sorted(self._fragments, key=lambda item: (item.priority, item.index)):
-            key = fragment.normalized_key()
-            content = fragment.content
-            content_sig = repr(content)
-            if key and key in seen_keys:
-                continue
-            if content_sig and content_sig in seen_content:
-                continue
-            if key:
-                seen_keys.add(key)
-            if content_sig:
-                seen_content.add(content_sig)
-            rendered.append(fragment)
-        return rendered
+    def fragments(self) -> tuple[PromptFragment, ...]:
+        return tuple(sorted(self._fragments, key=lambda item: (item.priority, item.index)))
 
-    def rendered_fragments(self) -> list[dict[str, object]]:
-        result: list[dict[str, object]] = []
-        for fragment in self._rendered_fragments():
-            content = fragment.content
-            item = {
-                "key": fragment.normalized_key(),
-                "title": fragment.title,
-                "source": _single_line(fragment.source, 80),
-                "priority": int(fragment.priority),
-                "content": content,
-                "chars": len(str(content)),
-            }
-            if fragment.metadata:
-                item["metadata"] = dict(fragment.metadata)
-            result.append(item)
-        return result
+    def sections(self) -> tuple[PromptSection, ...]:
+        return tuple(fragment.section for fragment in self.fragments())
 
-    def render(self) -> str:
-        return self._render_sections(self._rendered_fragments())
+    def conflicts(self) -> tuple[dict[str, object], ...]:
+        return tuple(dict(item) for item in self._conflicts)
 
-    @staticmethod
-    def _render_sections(fragments: Iterable[PromptFragment]) -> str:
-        return render_prompt_sections(
-            PromptSection(fragment.title, fragment.content)
-            for fragment in fragments
-        )
-
-    def render_partition(self, predicate: Callable[[PromptFragment], bool]) -> tuple[str, str]:
-        matched, rest, _matched_fragments, _rest_fragments = self.render_partition_with_fragments(predicate)
-        return matched, rest
-
-    def render_partition_with_fragments(
+    def partition_sections(
         self,
         predicate: Callable[[PromptFragment], bool],
-    ) -> tuple[str, str, list[dict[str, object]], list[dict[str, object]]]:
-        """Render a partition and expose the exact child manifest for plan bridges."""
-        matched: list[PromptFragment] = []
-        rest: list[PromptFragment] = []
-        matched_fragments: list[dict[str, object]] = []
-        rest_fragments: list[dict[str, object]] = []
-        for fragment in self._rendered_fragments():
-            content = fragment.content
-            if content is None or (isinstance(content, str) and not content.strip()):
-                continue
-            item: dict[str, object] = {
-                "key": fragment.normalized_key(),
-                "title": fragment.title,
-                "source": _single_line(fragment.source, 80),
-                "priority": int(fragment.priority),
-                "content": content,
-                "chars": len(str(content)),
-            }
-            if fragment.metadata:
-                item["metadata"] = dict(fragment.metadata)
-            if predicate(fragment):
-                matched.append(fragment)
-                matched_fragments.append(item)
-            else:
-                rest.append(fragment)
-                rest_fragments.append(item)
-        return (
-            self._render_sections(matched),
-            self._render_sections(rest),
-            matched_fragments,
-            rest_fragments,
-        )
+    ) -> tuple[tuple[PromptSection, ...], tuple[PromptSection, ...]]:
+        matched: list[PromptSection] = []
+        rest: list[PromptSection] = []
+        for fragment in self.fragments():
+            (matched if predicate(fragment) else rest).append(fragment.section)
+        return tuple(matched), tuple(rest)
 
     def __len__(self) -> int:
         return len(self._fragments)

@@ -18,6 +18,7 @@ from astrbot_plugin_private_companion.lab_fixture_adapter import (
     SCHEMA,
     register_companion_lab_fixture_adapter,
 )
+from astrbot_plugin_private_companion.conversation_prompt_section import prompt_section
 from astrbot_plugin_private_companion.plugin_identity import PLUGIN_ID
 from astrbot_plugin_private_companion.relationship_policy import relationship_stage_for_score
 
@@ -97,12 +98,16 @@ def _main_method(name: str):
             True if key == "enable_custom_relationship_stage_policy" else default
         ),
         "content_intent_from_text": lambda _text: {"requested_content_tier": "normal"},
-        "expression_decision_prompt": lambda projection: (
-            f"stage={projection.get('relationship_stage', '')}"
+        "expression_decision_prompt_section": lambda projection: prompt_section(
+            key="expression.decision",
+            title="Companion expression",
+            source="expression_decision",
+            content=f"stage={projection.get('relationship_stage', '')}",
         ),
         "build_expression_decision": lambda _source: SimpleNamespace(
             to_dict=lambda: {"relationship_stage": "fallback"}
         ),
+        "prompt_section": prompt_section,
         "_now_ts": lambda: 1000.0,
         "_single_line": lambda value, limit: str(value or "")[:limit],
         "logger": SimpleNamespace(debug=lambda *_args, **_kwargs: None),
@@ -569,10 +574,10 @@ class _ExpressionHarness:
             }
         )
 
-    def _append_turn_prompt_fragment_by_position(self, req, marker, content, **kwargs):
+    def _append_turn_prompt_fragment_by_position(self, req, marker, section, **kwargs):
         self.captured["prompt_fragment"] = {
             "marker": marker,
-            "content": content,
+            "content": section.content,
             "kwargs": kwargs,
         }
 

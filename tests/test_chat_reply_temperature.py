@@ -10,7 +10,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from reply_temperature import compose_reply_temperature  # noqa: E402
+from reply_temperature import (  # noqa: E402
+    compose_reply_temperature,
+    reply_temperature_prompt_section,
+)
 
 
 class ReplyTemperatureTests(unittest.TestCase):
@@ -32,7 +35,25 @@ class ReplyTemperatureTests(unittest.TestCase):
         marker = "PRIVATE_CONTEXT_DO_NOT_ECHO"
         result = compose_reply_temperature("warm", context=marker)
         self.assertNotIn(marker, repr(result))
-        self.assertEqual({"tier", "score", "cap_tier", "state_tier", "context_adjustment", "signals", "codes", "instruction"}, set(result))
+        self.assertEqual(
+            {"tier", "score", "cap_tier", "state_tier", "context_adjustment", "signals", "codes"},
+            set(result),
+        )
+
+    def test_prompt_section_owns_the_temperature_instruction(self) -> None:
+        expected = {
+            "guarded": "保持简短、尊重边界，不主动扩展。",
+            "neutral": "保持自然、克制的交流。",
+            "warm": "可以温和回应，保持尊重与分寸。",
+            "close": "可以更亲近地回应，但保持尊重与分寸。",
+        }
+        for tier, content in expected.items():
+            with self.subTest(tier=tier):
+                section = reply_temperature_prompt_section({"tier": tier})
+                self.assertEqual("relationship.reply_temperature", section.key)
+                self.assertEqual("Reply boundary", section.title)
+                self.assertEqual("relationship", section.source)
+                self.assertEqual(content, section.content)
 
     def test_contextual_boundary_lowers_temperature_without_mutating_p4_state(self) -> None:
         p4_state = {"confinement_state": "none", "warmth_tier": "close", "revision": 7}
@@ -66,7 +87,18 @@ class ReplyTemperatureTests(unittest.TestCase):
             and node.func.id == "compose_reply_temperature"
         ]
         self.assertEqual(1, len(legacy_calls))
-        self.assertIn("_private_companion_reply_temperature", ast.unparse(gate))
+        gate_source = ast.unparse(gate)
+        self.assertIn("_private_companion_reply_temperature", gate_source)
+        self.assertIn("reply_temperature_prompt_section", gate_source)
+        self.assertNotIn("temperature.get('instruction')", gate_source)
+        direct_section_calls = [
+            node
+            for node in ast.walk(gate)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "prompt_section"
+        ]
+        self.assertEqual([], direct_section_calls)
         expression_hook = next(
             node for node in ast.walk(tree)
             if isinstance(node, ast.AsyncFunctionDef)

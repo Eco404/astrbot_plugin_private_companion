@@ -106,6 +106,12 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
 from .markdown_segment_guard import (
     MARKDOWN_BLOCK_TOKEN_PATTERN,
     protect_markdown_blocks,
@@ -1440,6 +1446,13 @@ class EventDispatchMixin:
         return title or normalized_key or "提示词片段", "提示词组装中的一个片段；用于排查它对本轮模型输入的影响。"
 
     def _split_prompt_modules_by_heading(self, content: str) -> list[dict[str, Any]]:
+        """Recover modules from persisted pre-manifest prompt traces.
+
+        New traces must supply a section manifest instead of inferring semantic
+        boundaries from rendered text.  This parser remains only so the
+        diagnostics page can display trace records written by older releases.
+        """
+
         text = str(content or "").strip()
         if not text:
             return []
@@ -1492,40 +1505,97 @@ class EventDispatchMixin:
             )
         return modules
 
-    def _normalize_prompt_injection_modules(self, content: str, modules: Any = None) -> list[dict[str, Any]]:
-        raw_modules = modules if isinstance(modules, list) else self._split_prompt_modules_by_heading(content)
+    def _normalize_prompt_injection_modules(
+        self,
+        content: str,
+        modules: Any = None,
+        *,
+        legacy_heading_fallback: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Normalize a typed section manifest for prompt diagnostics.
+
+        ``legacy_heading_fallback`` is intentionally enabled for callers that
+        read old persisted traces.  Live trace writers disable it, so headings
+        inside rendered or user-supplied text cannot become fake modules.
+        """
+
+        if isinstance(modules, (list, tuple)):
+            raw_modules = list(modules)
+        elif legacy_heading_fallback:
+            raw_modules = self._split_prompt_modules_by_heading(content)
+        else:
+            text = str(content or "").strip()
+            raw_modules = (
+                [
+                    {
+                        "key": "prompt.full",
+                        "source": "merged_prompt",
+                        "priority": 100,
+                        "title": "完整提示词",
+                        "content": text,
+                        "chars": len(text),
+                    }
+                ]
+                if text
+                else []
+            )
         result: list[dict[str, Any]] = []
         max_modules = 28
         max_content = 6000
         for index, raw in enumerate(raw_modules[:max_modules]):
-            if not isinstance(raw, dict):
+            if isinstance(raw, PromptSection):
+                section = raw
+                module_content = render_prompt_sections(
+                    [section],
+                    mode=PromptRenderMode.BODY_ONLY,
+                ).strip()
+                key = _single_line(section.key, 100) or f"module.{index + 1}"
+                source = _single_line(section.source, 80)
+                raw_title = _single_line(section.title, 80)
+                priority = index
+                raw_description = ""
+                raw_chars = len(module_content)
+                raw_metadata = dict(section.metadata)
+            elif isinstance(raw, Mapping):
+                raw_content = raw.get("content")
+                module_content = raw_content.strip() if isinstance(raw_content, str) else ""
+                raw_chars = _safe_int(raw.get("chars"), len(module_content), 0)
+                key = _single_line(raw.get("key"), 100) or f"module.{index + 1}"
+                source = _single_line(raw.get("source"), 80)
+                raw_title = _single_line(raw.get("title"), 80)
+                priority = _safe_int(raw.get("priority"), index, 0)
+                raw_description = raw.get("description")
+                raw_metadata = raw.get("metadata") if isinstance(raw.get("metadata"), Mapping) else {}
+            else:
                 continue
-            module_content = str(raw.get("content") or "").strip()
             if not module_content:
                 continue
-            key = _single_line(raw.get("key"), 100) or f"module.{index + 1}"
-            source = _single_line(raw.get("source"), 80)
-            raw_title = _single_line(raw.get("title"), 80)
-            title, description = self._prompt_module_info(key, raw_title)
-            if raw.get("description"):
-                description = _single_line(raw.get("description"), 220) or description
-            chars = _safe_int(raw.get("chars"), len(module_content), 0)
+            inferred_title, description = self._prompt_module_info(key, raw_title)
+            title = raw_title or inferred_title
+            if raw_description:
+                description = _single_line(raw_description, 220) or description
             truncated = len(module_content) > max_content
             if truncated:
                 module_content = module_content[:max_content] + "\n...[模块内容已截断]"
-            result.append(
-                {
-                    "key": key,
-                    "source": source,
-                    "priority": _safe_int(raw.get("priority"), index, 0),
-                    "title": title,
-                    "description": description,
-                    "chars": chars,
-                    "truncated": truncated,
-                    "preview": _single_line(module_content, 180),
-                    "content": module_content,
+            item = {
+                "key": key,
+                "source": source,
+                "priority": priority,
+                "title": title,
+                "description": description,
+                "chars": raw_chars,
+                "truncated": truncated,
+                "preview": _single_line(module_content, 180),
+                "content": module_content,
+            }
+            if raw_metadata:
+                item["metadata"] = {
+                    _single_line(metadata_key, 40): _single_line(metadata_value, 220)
+                    for metadata_key, metadata_value in raw_metadata.items()
+                    if _single_line(metadata_key, 40)
+                    and _single_line(metadata_value, 220)
                 }
-            )
+            result.append(item)
         return result
 
     def _legacy_proactive_prompt_trace_text(self, item: Any) -> str:
@@ -1728,6 +1798,7 @@ class EventDispatchMixin:
         mode: str = "",
         metadata: dict[str, Any] | None = None,
         modules: list[dict[str, Any]] | None = None,
+        section_manifest: list[Any] | tuple[Any, ...] | None = None,
         trace_id: str = "",
         message_preview: str = "",
         sender_label: str = "",
@@ -1741,6 +1812,22 @@ class EventDispatchMixin:
         truncated = len(content) > max_content
         if truncated:
             content = content[:max_content] + "\n...[已截断]"
+        selected_manifest = (
+            section_manifest
+            if isinstance(section_manifest, (list, tuple))
+            else modules
+        )
+        normalized_modules = self._normalize_prompt_injection_modules(
+            str(text or ""),
+            selected_manifest,
+            legacy_heading_fallback=False,
+        )
+        if not normalized_modules:
+            normalized_modules = self._normalize_prompt_injection_modules(
+                str(text or ""),
+                None,
+                legacy_heading_fallback=False,
+            )
         item = {
             "ts": now,
             "time": self._format_timestamp_elapsed(now) if hasattr(self, "_format_timestamp_elapsed") else "",
@@ -1752,7 +1839,7 @@ class EventDispatchMixin:
             "truncated": truncated,
             "preview": _single_line(content, 220),
             "content": content,
-            "modules": self._normalize_prompt_injection_modules(str(text or ""), modules),
+            "modules": normalized_modules,
             "metadata": {
                 _single_line(key, 40): _single_line(value, 220)
                 for key, value in (metadata or {}).items()
@@ -2614,56 +2701,70 @@ class EventDispatchMixin:
             return True
         return bool(re.search(r"撤[回了掉]?.*(说|发|讲|聊)", compact))
 
+    def _format_recalled_messages_for_natural_query_prompt_section(
+        self,
+        event: AstrMessageEvent,
+        *,
+        limit: int = 5,
+    ) -> PromptSection:
+        if not _persona_value(self, 'enable_recall_enhancement', True) or not _persona_value(self, 'enable_recall_transcribe_command', True):
+            body = (
+                "用户正在问当前会话刚才撤回了什么,但撤回消息转述功能没有开启。请自然说明这边看不到可转述的撤回内容。"
+            )
+        else:
+            try:
+                is_private = bool(getattr(event, "is_private_chat", lambda: False)())
+            except Exception:
+                is_private = False
+            allowed = self._can_manage_private_companion(event) if is_private else self._can_manage_group_companion(event)
+            if not allowed:
+                body = (
+                    "用户正在问当前会话刚才撤回了什么,但这类内容只能由 Bot 管理员、配置目标用户或群管理员查看。"
+                    "请自然说明权限边界,不要猜测或编造撤回内容。"
+                )
+            else:
+                rows = self._recent_recalled_messages_for_scope(self._event_scope_key(event), limit=limit)
+                if not rows:
+                    body = (
+                        "用户正在问当前会话刚才撤回了什么,但当前会话没有可转述的撤回消息,或短期缓存已经过期。"
+                        "请自然说明没有查到,不要编造。"
+                    )
+                else:
+                    lines = [
+                        "用户正在问当前会话刚才撤回了什么。下面是可转述的短期撤回记录；请用自然口吻回答,不要提插件、缓存或内部记录机制。",
+                    ]
+                    for index, row in enumerate(rows, 1):
+                        sender = _single_line(row.get("sender_name"), 40) or _single_line(row.get("sender_id"), 40) or "未知"
+                        text = _single_line(row.get("text"), 360)
+                        if row.get("cache_miss"):
+                            text = "[已收到撤回通知，但原消息没有进入短期缓存，不能编造具体内容]"
+                        image_status = self._recall_image_status_summary(row)
+                        if image_status:
+                            text = f"{text}（{image_status}；如需可恢复图片,请使用撤回消息命令查看）"
+                        elapsed = self._format_timestamp_elapsed(row.get("recalled_ts", 0))
+                        lines.append(f"{index}. {sender}｜{elapsed}撤回：{text}")
+                    body = "\n".join(lines)
+        return prompt_section(
+            key="recall.query",
+            title="撤回消息查询",
+            source="event_dispatch",
+            content=body,
+        )
+
     def _format_recalled_messages_for_natural_query(
         self,
         event: AstrMessageEvent,
         *,
         limit: int = 5,
-        include_heading: bool = True,
     ) -> str:
-        heading = "【撤回消息查询】\n" if include_heading else ""
-        if not _persona_value(self, 'enable_recall_enhancement', True) or not _persona_value(self, 'enable_recall_transcribe_command', True):
-            return (
-                heading
-                +
-                "用户正在问当前会话刚才撤回了什么,但撤回消息转述功能没有开启。请自然说明这边看不到可转述的撤回内容。"
-            )
-        try:
-            is_private = bool(getattr(event, "is_private_chat", lambda: False)())
-        except Exception:
-            is_private = False
-        allowed = self._can_manage_private_companion(event) if is_private else self._can_manage_group_companion(event)
-        if not allowed:
-            return (
-                heading
-                +
-                "用户正在问当前会话刚才撤回了什么,但这类内容只能由 Bot 管理员、配置目标用户或群管理员查看。"
-                "请自然说明权限边界,不要猜测或编造撤回内容。"
-            )
-        rows = self._recent_recalled_messages_for_scope(self._event_scope_key(event), limit=limit)
-        if not rows:
-            return (
-                heading
-                +
-                "用户正在问当前会话刚才撤回了什么,但当前会话没有可转述的撤回消息,或短期缓存已经过期。"
-                "请自然说明没有查到,不要编造。"
-            )
-        lines = [
-            "用户正在问当前会话刚才撤回了什么。下面是可转述的短期撤回记录；请用自然口吻回答,不要提插件、缓存或内部记录机制。",
-        ]
-        if include_heading:
-            lines.insert(0, "【撤回消息查询】")
-        for index, row in enumerate(rows, 1):
-            sender = _single_line(row.get("sender_name"), 40) or _single_line(row.get("sender_id"), 40) or "未知"
-            text = _single_line(row.get("text"), 360)
-            if row.get("cache_miss"):
-                text = "[已收到撤回通知，但原消息没有进入短期缓存，不能编造具体内容]"
-            image_status = self._recall_image_status_summary(row)
-            if image_status:
-                text = f"{text}（{image_status}；如需可恢复图片,请使用撤回消息命令查看）"
-            elapsed = self._format_timestamp_elapsed(row.get("recalled_ts", 0))
-            lines.append(f"{index}. {sender}｜{elapsed}撤回：{text}")
-        return "\n".join(lines)
+        section = self._format_recalled_messages_for_natural_query_prompt_section(
+            event,
+            limit=limit,
+        )
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
 
     def _forbidden_recall_words(self) -> list[str]:
         words = _persona_value(self, 'recall_forbidden_words', [])
@@ -4280,6 +4381,44 @@ class EventDispatchMixin:
             return "incomplete", 0.7, text[:80]
         return "complete", 0.6, text[:80]
 
+    @staticmethod
+    def _smart_message_debounce_prompt_section(
+        *,
+        private_chat: bool,
+        sender_name: str,
+        sender_id: str,
+        cleaned: str,
+        recent: list[Any],
+        example_lines: list[str],
+    ) -> PromptSection:
+        return prompt_section(
+            key="background.smart_message_debounce",
+            title="消息完整性判断",
+            source="event_dispatch",
+            template=(
+                "判断用户当前这句话是否明显还没说完，需要 Bot 等一小会儿再回复。\n\n"
+                '只输出 JSON：{{"decision":"complete|incomplete","confidence":0-1,"reason":"不超过20字"}}\n\n'
+                "会话类型：{conversation_type}\n"
+                "用户：{sender}\n"
+                "当前消息：{message}\n"
+                "缓冲中的前文：{recent}\n\n"
+                "已学习的误判样本：\n{examples}\n\n"
+                "判断规则：\n"
+                "- “知道吗/你知道吗/懂吗/明白吗/猜猜/问你个事/跟你说”这类短引子通常是在铺垫下一句，倾向 incomplete。\n"
+                "- 如果用户像是在起手、列举、转折、说“等下/还有/然后/我想想”、句子停在逗号冒号分号，倾向 incomplete。\n"
+                "- 如果是完整问题、完整请求、完整情绪表达、问候、贴贴、摸摸、表情或短回复，倾向 complete。\n"
+                "- 不要因为消息短就等待；只有真的像还会补一句才 incomplete。\n"
+                "- 宁可少等，也不要让正常对话变慢。"
+            ),
+            variables={
+                "conversation_type": "私聊" if private_chat else "群聊",
+                "sender": _single_line(sender_name, 40) or _single_line(sender_id, 40),
+                "message": cleaned,
+                "recent": " / ".join(recent[-3:]) if recent else "无",
+                "examples": "\n".join(example_lines) or "无",
+            },
+        )
+
     async def _smart_message_debounce_wait_seconds_for_event(
         self,
         event: AstrMessageEvent,
@@ -4452,26 +4591,17 @@ class EventDispatchMixin:
             recent = snapshot.get("texts", []) if isinstance(snapshot, dict) else []
         except Exception:
             recent = []
-        prompt = f"""
-判断用户当前这句话是否明显还没说完，需要 Bot 等一小会儿再回复。
-
-只输出 JSON：{{"decision":"complete|incomplete","confidence":0-1,"reason":"不超过20字"}}
-
-会话类型：{"私聊" if private_chat else "群聊"}
-用户：{_single_line(sender_name, 40) or _single_line(sender_id, 40)}
-当前消息：{cleaned}
-缓冲中的前文：{(" / ".join(recent[-3:]) if recent else "无")}
-
-已学习的误判样本：
-{chr(10).join(example_lines) or "无"}
-
-判断规则：
-- “知道吗/你知道吗/懂吗/明白吗/猜猜/问你个事/跟你说”这类短引子通常是在铺垫下一句，倾向 incomplete。
-- 如果用户像是在起手、列举、转折、说“等下/还有/然后/我想想”、句子停在逗号冒号分号，倾向 incomplete。
-- 如果是完整问题、完整请求、完整情绪表达、问候、贴贴、摸摸、表情或短回复，倾向 complete。
-- 不要因为消息短就等待；只有真的像还会补一句才 incomplete。
-- 宁可少等，也不要让正常对话变慢。
-""".strip()
+        prompt = render_prompt_sections(
+            [self._smart_message_debounce_prompt_section(
+                private_chat=private_chat,
+                sender_name=sender_name,
+                sender_id=sender_id,
+                cleaned=cleaned,
+                recent=recent,
+                example_lines=example_lines,
+            )],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
         raw = ""
         model_error = ""
         timeout_seconds = max(0.2, min(5.0, _safe_float(_persona_value(self, 'smart_message_debounce_model_timeout_seconds', 0.8), 0.8, 0.2)))
@@ -4663,6 +4793,47 @@ class EventDispatchMixin:
         repair_markers = ("不对", "错了", "不是", "我说的是", "刚才", "你说", "你漏", "重新")
         return any(marker in compact for marker in task_markers) or any(marker in compact for marker in repair_markers)
 
+    def _group_air_reply_guard_prompt_section(
+        self,
+        *,
+        sender_id: str,
+        sender_name: str,
+        text: str,
+        scene: dict[str, Any],
+        recent_bot_count: int,
+        recent_bot_lines: str,
+        recent_flow: str,
+    ) -> PromptSection:
+        return prompt_section(
+            key="background.group_air_reply_guard",
+            title="群聊继续回复判断",
+            source="event_dispatch",
+            template=(
+                "判断群聊里 Bot 现在是否应该继续回复。只回答 REPLY 或 SILENCE，不要解释。\n\n"
+                "优先 SILENCE 的情况：\n"
+                "- 群里多个机器人/账号正在互相 @、互相引用或礼貌收尾，继续回只会循环。\n"
+                "- 当前只是“晚安/早安/谢谢/拜拜/辛苦了”等收尾寒暄，而且 Bot 近期已经回过类似内容。\n"
+                "- 话题已经自然结束、没有新的问题、任务或需要 Bot 承接的信息。\n\n"
+                "可以 REPLY 的情况：\n"
+                "- 当前明确提出新问题、给出新任务、纠正 Bot 事实错误，或需要 Bot 做具体处理。\n\n"
+                "当前发言者：{sender}\n"
+                "当前消息：{message}\n"
+                "场景：trigger={trigger} reason={reason}\n"
+                "窗口内 Bot 已回复次数：{recent_bot_count}\n"
+                "Bot 近期回复：\n{recent_bot_lines}\n\n"
+                "最近群聊：\n{recent_flow}"
+            ),
+            variables={
+                "sender": self._group_member_identity_label(sender_id, sender_name, limit=24),
+                "message": _single_line(text, 180),
+                "trigger": _single_line(scene.get("trigger"), 40),
+                "reason": _single_line(scene.get("reason"), 80),
+                "recent_bot_count": str(recent_bot_count),
+                "recent_bot_lines": recent_bot_lines,
+                "recent_flow": recent_flow or "（无）",
+            },
+        )
+
     async def _group_air_reply_guard_decision(
         self,
         group: dict[str, Any],
@@ -4706,27 +4877,18 @@ class EventDispatchMixin:
             f"- {self._format_ts_for_display(_safe_float(item.get('ts'), 0)) if hasattr(self, '_format_ts_for_display') else int(_safe_float(item.get('ts'), 0))}: {_single_line(item.get('text'), 120)}"
             for item in recent_bot[-6:]
         ) or "（无）"
-        prompt = f"""
-判断群聊里 Bot 现在是否应该继续回复。只回答 REPLY 或 SILENCE，不要解释。
-
-优先 SILENCE 的情况：
-- 群里多个机器人/账号正在互相 @、互相引用或礼貌收尾，继续回只会循环。
-- 当前只是“晚安/早安/谢谢/拜拜/辛苦了”等收尾寒暄，而且 Bot 近期已经回过类似内容。
-- 话题已经自然结束、没有新的问题、任务或需要 Bot 承接的信息。
-
-可以 REPLY 的情况：
-- 当前明确提出新问题、给出新任务、纠正 Bot 事实错误，或需要 Bot 做具体处理。
-
-当前发言者：{self._group_member_identity_label(sender_id, sender_name, limit=24)}
-当前消息：{_single_line(text, 180)}
-场景：trigger={_single_line(scene.get('trigger'), 40)} reason={_single_line(scene.get('reason'), 80)}
-窗口内 Bot 已回复次数：{len(recent_bot)}
-Bot 近期回复：
-{recent_bot_lines}
-
-最近群聊：
-{recent_flow or '（无）'}
-""".strip()
+        prompt = render_prompt_sections(
+            [self._group_air_reply_guard_prompt_section(
+                sender_id=sender_id,
+                sender_name=sender_name,
+                text=text,
+                scene=scene,
+                recent_bot_count=len(recent_bot),
+                recent_bot_lines=recent_bot_lines,
+                recent_flow=recent_flow,
+            )],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
         try:
             raw = await self._llm_call(prompt, max_tokens=8, provider_id=provider_id, task="group_air_reply_guard")
         except Exception as exc:
@@ -4756,30 +4918,17 @@ Bot 近期回复：
             if callable(flow_formatter)
             else ""
         )
-        prompt = f"""
-判断群聊里当前这句话是否仍然是在和 Bot 对话。
-
-只回答 YES 或 NO，不要解释。
-
-已知：
-- 上一次明确和 Bot 对话的人：{self._group_member_identity_label(str(active.get('sender_id') or sender_id), active.get('sender_name'), limit=24)}
-- 上一次明确对 Bot 说的话：{_single_line(active.get('last_text'), 120)}
-- Bot 上一次回复：{_single_line(active.get('last_bot_reply'), 180) or "（未记录）"}
-- 当前发言者：{self._group_member_identity_label(sender_id, sender_name, limit=24)}
-- 当前发言者身份锚点：{self._group_member_identity_anchor_note(sender_id, sender_name, limit=120) or "无显示名冲突"}
-- 当前消息：{_single_line(text, 180)}
-- 规则初判：trigger={_single_line(scene.get('trigger'), 40)} talking_to={_single_line(scene.get('talking_to'), 40)}
-
-真实最近群聊（按时间顺序，包含当前句；判断时必须参考整段聊天流，不要只看上一条唤醒消息）：
-{recent_flow or "（无）"}
-
-判断标准：
-- 如果当前消息是在承接 Bot 的回答、追问 Bot、纠正 Bot、继续问 Bot，回答 YES。
-- 如果当前消息明显转向群友、全群、第三人、另一个话题，回答 NO。
-- 如果中间有人插话，但当前消息仍明确指向 Bot，可以回答 YES。
-- 不要因为同一用户还在窗口内就直接 YES。
-- 方括号里的 QQ 是内部身份锚点；不同 QQ 即使外号相似也不是同一人。
-""".strip()
+        prompt = render_prompt_sections(
+            [self._group_followup_judge_prompt_section(
+                sender_id=sender_id,
+                sender_name=sender_name,
+                text=text,
+                active=active,
+                scene=scene,
+                recent_flow=recent_flow,
+            )],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
         raw = await self._llm_call(
             prompt,
             max_tokens=8,
@@ -4792,6 +4941,61 @@ Bot 近期回复：
         if answer.startswith("NO") or answer.startswith("否"):
             return False
         return None
+
+    def _group_followup_judge_prompt_section(
+        self,
+        *,
+        sender_id: str,
+        sender_name: str,
+        text: str,
+        active: dict[str, Any],
+        scene: dict[str, Any],
+        recent_flow: str,
+    ) -> PromptSection:
+        return prompt_section(
+            key="background.group_followup_judge",
+            title="群聊连续对话判断",
+            source="event_dispatch",
+            template=(
+                "判断群聊里当前这句话是否仍然是在和 Bot 对话。\n\n"
+                "只回答 YES 或 NO，不要解释。\n\n"
+                "已知：\n"
+                "- 上一次明确和 Bot 对话的人：{previous_sender}\n"
+                "- 上一次明确对 Bot 说的话：{previous_message}\n"
+                "- Bot 上一次回复：{previous_reply}\n"
+                "- 当前发言者：{current_sender}\n"
+                "- 当前发言者身份锚点：{identity_anchor}\n"
+                "- 当前消息：{current_message}\n"
+                "- 规则初判：trigger={trigger} talking_to={talking_to}\n\n"
+                "真实最近群聊（按时间顺序，包含当前句；判断时必须参考整段聊天流，不要只看上一条唤醒消息）：\n"
+                "{recent_flow}\n\n"
+                "判断标准：\n"
+                "- 如果当前消息是在承接 Bot 的回答、追问 Bot、纠正 Bot、继续问 Bot，回答 YES。\n"
+                "- 如果当前消息明显转向群友、全群、第三人、另一个话题，回答 NO。\n"
+                "- 如果中间有人插话，但当前消息仍明确指向 Bot，可以回答 YES。\n"
+                "- 不要因为同一用户还在窗口内就直接 YES。\n"
+                "- 方括号里的 QQ 是内部身份锚点；不同 QQ 即使外号相似也不是同一人。"
+            ),
+            variables={
+                "previous_sender": self._group_member_identity_label(
+                    str(active.get("sender_id") or sender_id),
+                    active.get("sender_name"),
+                    limit=24,
+                ),
+                "previous_message": _single_line(active.get("last_text"), 120),
+                "previous_reply": _single_line(active.get("last_bot_reply"), 180) or "（未记录）",
+                "current_sender": self._group_member_identity_label(sender_id, sender_name, limit=24),
+                "identity_anchor": self._group_member_identity_anchor_note(
+                    sender_id,
+                    sender_name,
+                    limit=120,
+                ) or "无显示名冲突",
+                "current_message": _single_line(text, 180),
+                "trigger": _single_line(scene.get("trigger"), 40),
+                "talking_to": _single_line(scene.get("talking_to"), 40),
+                "recent_flow": recent_flow or "（无）",
+            },
+        )
 
     async def _group_message_is_bot_continuation(
         self,

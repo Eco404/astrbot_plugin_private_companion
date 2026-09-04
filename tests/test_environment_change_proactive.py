@@ -170,6 +170,31 @@ class EnvironmentChangeProactiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(semantics["kind"], "observation")
         self.assertEqual(semantics["anchor_type"], "environment")
 
+    def test_environment_change_prompt_is_canonically_authored(self) -> None:
+        user = {
+            "planned_environment_change_context": {
+                "previous": {"text": "晴，28°C"},
+                "current": {"text": "雷阵雨，24°C"},
+                "topic": "外面开始下雨",
+            }
+        }
+
+        section = self.harness._format_environment_change_prompt_section(
+            user,
+            reason="environment_change",
+        )
+
+        self.assertEqual("environment.change", section.key)
+        self.assertEqual("刚发生的环境变化", section.title)
+        self.assertEqual("daily_state", section.source)
+        self.assertNotIn("【刚发生的环境变化】", section.content)
+        self.assertTrue(
+            self.harness._format_environment_change_prompt(
+                user,
+                reason="environment_change",
+            ).startswith("【刚发生的环境变化】\n")
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

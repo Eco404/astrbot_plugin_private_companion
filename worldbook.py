@@ -104,6 +104,16 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .conversation_prompt_section import (
+    PromptDocument,
+    PromptRenderMode,
+    PromptSection,
+    prompt_document,
+    prompt_section,
+    prompt_text,
+    render_prompt_document,
+    render_prompt_sections,
+)
 from .persona_config import runtime_persona_setting
 from .planning import (
     build_daily_plan_prompt,
@@ -1238,10 +1248,11 @@ class WorldbookMixin:
         )
         return {"confirm_reply": f"那我以后叫你{name}可以吗？"}
 
-    async def _refresh_worldbook_self_registration_impression(self, payload: dict[str, Any]) -> None:
+    def _worldbook_self_registration_prompt_document(
+        self,
+        payload: dict[str, Any],
+    ) -> PromptDocument:
         user_id = str(payload.get("user_id") or "").strip()
-        if not user_id:
-            return
         name = _single_line(payload.get("name"), 40) or user_id
         aliases = payload.get("aliases") if isinstance(payload.get("aliases"), list) else []
         recent_lines = []
@@ -1253,33 +1264,97 @@ class WorldbookMixin:
             msg = _single_line(item.get("text"), 80)
             if msg:
                 recent_lines.append(f"- {speaker}: {msg}")
-        prompt = f"""
-请根据这条群聊自我介绍，生成一段适合“关系节点资料正文”的简短人物印象。
+        intro = prompt_section(
+            key="background.worldbook_registration.intro",
+            title="关系网自登记人物印象",
+            source="worldbook",
+            content="请根据这条群聊自我介绍，生成一段适合“关系节点资料正文”的简短人物印象。",
+        )
+        fields = [
+            prompt_section(
+                key="background.worldbook_registration.persona",
+                title="Bot 人格",
+                source="worldbook",
+                content=_single_line(self._get_default_persona_prompt(), 500),
+            ),
+            prompt_section(
+                key="background.worldbook_registration.group",
+                title="群号",
+                source="worldbook",
+                content=_single_line(payload.get("group_id"), 40),
+            ),
+            prompt_section(
+                key="background.worldbook_registration.user",
+                title="QQ",
+                source="worldbook",
+                content=user_id,
+            ),
+            prompt_section(
+                key="background.worldbook_registration.name",
+                title="自称/称呼",
+                source="worldbook",
+                content=(
+                    name
+                    + (
+                        "；别名："
+                        + "、".join(
+                            _single_line(item, 24)
+                            for item in aliases
+                            if _single_line(item, 24)
+                        )
+                        if aliases
+                        else ""
+                    )
+                ),
+            ),
+            prompt_section(
+                key="background.worldbook_registration.introduction",
+                title="自我介绍原文",
+                source="worldbook",
+                content=_single_line(payload.get("text"), 260),
+            ),
+            prompt_section(
+                key="background.worldbook_registration.recent_group",
+                title="附近群聊",
+                source="worldbook",
+                content="\n".join(recent_lines) or "（暂无）",
+            ),
+        ]
+        requirements = prompt_section(
+            key="background.worldbook_registration.requirements",
+            title="输出要求",
+            source="worldbook",
+            content=(
+                "要求：\n"
+                "- 只输出 1 段中文，40 到 90 字\n"
+                "- 像人物画像插件里的初始印象：描述可观察信息、称呼和互动注意点\n"
+                "- 不要编造职业、性格、现实身份或私密事实\n"
+                "- 不要写“根据聊天记录/资料显示/模型判断”"
+            ),
+        )
+        root = prompt_section(
+            key="background.worldbook_registration",
+            title="关系网自登记人物印象任务",
+            source="worldbook",
+            content=prompt_text(
+                render_prompt_sections([intro], mode=PromptRenderMode.BODY_ONLY),
+                render_prompt_sections(fields, mode=PromptRenderMode.LABELED_BLOCK),
+                render_prompt_sections([requirements], mode=PromptRenderMode.BODY_ONLY),
+                separator="\n\n",
+            ),
+        )
+        return prompt_document(user=[root])
 
-【Bot 人格】
-{_single_line(self._get_default_persona_prompt(), 500)}
-
-【群号】
-{_single_line(payload.get('group_id'), 40)}
-
-【QQ】
-{user_id}
-
-【自称/称呼】
-{name}{"；别名：" + "、".join(_single_line(item, 24) for item in aliases if _single_line(item, 24)) if aliases else ""}
-
-【自我介绍原文】
-{_single_line(payload.get('text'), 260)}
-
-【附近群聊】
-{chr(10).join(recent_lines) or "（暂无）"}
-
-要求：
-- 只输出 1 段中文，40 到 90 字
-- 像人物画像插件里的初始印象：描述可观察信息、称呼和互动注意点
-- 不要编造职业、性格、现实身份或私密事实
-- 不要写“根据聊天记录/资料显示/模型判断”
-""".strip()
+    async def _refresh_worldbook_self_registration_impression(self, payload: dict[str, Any]) -> None:
+        user_id = str(payload.get("user_id") or "").strip()
+        if not user_id:
+            return
+        name = _single_line(payload.get("name"), 40) or user_id
+        registration_document = self._worldbook_self_registration_prompt_document(payload)
+        prompt = render_prompt_document(
+            registration_document,
+            mode=PromptRenderMode.BODY_ONLY,
+        )["user"]
         impression = await self._llm_call(
             prompt,
             max_tokens=180,
@@ -1528,8 +1603,22 @@ class WorldbookMixin:
         text: str,
         *,
         limit: int | None = None,
-        include_heading: bool = True,
     ) -> str:
+        section = self._format_worldbook_private_mentions_prompt_section(
+            text,
+            limit=limit,
+        )
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+
+    def _format_worldbook_private_mentions_prompt_section(
+        self,
+        text: str,
+        *,
+        limit: int | None = None,
+    ) -> PromptSection:
         profiles = self._select_worldbook_member_profiles_for_private_text(text, limit=limit)
         token_hits = self._worldbook_private_token_hits(text)
         ambiguous_tokens = sorted(
@@ -1537,9 +1626,7 @@ class WorldbookMixin:
             key=len,
             reverse=True,
         )[:8]
-        if not profiles and not ambiguous_tokens:
-            return ""
-        lines = ["【本轮提到的关系网对象】"] if include_heading else []
+        lines: list[str] = []
         if ambiguous_tokens:
             lines.append(
                 "- 称呼线索存在多个稳定用户："
@@ -1566,8 +1653,14 @@ class WorldbookMixin:
                 parts.append(f"边界：{boundary}")
             lines.append("- " + "｜".join(parts))
             injected.append(f"{profile_uid}:{name}")
-        logger.info("本轮提及关系网对象注入: users=%s", "；".join(injected))
-        return "\n".join(lines)
+        if lines:
+            logger.info("本轮提及关系网对象注入: users=%s", "；".join(injected))
+        return prompt_section(
+            key="worldbook.private_mentions",
+            title="本轮提到的关系网对象",
+            source="worldbook",
+            content="\n".join(lines),
+        )
 
     def _select_worldbook_member_profiles_for_group(
         self,
@@ -1656,8 +1749,33 @@ class WorldbookMixin:
         return ranked[:member_limit]
 
     def _format_worldbook_group_members_for_prompt(self, group: dict[str, Any], sender_id: str = "", text: str = "") -> str:
+        return render_prompt_sections(
+            [
+                self._format_worldbook_group_members_prompt_section(
+                    group,
+                    sender_id=sender_id,
+                    text=text,
+                )
+            ],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+
+    def _format_worldbook_group_members_prompt_section(
+        self,
+        group: dict[str, Any],
+        sender_id: str = "",
+        text: str = "",
+    ) -> PromptSection:
+        def build_section(content: str = "") -> PromptSection:
+            return prompt_section(
+                key="worldbook.group_members",
+                title="群聊关系网",
+                source="worldbook",
+                content=content,
+            )
+
         if not runtime_persona_setting(self, "enable_worldbook_member_recognition", True):
-            return ""
+            return build_section()
         lines: list[str] = []
         group_id = _single_line(group.get("group_id"), 40)
         group_profiles = self.data.get("worldbook_group_profiles")
@@ -1729,7 +1847,7 @@ class WorldbookMixin:
                 + "：" + "｜".join(part for part in parts if part)
             )
         if not lines:
-            return ""
+            return build_section()
         current_profile = next(
             (
                 item
@@ -1758,11 +1876,11 @@ class WorldbookMixin:
                     f"（QQ:{_single_line(claimed_other.get('user_id'), 40)}）；把它当作玩笑、模仿或提及，可轻松应和调侃，但不得据此改认当前发言者身份或写成核心画像，"
                     f"不能把当前发言者改认成 {_single_line(claimed_other.get('name'), 40)}。\n"
                 )
-        return (
-            "【群聊关系网】\n"
+        body = (
             "下面是按 QQ 号确认的稳定关系资料；群名片、昵称和别名只当称呼线索。\n"
             "只有“当前发言者”可用于判断本轮对话对象；“当前消息提到的人”和“近期参与者”只用于理解上下文，不要把他们的身份、专属称呼或亲密关系套给当前发言者。\n"
             + identity_priority
             + "\n".join(lines)
         )
+        return build_section(body)
 

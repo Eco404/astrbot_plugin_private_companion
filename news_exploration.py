@@ -105,6 +105,11 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _text_looks_garbled, _today_key
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    prompt_section,
+    render_prompt_sections,
+)
 from .persona_config import runtime_persona_setting
 
 
@@ -2916,7 +2921,7 @@ class NewsExplorationMixin:
                 continue
             summary = _single_line(item.get("summary"), 180)
             lines.append(f"{idx}. [{source}] {title}" + (f"｜{summary}" if summary else ""))
-        prompt = f"""
+        prompt_body = f"""
 请作为 Bot 资料归档新闻后的内部整理,从下面新闻里挑一条最适合轻轻提起的内容。
 
 要求：
@@ -2930,6 +2935,17 @@ class NewsExplorationMixin:
 新闻候选：
 {chr(10).join(lines)}
 """.strip()
+        prompt = render_prompt_sections(
+            [
+                prompt_section(
+                    key="news.digest",
+                    title="新闻内部整理",
+                    source="news_exploration",
+                    content=prompt_body,
+                )
+            ],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
         raw = await self._llm_call(prompt, max_tokens=260, provider_id=provider_id, task="news_digest")
         parsed = self._parse_json_object(raw)
         if not isinstance(parsed, dict):
@@ -3087,7 +3103,7 @@ class NewsExplorationMixin:
         link = _single_line(payload.get("selected_link") or payload.get("source_url") or payload.get("link"), 420)
         stable_self_context = self._format_external_event_stable_self_context()
         current_self_context = self._format_external_event_current_self_context()
-        prompt = f"""
+        instruction = """
 请判断 Bot 刚读到的一条外界信息,是否会在它心里产生“和我自己有关,想找用户说说”的主动意愿。
 
 这不是写给用户的消息,只是内部决策。请不要把关键词当硬触发,要根据人格、当前状态、能力边界、兴趣、近期见闻和用户关系判断。
@@ -3109,22 +3125,39 @@ class NewsExplorationMixin:
   "tone": "适合的表达气质,如撒娇/好奇/嘴硬/认真/轻轻分享",
   "boundary": "主动时要避开的表达,80字内"
 }}
-
-【Bot 稳定自我上下文】
-{stable_self_context}
-
-【来源类型】
-{source_type}
-
-【外界信息】
-标题：{title}
-来源：{source}
-链接：{link}
-内部印象：{impression}
-
-【Bot 当前短时状态】
-{current_self_context}
 """.strip()
+
+        prompt = "\n\n".join(
+            part
+            for part in (
+                render_prompt_sections(
+                    [
+                        prompt_section(
+                            key="external_event.self_link.instruction",
+                            title="外界信息自我关联判断",
+                            source="news_exploration",
+                            content=instruction,
+                        )
+                    ],
+                    mode=PromptRenderMode.BODY_ONLY,
+                ),
+                render_prompt_sections(
+                    [
+                        prompt_section(key="external_event.stable_self", title="Bot 稳定自我上下文", source="news_exploration", content=stable_self_context),
+                        prompt_section(key="external_event.source_type", title="来源类型", source="news_exploration", content=source_type),
+                        prompt_section(
+                            key="external_event.material",
+                            title="外界信息",
+                            source="news_exploration",
+                            content=f"标题：{title}\n来源：{source}\n链接：{link}\n内部印象：{impression}",
+                        ),
+                        prompt_section(key="external_event.current_self", title="Bot 当前短时状态", source="news_exploration", content=current_self_context),
+                    ],
+                    mode=PromptRenderMode.LABELED_BLOCK,
+                ),
+            )
+            if part
+        )
         raw = await self._llm_call(prompt, max_tokens=360, provider_id=provider_id, task="external_event_self_link")
         parsed = self._parse_json_object(raw)
         if not isinstance(parsed, dict):
@@ -4578,7 +4611,7 @@ class NewsExplorationMixin:
                 return {"query": query, "reason": f"从{_single_line(hot.get('source'), 20)}热点里挑了一个想了解的话题", "topic": "news"}
             return {"query": random.choice(fallback_topics), "reason": "无模型时随机探索", "topic": "general"}
         hot_context = self._format_hot_trend_candidates_for_prompt(hot_items)
-        prompt = f"""
+        instruction = f"""
 请作为 Bot 自己,决定这会儿想上网搜索了解什么。
 
 要求：
@@ -4588,19 +4621,25 @@ class NewsExplorationMixin:
 4. 搜索词要具体,适合直接丢给网页搜索。
 5. 输出 JSON：query, reason, topic。topic 只能是 general 或 news。
 6. query 40字以内；reason 80字以内。
-
-【Bot 名称】
-{runtime_persona_setting(self, "bot_name", "小星")}
-
-【人格】
-{self._get_default_persona_prompt()}
-
-【当前上下文】
-{self._web_exploration_recent_context()}
-
-【公开热点候选】
-{hot_context or "暂无可用热点候选"}
 """.strip()
+
+        prompt = "\n\n".join(
+            (
+                render_prompt_sections(
+                    [prompt_section(key="web_exploration.query.instruction", title="网页探索选题", source="news_exploration", content=instruction)],
+                    mode=PromptRenderMode.BODY_ONLY,
+                ),
+                render_prompt_sections(
+                    [
+                        prompt_section(key="web_exploration.bot_name", title="Bot 名称", source="news_exploration", content=runtime_persona_setting(self, "bot_name", "小星")),
+                        prompt_section(key="web_exploration.persona", title="人格", source="news_exploration", content=self._get_default_persona_prompt()),
+                        prompt_section(key="web_exploration.context", title="当前上下文", source="news_exploration", content=self._web_exploration_recent_context()),
+                        prompt_section(key="web_exploration.hot_candidates", title="公开热点候选", source="news_exploration", content=hot_context or "暂无可用热点候选"),
+                    ],
+                    mode=PromptRenderMode.LABELED_BLOCK,
+                ),
+            )
+        )
         raw = await self._llm_call(prompt, max_tokens=220, provider_id=provider_id, task="web_exploration_query")
         parsed = self._parse_json_object(raw)
         if not isinstance(parsed, dict):
@@ -4671,7 +4710,7 @@ class NewsExplorationMixin:
                 + (f"｜{_single_line(item.get('snippet'), 180)}" if _single_line(item.get("snippet"), 180) else "")
                 + (f"｜{_single_line(item.get('url'), 160)}" if _single_line(item.get("url"), 160) else "")
             )
-        prompt = f"""
+        prompt_body = f"""
 请把 Bot 这次自主网页探索整理成一条内部探索笔记。
 
 要求：
@@ -4686,6 +4725,10 @@ class NewsExplorationMixin:
 结果：
 {chr(10).join(lines)}
 """.strip()
+        prompt = render_prompt_sections(
+            [prompt_section(key="web_exploration.digest", title="网页探索内部笔记", source="news_exploration", content=prompt_body)],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
         raw = await self._llm_call(prompt, max_tokens=280, provider_id=provider_id, task="web_exploration_digest")
         parsed = self._parse_json_object(raw)
         if not isinstance(parsed, dict):

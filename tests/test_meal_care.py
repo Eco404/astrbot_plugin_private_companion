@@ -380,10 +380,26 @@ class MealCareTests(unittest.TestCase):
         user = harness._active_user()
         result = harness._handle_meal_care_inbound(user, "还没吃呢", now=datetime.now().timestamp())
         self.assertEqual(result["kind"], "not_eaten")
-        prompt = harness._format_meal_care_reply_context(user, "还没吃呢")
+        prompt = harness._format_meal_care_reply_prompt_section(
+            user,
+            "还没吃呢",
+        ).content
         self.assertIn("不要追问“吃了什么”", prompt)
-        menu = harness._format_food_menu_for_reply("还没吃呢", user=user)
+        meal_section = harness._format_meal_care_reply_prompt_section(user, "还没吃呢")
+        self.assertEqual("meal.care_reply", meal_section.key)
+        self.assertEqual("吃饭关心承接", meal_section.title)
+        self.assertEqual("daily_state", meal_section.source)
+        self.assertNotIn("【吃饭关心承接】", meal_section.content)
+        menu = harness._format_food_menu_reply_prompt_section(
+            "还没吃呢",
+            user=user,
+        ).content
         self.assertIn("番茄鸡蛋面", menu)
+        menu_section = harness._format_food_menu_reply_prompt_section("还没吃呢", user=user)
+        self.assertEqual("meal.food_candidates", menu_section.key)
+        self.assertEqual("吃饭候选", menu_section.title)
+        self.assertEqual("daily_state", menu_section.source)
+        self.assertNotIn("【吃饭候选】", menu_section.content)
 
     def test_unrelated_short_reply_is_not_learned_as_food(self) -> None:
         harness = _MealCareHarness()
@@ -479,7 +495,7 @@ class MealCareTests(unittest.TestCase):
         self.assertEqual(result["kind"], "ate_without_detail_final")
         self.assertFalse(user["meal_check_context"]["active"])
         self.assertNotIn("pending_followup_event", user)
-        prompt = harness._format_meal_care_reply_context(user, "吃了")
+        prompt = harness._format_meal_care_reply_prompt_section(user, "吃了").content
         self.assertIn("不要第三次追问", prompt)
 
 

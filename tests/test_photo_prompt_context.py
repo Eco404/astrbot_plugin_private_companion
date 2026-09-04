@@ -21,31 +21,209 @@ if PACKAGE_NAME not in sys.modules:
     spec.loader.exec_module(package)
 
 from astrbot_plugin_private_companion.photo_prompt_context import (
-    PhotoPromptSection,
     compile_local_photo_prompt,
     resolve_photo_prompt_context,
+)
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PhotoPromptContent,
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
 )
 from astrbot_plugin_private_companion import photo_prompt_context
 from astrbot_plugin_private_companion.photo_wardrobe_decision import PhotoWardrobeDecision
 
 
+def _photo_section(
+    name: str,
+    source: str,
+    positive: str = "",
+    negative: str = "",
+    protected: bool = False,
+    sanitize_conflicts: bool | None = None,
+) -> PromptSection:
+    return prompt_section(
+        key=f"photo.test.{source}.{name}",
+        title=name,
+        source="photo_prompt_context",
+        content=PhotoPromptContent(
+            positive=positive,
+            negative=negative,
+            domain_source=source,
+            protected=protected,
+            sanitize_conflicts=sanitize_conflicts,
+        ),
+    )
+
+
 class PhotoPromptContextTests(unittest.TestCase):
+    def test_domain_section_round_trips_through_canonical_prompt_section(self) -> None:
+        original = _photo_section(
+            name="request",
+            source="user_request",
+            positive="雨夜窗边人像",
+            negative="watermark",
+            protected=True,
+            sanitize_conflicts=False,
+        )
+
+        authored = original
+        self.assertIsInstance(authored, PromptSection)
+        self.assertEqual("photo.test.user_request.request", authored.key)
+        self.assertEqual("photo_prompt_context", authored.source)
+        self.assertEqual({}, authored.metadata)
+        self.assertEqual(
+            PhotoPromptContent(
+                positive="雨夜窗边人像",
+                negative="watermark",
+                domain_source="user_request",
+                protected=True,
+                sanitize_conflicts=False,
+            ),
+            authored.content,
+        )
+        self.assertEqual(
+            "雨夜窗边人像",
+            render_prompt_sections(
+                [authored],
+                mode=PromptRenderMode.PHOTO_PROMPT,
+            ),
+        )
+        for invalid_mode in (
+            PromptRenderMode.BODY_ONLY,
+            PromptRenderMode.LABELED_BLOCK,
+            PromptRenderMode.CONVERSATION_XML,
+        ):
+            with self.subTest(invalid_mode=invalid_mode):
+                with self.assertRaisesRegex(TypeError, "requires PHOTO_PROMPT"):
+                    render_prompt_sections([authored], mode=invalid_mode)
+
+        for prompt_format in ("traditional", "natural", "nai"):
+            with self.subTest(prompt_format=prompt_format):
+                direct = resolve_photo_prompt_context(
+                    wardrobe={},
+                    sections=(original,),
+                    prompt_format=prompt_format,
+                    workflow_kind="text2img",
+                )
+                adapted = resolve_photo_prompt_context(
+                    wardrobe={},
+                    sections=(authored,),
+                    prompt_format=prompt_format,
+                    workflow_kind="text2img",
+                )
+                self.assertEqual(direct.final_prompt, adapted.final_prompt)
+                self.assertEqual(direct.complete_prompt, adapted.complete_prompt)
+                self.assertEqual(direct.prompt_sections, adapted.prompt_sections)
+
+    def test_metadata_only_photo_payload_is_not_deserialized(self) -> None:
+        metadata_only = prompt_section(
+            key="photo.legacy.metadata",
+            title="legacy",
+            source="photo_prompt_context",
+            content="legacy scene",
+            metadata={
+                "photo_prompt_section": {
+                    "name": "legacy",
+                    "source": "scene_context",
+                    "positive": "legacy scene",
+                    "negative": "",
+                    "protected": False,
+                    "sanitize_conflicts": None,
+                }
+            },
+        )
+
+        with self.assertRaisesRegex(TypeError, "compatible photo prompt sections"):
+            resolve_photo_prompt_context(
+                wardrobe={},
+                sections=(metadata_only,),
+                prompt_format="traditional",
+                workflow_kind="text2img",
+            )
+
+    def test_all_photo_render_modes_keep_the_existing_wire_contract(self) -> None:
+        sections = (
+            _photo_section(
+                "request",
+                "user_request",
+                positive="a portrait by the window",
+                negative="watermark",
+            ),
+            _photo_section(
+                "scene",
+                "scene_context",
+                positive="soft morning light",
+            ),
+        )
+
+        traditional = resolve_photo_prompt_context(
+            wardrobe={},
+            sections=sections,
+            prompt_format="traditional",
+            workflow_kind="text2img",
+        ).final_prompt
+        natural = resolve_photo_prompt_context(
+            wardrobe={},
+            sections=sections,
+            prompt_format="natural",
+            workflow_kind="text2img",
+        ).final_prompt
+        nai = resolve_photo_prompt_context(
+            wardrobe={},
+            sections=sections,
+            prompt_format="nai",
+            workflow_kind="text2img",
+        ).final_prompt
+
+        self.assertEqual(
+            "Positive prompt:\n"
+            "[User image request]\n"
+            "a portrait by the window\n\n"
+            "[Scene, style and final preset]\n"
+            "soft morning light\n\n"
+            "Negative prompt:\n"
+            "watermark",
+            traditional,
+        )
+        self.assertEqual(
+            "[User image request]\n"
+            "a portrait by the window\n\n"
+            "[Scene, style and final preset]\n"
+            "soft morning light\n\n"
+            "Avoid watermark.",
+            natural,
+        )
+        self.assertEqual(
+            "User image request:\n"
+            "a portrait by the window\n\n"
+            "Scene, style and final preset:\n"
+            "soft morning light\n\n"
+            "-1.5::watermark::",
+            nai,
+        )
+
     def test_public_interface_and_section_contract_are_strict(self) -> None:
         self.assertEqual(
             photo_prompt_context.__all__,
             [
-                "PhotoPromptSection",
                 "ResolvedPhotoPromptContext",
                 "compile_local_photo_prompt",
                 "resolve_photo_prompt_context",
             ],
         )
-        with self.assertRaisesRegex(ValueError, "unsupported.*source"):
-            PhotoPromptSection("invalid", "additional_prompt")
-        section = PhotoPromptSection("request", "user_request", "portrait")
+        with self.assertRaisesRegex(TypeError, "compatible photo prompt sections"):
+            resolve_photo_prompt_context(
+                wardrobe={},
+                sections=(_photo_section("invalid", "additional_prompt"),),
+                prompt_format="traditional",
+                workflow_kind="text2img",
+            )
+        section = _photo_section("request", "user_request", "portrait")
         self.assertFalse(hasattr(section, "__dict__"))
         with self.assertRaises((AttributeError, TypeError)):
-            section.positive = "changed"  # type: ignore[misc]
+            section.content.positive = "changed"  # type: ignore[misc]
 
     def test_locked_outfit_removes_daily_outfit_but_preserves_scene_facts(self) -> None:
         wardrobe = PhotoWardrobeDecision(
@@ -58,12 +236,12 @@ class PhotoPromptContextTests(unittest.TestCase):
             positive_instruction="Wear only the requested school uniform.",
         )
         sections = (
-            PhotoPromptSection(
+            _photo_section(
                 name="request",
                 source="user_request",
                 positive="在教室拍照，换成校服",
             ),
-            PhotoPromptSection(
+            _photo_section(
                 name="snapshot",
                 source="scene_context",
                 positive="身份：林默；当前位置：教室；今日穿搭：粉色睡衣；姿势：坐在课桌旁",
@@ -77,8 +255,8 @@ class PhotoPromptContextTests(unittest.TestCase):
             workflow_kind="selfie",
         )
 
-        scene = next(section for section in resolved.prompt_sections if section.name == "snapshot")
-        self.assertEqual(scene.positive, "身份：林默；当前位置：教室；姿势：坐在课桌旁")
+        scene = next(section for section in resolved.prompt_sections if section.title == "snapshot")
+        self.assertEqual(scene.content.positive, "身份：林默；当前位置：教室；姿势：坐在课桌旁")
         self.assertIn("校服", resolved.final_prompt)
         self.assertIn("当前位置：教室", resolved.final_prompt)
         self.assertNotIn("睡衣", resolved.final_prompt)
@@ -99,13 +277,13 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection(
+                _photo_section(
                     name="request",
                     source="user_request",
                     positive="在卧室拍照",
                     negative="睡衣",
                 ),
-                PhotoPromptSection(
+                _photo_section(
                     name="snapshot",
                     source="scene_context",
                     positive="当前位置：卧室；今日穿搭：蓝色睡衣；当前场景：夜晚",
@@ -115,8 +293,8 @@ class PhotoPromptContextTests(unittest.TestCase):
             workflow_kind="selfie",
         )
 
-        snapshot = next(section for section in resolved.prompt_sections if section.name == "snapshot")
-        self.assertEqual(snapshot.positive, "当前位置：卧室；当前场景：夜晚")
+        snapshot = next(section for section in resolved.prompt_sections if section.title == "snapshot")
+        self.assertEqual(snapshot.content.positive, "当前位置：卧室；当前场景：夜晚")
         self.assertIn("Negative prompt", resolved.final_prompt)
         self.assertIn("睡衣", resolved.final_prompt)
         self.assertEqual(resolved.residual_conflicts, ())
@@ -133,13 +311,13 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "wear a school uniform"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "wear a school uniform"),
+                _photo_section(
                     "preset",
                     "preset",
                     "Scene preset: cozy pajamas portrait, warm window light",
                 ),
-                PhotoPromptSection(
+                _photo_section(
                     "fixed",
                     "fixed_prompt",
                     "Additional fixed prompt: formal attire; fine film grain",
@@ -149,9 +327,9 @@ class PhotoPromptContextTests(unittest.TestCase):
             workflow_kind="portrait",
         )
 
-        by_name = {section.name: section for section in resolved.prompt_sections}
-        self.assertEqual(by_name["preset"].positive, "warm window light")
-        self.assertEqual(by_name["fixed"].positive, "fine film grain")
+        by_name = {section.title: section for section in resolved.prompt_sections}
+        self.assertEqual(by_name["preset"].content.positive, "warm window light")
+        self.assertEqual(by_name["fixed"].content.positive, "fine film grain")
         self.assertNotIn("pajamas", resolved.final_prompt.lower())
         self.assertNotIn("formal attire", resolved.final_prompt.lower())
         self.assertIn("warm window light", resolved.final_prompt)
@@ -167,8 +345,8 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "换成角色扮演服"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "换成角色扮演服"),
+                _photo_section(
                     "memory",
                     "visual_memory",
                     "校服；礼服；运动服；保留脸和发型",
@@ -178,8 +356,8 @@ class PhotoPromptContextTests(unittest.TestCase):
             workflow_kind="selfie",
         )
 
-        memory = next(section for section in resolved.prompt_sections if section.name == "memory")
-        self.assertEqual(memory.positive, "保留脸和发型")
+        memory = next(section for section in resolved.prompt_sections if section.title == "memory")
+        self.assertEqual(memory.content.positive, "保留脸和发型")
 
     def test_unknown_wardrobe_in_an_indivisible_clause_drops_the_section(self) -> None:
         wardrobe = PhotoWardrobeDecision(
@@ -193,8 +371,8 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "换成校服"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "换成校服"),
+                _photo_section(
                     "memory",
                     "visual_memory",
                     "Preserve identity and copy the exact outfit and accessories from memory",
@@ -204,8 +382,8 @@ class PhotoPromptContextTests(unittest.TestCase):
             workflow_kind="selfie",
         )
 
-        memory = next(section for section in resolved.prompt_sections if section.name == "memory")
-        self.assertEqual(memory.positive, "")
+        memory = next(section for section in resolved.prompt_sections if section.title == "memory")
+        self.assertEqual(memory.content.positive, "")
         self.assertTrue(
             any(item["action"] == "section_dropped" for item in resolved.removed_conflicts)
         )
@@ -224,8 +402,8 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "wear a school uniform"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "wear a school uniform"),
+                _photo_section(
                     "fixed",
                     "fixed_prompt",
                     negative="school uniform, bad anatomy",
@@ -235,8 +413,8 @@ class PhotoPromptContextTests(unittest.TestCase):
             workflow_kind="portrait",
         )
 
-        fixed = next(section for section in resolved.prompt_sections if section.name == "fixed")
-        self.assertEqual(fixed.negative, "bad anatomy")
+        fixed = next(section for section in resolved.prompt_sections if section.title == "fixed")
+        self.assertEqual(fixed.content.negative, "bad anatomy")
         negative = resolved.final_prompt.split("Negative prompt:", 1)[1]
         self.assertNotIn("school uniform", negative.lower())
         self.assertIn("bad anatomy", negative.lower())
@@ -254,8 +432,8 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "换成红色吊带长裙"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "换成红色吊带长裙"),
+                _photo_section(
                     "fixed",
                     "fixed_prompt",
                     negative="长裙, bad anatomy",
@@ -265,8 +443,8 @@ class PhotoPromptContextTests(unittest.TestCase):
             workflow_kind="portrait",
         )
 
-        fixed = next(section for section in resolved.prompt_sections if section.name == "fixed")
-        self.assertEqual(fixed.negative, "bad anatomy")
+        fixed = next(section for section in resolved.prompt_sections if section.title == "fixed")
+        self.assertEqual(fixed.content.negative, "bad anatomy")
         self.assertTrue(
             any(
                 item["rule"] == "authoritative_outfit_item_negated"
@@ -282,7 +460,7 @@ class PhotoPromptContextTests(unittest.TestCase):
             category="school_uniform",
             lock_outfit=True,
         )
-        request = PhotoPromptSection(
+        request = _photo_section(
             "request",
             "user_request",
             positive="wear pajamas beside the window",
@@ -297,8 +475,8 @@ class PhotoPromptContextTests(unittest.TestCase):
         )
 
         self.assertEqual(resolved.prompt_sections, (request,))
-        self.assertIn(request.positive, resolved.final_prompt)
-        self.assertIn(request.negative, resolved.final_prompt)
+        self.assertIn(request.content.positive, resolved.final_prompt)
+        self.assertIn(request.content.negative, resolved.final_prompt)
         self.assertEqual(resolved.residual_conflicts, ())
 
     def test_recent_continuity_uses_effective_reference_roles(self) -> None:
@@ -313,8 +491,8 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "change the seated pose"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "change the seated pose"),
+                _photo_section(
                     "recent",
                     "recent_continuity",
                     "Recent-photo continuity: preserve identity, face, hairstyle, exact outfit and accessories. Preserve camera tone.",
@@ -324,10 +502,10 @@ class PhotoPromptContextTests(unittest.TestCase):
             workflow_kind="selfie",
         )
 
-        recent = next(section for section in resolved.prompt_sections if section.name == "recent")
-        self.assertIn("preserve identity", recent.positive.lower())
-        self.assertIn("preserve camera tone", recent.positive.lower())
-        self.assertNotIn("exact outfit and accessories", recent.positive.lower())
+        recent = next(section for section in resolved.prompt_sections if section.title == "recent")
+        self.assertIn("preserve identity", recent.content.positive.lower())
+        self.assertIn("preserve camera tone", recent.content.positive.lower())
+        self.assertNotIn("exact outfit and accessories", recent.content.positive.lower())
         self.assertTrue(
             any(item["rule"] == "inactive_reference_outfit_role" for item in resolved.removed_conflicts)
         )
@@ -352,8 +530,8 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "换成校服"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "换成校服"),
+                _photo_section(
                     "recent",
                     "recent_continuity",
                     "Recent-photo continuity: preserve identity and room from this reference.",
@@ -383,7 +561,7 @@ class PhotoPromptContextTests(unittest.TestCase):
             reference_roles=("identity", "outfit"),
             effective_reference_roles=("identity",),
         )
-        request = (PhotoPromptSection("request", "user_request", "wear a school uniform"),)
+        request = (_photo_section("request", "user_request", "wear a school uniform"),)
         unknown = {
             "id": "unknown-outfit",
             "reference_roles": ["identity", "outfit"],
@@ -440,7 +618,7 @@ class PhotoPromptContextTests(unittest.TestCase):
 
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
-            sections=(PhotoPromptSection("request", "user_request", "换成校服"),),
+            sections=(_photo_section("request", "user_request", "换成校服"),),
             prompt_format="traditional",
             workflow_kind="selfie",
             reference={
@@ -463,8 +641,8 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "在街边拍照", negative="白衬衫"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "在街边拍照", negative="白衬衫"),
+                _photo_section(
                     "snapshot",
                     "scene_context",
                     "今日穿搭：白衬衫和牛仔裤；当前位置：街边",
@@ -474,8 +652,8 @@ class PhotoPromptContextTests(unittest.TestCase):
             workflow_kind="selfie",
         )
 
-        snapshot = next(section for section in resolved.prompt_sections if section.name == "snapshot")
-        self.assertEqual(snapshot.positive, "当前位置：街边")
+        snapshot = next(section for section in resolved.prompt_sections if section.title == "snapshot")
+        self.assertEqual(snapshot.content.positive, "当前位置：街边")
         positive = resolved.final_prompt.split("Negative prompt:", 1)[0]
         self.assertNotIn("白衬衫", positive)
         self.assertTrue(
@@ -485,13 +663,13 @@ class PhotoPromptContextTests(unittest.TestCase):
     def test_traditional_and_natural_language_formats_share_sanitized_content(self) -> None:
         wardrobe = PhotoWardrobeDecision(rule_id="none")
         sections = (
-            PhotoPromptSection(
+            _photo_section(
                 "request",
                 "user_request",
                 positive="a portrait by the window",
                 negative="watermark",
             ),
-            PhotoPromptSection("scene", "scene_context", "soft morning light"),
+            _photo_section("scene", "scene_context", "soft morning light"),
         )
 
         traditional = resolve_photo_prompt_context(
@@ -518,18 +696,18 @@ class PhotoPromptContextTests(unittest.TestCase):
 
     def test_local_traditional_prompt_contains_only_renderable_positive_content(self) -> None:
         sections = (
-            PhotoPromptSection(
+            _photo_section(
                 "request",
                 "user_request",
                 positive="[User image request]\nuser request: 拍一张自拍",
                 negative="text, watermark",
             ),
-            PhotoPromptSection(
+            _photo_section(
                 "wardrobe",
                 "wardrobe_decision",
                 positive="Wardrobe decision: use the selected reference outfit.",
             ),
-            PhotoPromptSection(
+            _photo_section(
                 "scene",
                 "scene_context",
                 positive=(
@@ -538,18 +716,18 @@ class PhotoPromptContextTests(unittest.TestCase):
                     "otherwise preserve character identity."
                 ),
             ),
-            PhotoPromptSection(
+            _photo_section(
                 "preset",
                 "preset",
                 positive="Scene preset: 单人，柔和光线",
             ),
-            PhotoPromptSection(
+            _photo_section(
                 "composition",
                 "composition",
                 positive="Subject-count boundary: show at most one recognizable human character.",
                 negative="multiple people, collage",
             ),
-            PhotoPromptSection(
+            _photo_section(
                 "reference_fallback",
                 "reference_fallback",
                 positive="Reference attachment availability override: image 2 is not attached.",
@@ -577,7 +755,7 @@ class PhotoPromptContextTests(unittest.TestCase):
 
     def test_local_compiler_preserves_nai_and_natural_formats(self) -> None:
         sections = (
-            PhotoPromptSection(
+            _photo_section(
                 "request",
                 "user_request",
                 positive="{solo girl}, [crowd]",
@@ -597,13 +775,13 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=PhotoWardrobeDecision(rule_id="none"),
             sections=(
-                PhotoPromptSection(
+                _photo_section(
                     "request",
                     "user_request",
                     positive="{solo girl}, rainy window",
                     negative="text, watermark",
                 ),
-                PhotoPromptSection("scene", "scene_context", "soft morning light"),
+                _photo_section("scene", "scene_context", "soft morning light"),
             ),
             prompt_format="nai",
             workflow_kind="portrait",
@@ -618,15 +796,15 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=PhotoWardrobeDecision(rule_id="none"),
             sections=(
-                PhotoPromptSection("user", "user_request", "u" * 900, "n" * 400),
-                PhotoPromptSection("wardrobe", "wardrobe_decision", "w" * 600, "d" * 180),
-                PhotoPromptSection("scene", "scene_context", "s" * 500, "e" * 180),
-                PhotoPromptSection("memory", "visual_memory", "m" * 500),
-                PhotoPromptSection("preset", "preset", "p" * 220),
-                PhotoPromptSection("fixed", "fixed_prompt", "f" * 180),
-                PhotoPromptSection("edit", "edit_contract", "i" * 260),
-                PhotoPromptSection("composition", "composition", "c" * 260),
-                PhotoPromptSection(
+                _photo_section("user", "user_request", "u" * 900, "n" * 400),
+                _photo_section("wardrobe", "wardrobe_decision", "w" * 600, "d" * 180),
+                _photo_section("scene", "scene_context", "s" * 500, "e" * 180),
+                _photo_section("memory", "visual_memory", "m" * 500),
+                _photo_section("preset", "preset", "p" * 220),
+                _photo_section("fixed", "fixed_prompt", "f" * 180),
+                _photo_section("edit", "edit_contract", "i" * 260),
+                _photo_section("composition", "composition", "c" * 260),
+                _photo_section(
                     "recent",
                     "recent_continuity",
                     "Recent-photo continuity: " + "r" * 600,
@@ -635,24 +813,28 @@ class PhotoPromptContextTests(unittest.TestCase):
             prompt_format="traditional",
             workflow_kind="portrait",
         )
-        by_name = {section.name: section for section in resolved.prompt_sections}
+        by_name = {section.title: section for section in resolved.prompt_sections}
 
-        self.assertEqual(by_name["user"].positive, "u" * 900)
-        self.assertLessEqual(len(by_name["wardrobe"].positive), 420)
+        self.assertEqual(by_name["user"].content.positive, "u" * 900)
+        self.assertLessEqual(len(by_name["wardrobe"].content.positive), 420)
         self.assertLessEqual(
-            len(by_name["scene"].positive) + len(by_name["memory"].positive),
+            len(by_name["scene"].content.positive) + len(by_name["memory"].content.positive),
             700,
         )
-        self.assertLessEqual(len(by_name["preset"].positive), 140)
-        self.assertLessEqual(len(by_name["fixed"].positive), 600)
-        self.assertLessEqual(len(by_name["recent"].positive), 460)
+        self.assertLessEqual(len(by_name["preset"].content.positive), 140)
+        self.assertLessEqual(len(by_name["fixed"].content.positive), 600)
+        self.assertLessEqual(len(by_name["recent"].content.positive), 460)
         self.assertLessEqual(
-            sum(len(by_name[name].positive) for name in ("edit", "composition", "recent")),
+            sum(len(by_name[name].content.positive) for name in ("edit", "composition", "recent")),
             680,
         )
-        self.assertEqual(by_name["user"].negative, "n" * 400)
+        self.assertEqual(by_name["user"].content.negative, "n" * 400)
         self.assertLessEqual(
-            sum(section.negative and len(section.negative) or 0 for section in resolved.prompt_sections if section.source != "user_request"),
+            sum(
+                section.content.negative and len(section.content.negative) or 0
+                for section in resolved.prompt_sections
+                if section.content.domain_source != "user_request"
+            ),
             230,
         )
         self.assertIn("p" * 220, resolved.complete_prompt)
@@ -671,13 +853,13 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "穿校服拍照"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "穿校服拍照"),
+                _photo_section(
                     "global_fixed_prompt",
                     "fixed_prompt",
                     "Additional fixed prompt: pajamas; fine film grain",
                 ),
-                PhotoPromptSection("scene_preset", "preset", long_safe_preset),
+                _photo_section("scene_preset", "preset", long_safe_preset),
             ),
             prompt_format="traditional",
             workflow_kind="portrait",
@@ -701,24 +883,24 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=PhotoWardrobeDecision(rule_id="none"),
             sections=(
-                PhotoPromptSection(
+                _photo_section(
                     "request",
                     "user_request",
                     user_request,
                     protected=True,
                 ),
-                PhotoPromptSection(
+                _photo_section(
                     "decision",
                     "wardrobe_decision",
                     negative="generic exclusion " * 30,
                 ),
-                PhotoPromptSection(
+                _photo_section(
                     "global_fixed_prompt",
                     "fixed_prompt",
                     fixed_prompt,
                     protected=True,
                 ),
-                PhotoPromptSection(
+                _photo_section(
                     "composition",
                     "composition",
                     negative=composition_negative,
@@ -728,18 +910,18 @@ class PhotoPromptContextTests(unittest.TestCase):
             prompt_format="traditional",
             workflow_kind="selfie",
         )
-        by_name = {section.name: section for section in resolved.prompt_sections}
+        by_name = {section.title: section for section in resolved.prompt_sections}
 
-        self.assertEqual(by_name["request"].positive, user_request)
-        self.assertEqual(by_name["global_fixed_prompt"].positive, fixed_prompt)
-        self.assertEqual(by_name["composition"].negative, composition_negative)
+        self.assertEqual(by_name["request"].content.positive, user_request)
+        self.assertEqual(by_name["global_fixed_prompt"].content.positive, fixed_prompt)
+        self.assertEqual(by_name["composition"].content.negative, composition_negative)
 
     def test_budget_compaction_keeps_complete_words(self) -> None:
         tokens = ["x" * 60, *(f"token{index:03d}" for index in range(40))]
         resolved = resolve_photo_prompt_context(
             wardrobe=PhotoWardrobeDecision(rule_id="none"),
             sections=(
-                PhotoPromptSection(
+                _photo_section(
                     "fixed",
                     "fixed_prompt",
                     " ".join(tokens),
@@ -748,7 +930,7 @@ class PhotoPromptContextTests(unittest.TestCase):
             prompt_format="traditional",
             workflow_kind="selfie",
         )
-        fixed = resolved.prompt_sections[0].positive
+        fixed = resolved.prompt_sections[0].content.positive
         fragments = fixed.replace("... [section compacted] ...", "").split()
 
         self.assertTrue(fragments)
@@ -768,25 +950,25 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "换成红色吊带长裙"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "换成红色吊带长裙"),
+                _photo_section(
                     "decision",
                     "wardrobe_decision",
                     "Wardrobe decision: wear the requested red camisole dress.",
                 ),
-                PhotoPromptSection("scene", "scene_context", "今日穿搭：蓝色睡衣"),
+                _photo_section("scene", "scene_context", "今日穿搭：蓝色睡衣"),
             ),
             prompt_format="traditional",
             workflow_kind="selfie",
         )
 
-        decision = next(section for section in resolved.prompt_sections if section.name == "decision")
-        scene = next(section for section in resolved.prompt_sections if section.name == "scene")
+        decision = next(section for section in resolved.prompt_sections if section.title == "decision")
+        scene = next(section for section in resolved.prompt_sections if section.title == "scene")
         self.assertEqual(
-            decision.positive,
+            decision.content.positive,
             "Wardrobe decision: wear the requested red camisole dress.",
         )
-        self.assertEqual(scene.positive, "")
+        self.assertEqual(scene.content.positive, "")
 
     def test_neutral_identity_and_single_outfit_composition_are_preserved(self) -> None:
         wardrobe = PhotoWardrobeDecision(
@@ -800,13 +982,13 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "wear a school uniform"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "wear a school uniform"),
+                _photo_section(
                     "memory",
                     "visual_memory",
                     "preserve identity, face and hairstyle; copy the exact old outfit",
                 ),
-                PhotoPromptSection(
+                _photo_section(
                     "composition",
                     "composition",
                     "exactly one character wearing one coherent outfit in one continuous scene",
@@ -815,11 +997,11 @@ class PhotoPromptContextTests(unittest.TestCase):
             prompt_format="natural_language",
             workflow_kind="selfie",
         )
-        by_name = {section.name: section for section in resolved.prompt_sections}
+        by_name = {section.title: section for section in resolved.prompt_sections}
 
-        self.assertEqual(by_name["memory"].positive, "preserve identity, face and hairstyle")
+        self.assertEqual(by_name["memory"].content.positive, "preserve identity, face and hairstyle")
         self.assertEqual(
-            by_name["composition"].positive,
+            by_name["composition"].content.positive,
             "exactly one character wearing one coherent outfit in one continuous scene",
         )
 
@@ -838,8 +1020,8 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "wear conservative sleepwear"),
-                PhotoPromptSection("sleepwear_preset", "preset", preset_text),
+                _photo_section("request", "user_request", "wear conservative sleepwear"),
+                _photo_section("sleepwear_preset", "preset", preset_text),
             ),
             prompt_format="traditional",
             workflow_kind="selfie",
@@ -847,15 +1029,15 @@ class PhotoPromptContextTests(unittest.TestCase):
         preset = next(
             section
             for section in resolved.prompt_sections
-            if section.name == "sleepwear_preset"
+            if section.title == "sleepwear_preset"
         )
 
-        self.assertIn("sleepwear or bedtime loungewear portrait", preset.positive)
-        self.assertIn("natural home or bedtime context", preset.positive)
-        self.assertNotIn("do not restore", preset.positive.lower())
-        self.assertIn("daytime outfit", preset.negative)
-        self.assertIn("coat", preset.negative)
-        self.assertIn("school uniform", preset.negative)
+        self.assertIn("sleepwear or bedtime loungewear portrait", preset.content.positive)
+        self.assertIn("natural home or bedtime context", preset.content.positive)
+        self.assertNotIn("do not restore", preset.content.positive.lower())
+        self.assertIn("daytime outfit", preset.content.negative)
+        self.assertIn("coat", preset.content.negative)
+        self.assertIn("school uniform", preset.content.negative)
         self.assertEqual(resolved.residual_conflicts, ())
 
     def test_embedded_negative_cannot_negate_authoritative_sleepwear(self) -> None:
@@ -868,8 +1050,8 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "wear sleepwear"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "wear sleepwear"),
+                _photo_section(
                     "preset",
                     "preset",
                     "soft bedroom light, avoid sleepwear",
@@ -878,10 +1060,10 @@ class PhotoPromptContextTests(unittest.TestCase):
             prompt_format="traditional",
             workflow_kind="selfie",
         )
-        preset = next(section for section in resolved.prompt_sections if section.name == "preset")
+        preset = next(section for section in resolved.prompt_sections if section.title == "preset")
 
-        self.assertEqual(preset.positive, "soft bedroom light")
-        self.assertEqual(preset.negative, "")
+        self.assertEqual(preset.content.positive, "soft bedroom light")
+        self.assertEqual(preset.content.negative, "")
         self.assertTrue(
             any(
                 item["rule"] == "authoritative_wardrobe_negated"
@@ -907,12 +1089,12 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection(
+                _photo_section(
                     "request",
                     "user_request",
                     "daily outfit character illustration",
                 ),
-                PhotoPromptSection(
+                _photo_section(
                     "contract",
                     "composition",
                     negative=daily_negative,
@@ -922,16 +1104,16 @@ class PhotoPromptContextTests(unittest.TestCase):
             workflow_kind="selfie",
         )
         contract = next(
-            section for section in resolved.prompt_sections if section.name == "contract"
+            section for section in resolved.prompt_sections if section.title == "contract"
         )
 
-        self.assertIn("cropped head", contract.negative)
-        self.assertIn("headless", contract.negative)
-        self.assertIn("faceless", contract.negative)
-        self.assertIn("mirror selfie", contract.negative)
-        self.assertIn("nsfw", contract.negative)
-        self.assertIn("same outfit as a recent daily outfit photo", contract.negative)
-        self.assertIn("outer layers", contract.negative)
+        self.assertIn("cropped head", contract.content.negative)
+        self.assertIn("headless", contract.content.negative)
+        self.assertIn("faceless", contract.content.negative)
+        self.assertIn("mirror selfie", contract.content.negative)
+        self.assertIn("nsfw", contract.content.negative)
+        self.assertIn("same outfit as a recent daily outfit photo", contract.content.negative)
+        self.assertIn("outer layers", contract.content.negative)
         self.assertFalse(
             any(
                 item["rule"] == "authoritative_wardrobe_negated"
@@ -955,8 +1137,8 @@ class PhotoPromptContextTests(unittest.TestCase):
                 resolved = resolve_photo_prompt_context(
                     wardrobe=wardrobe,
                     sections=(
-                        PhotoPromptSection("request", "user_request", "生成今日穿搭"),
-                        PhotoPromptSection(
+                        _photo_section("request", "user_request", "生成今日穿搭"),
+                        _photo_section(
                             "rotation_contract",
                             "composition",
                             negative=clause,
@@ -968,10 +1150,10 @@ class PhotoPromptContextTests(unittest.TestCase):
                 contract = next(
                     section
                     for section in resolved.prompt_sections
-                    if section.name == "rotation_contract"
+                    if section.title == "rotation_contract"
                 )
 
-                self.assertEqual(clause, contract.negative)
+                self.assertEqual(clause, contract.content.negative)
                 self.assertFalse(
                     any(
                         item["rule"] == "authoritative_wardrobe_negated"
@@ -988,8 +1170,8 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=wardrobe,
             sections=(
-                PhotoPromptSection("request", "user_request", "生成今日穿搭"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "生成今日穿搭"),
+                _photo_section(
                     "invalid_negative",
                     "preset",
                     negative="avoid daily outfit",
@@ -1001,10 +1183,10 @@ class PhotoPromptContextTests(unittest.TestCase):
         invalid = next(
             section
             for section in resolved.prompt_sections
-            if section.name == "invalid_negative"
+            if section.title == "invalid_negative"
         )
 
-        self.assertEqual("", invalid.negative)
+        self.assertEqual("", invalid.content.negative)
         self.assertTrue(
             any(
                 item["rule"] == "authoritative_wardrobe_negated"
@@ -1016,8 +1198,8 @@ class PhotoPromptContextTests(unittest.TestCase):
         resolved = resolve_photo_prompt_context(
             wardrobe=PhotoWardrobeDecision(rule_id="none"),
             sections=(
-                PhotoPromptSection("request", "user_request", "a portrait"),
-                PhotoPromptSection(
+                _photo_section("request", "user_request", "a portrait"),
+                _photo_section(
                     "fixed",
                     "fixed_prompt",
                     "additional fixed prompt: " + ", ".join(f"tag{index:03d}" for index in range(120)),

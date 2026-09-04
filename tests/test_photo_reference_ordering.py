@@ -177,8 +177,8 @@ class _ToolPhotoHarness(LlmToolActionsMixin):
         return True
 
     @staticmethod
-    def _build_natural_language_photo_prompt(**kwargs) -> str:
-        return str(kwargs.get("prompt") or "")
+    def _build_natural_language_photo_prompt_sections(**_kwargs) -> tuple[object, ...]:
+        return ()
 
     async def _generate_photo_image_result(self, **kwargs):
         self.generation_calls += 1

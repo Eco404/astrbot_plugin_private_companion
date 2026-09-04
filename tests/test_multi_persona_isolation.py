@@ -18,6 +18,7 @@ from astrbot_plugin_private_companion.main import (
     PrivateCompanionPlugin,
     _multi_persona_event_context,
 )
+from astrbot_plugin_private_companion.conversation_prompt_section import prompt_section
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
 from astrbot_plugin_private_companion.plugin_identity import PLUGIN_ID
 from astrbot_plugin_private_companion.storage.store_manager import StoreManager
@@ -542,13 +543,18 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
     async def test_lightweight_passive_state_cache_is_scoped_by_persona(self):
         with tempfile.TemporaryDirectory() as root:
             plugin = _plugin_harness(root)
-            plugin._format_lightweight_state_injection = (
-                lambda state, *, include_heading=True: state["text"]
+            plugin._format_state_prompt_section = (
+                lambda state: prompt_section(
+                    key="state.current",
+                    title="Bot 自身模拟状态",
+                    source="daily_state",
+                    content=state["text"],
+                )
             )
 
             token = plugin._activate_persona_id("main")
             try:
-                main_text = plugin._prepared_lightweight_state_injection(
+                main_section = plugin._prepared_lightweight_state_prompt_section(
                     {"text": "MAIN_STATE"}
                 )
             finally:
@@ -556,16 +562,24 @@ class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
 
             token = plugin._activate_persona_id("alt")
             try:
-                alt_text = plugin._prepared_lightweight_state_injection(
+                alt_section = plugin._prepared_lightweight_state_prompt_section(
                     {"text": "ALT_STATE"}
                 )
             finally:
                 plugin._deactivate_persona_for_event(token)
 
-            self.assertEqual("MAIN_STATE", main_text)
-            self.assertEqual("ALT_STATE", alt_text)
-            self.assertEqual("MAIN_STATE", plugin._passive_light_injection_cache["main"]["text"])
-            self.assertEqual("ALT_STATE", plugin._passive_light_injection_cache["alt"]["text"])
+            self.assertEqual("MAIN_STATE", main_section.content)
+            self.assertEqual("ALT_STATE", alt_section.content)
+            self.assertEqual("state.lightweight", main_section.key)
+            self.assertEqual("state.lightweight", alt_section.key)
+            self.assertEqual(
+                "MAIN_STATE",
+                plugin._passive_light_injection_cache["main"]["section"].content,
+            )
+            self.assertEqual(
+                "ALT_STATE",
+                plugin._passive_light_injection_cache["alt"]["section"].content,
+            )
 
     async def test_page_persona_selection_does_not_write_window_or_profile_data(self):
         with tempfile.TemporaryDirectory() as root:

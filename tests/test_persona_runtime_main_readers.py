@@ -13,6 +13,12 @@ from types import SimpleNamespace
 from typing import Any
 
 from astrbot_plugin_private_companion.persona_config import runtime_persona_setting
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +44,10 @@ def _load_methods(*names: str) -> dict[str, Any]:
         "logger": logging.getLogger(__name__),
         "re": re,
         "runtime_persona_setting": runtime_persona_setting,
+        "PromptRenderMode": PromptRenderMode,
+        "PromptSection": PromptSection,
+        "prompt_section": prompt_section,
+        "render_prompt_sections": render_prompt_sections,
         "time": time,
         "_single_line": lambda value, limit=240: " ".join(str(value or "").split())[:limit],
     }
@@ -47,6 +57,7 @@ def _load_methods(*names: str) -> dict[str, Any]:
 
 METHODS = _load_methods(
     "_normalize_persona_voice_text",
+    "_format_persona_voice_channel_prompt_section",
     "_format_persona_voice_channel_prompt",
     "_review_group_question_wakeup_reply_before_send",
     "_rest_reply_llm_score",
@@ -55,6 +66,9 @@ METHODS = _load_methods(
 
 class _MainReadersHarness:
     _normalize_persona_voice_text = METHODS["_normalize_persona_voice_text"]
+    _format_persona_voice_channel_prompt_section = METHODS[
+        "_format_persona_voice_channel_prompt_section"
+    ]
     _format_persona_voice_channel_prompt = METHODS["_format_persona_voice_channel_prompt"]
     _review_group_question_wakeup_reply_before_send = METHODS["_review_group_question_wakeup_reply_before_send"]
     _rest_reply_llm_score = METHODS["_rest_reply_llm_score"]

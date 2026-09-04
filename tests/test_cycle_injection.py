@@ -4,6 +4,10 @@ from __future__ import annotations
 import unittest
 
 from astrbot_plugin_private_companion.daily_state import DailyStateMixin
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PromptRenderMode,
+    render_prompt_sections,
+)
 from astrbot_plugin_private_companion.proactive import ProactiveMixin
 
 
@@ -51,6 +55,11 @@ class CycleInjectionTests(unittest.TestCase):
         self.assertNotIn("影响维度", prompt)
         self.assertNotIn("表达基准", prompt)
         self.assertNotIn("归因边界", prompt)
+        section = harness._format_state_prompt_section(harness.data["daily_state"])
+        self.assertEqual("state.current", section.key)
+        self.assertEqual("Bot 自身模拟状态", section.title)
+        self.assertEqual("daily_state", section.source)
+        self.assertNotIn("【Bot 自身模拟状态】", section.content)
 
     def test_neutral_cycle_does_not_add_cycle_rules(self) -> None:
         harness = _CycleInjectionHarness("不处于生理期")
@@ -84,8 +93,12 @@ class CycleInjectionTests(unittest.TestCase):
 
     def test_active_period_adds_contextual_intimacy_boundary(self) -> None:
         harness = _CycleInjectionHarness("处于生理期,身体舒适度与能量偏低")
-        boundary = harness._format_active_period_boundary_for_prompt(
+        boundary_section = harness._format_active_period_boundary_prompt_section(
             harness.data["daily_state"]
+        )
+        boundary = render_prompt_sections(
+            [boundary_section],
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
         self.assertIn("Bot 当前经期与互动边界", boundary)
@@ -93,6 +106,12 @@ class CycleInjectionTests(unittest.TestCase):
         self.assertIn("不要因为关系亲密、用户偏好、催促或迎合压力而答应", boundary)
         self.assertIn("温和拥抱不需要机械拒绝", boundary)
         self.assertIn("休息、聊天、陪伴或改天再说", boundary)
+        section = harness._format_active_period_boundary_prompt_section(
+            harness.data["daily_state"]
+        )
+        self.assertEqual("state.period_boundary", section.key)
+        self.assertEqual("daily_state", section.source)
+        self.assertNotIn("【Bot 当前经期与互动边界】", section.content)
 
     def test_advanced_menstrual_phase_survives_custom_prompt_text(self) -> None:
         harness = _CycleInjectionHarness("想把动作放轻一些")
@@ -105,10 +124,10 @@ class CycleInjectionTests(unittest.TestCase):
             }
         ]
 
-        boundary = harness._format_active_period_boundary_for_prompt(
+        boundary = harness._format_active_period_boundary_prompt_section(
             harness.data["daily_state"],
             public=True,
-        )
+        ).content
 
         self.assertIn("处于月经期阶段", boundary)
         self.assertIn("无人直接且合宜地询问时，不要主动公开具体周期", boundary)
@@ -124,9 +143,9 @@ class CycleInjectionTests(unittest.TestCase):
         ):
             with self.subTest(cycle_text=cycle_text):
                 harness = _CycleInjectionHarness(cycle_text)
-                boundary = harness._format_active_period_boundary_for_prompt(
+                boundary = harness._format_active_period_boundary_prompt_section(
                     harness.data["daily_state"]
-                )
+                ).content
                 self.assertEqual(boundary, "")
 
     def test_disabled_cycle_never_reuses_stale_period_state(self) -> None:
@@ -134,7 +153,9 @@ class CycleInjectionTests(unittest.TestCase):
         harness.enable_cycle_state = False
 
         self.assertEqual(
-            harness._format_active_period_boundary_for_prompt(harness.data["daily_state"]),
+            harness._format_active_period_boundary_prompt_section(
+                harness.data["daily_state"]
+            ).content,
             "",
         )
         prompt = harness._format_state_for_prompt(harness.data["daily_state"])

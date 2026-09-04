@@ -15,6 +15,13 @@ from typing import Any
 from astrbot.api.event import AstrMessageEvent
 
 from .constants import DEFAULT_NATURAL_LANGUAGE_PHOTO_EXTRA_PROMPT
+from .conversation_prompt_section import (
+    PhotoPromptContent,
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
 from .helpers import _flat_get, _missing_optional_model_dependency, _now_ts, _path_text, _photo_group_request_matches, _safe_float, _safe_int, _set_into_config, _single_line, _today_key
 from .logging_util import get_module_logger
 from .photo_generation_scope import PHOTO_GENERATION_SCOPE_LIMIT_KEYS
@@ -27,7 +34,6 @@ from .photo_reference_catalog import (
     load_catalog,
     validate_and_serialize,
 )
-from .photo_prompt_context import PhotoPromptSection
 from .persona_config import runtime_persona_setting
 from .runtime_config_dispatcher import dispatch_runtime_config_effects
 
@@ -3175,7 +3181,7 @@ class CommandHandlersMixin:
         }
         detailed_entries = [item for item in (selected or []) if isinstance(item, dict)][:4]
         blocks: list[str] = []
-        for entry in detailed_entries:
+        for index, entry in enumerate(detailed_entries):
             title = _single_line(entry.get("title"), 80)
             if not title:
                 continue
@@ -3187,14 +3193,23 @@ class CommandHandlersMixin:
                 if str(item or "").strip()
             )
             blocks.append(
-                "\n".join(
+                render_prompt_sections(
                     [
-                        f"【{title}】",
-                        f"逻辑：{entry.get('summary') or ''}",
-                        f"检查：{checks or '无'}",
-                        f"建议：{suggestions or '无'}",
-                        f"配置键：{settings or '无'}",
-                    ]
+                        prompt_section(
+                            key=f"background.manual_diagnosis.capability.{index}",
+                            title=title,
+                            source="command_handlers",
+                            content="\n".join(
+                                (
+                                    f"逻辑：{entry.get('summary') or ''}",
+                                    f"检查：{checks or '无'}",
+                                    f"建议：{suggestions or '无'}",
+                                    f"配置键：{settings or '无'}",
+                                )
+                            ),
+                        )
+                    ],
+                    mode=PromptRenderMode.LABELED_BLOCK,
                 )
             )
         index_lines: list[str] = []
@@ -3212,7 +3227,19 @@ class CommandHandlersMixin:
             )
             index_lines.append(f"- {title}：{summary or '见插件实现'}；相关配置：{settings or '无'}")
         if index_lines:
-            blocks.append("【其他能力索引（用于发现相关链路，不是预设答案）】\n" + "\n".join(index_lines))
+            blocks.append(
+                render_prompt_sections(
+                    [
+                        prompt_section(
+                            key="background.manual_diagnosis.capability_index",
+                            title="其他能力索引（用于发现相关链路，不是预设答案）",
+                            source="command_handlers",
+                            content="\n".join(index_lines),
+                        )
+                    ],
+                    mode=PromptRenderMode.LABELED_BLOCK,
+                )
+            )
         return "\n\n".join(blocks)[:18000]
 
     @staticmethod
@@ -3303,8 +3330,18 @@ class CommandHandlersMixin:
         candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
         blocks: list[str] = []
         length = 0
-        for _score, file_name, start_line, excerpt in candidates[:18]:
-            block = f"【{file_name}:{start_line}】\n" + "\n".join(excerpt)
+        for index, (_score, file_name, start_line, excerpt) in enumerate(candidates[:18]):
+            block = render_prompt_sections(
+                [
+                    prompt_section(
+                        key=f"background.manual_diagnosis.source_excerpt.{index}",
+                        title=f"{file_name}:{start_line}",
+                        source="command_handlers",
+                        content="\n".join(excerpt),
+                    )
+                ],
+                mode=PromptRenderMode.LABELED_BLOCK,
+            )
             if length + len(block) > max_chars:
                 remaining = max_chars - length
                 if remaining > 240:
@@ -3475,63 +3512,64 @@ class CommandHandlersMixin:
                 )
             except Exception as exc:
                 logger.debug("答疑 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
-        prompt = f"""
-你是 PrivateCompanion 的插件专家答疑助手。你理解插件的功能边界、模块协作、配置、运行状态和关键实现，目标是像熟悉整个项目的维护者一样回答，而不是把问题套进关键词规则。
-
-回答方式：
-- 先直接回答用户真正问的内容。可以解释设计目的、实际调用链、模块关系、配置影响、已知限制、故障根因或改进方案，不要强行把所有问题改写成“现象排障”。
-- 以当前源码摘录、配置结构和真实运行状态为最高优先级；静态能力索引和关键词候选只帮助检索，绝不是预设结论。若候选与问题不符，必须忽略。
-- 用户问“能不能、为什么、怎么实现、这一改动是否有效”时，要结合实现链路进行推理，明确区分“部分解决”“完全解决”和“没有解决”。
-- 用户问最近发生的具体事件时才做现场诊断；有证据就引用关键证据，没有证据就明确不确定，不要用规则命中伪装成事实。
-- 回答深度由问题决定：简单问题可以短答，架构、代码或复杂排障可以充分展开，不受 3-6 行限制。
-- 不要把“完整功能说明书”“关键词初筛”“本地回退”“当前配置快照”“源码检索”等内部过程说给用户。
-- 不要编造不存在的配置项、模块、日志或已经执行过的操作；配置项以配置目录和源码为准。
-- 解释代码、公式、耗时或单位换算时，先逐项读取原表达式和数值单位，统一到基本单位计算，再换算展示单位并做反向换算复核；明确区分代码要求时长、实际运行耗时、日志值和界面显示值。
-- 不得引入源码、日志或用户材料中没有出现的运算、常数、倍率、对数或所谓解释器规则来凑结果，尤其不能凭空加入 ln、log、指数或除法。`time.sleep(10 * 60)` 就是 600 秒，即 10 分钟；若结果不符，应说明还缺哪段真实代码或日志。
-- 提到配置时必须同时写中文名和参数名,格式类似“高强度唤醒阈值（group_high_intensity_wakeup_threshold）”。
-- 涉及调参时，说明作用范围和副作用；只有证据支持时才给具体数值。
-- 可执行改配置由本地白名单规则另行生成；你只负责解释和建议,不要声称已经修改配置。
-- 语气自然、清楚，像插件作者本人在解释和排障，不要写客服套话。
-- 不要说“内置说明书没匹配到”“关键词没命中”“去扩展页排障中心”这类暴露实现的话；如果不确定,就自然说明需要更具体的现象或日志。
-- 不要要求用户复制文件；用户和你在同一机器上。
-
-【用户问题】
-{_single_line(question, 260)}
-
-【当前人格/说话风格参考】
-{persona_text or '未读取到人格；保持简洁、自然、温和。'}
-
-【同一会话上一轮答疑上下文】
-{recent_context}
-
-【本轮图片/引用图片上下文】
-{media_context or '本轮没有检测到随消息携带或引用的图片。'}
-
-【我会牢牢记住你 最近排障/配置记忆】
-{memory_context or '暂无可用的近期记忆。'}
-使用方式：只辅助理解这台实例最近发生过什么；本地运行状态、截图和日志证据优先。不要说“我查记忆发现”。
-
-【关键词候选（只用于检索，可能不准确）】
-{selected_hint}
-
-【插件能力知识目录】
-{manual_context}
-
-【与本题相关的当前源码/文档摘录】
-{source_context or '没有检索到直接相关的源码片段；此时只能依据能力目录、配置和运行状态回答。'}
-
-【用户明确提到的配置项】
-{mentioned_config_text}
-
-【当前运行状态快照】
-{runtime or '没有拿到当前会话专项状态,只能按配置和说明书判断。'}
-
-【本地采集到的候选证据（可能与问题无关，不得直接当结论）】
-{local_hint}
-
-请输出：
-直接回答用户的问题。按问题复杂度组织内容，必要时说明调用链、依据、边界和下一步。
-""".strip()
+        instruction_section = prompt_section(
+            key="background.manual_diagnosis.instructions",
+            title="插件专家答疑任务",
+            source="command_handlers",
+            content=(
+                "你是 PrivateCompanion 的插件专家答疑助手。你理解插件的功能边界、模块协作、配置、运行状态和关键实现，目标是像熟悉整个项目的维护者一样回答，而不是把问题套进关键词规则。\n\n"
+                "回答方式：\n"
+                "- 先直接回答用户真正问的内容。可以解释设计目的、实际调用链、模块关系、配置影响、已知限制、故障根因或改进方案，不要强行把所有问题改写成“现象排障”。\n"
+                "- 以当前源码摘录、配置结构和真实运行状态为最高优先级；静态能力索引和关键词候选只帮助检索，绝不是预设结论。若候选与问题不符，必须忽略。\n"
+                "- 用户问“能不能、为什么、怎么实现、这一改动是否有效”时，要结合实现链路进行推理，明确区分“部分解决”“完全解决”和“没有解决”。\n"
+                "- 用户问最近发生的具体事件时才做现场诊断；有证据就引用关键证据，没有证据就明确不确定，不要用规则命中伪装成事实。\n"
+                "- 回答深度由问题决定：简单问题可以短答，架构、代码或复杂排障可以充分展开，不受 3-6 行限制。\n"
+                "- 不要把“完整功能说明书”“关键词初筛”“本地回退”“当前配置快照”“源码检索”等内部过程说给用户。\n"
+                "- 不要编造不存在的配置项、模块、日志或已经执行过的操作；配置项以配置目录和源码为准。\n"
+                "- 解释代码、公式、耗时或单位换算时，先逐项读取原表达式和数值单位，统一到基本单位计算，再换算展示单位并做反向换算复核；明确区分代码要求时长、实际运行耗时、日志值和界面显示值。\n"
+                "- 不得引入源码、日志或用户材料中没有出现的运算、常数、倍率、对数或所谓解释器规则来凑结果，尤其不能凭空加入 ln、log、指数或除法。`time.sleep(10 * 60)` 就是 600 秒，即 10 分钟；若结果不符，应说明还缺哪段真实代码或日志。\n"
+                "- 提到配置时必须同时写中文名和参数名,格式类似“高强度唤醒阈值（group_high_intensity_wakeup_threshold）”。\n"
+                "- 涉及调参时，说明作用范围和副作用；只有证据支持时才给具体数值。\n"
+                "- 可执行改配置由本地白名单规则另行生成；你只负责解释和建议,不要声称已经修改配置。\n"
+                "- 语气自然、清楚，像插件作者本人在解释和排障，不要写客服套话。\n"
+                "- 不要说“内置说明书没匹配到”“关键词没命中”“去扩展页排障中心”这类暴露实现的话；如果不确定,就自然说明需要更具体的现象或日志。\n"
+                "- 不要要求用户复制文件；用户和你在同一机器上。"
+            ),
+        )
+        context_sections = (
+            prompt_section(key="background.manual_diagnosis.question", title="用户问题", source="command_handlers", content=_single_line(question, 260)),
+            prompt_section(key="background.manual_diagnosis.persona", title="当前人格/说话风格参考", source="command_handlers", content=persona_text or "未读取到人格；保持简洁、自然、温和。"),
+            prompt_section(key="background.manual_diagnosis.recent", title="同一会话上一轮答疑上下文", source="command_handlers", content=recent_context),
+            prompt_section(key="background.manual_diagnosis.media", title="本轮图片/引用图片上下文", source="command_handlers", content=media_context or "本轮没有检测到随消息携带或引用的图片。"),
+            prompt_section(
+                key="background.manual_diagnosis.memory",
+                title="我会牢牢记住你 最近排障/配置记忆",
+                source="command_handlers",
+                content=(
+                    f"{memory_context or '暂无可用的近期记忆。'}\n"
+                    "使用方式：只辅助理解这台实例最近发生过什么；本地运行状态、截图和日志证据优先。不要说“我查记忆发现”。"
+                ),
+            ),
+            prompt_section(key="background.manual_diagnosis.candidates", title="关键词候选（只用于检索，可能不准确）", source="command_handlers", content=selected_hint),
+            prompt_section(key="background.manual_diagnosis.manual", title="插件能力知识目录", source="command_handlers", content=manual_context),
+            prompt_section(key="background.manual_diagnosis.sources", title="与本题相关的当前源码/文档摘录", source="command_handlers", content=source_context or "没有检索到直接相关的源码片段；此时只能依据能力目录、配置和运行状态回答。"),
+            prompt_section(key="background.manual_diagnosis.config", title="用户明确提到的配置项", source="command_handlers", content=mentioned_config_text),
+            prompt_section(key="background.manual_diagnosis.runtime", title="当前运行状态快照", source="command_handlers", content=runtime or "没有拿到当前会话专项状态,只能按配置和说明书判断。"),
+            prompt_section(key="background.manual_diagnosis.evidence", title="本地采集到的候选证据（可能与问题无关，不得直接当结论）", source="command_handlers", content=local_hint),
+        )
+        output_section = prompt_section(
+            key="background.manual_diagnosis.output",
+            title="插件专家答疑输出要求",
+            source="command_handlers",
+            content="请输出：\n直接回答用户的问题。按问题复杂度组织内容，必要时说明调用链、依据、边界和下一步。",
+        )
+        prompt = "\n\n".join(
+            (
+                render_prompt_sections([instruction_section], mode=PromptRenderMode.BODY_ONLY),
+                render_prompt_sections(context_sections, mode=PromptRenderMode.LABELED_BLOCK),
+                render_prompt_sections([output_section], mode=PromptRenderMode.BODY_ONLY),
+            )
+        )
         timeout_resolver = getattr(self, "_model_timeout_seconds_for_call", None)
         answer_timeout = None
         if callable(timeout_resolver):
@@ -4781,8 +4819,42 @@ class CommandHandlersMixin:
         kind: str,
         has_reference: bool,
         memory_context: str = "",
-        structured: bool = False,
-    ) -> str | tuple[PhotoPromptSection, ...]:
+    ) -> str:
+        sections = self._build_natural_language_photo_prompt_sections(
+            prompt=prompt,
+            kind=kind,
+            has_reference=has_reference,
+            memory_context=memory_context,
+        )
+        combined_positive = ", ".join(
+            section.content.positive
+            for section in sections
+            if isinstance(section.content, PhotoPromptContent)
+            and section.content.positive
+        )
+        combined_negative = ", ".join(
+            section.content.negative
+            for section in sections
+            if isinstance(section.content, PhotoPromptContent)
+            and section.content.negative
+        )
+        return _single_line(
+            "Positive prompt: "
+            + combined_positive
+            + ". Negative prompt: "
+            + combined_negative
+            + ".",
+            6500,
+        )
+
+    def _build_natural_language_photo_prompt_sections(
+        self,
+        *,
+        prompt: str,
+        kind: str,
+        has_reference: bool,
+        memory_context: str = "",
+    ) -> tuple[PromptSection, ...]:
         style_name, style_instruction = self._get_photo_style_instruction() if callable(getattr(self, "_get_photo_style_instruction", None)) else ("默认", "")
         style_prompt = (
             self._photo_style_prompt_en(style_name, style_instruction)
@@ -4923,66 +4995,75 @@ class CommandHandlersMixin:
                     ]
                 )
         sections = [
-            PhotoPromptSection(
-                name="user_request",
-                source="user_request",
-                positive=f"user request: {user_request}",
-                protected=True,
+            prompt_section(
+                key="photo.command.user_request",
+                title="user_request",
+                source="photo_prompt_context",
+                content=PhotoPromptContent(
+                    positive=f"user request: {user_request}",
+                    domain_source="user_request",
+                    protected=True,
+                ),
             )
         ]
         sections.append(
-            PhotoPromptSection(
-                name="natural_language_contract",
-                # This is a trusted workflow contract, not caller-supplied
-                # visual memory.  Freeze it for this task so the N-1 resolver
-                # cannot trim safety/composition rules as ambient context.
-                source="fixed_prompt",
-                positive=_single_line(
-                    ", ".join(
-                        part for part in positive if _single_line(part, 520)
+            prompt_section(
+                key="photo.command.natural_language_contract",
+                title="natural_language_contract",
+                source="photo_prompt_context",
+                content=PhotoPromptContent(
+                    # This is a trusted workflow contract, not caller-supplied
+                    # visual memory. Freeze it for this task so the N-1 resolver
+                    # cannot trim safety/composition rules as ambient context.
+                    positive=_single_line(
+                        ", ".join(
+                            part for part in positive if _single_line(part, 520)
+                        ),
+                        1400,
                     ),
-                    1400,
+                    negative=_single_line(", ".join(negative), 760),
+                    domain_source="fixed_prompt",
+                    protected=True,
                 ),
-                negative=_single_line(", ".join(negative), 760),
-                protected=True,
             )
         )
         if kind == "selfie":
             sections.append(
-                PhotoPromptSection(
-                    name="identity_continuity",
-                    source="visual_memory",
-                    positive=identity_continuity,
+                prompt_section(
+                    key="photo.command.identity_continuity",
+                    title="identity_continuity",
+                    source="photo_prompt_context",
+                    content=PhotoPromptContent(
+                        positive=identity_continuity,
+                        domain_source="visual_memory",
+                    ),
                 )
             )
         if visual_memory and kind != "edit":
             sections.append(
-                PhotoPromptSection(
-                    name="visual_memory",
-                    source="visual_memory",
-                    positive=f"visual continuity reference: {_single_line(visual_memory, 300)}",
+                prompt_section(
+                    key="photo.command.visual_memory",
+                    title="visual_memory",
+                    source="photo_prompt_context",
+                    content=PhotoPromptContent(
+                        positive=f"visual continuity reference: {_single_line(visual_memory, 300)}",
+                        domain_source="visual_memory",
+                    ),
                 )
             )
         if extra_prompt:
             sections.append(
-                PhotoPromptSection(
-                    name="natural_language_extra",
-                    source="fixed_prompt",
-                    positive=f"additional generation preference: {_single_line(extra_prompt, 420)}",
+                prompt_section(
+                    key="photo.command.natural_language_extra",
+                    title="natural_language_extra",
+                    source="photo_prompt_context",
+                    content=PhotoPromptContent(
+                        positive=f"additional generation preference: {_single_line(extra_prompt, 420)}",
+                        domain_source="fixed_prompt",
+                    ),
                 )
             )
-        if structured:
-            return tuple(sections)
-        combined_positive = ", ".join(section.positive for section in sections if section.positive)
-        combined_negative = ", ".join(section.negative for section in sections if section.negative)
-        return _single_line(
-            "Positive prompt: "
-            + combined_positive
-            + ". Negative prompt: "
-            + combined_negative
-            + ".",
-            6500,
-        )
+        return tuple(sections)
 
     @staticmethod
     def _photo_generation_workflow_kind(intent_kind: str) -> str:
@@ -5357,12 +5438,11 @@ class CommandHandlersMixin:
                 )
             except Exception:
                 memory_context = ""
-        prompt_sections = self._build_natural_language_photo_prompt(
+        prompt_sections = self._build_natural_language_photo_prompt_sections(
             prompt=str(intent.get("prompt") or ""),
             kind=str(intent.get("kind") or "text2img"),
             has_reference=bool(reference_path),
             memory_context=memory_context,
-            structured=True,
         )
         prompt_text = str(intent.get("prompt") or "")
         intent_kind = str(intent.get("kind") or "text2img")
@@ -5675,12 +5755,11 @@ class CommandHandlersMixin:
             except Exception:
                 memory_context = ""
 
-        prompt_sections = self._build_natural_language_photo_prompt(
+        prompt_sections = self._build_natural_language_photo_prompt_sections(
             prompt=prompt,
             kind=forced_kind,
             has_reference=bool(reference_path),
             memory_context=memory_context,
-            structured=True,
         )
         prompt_text = prompt
         workflow_kind = self._photo_generation_workflow_kind(forced_kind)

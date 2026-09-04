@@ -3,6 +3,9 @@ import time
 from datetime import datetime
 from unittest.mock import patch
 
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    render_prompt_sections,
+)
 from astrbot_plugin_private_companion.user_memory import UserMemoryMixin
 from astrbot_plugin_private_companion.core_store import CoreStoreMixin
 
@@ -168,6 +171,14 @@ class PrivateFactAttributionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不得把“Bot 提过", guard)
         self.assertIn("不是我说的，是你先提的", guard)
 
+        section = self.harness._format_private_fact_attribution_guard_prompt_section(
+            user,
+            "",
+        )
+        self.assertEqual("identity.fact_attribution", section.key)
+        self.assertEqual("事实主语与归属边界", section.title)
+        self.assertEqual("identity", section.source)
+
     def test_private_identity_anchor_keeps_one_configured_address(self):
         self.harness.default_nickname = "你"
 
@@ -184,6 +195,16 @@ class PrivateFactAttributionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不必每句都带称呼", anchor)
         self.assertIn("关系阶段、旧记忆、显示名和别名不能据此另造亲昵称呼", anchor)
         self.assertIn("岚岚", anchor)
+        section = self.harness._format_private_identity_anchor_prompt_section(
+            "u1",
+            {
+                "nickname": "阿岚",
+                "last_display_name": "岚岚",
+            },
+        )
+        self.assertEqual("identity.anchor", section.key)
+        self.assertEqual("私聊身份锚点", section.title)
+        self.assertEqual("identity", section.source)
 
     def test_recent_proactive_photo_reaction_is_owned_by_bot(self):
         now = time.time()
@@ -200,10 +221,19 @@ class PrivateFactAttributionTests(unittest.IsolatedAsyncioTestCase):
         }
 
         guard = self.harness._format_private_fact_attribution_guard(user, "啊啊啊洒出来了啊啊")
+        section = self.harness._format_private_fact_attribution_guard_prompt_section(
+            user,
+            "啊啊啊洒出来了啊啊",
+        )
+        rendered = render_prompt_sections([section])
 
         self.assertIn("本轮主动图片归属", guard)
+        self.assertIn("【本轮主动图片归属（高优先级）】", guard)
         self.assertIn("不是在报告自己做了图中的事", guard)
         self.assertIn("属于 Bot/当前人格", guard)
+        self.assertIn('<section title="事实主语与归属边界">', rendered)
+        self.assertIn('<section title="本轮主动图片归属（高优先级）">', rendered)
+        self.assertNotIn("【本轮主动图片归属（高优先级）】", rendered)
 
     def test_explicit_user_owned_accident_does_not_use_photo_ownership_guard(self):
         now = time.time()

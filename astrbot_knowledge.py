@@ -10,7 +10,12 @@ from typing import Any
 
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .conversation_prompt_section import prompt_section
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
 from .helpers import _single_line
 from .persona_config import runtime_persona_setting
 from .reference_assets import normalize_reference_asset
@@ -251,13 +256,16 @@ class AstrBotKnowledgeMixin:
         max_chars: int = 3200,
         max_chunks: int = 18,
     ) -> str:
-        body = self._format_roleplay_knowledge_context_body(
+        section = self._format_roleplay_knowledge_context_section(
             purpose=purpose,
             query=query,
             max_chars=max_chars,
             max_chunks=max_chunks,
         )
-        return f"【AstrBot 知识库世界观参考】\n{body}" if body else ""
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
 
     def _format_roleplay_knowledge_context_section(
         self,
@@ -266,10 +274,12 @@ class AstrBotKnowledgeMixin:
         query: str = "",
         max_chars: int = 3200,
         max_chunks: int = 18,
-    ) -> dict[str, Any]:
+    ) -> PromptSection:
         return prompt_section(
-            "AstrBot 知识库世界观参考",
-            self._format_roleplay_knowledge_context_body(
+            key="worldview.astrbot_knowledge",
+            title="AstrBot 知识库世界观参考",
+            source="astrbot_knowledge",
+            content=self._format_roleplay_knowledge_context_body(
                 purpose=purpose,
                 query=query,
                 max_chars=max_chars,

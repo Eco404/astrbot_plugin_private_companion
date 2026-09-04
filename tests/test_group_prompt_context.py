@@ -7,6 +7,7 @@ from datetime import datetime
 from xml.etree import ElementTree as ET
 from zoneinfo import ZoneInfo
 
+from astrbot_plugin_private_companion.conversation_prompt_section import PromptSection
 from astrbot_plugin_private_companion.group_prompt_context import (
     _timeline_wire_text,
     build_group_prompt_context,
@@ -100,6 +101,9 @@ class GroupPromptContextTests(unittest.TestCase):
             bot_name="璃",
         )
 
+        self.assertIsInstance(context, PromptSection)
+        self.assertEqual("group.context", context.key)
+        self.assertEqual("group_prompt_context", context.source)
         group = _rendered_group(context)
         current_element = group.find("./current")
         self.assertIsNotNone(current_element)
@@ -115,7 +119,7 @@ class GroupPromptContextTests(unittest.TestCase):
             ["datetime", "weekday", "is_workday", "id", "name", "role", "content"],
             list(history[0]),
         )
-        self.assertNotIn("version", context)
+        self.assertNotIn("version", group.attrib)
         self.assertNotIn("message_id", current_element.attrib)
         self.assertTrue(all("kind" not in item and "reply_to" not in item for item in history))
         scene = group.find("./scene")

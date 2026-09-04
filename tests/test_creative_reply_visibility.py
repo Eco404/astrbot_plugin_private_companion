@@ -74,7 +74,10 @@ class CreativeReplyVisibilityTests(unittest.TestCase):
         self.assertTrue(self.harness._is_lightweight_private_passive_inbound("嗯嗯"))
 
     def test_creative_context_reports_inventory_and_publication_boundary(self):
-        context = self.harness._format_hidden_creative_context_for_reply("你写过书吗", {})
+        context = self.harness._format_hidden_creative_context_for_reply_prompt_section(
+            "你写过书吗",
+            {},
+        ).content
 
         self.assertIn("共有 3 个已有正文的文本作品", context)
         self.assertIn("已完成 2 个、仍在写 1 个", context)
@@ -83,7 +86,10 @@ class CreativeReplyVisibilityTests(unittest.TestCase):
         self.assertIn("楼梯尽头", context)
 
     def test_bookshelf_inventory_question_injects_real_titles(self):
-        context = self.harness._format_hidden_creative_context_for_reply("现在能看到资料柜吗", {})
+        context = self.harness._format_hidden_creative_context_for_reply_prompt_section(
+            "现在能看到资料柜吗",
+            {},
+        ).content
 
         self.assertIn("共有 3 个已有正文的文本作品", context)
         self.assertIn("用户正在询问能否看到资料柜", context)
@@ -92,7 +98,10 @@ class CreativeReplyVisibilityTests(unittest.TestCase):
     def test_empty_bookshelf_inventory_is_explicit(self):
         self.harness.data["creative_projects"] = []
 
-        context = self.harness._format_hidden_creative_context_for_reply("资料柜里有什么", {})
+        context = self.harness._format_hidden_creative_context_for_reply_prompt_section(
+            "资料柜里有什么",
+            {},
+        ).content
 
         self.assertIn("当前资料柜创作区确实没有保存过正文的作品", context)
         self.assertIn("不要假装翻找", context)
@@ -100,23 +109,25 @@ class CreativeReplyVisibilityTests(unittest.TestCase):
     def test_structured_inventory_context_owns_its_branch_title(self):
         self.harness.data["creative_projects"] = []
 
-        section = self.harness._format_hidden_creative_context_for_reply(
+        section = self.harness._format_hidden_creative_context_for_reply_prompt_section(
             "资料柜里有什么",
             {},
-            as_section=True,
         )
-        self.assertEqual("资料柜创作区真实库存", section["title"])
-        self.assertNotIn("【资料柜创作区真实库存】", section["content"])
+        self.assertEqual("资料柜创作区真实库存", section.title)
+        self.assertEqual("creative.inventory_empty", section.key)
+        self.assertEqual("daily_state", section.source)
+        self.assertNotIn("【资料柜创作区真实库存】", section.content)
 
     def test_structured_creative_context_keeps_real_work_title(self):
-        section = self.harness._format_hidden_creative_context_for_reply(
+        section = self.harness._format_hidden_creative_context_for_reply_prompt_section(
             "你写过书吗",
             {},
-            as_section=True,
         )
-        self.assertEqual("私下创作近况", section["title"])
-        self.assertIn("标题：楼梯尽头", section["content"])
-        self.assertNotIn("标题：私下创作近况", section["content"])
+        self.assertEqual("私下创作近况", section.title)
+        self.assertEqual("creative.hidden_context", section.key)
+        self.assertEqual("daily_state", section.source)
+        self.assertIn("标题：楼梯尽头", section.content)
+        self.assertNotIn("标题：私下创作近况", section.content)
 
 
 if __name__ == "__main__":

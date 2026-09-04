@@ -11,7 +11,12 @@ from typing import Any
 
 from astrbot.api.event import AstrMessageEvent
 
-from .conversation_prompt_section import prompt_section
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
 from .helpers import _now_ts, _path_text, _safe_float, _safe_int, _single_line
 from .persona_config import runtime_persona_setting
 from .logging_util import get_module_logger
@@ -155,17 +160,22 @@ class QzonePublishMixin:
         )
 
     def _qzone_recent_self_publish_chat_context(self, *, limit: int = 3) -> str:
-        body = self._qzone_recent_self_publish_chat_context_body(limit=limit)
-        return f"【Bot 自己最近成功发布的 QQ 空间记录】\n{body}" if body else ""
+        section = self._qzone_recent_self_publish_chat_prompt_section(limit=limit)
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
 
     def _qzone_recent_self_publish_chat_prompt_section(
         self,
         *,
         limit: int = 3,
-    ) -> dict[str, Any]:
+    ) -> PromptSection:
         return prompt_section(
-            "Bot 自己最近成功发布的 QQ 空间记录",
-            self._qzone_recent_self_publish_chat_context_body(limit=limit),
+            key="tools.qzone.recent_self_publish",
+            title="Bot 自己最近成功发布的 QQ 空间记录",
+            source="qzone_publish",
+            content=self._qzone_recent_self_publish_chat_context_body(limit=limit),
         )
 
     def _qzone_note_recent_publish(
@@ -433,17 +443,24 @@ class QzonePublishMixin:
         if stripped and not self._qzone_text_leaks_internal_state(stripped) and len(stripped) >= 12:
             logger.warning("QQ 空间说说草稿含内部状态,已净化: %s", _single_line(cleaned, 160))
             return stripped
-        rewrite_prompt = f"""
+        instruction = """
 下面是一条 QQ 空间说说草稿,里面泄露了内部状态/数值。请重写成自然生活动态。
 只输出正文,30 到 120 字,不要解释。
 禁止出现：能量、心理能量、/100、当前状态、状态变量、插件、模型、系统提示。
-
-【原草稿】
-{cleaned}
-
-【原任务背景】
-{_single_line(prompt, 600)}
 """.strip()
+
+        rewrite_prompt = "\n\n".join(
+            (
+                render_prompt_sections([prompt_section(key="qzone.sanitize.instruction", title="说说净化任务", source="qzone_publish", content=instruction)], mode=PromptRenderMode.BODY_ONLY),
+                render_prompt_sections(
+                    [
+                        prompt_section(key="qzone.sanitize.draft", title="原草稿", source="qzone_publish", content=cleaned),
+                        prompt_section(key="qzone.sanitize.context", title="原任务背景", source="qzone_publish", content=_single_line(prompt, 600)),
+                    ],
+                    mode=PromptRenderMode.LABELED_BLOCK,
+                ),
+            )
+        )
         try:
             rewritten = await self._llm_call(
                 rewrite_prompt,
@@ -519,7 +536,7 @@ class QzonePublishMixin:
             source="qzone.publish_test.memory",
         )
         relationship_authority_guard = self._qzone_relationship_authority_guard()
-        prompt = f"""
+        instruction = f"""
 请以当前 Bot 人格写一条 QQ 空间说说。
 只输出说说正文,不要解释,不要加标题。
 
@@ -530,33 +547,27 @@ class QzonePublishMixin:
 - 禁止出现“能量”“心理能量”“/100”“状态变量”“当前状态”等内部汇报词。
 - 不要 @ 用户,不要泄露私聊内容,不要写得像营销文。
 - 写作角度：{theme_hint}
-
-【说说风格提示】
-{self._qzone_publish_style_prompt()}
-
-【当前时间与季节】
-{temporal_context}
-
-【公开可写的状态余味】
-{public_state_hint}
-
-【当前/附近日程】
-{current_schedule_hint or "无明确日程"}
-
-【近日私密日记余味】
-{diary_context or "暂无"}
-
-【我会牢牢记住你 公开可写生活参考】
-{memory_context or "暂无"}
-使用方式：只选公开可写、不会泄露私聊或内部记忆来源的生活连续性。
-
-【最近说说去重】
-{recent_publish_context or "暂无最近记录。"}
-
-{relationship_authority_guard}
-
-{self._format_worldview_adaptation_prompt()}
 """.strip()
+
+        prompt = "\n\n".join(
+            part for part in (
+                render_prompt_sections([prompt_section(key="qzone.publish_test.instruction", title="QQ 空间说说测试", source="qzone_publish", content=instruction)], mode=PromptRenderMode.BODY_ONLY),
+                render_prompt_sections(
+                    [
+                        prompt_section(key="qzone.publish_test.style", title="说说风格提示", source="qzone_publish", content=self._qzone_publish_style_prompt()),
+                        prompt_section(key="qzone.publish_test.time", title="当前时间与季节", source="qzone_publish", content=temporal_context),
+                        prompt_section(key="qzone.publish_test.state", title="公开可写的状态余味", source="qzone_publish", content=public_state_hint),
+                        prompt_section(key="qzone.publish_test.schedule", title="当前/附近日程", source="qzone_publish", content=current_schedule_hint or "无明确日程"),
+                        prompt_section(key="qzone.publish_test.diary", title="近日私密日记余味", source="qzone_publish", content=diary_context or "暂无"),
+                        prompt_section(key="qzone.publish_test.memory", title="我会牢牢记住你 公开可写生活参考", source="qzone_publish", content=(memory_context or "暂无") + "\n使用方式：只选公开可写、不会泄露私聊或内部记忆来源的生活连续性。"),
+                        prompt_section(key="qzone.publish_test.recent", title="最近说说去重", source="qzone_publish", content=recent_publish_context or "暂无最近记录。"),
+                    ],
+                    mode=PromptRenderMode.LABELED_BLOCK,
+                ),
+                relationship_authority_guard,
+                self._format_worldview_adaptation_prompt(),
+            ) if part
+        )
         try:
             draft = await self._llm_call(
                 prompt,
@@ -658,7 +669,7 @@ class QzonePublishMixin:
             source="qzone.publish_image_test.recent_diary",
         )
         relationship_authority_guard = self._qzone_relationship_authority_guard()
-        prompt = f"""
+        instruction = f"""
 请以当前 Bot 人格写一条 QQ 空间说说，用来测试配图生成。
 只输出说说正文,不要解释,不要加标题。
 
@@ -667,29 +678,26 @@ class QzonePublishMixin:
 - 像自然生活动态,最好包含一个能被画出来的具体场景或物件。
 - 不要 @ 用户,不要泄露私聊内容,不要出现插件、模型、系统提示、内部状态数值。
 - 写作角度：{self._qzone_publish_theme_hint()}
-
-【说说风格提示】
-{self._qzone_publish_style_prompt()}
-
-【当前时间与季节】
-{self._qzone_temporal_context()}
-
-【公开可写的状态余味】
-{public_state_hint}
-
-【当前/附近日程】
-{current_schedule_hint or "无明确日程"}
-
-【近日私密日记余味】
-{diary_context or "暂无"}
-
-【最近说说去重】
-{self._qzone_recent_publish_context(state) or "暂无最近记录。"}
-
-{relationship_authority_guard}
-
-{self._format_worldview_adaptation_prompt()}
 """.strip()
+
+        prompt = "\n\n".join(
+            part for part in (
+                render_prompt_sections([prompt_section(key="qzone.image_test.instruction", title="QQ 空间配图测试", source="qzone_publish", content=instruction)], mode=PromptRenderMode.BODY_ONLY),
+                render_prompt_sections(
+                    [
+                        prompt_section(key="qzone.image_test.style", title="说说风格提示", source="qzone_publish", content=self._qzone_publish_style_prompt()),
+                        prompt_section(key="qzone.image_test.time", title="当前时间与季节", source="qzone_publish", content=self._qzone_temporal_context()),
+                        prompt_section(key="qzone.image_test.state", title="公开可写的状态余味", source="qzone_publish", content=public_state_hint),
+                        prompt_section(key="qzone.image_test.schedule", title="当前/附近日程", source="qzone_publish", content=current_schedule_hint or "无明确日程"),
+                        prompt_section(key="qzone.image_test.diary", title="近日私密日记余味", source="qzone_publish", content=diary_context or "暂无"),
+                        prompt_section(key="qzone.image_test.recent", title="最近说说去重", source="qzone_publish", content=self._qzone_recent_publish_context(state) or "暂无最近记录。"),
+                    ],
+                    mode=PromptRenderMode.LABELED_BLOCK,
+                ),
+                relationship_authority_guard,
+                self._format_worldview_adaptation_prompt(),
+            ) if part
+        )
         try:
             draft = await self._llm_call(
                 prompt,
@@ -1011,43 +1019,12 @@ class QzonePublishMixin:
             if qzone_selfie_reference_path
             else "当前没有可用自拍参考图。可以让人物自然入镜，人物外貌参考人格描述和公开状态；优先使用第一视角手部、侧脸、背影、肩颈半身、影子、随身小物等不强依赖精确脸部的方式，避免凭空追加人格里没有的脸部细节，也不要默认镜前自拍。"
         )
-        prompt = f"""
+        instruction = """
 请为一条即将公开发布到 QQ 空间的说说生成一张配图提示词。
 只输出 JSON，不要解释。
+""".strip()
 
-【说说正文】
-{_single_line(post_text, 300)}
-
-【人格】
-{self._get_default_persona_prompt()}
-
-【公开可写的状态余味】
-{state_desc}
-
-【当前/附近日程】
-{current_desc}
-
-【近日日记余味】
-{_single_line(diary_context, 500) or "暂无"}
-
-{self._format_worldview_adaptation_prompt()}
-
-{relationship_authority_guard}
-
-【可选画面方向】
-{content_options}
-
-【自拍参考图状态】
-{reference_text}
-
-【空间配图风格提示】
-{self._qzone_publish_image_style_prompt()}
-
-【生图风格】
-{style_name}
-风格要求：{style_instruction}
-
-输出 JSON：
+        output_contract = f"""输出 JSON：
 {{
   "kind": "selfie 或 text2img；按说说正文选择，不要固定优先镜前自拍",
   "visual_anchor": "本图唯一视觉锚点，例如第一视角手部与饮品/桌面小物/路上夕光/侧脸看窗边光影/背影走在路上/餐盘与衣袖；必须具体",
@@ -1067,6 +1044,33 @@ class QzonePublishMixin:
 8. 不要包含 NSFW、真实用户隐私、聊天截图或电脑屏幕内容；避免文字、水印、UI、二维码、聊天气泡。
 9. prompt 必须体现上面的生图风格要求，且不能是泛泛的“好看的照片/生活记录/天气图”。
 """.strip()
+        prompt = "\n\n".join(
+            part for part in (
+                render_prompt_sections([prompt_section(key="qzone.photo_prompt.instruction", title="QQ 空间配图提示词任务", source="qzone_publish", content=instruction)], mode=PromptRenderMode.BODY_ONLY),
+                render_prompt_sections(
+                    [
+                        prompt_section(key="qzone.photo_prompt.post", title="说说正文", source="qzone_publish", content=_single_line(post_text, 300)),
+                        prompt_section(key="qzone.photo_prompt.persona", title="人格", source="qzone_publish", content=self._get_default_persona_prompt()),
+                        prompt_section(key="qzone.photo_prompt.state", title="公开可写的状态余味", source="qzone_publish", content=state_desc),
+                        prompt_section(key="qzone.photo_prompt.schedule", title="当前/附近日程", source="qzone_publish", content=current_desc),
+                        prompt_section(key="qzone.photo_prompt.diary", title="近日日记余味", source="qzone_publish", content=_single_line(diary_context, 500) or "暂无"),
+                    ],
+                    mode=PromptRenderMode.LABELED_BLOCK,
+                ),
+                self._format_worldview_adaptation_prompt(),
+                relationship_authority_guard,
+                render_prompt_sections(
+                    [
+                        prompt_section(key="qzone.photo_prompt.options", title="可选画面方向", source="qzone_publish", content=content_options),
+                        prompt_section(key="qzone.photo_prompt.reference", title="自拍参考图状态", source="qzone_publish", content=reference_text),
+                        prompt_section(key="qzone.photo_prompt.style", title="空间配图风格提示", source="qzone_publish", content=self._qzone_publish_image_style_prompt()),
+                        prompt_section(key="qzone.photo_prompt.backend_style", title="生图风格", source="qzone_publish", content=f"{style_name}\n风格要求：{style_instruction}"),
+                    ],
+                    mode=PromptRenderMode.LABELED_BLOCK,
+                ),
+                render_prompt_sections([prompt_section(key="qzone.photo_prompt.output", title="配图 JSON 输出契约", source="qzone_publish", content=output_contract)], mode=PromptRenderMode.BODY_ONLY),
+            ) if part
+        )
         try:
             text = await self._llm_call(
                 prompt,

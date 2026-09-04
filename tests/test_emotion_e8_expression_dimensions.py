@@ -10,7 +10,9 @@ from companion_interaction_expression import (
     EXPRESSION_CONTRACT_VERSION,
     build_expression_decision,
     expression_decision_prompt,
+    expression_decision_prompt_section,
 )
+from conversation_prompt_section import PromptRenderMode, render_prompt_sections
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +86,14 @@ class EmotionE8ExpressionDimensionTests(unittest.TestCase):
             },
         ).to_dict()
         prompt = expression_decision_prompt(decision)
+        section = expression_decision_prompt_section(decision)
+        self.assertEqual("expression.decision", section.key)
+        self.assertEqual("Companion expression", section.title)
+        self.assertEqual("expression_decision", section.source)
+        self.assertEqual(
+            prompt,
+            render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY),
+        )
         labels = {
             "pacing": "节奏",
             "directness": "直接度",

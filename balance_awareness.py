@@ -12,6 +12,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
 from .helpers import _now_ts, _safe_float, _single_line
 from .persona_config import runtime_persona_setting
 from .logging_util import get_module_logger
@@ -491,22 +497,42 @@ class BalanceAwarenessMixin:
         return f"{amount_text}{currency}"
 
     def _format_balance_awareness_prompt(self, user: dict[str, Any], *, reason: str = "") -> str:
+        section = self._format_balance_awareness_prompt_section(user, reason=reason)
+        return (
+            render_prompt_sections(
+                [section],
+                mode=PromptRenderMode.LABELED_BLOCK,
+            )
+            if section is not None
+            else ""
+        )
+
+    def _format_balance_awareness_prompt_section(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str = "",
+    ) -> PromptSection | None:
         if reason != "low_balance" or not isinstance(user, dict):
-            return ""
+            return None
         context = user.get("planned_balance_context")
         if not isinstance(context, dict):
-            return ""
+            return None
         tier = _single_line(context.get("tier"), 20)
         display = _single_line(context.get("display"), 80)
         include_amount = bool(getattr(self, "balance_include_amount_in_message", True))
         level_text = "已经很紧张" if tier == "critical" else "有点少了"
         fact = f"当前可支配余额{level_text}" + (f"，参考值为 {display}" if include_amount and display else "")
-        return (
-            "【余额感知（已由用户主动配置）】\n"
+        return prompt_section(
+            key="balance.awareness",
+            title="余额感知（已由用户主动配置）",
+            source="balance_awareness",
+            content=(
             f"- {fact}。这是 Bot 自身服务/能力的可支配经费状态，不是用户欠款，也不是支付账单。\n"
             "- 可以结合当前人格与世界观，把它自然理解成零花钱、饭卡、钱包、电量或补给，轻轻提一次；也可以只含蓄提醒快不够用了。\n"
             "- 不要照抄后台字段，不要提接口、模型、Token、阈值或系统告警，不要伪造已经充值。\n"
             "- 不施压、不道德绑架、不催转账，不用断联、死亡、生病或停止陪伴来威胁；给对方留出不回应或稍后处理的空间。"
+            ),
         )
 
     def _balance_owner_users(self) -> list[tuple[str, dict[str, Any]]]:

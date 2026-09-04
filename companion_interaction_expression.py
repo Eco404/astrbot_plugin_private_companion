@@ -21,6 +21,20 @@ try:
     from .affect_modulation_contract import normalize_affect_modulation
 except ImportError:  # pragma: no cover
     from affect_modulation_contract import normalize_affect_modulation
+try:
+    from .conversation_prompt_section import (
+        PromptRenderMode,
+        PromptSection,
+        prompt_section,
+        render_prompt_sections,
+    )
+except ImportError:  # pragma: no cover
+    from conversation_prompt_section import (
+        PromptRenderMode,
+        PromptSection,
+        prompt_section,
+        render_prompt_sections,
+    )
 
 
 EXPRESSION_CONTRACT_VERSION = "companion_interaction_expression.v2"
@@ -743,11 +757,23 @@ def current_interaction_projection(
     return projection
 
 
-def expression_decision_prompt(value: ExpressionDecision | Mapping[str, Any]) -> str:
+def expression_decision_prompt_section(
+    value: ExpressionDecision | Mapping[str, Any],
+) -> PromptSection:
+    """Author the main-conversation expression guidance from one projection."""
+
     decision = value.to_dict() if isinstance(value, ExpressionDecision) else dict(_mapping(value))
     band = _band(decision.get("expression_band")) or ExpressionBand.RELAXED
+    section_key = "expression.decision"
+    section_title = "Companion expression"
+    section_source = "expression_decision"
     if decision.get("blocker"):
-        return "当前表达受边界或安全规则限制：保持简短、低压，不主动扩展或追问。"
+        return prompt_section(
+            key=section_key,
+            title=section_title,
+            source=section_source,
+            content="当前表达受边界或安全规则限制：保持简短、低压，不主动扩展或追问。",
+        )
     followup = "可以自然追问" if bool(decision.get("followup")) else "不要追问"
     initiative = "允许在合适窗口主动联系" if decision.get("initiative") == "allowed" else "本轮只被动回应"
     proactive_target = _bounded_int(decision.get("proactive_target"), 0, 0, 30)
@@ -792,14 +818,37 @@ def expression_decision_prompt(value: ExpressionDecision | Mapping[str, Any]) ->
             "请求要贴当前话题或自身愿望，不索取表态、承诺、秘密、排他性或即时回复"
         )
     violation_hint = _bounded_text(decision.get("relationship_violation_hint"), 240)
-    return (
-        f"当前互动表达：{EXPRESSION_BAND_LABELS[band.value]}；"
-        f"语气={str(decision.get('tone') or 'steady')[:24]}，"
-        f"称呼距离={str(decision.get('address_style') or 'neutral')[:24]}，"
-        f"回复长度={str(decision.get('response_length') or 'balanced')[:24]}；"
-        f"{followup}；{initiative}；{proactive_rhythm}；{dimensions}{relationship_initiative}"
-        f"{f'；{content_instruction}' if content_instruction else ''}"
-        f"{f'；{violation_hint}' if violation_hint else ''}。"
+    return prompt_section(
+        key=section_key,
+        title=section_title,
+        source=section_source,
+        template=(
+            "当前互动表达：{band_label}；语气={tone}，称呼距离={address_style}，"
+            "回复长度={response_length}；{followup}；{initiative}；{proactive_rhythm}；"
+            "{dimensions}{relationship_initiative}{content_suffix}{violation_suffix}。"
+        ),
+        variables={
+            "band_label": EXPRESSION_BAND_LABELS[band.value],
+            "tone": str(decision.get("tone") or "steady")[:24],
+            "address_style": str(decision.get("address_style") or "neutral")[:24],
+            "response_length": str(decision.get("response_length") or "balanced")[:24],
+            "followup": followup,
+            "initiative": initiative,
+            "proactive_rhythm": proactive_rhythm,
+            "dimensions": dimensions,
+            "relationship_initiative": relationship_initiative,
+            "content_suffix": f"；{content_instruction}" if content_instruction else "",
+            "violation_suffix": f"；{violation_hint}" if violation_hint else "",
+        },
+    )
+
+
+def expression_decision_prompt(value: ExpressionDecision | Mapping[str, Any]) -> str:
+    """Return the legacy body-only view of the canonical expression section."""
+
+    return render_prompt_sections(
+        [expression_decision_prompt_section(value)],
+        mode=PromptRenderMode.BODY_ONLY,
     )
 
 
@@ -863,5 +912,6 @@ __all__ = [
     "content_intent_from_text",
     "normalize_normal_interaction_band_cap",
     "expression_decision_prompt",
+    "expression_decision_prompt_section",
     "resolve_expression_decision",
 ]

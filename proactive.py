@@ -104,6 +104,12 @@ from .dreaming import (
     weighted_unique_fragment_sample,
 )
 from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
 
 
 _ANONYMOUS_AREA_STABLE_GAP_SECONDS = 90 * 60
@@ -638,7 +644,13 @@ class ProactiveMixin(UserRestGateMixin):
             semantic_kind=user.get("planned_proactive_semantic_kind"),
         )
 
-    def _proactive_route_prompt(self, user: dict[str, Any], *, reason: Any = "", source: Any = "") -> str:
+    def _proactive_route_prompt_section(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: Any = "",
+        source: Any = "",
+    ) -> PromptSection:
         kind = self._proactive_message_kind(
             reason=reason or user.get("planned_proactive_reason"),
             source=source or user.get("planned_proactive_source"),
@@ -651,12 +663,22 @@ class ProactiveMixin(UserRestGateMixin):
             if _safe_int(tier_policy.get("tier"), 0) >= 4
             else "按当前关系自然表达，不解释主动频率、配额、候选或调度机制。"
         )
-        return (
-            "【本轮主动路线】\n"
-            f"- 类型：{route.label}。\n"
-            f"- 路线要求：{route.render_directive(quota_tier=_safe_int(tier_policy.get('tier'), 0))}\n"
-            f"- 终审重点：{route.review_directive()}\n"
-            f"- 配额策略：L{tier_policy.get('tier', 0)} {tier_policy.get('label', '')}。{tier_rule}"
+        return prompt_section(
+            key="proactive.route",
+            title="本轮主动路线",
+            source="proactive",
+            content=(
+                f"- 类型：{route.label}。\n"
+                f"- 路线要求：{route.render_directive(quota_tier=_safe_int(tier_policy.get('tier'), 0))}\n"
+                f"- 终审重点：{route.review_directive()}\n"
+                f"- 配额策略：L{tier_policy.get('tier', 0)} {tier_policy.get('label', '')}。{tier_rule}"
+            ),
+        )
+
+    def _proactive_route_prompt(self, user: dict[str, Any], *, reason: Any = "", source: Any = "") -> str:
+        return render_prompt_sections(
+            [self._proactive_route_prompt_section(user, reason=reason, source=source)],
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
 
     def _prepare_proactive_route_candidate(
@@ -1827,20 +1849,21 @@ class ProactiveMixin(UserRestGateMixin):
                 return 0
         return max(0, _safe_int(_proactive_setting_value(self, "poke_action_max_times", 0), 0, 0))
 
-    def _format_private_user_boundary_hint(self, user: dict[str, Any]) -> str:
+    def _format_private_user_boundary_prompt_section(
+        self,
+        user: dict[str, Any],
+    ) -> PromptSection:
         role = self._private_user_role(user)
         labeler = getattr(self, "_private_user_role_label", None)
         label = labeler(role) if callable(labeler) else ("主要用户" if role == "owner" else "次要用户")
         note = _single_line(user.get("proactive_boundary_note"), 180)
         if role == "owner":
-            text = (
-                "【当前私聊关系角色】\n"
+            body = (
                 f"- 当前用户角色：{label}。\n"
                 "- 可以延续人格中对主要用户的亲近、依赖和日常陪伴动机，但仍要尊重用户休息、忙碌和拒绝信号。"
             )
         else:
-            text = (
-                "【当前私聊关系角色】\n"
+            body = (
                 f"- 当前用户角色：{label}。\n"
                 "- 对方不是主要用户/恋人/专属陪伴目标。主动联系应像普通朋友：少量、具体、不过度亲密，不使用主要用户专属称呼、占有欲、撒娇索取或暧昧承诺。\n"
                 "- 动机应以礼貌关心、共同话题、必要转告、轻分享为主；不要因为想贴近、想被哄、想确认对方在不在而频繁打扰。\n"
@@ -1848,8 +1871,19 @@ class ProactiveMixin(UserRestGateMixin):
                 "- 不对次要用户发起资料/资料归档推荐、资料归档分享、屏幕观察、群聊私下转述、私下创作分享或其他涉及隐私来源的主动。"
             )
         if note:
-            text += f"\n- 用户级边界备注：{note}"
-        return text
+            body += f"\n- 用户级边界备注：{note}"
+        return prompt_section(
+            key="proactive.private_user_role",
+            title="当前私聊关系角色",
+            source="proactive",
+            content=body,
+        )
+
+    def _format_private_user_boundary_hint(self, user: dict[str, Any]) -> str:
+        return render_prompt_sections(
+            [self._format_private_user_boundary_prompt_section(user)],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
 
     def _friend_sensitive_proactive_reason(self, reason: Any) -> bool:
         normalized = str(reason or "").strip()

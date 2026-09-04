@@ -6,6 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from xml.etree import ElementTree as ET
 
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    prompt_section,
+)
+from astrbot_plugin_private_companion.conversation_injection_plan import (
+    get_conversation_injection_plan,
+)
 from astrbot_plugin_private_companion.passive_state_pipeline import (
     _neutralize_stale_reaction_feedback_compat,
     inject_humanized_state,
@@ -24,13 +30,6 @@ def test_reaction_history_compat_cleanup_handles_hot_loaded_plugin_without_metho
 
 class PassiveGroupContextDecouplingTests(unittest.IsolatedAsyncioTestCase):
     async def test_group_context_still_injects_when_passive_states_are_disabled(self) -> None:
-        captured_fragment = {}
-
-        def append_fragment(_req, _marker, text, **kwargs):
-            captured_fragment["text"] = text
-            captured_fragment.update(kwargs)
-            return False
-
         plugin = SimpleNamespace(
             enabled=True,
             data={"users": {}},
@@ -65,10 +64,26 @@ class PassiveGroupContextDecouplingTests(unittest.IsolatedAsyncioTestCase):
             _expression_voice_selection=lambda **_kwargs: {},
             _consume_semantic_message_buffer_for_event=AsyncMock(return_value=""),
             _user_asks_recalled_messages=lambda _text: False,
-            _format_group_passive_reply_context_for_prompt=lambda *_args: "【群聊回复补充】\n真实最近群聊：\n- 群友: 你好",
-            _group_slang_embedding_context=AsyncMock(return_value="本群黑话释义"),
-            _format_recent_atrelay_context_for_prompt=lambda **_kwargs: "刚刚的转述",
-            _append_turn_prompt_fragment_by_position=append_fragment,
+            _format_group_passive_reply_context_for_prompt=lambda *_args: prompt_section(
+                key="group.context",
+                title="群聊上下文",
+                source="group_observation",
+                content="真实最近群聊：\n- 群友: 你好",
+            ),
+            _group_slang_embedding_prompt_section=AsyncMock(
+                return_value=prompt_section(
+                    key="group.slang_similarity",
+                    title="群内黑话语义近似（仅作软参考）",
+                    source="group_observation",
+                    content="本群黑话释义",
+                )
+            ),
+            _format_recent_atrelay_context_prompt_section=lambda **_kwargs: prompt_section(
+                key="atrelay.recent",
+                title="刚刚的转述动作",
+                source="atrelay",
+                content="刚刚的转述",
+            ),
             _record_request_prompt_fragment=AsyncMock(),
             _append_group_active_period_boundary_to_request=AsyncMock(),
             _memory_companion_should_defer_prompt_section=lambda *_args: True,
@@ -104,14 +119,22 @@ class PassiveGroupContextDecouplingTests(unittest.IsolatedAsyncioTestCase):
         ):
             await inject_humanized_state(plugin, event, request)
 
-        self.assertIn("private_companion_group_context_v1", request.system_prompt)
-        self.assertIn("真实最近群聊", request.system_prompt)
-        payload = ET.fromstring(captured_fragment["text"])
+        self.assertEqual("群聊人格", request.system_prompt)
+        self.assertEqual(1, len(request.extra_user_content_parts))
+        payload = ET.fromstring(request.extra_user_content_parts[0].text)
         self.assertEqual(
             ["群内黑话语义近似（仅作软参考）", "刚刚的转述动作", "群聊上下文"],
             [item.attrib["title"] for item in payload.findall("./section")],
         )
-        self.assertEqual(10_000, captured_fragment["priority"])
+        self.assertEqual([], payload.findall("./section/section"))
+        self.assertIn("真实最近群聊", request.extra_user_content_parts[0].text)
+        plan = get_conversation_injection_plan(request, create=False)
+        self.assertIsNotNone(plan)
+        group_context = next(
+            item for item in plan.manifest() if item["key"] == "group.context"
+        )
+        self.assertEqual(10_000, group_context["priority"])
+        self.assertNotIn("group.context.batch", {item["key"] for item in plan.manifest()})
         plugin._record_request_prompt_fragment.assert_awaited_once()
         plugin._append_group_active_period_boundary_to_request.assert_not_awaited()
 

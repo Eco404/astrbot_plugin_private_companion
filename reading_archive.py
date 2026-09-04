@@ -12,11 +12,25 @@ import random
 import re
 from typing import Any
 
-from .conversation_prompt_section import prompt_section
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
 from .helpers import _now_ts, _single_line
 
 
 class ReadingArchiveMixin:
+    @staticmethod
+    def _bookshelf_password_prompt_section() -> PromptSection:
+        return prompt_section(
+            key="background.bookshelf_password",
+            title="资料柜夹层密码生成",
+            source="reading_archive",
+            content='只输出 JSON：{"password":"482719","reason":"一句不涉及生日日期的私密暗号理由"}。密码必须是4到6位纯数字，不要使用常见数字。',
+        )
+
     @staticmethod
     def _bookshelf_password_should_rotate(password: str, basis: str = "") -> bool:
         value = _single_line(password, 12)
@@ -72,7 +86,10 @@ class ReadingArchiveMixin:
         if callable(llm_call):
             try:
                 raw = await llm_call(
-                    "只输出 JSON：{\"password\":\"482719\",\"reason\":\"一句不涉及生日日期的私密暗号理由\"}。密码必须是4到6位纯数字，不要使用常见数字。",
+                    render_prompt_sections(
+                        [self._bookshelf_password_prompt_section()],
+                        mode=PromptRenderMode.BODY_ONLY,
+                    ),
                     max_tokens=40,
                     task="bookshelf_password",
                     provider_id=getattr(self, "llm_provider_id", ""),
@@ -207,17 +224,21 @@ class ReadingArchiveMixin:
         )
 
     async def _format_bookshelf_secret_for_prompt(self, inbound_text: str = "", user: dict[str, Any] | None = None) -> str:
-        body = await self._format_bookshelf_secret_prompt_body(inbound_text, user)
-        return f"【书柜夹层】\n{body}" if body else ""
+        return render_prompt_sections(
+            [await self._format_bookshelf_secret_prompt_section(inbound_text, user)],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
 
     async def _format_bookshelf_secret_prompt_section(
         self,
         inbound_text: str = "",
         user: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> PromptSection:
         return prompt_section(
-            "资料柜夹层",
-            await self._format_bookshelf_secret_prompt_body(inbound_text, user),
+            key="bookshelf.secret",
+            title="书柜夹层",
+            source="reading_archive",
+            content=await self._format_bookshelf_secret_prompt_body(inbound_text, user),
         )
 
     def _reading_archive_available(self) -> bool:

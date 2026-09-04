@@ -1,8 +1,13 @@
-"""Pure composition of a bounded final reply temperature projection."""
+"""Bounded reply-temperature projection and its canonical prompt section."""
 from __future__ import annotations
 
 from math import isfinite
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
+
+try:
+    from ...conversation_prompt_section import PromptSection, prompt_section
+except ImportError:  # pragma: no cover - direct module import in lightweight tests
+    from conversation_prompt_section import PromptSection, prompt_section
 
 
 REPLY_TEMPERATURE_TIERS = ("guarded", "neutral", "warm", "close")
@@ -53,8 +58,24 @@ def compose_reply_temperature(
         "context_adjustment": context_delta,
         "signals": {"energy": energy_label, "mood": mood_label, "schedule": schedule_label, "context": context_label},
         "codes": codes,
-        "instruction": _instruction_for(tier),
     }
+
+
+def reply_temperature_prompt_section(projection: Mapping[str, Any]) -> PromptSection:
+    """Author the bounded reply instruction from a fact-only projection."""
+
+    tier, _ = _normalize_p4_tier(projection.get("tier"))
+    return prompt_section(
+        key="relationship.reply_temperature",
+        title="Reply boundary",
+        source="relationship",
+        content={
+            "guarded": "保持简短、尊重边界，不主动扩展。",
+            "neutral": "保持自然、克制的交流。",
+            "warm": "可以温和回应，保持尊重与分寸。",
+            "close": "可以更亲近地回应，但保持尊重与分寸。",
+        }[tier],
+    )
 
 
 def _normalize_p4_tier(value: Any) -> tuple[str, bool]:
@@ -167,13 +188,8 @@ def _contains_any(text: str, words: Iterable[str]) -> bool:
     return any(word in text for word in words)
 
 
-def _instruction_for(tier: str) -> str:
-    return {
-        "guarded": "保持简短、尊重边界，不主动扩展。",
-        "neutral": "保持自然、克制的交流。",
-        "warm": "可以温和回应，保持尊重与分寸。",
-        "close": "可以更亲近地回应，但保持尊重与分寸。",
-    }[tier]
-
-
-__all__ = ["REPLY_TEMPERATURE_TIERS", "compose_reply_temperature"]
+__all__ = [
+    "REPLY_TEMPERATURE_TIERS",
+    "compose_reply_temperature",
+    "reply_temperature_prompt_section",
+]

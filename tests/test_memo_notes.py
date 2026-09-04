@@ -132,6 +132,22 @@ class MemoNoteTests(unittest.IsolatedAsyncioTestCase):
         prompt = self.plugin._format_memo_note_prompt(self.plugin.data["users"]["owner"], reason="memo_note_reminder")
         self.assertIn("交材料", prompt)
         self.assertIn("不解释便签系统", prompt)
+        section = self.plugin._format_memo_note_prompt_section(
+            self.plugin.data["users"]["owner"],
+            reason="memo_note_reminder",
+        )
+        self.assertEqual("memo.due_reminder", section.key)
+        self.assertEqual("到期备忘便签", section.title)
+        self.assertEqual("daily_state", section.source)
+        self.assertNotIn("【到期备忘便签】", section.content)
+        active_section = self.plugin._format_memo_notes_prompt_section(
+            days=2,
+            include_pinned=True,
+            limit=4,
+        )
+        self.assertEqual("memo.active_notes", active_section.key)
+        self.assertEqual("daily_state", active_section.source)
+        self.assertNotIn("【备忘便签】", active_section.content)
         self.assertGreaterEqual(self.plugin._next_memo_due_in_seconds(NOW), 23 * 3600)
 
     def test_normalization_and_due_state(self):

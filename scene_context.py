@@ -9,7 +9,12 @@ from typing import Any
 
 from .helpers import _flat_get, _now_ts, _path_text, _safe_float, _safe_int, _single_line
 from .persona_config import runtime_persona_setting
-from .conversation_prompt_section import prompt_section
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
 
 
 SCENE_CONTEXT_VERSION = 3
@@ -811,6 +816,26 @@ class SceneContextMixin:
         user: dict[str, Any] | None = None,
         purpose: str = "prompt",
     ) -> str:
+        return render_prompt_sections(
+            [
+                self._format_companion_scene_snapshot_prompt_section(
+                    snapshot,
+                    user=user,
+                    purpose=purpose,
+                )
+            ],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
+
+    def _format_companion_scene_snapshot_prompt_section(
+        self,
+        snapshot: dict[str, Any] | None = None,
+        *,
+        user: dict[str, Any] | None = None,
+        purpose: str = "prompt",
+    ) -> PromptSection:
+        """Author the canonical scene prompt before selecting a sink renderer."""
+
         scene = snapshot if isinstance(snapshot, dict) else self._build_companion_scene_snapshot(user)
         state = scene.get("state") if isinstance(scene.get("state"), dict) else {}
         schedule = scene.get("schedule") if isinstance(scene.get("schedule"), dict) else {}
@@ -1033,26 +1058,48 @@ class SceneContextMixin:
                 )
         if _single_line(visual.get("topic"), 80):
             parts.append(f"视觉话题：{_single_line(visual.get('topic'), 80)}")
-        return _single_line("；".join(part for part in parts if part), 1200)
+        return prompt_section(
+            key="scene.snapshot",
+            title="陪伴场景快照",
+            source="scene_context",
+            content=_single_line("；".join(part for part in parts if part), 1200),
+            metadata={"purpose": _single_line(purpose, 40) or "prompt"},
+        )
 
     def _format_mobile_user_location_context(
         self,
         user: dict[str, Any] | None,
-        *,
-        as_section: bool = False,
-    ) -> str | dict[str, Any]:
+    ) -> str:
+        section = self._format_mobile_user_location_context_prompt_section(user)
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+
+    def _format_mobile_user_location_context_prompt_section(
+        self,
+        user: dict[str, Any] | None,
+    ) -> PromptSection:
         """Format authorized Android location for the current private dialogue."""
+        def build_section(content: str = "") -> PromptSection:
+            return prompt_section(
+                key="reality_touch.mobile_location",
+                title="用户手机位置感知",
+                source="scene_context",
+                content=content,
+            )
+
         current_user = user if isinstance(user, dict) else {}
         user_id = _single_line(current_user.get("user_id"), 80)
         getter = getattr(self, "_reality_mobile_context", None)
         if not user_id or not callable(getter):
-            return ""
+            return build_section()
         try:
             mobile_context = getter(user_id)
         except Exception:
-            return ""
+            return build_section()
         if not isinstance(mobile_context, dict):
-            return ""
+            return build_section()
         location = mobile_context.get("location") if isinstance(mobile_context.get("location"), dict) else {}
         map_observer = getattr(self, "_observe_mobile_place_context", None)
         cognitive_map: dict[str, Any] = {}
@@ -1119,7 +1166,7 @@ class SceneContextMixin:
             if map_text:
                 facts.append(map_text)
         if not facts:
-            return ""
+            return build_section()
         body = (
             "；".join(facts)
             + "\n这些是用户主动授权的短期环境事实，只用于理解用户所在场景、出行方向、行为语境和设备可达性。"
@@ -1127,7 +1174,7 @@ class SceneContextMixin:
             "不得把未标记地点猜成具体住址，也不要把手机状态说成后台监控或精确在线证明。"
             "身体数据只能按已提供的数值和时间描述，不得据此诊断、夸大风险或替代专业建议。"
         )
-        return prompt_section("用户手机位置感知", body) if as_section else f"【用户手机位置感知】\n{body}"
+        return build_section(body)
 
     def _mobile_location_weather_sensitivity(self) -> str:
         config = getattr(self, "config", {})
@@ -1326,7 +1373,10 @@ class SceneContextMixin:
     def _known_places_from_map(cognitive_map: dict[str, Any]) -> list[Any]:
         return cognitive_map.get("known_places") if isinstance(cognitive_map.get("known_places"), list) else []
 
-    def _format_mobile_user_location_context_for_proactive(self, user: dict[str, Any] | None) -> str:
+    def _format_mobile_user_location_context_for_proactive_prompt_section(
+        self,
+        user: dict[str, Any] | None,
+    ) -> PromptSection | None:
         """Format location as a low-pressure scene hint for proactive messages.
 
         Proactive prompts should not receive the private-dialogue coordinate detail.  They
@@ -1334,7 +1384,7 @@ class SceneContextMixin:
         """
         scene = self._mobile_user_proactive_scene(user, include_map=True)
         if not scene:
-            return ""
+            return None
         facts: list[str] = []
         area_label = _single_line(scene.get("area_label"), 100)
         if area_label:
@@ -1407,9 +1457,21 @@ class SceneContextMixin:
             facts.append("陪伴终端当前在后台；这不代表用户离线，也不要主动提及后台状态")
         if isinstance(battery, int) and battery <= 15 and not bool(scene.get("charging")):
             facts.append("设备电量偏低；若要主动表达应尽量简短，不邀请长通话，也不要把电量本身写成话题")
+        return prompt_section(
+            key="proactive.mobile_location",
+            title="主动场景位置线索",
+            source="scene_context",
+            content=(
+                "；".join(facts)
+                + "\n这是用户授权的弱场景证据，只用于调整主动话题、时机和语气（如通勤、到家或工作间隙）。"
+                "不要主动复述地点、坐标、轨迹或设备状态，不要从这些信号推断用户正在做的具体动作，也不要把位置本身硬写成主动话题，不要把感知本身硬写成主动话题。"
+            ),
+        )
+
+    def _format_mobile_user_location_context_for_proactive(self, user: dict[str, Any] | None) -> str:
+        section = self._format_mobile_user_location_context_for_proactive_prompt_section(user)
         return (
-            "【主动场景位置线索】\n"
-            + "；".join(facts)
-            + "\n这是用户授权的弱场景证据，只用于调整主动话题、时机和语气（如通勤、到家或工作间隙）。"
-            "不要主动复述地点、坐标、轨迹或设备状态，不要从这些信号推断用户正在做的具体动作，也不要把位置本身硬写成主动话题，不要把感知本身硬写成主动话题。"
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
+            if section is not None
+            else ""
         )

@@ -8,6 +8,8 @@ from datetime import date, datetime
 from typing import Any
 
 from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
     XmlElement,
     prompt_section,
     render_prompt_sections,
@@ -271,8 +273,10 @@ def _timeline_wire_text(
     return render_prompt_sections(
         [
             prompt_section(
-                "群聊上下文",
-                xml_element(
+                key=GROUP_CONTEXT_KEY,
+                title="群聊上下文",
+                source="group_prompt_context",
+                content=xml_element(
                     "group_context",
                     children=(
                         _history_element(
@@ -357,7 +361,7 @@ def build_group_prompt_context(
     scene_mood: str = "",
     scene_high_intensity: bool = False,
     matched_slang: Sequence[Mapping[str, Any]] = (),
-) -> dict[str, Any]:
+) -> PromptSection:
     """Build a request-local, read-only group context for the main dialogue model."""
 
     current = dict(current_message) if isinstance(current_message, Mapping) else {}
@@ -602,29 +606,50 @@ def build_group_prompt_context(
         children.append(xml_element("context", children=contextual_children))
     children.append(constraints)
     return prompt_section(
-        "群聊上下文",
-        xml_element("group_context", children=children),
+        key=GROUP_CONTEXT_KEY,
+        title="群聊上下文",
+        source="group_prompt_context",
+        content=xml_element("group_context", children=children),
     )
 
 
-def render_group_prompt_context(context: Mapping[str, Any]) -> str:
+def render_group_prompt_context(context: PromptSection | Mapping[str, Any]) -> str:
     """Render a group context as escaped XML for the user-conversation LLM."""
 
-    return render_prompt_sections([context])
+    return render_prompt_sections(
+        [context],
+        mode=PromptRenderMode.CONVERSATION_XML,
+    )
 
 
-def group_prompt_context_history_count(context: Mapping[str, Any] | None) -> int:
+def group_prompt_context_history_count(
+    context: PromptSection | Mapping[str, Any] | None,
+) -> int:
     """Return the number of concrete history messages in a structured section."""
 
-    if not isinstance(context, Mapping):
+    if isinstance(context, PromptSection):
+        root = context.content
+    elif isinstance(context, Mapping):
+        root = context.get("content")
+    else:
         return 0
-    root = context.get("content")
     if not isinstance(root, XmlElement) or root.tag != "group_context":
         return 0
-    for child in root.children:
-        if child.tag == "history":
-            return sum(1 for item in child.children if item.tag == "message")
-    return 0
+
+    def message_count(element: XmlElement) -> int:
+        if element.tag == "history":
+            return sum(
+                1
+                for item in element.children
+                if isinstance(item, XmlElement) and item.tag == "message"
+            )
+        return sum(
+            message_count(child)
+            for child in element.children
+            if isinstance(child, XmlElement)
+        )
+
+    return message_count(root)
 
 
 __all__ = [

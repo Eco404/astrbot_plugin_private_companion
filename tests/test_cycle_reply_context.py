@@ -6,6 +6,10 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    prompt_section,
+    render_prompt_sections,
+)
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 from astrbot_plugin_private_companion.prompt_surface import PromptSurface
 
@@ -306,14 +310,19 @@ class CycleReplyContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(first_update[0])
         self.assertEqual(second_update, ("", False, "unchanged_light"))
-        self.assertIn("明确地拒绝或推迟", first_surface.render())
-        self.assertIn("明确地拒绝或推迟", second_surface.render())
-        second_fragment = second_surface.rendered_fragments()[0]
-        self.assertEqual(second_fragment["key"], "state.period_boundary")
-        self.assertEqual(second_fragment["priority"], 89)
+        first_rendered = render_prompt_sections(first_surface.sections())
+        second_rendered = render_prompt_sections(second_surface.sections())
+        self.assertIn("明确地拒绝或推迟", first_rendered)
+        self.assertIn("明确地拒绝或推迟", second_rendered)
+        second_fragment = second_surface.fragments()[0]
+        self.assertEqual(second_fragment.key, "state.period_boundary")
+        self.assertEqual(second_fragment.priority, 89)
         self.assertEqual(anchored_update[1:], (False, "continuity_anchor"))
         self.assertIn("【Bot 当下连续性】", anchored_update[0])
-        self.assertIn("明确地拒绝或推迟", anchored_surface.render())
+        self.assertIn(
+            "明确地拒绝或推迟",
+            render_prompt_sections(anchored_surface.sections()),
+        )
 
     def test_unchanged_private_state_gets_bounded_continuity_anchor_when_opted_in(
         self,
@@ -846,21 +855,52 @@ class CycleReplyContextTests(unittest.IsolatedAsyncioTestCase):
         plugin._is_lightweight_private_passive_inbound = lambda _text: True
         plugin._memo_management_instruction_matches = lambda _text: []
         plugin._bookshelf_secret_signal_info = lambda _text: {}
-        plugin._format_reply_style_prompt = lambda **_kwargs: ""
-        plugin._format_dialogue_outfit_continuity_for_prompt = lambda _user, **_kwargs: ""
-        plugin._format_private_routine_check_boundary = lambda _text, **_kwargs: ""
+        plugin._format_reply_style_prompt_section = lambda: prompt_section(
+            key="reply.style",
+            title="回复风格约束",
+            source="main",
+            content="",
+        )
+        plugin._format_dialogue_outfit_continuity_prompt_section = lambda _user: prompt_section(
+            key="dialogue.outfit_continuity",
+            title="当前会话服装连续性",
+            source="daily_state",
+            content="",
+        )
+        plugin._format_private_routine_check_boundary_section = lambda _text: prompt_section(
+            key="turn.routine_check_boundary",
+            title="本轮轻量例行检查",
+            source="main",
+            content="",
+        )
         plugin._record_recent_private_fact_correction = lambda *_args, **_kwargs: False
-        plugin._format_private_fact_attribution_guard = lambda *_args, **_kwargs: ""
+        plugin._format_private_fact_attribution_guard_prompt_section = (
+            lambda *_args, **_kwargs: prompt_section(
+                key="identity.fact_attribution",
+                title="事实主语与归属边界",
+                source="user_memory",
+                content="",
+            )
+        )
         plugin._private_passive_state_update_for_prompt = Mock(
             side_effect=AssertionError("delta state update must stay disabled")
         )
-        plugin._prepared_lightweight_state_injection = Mock(return_value="legacy lightweight state")
+        plugin._prepared_lightweight_state_prompt_section = Mock(
+            return_value=prompt_section(
+                key="state.lightweight",
+                title="Bot 自身模拟状态",
+                source="daily_state",
+                content="legacy lightweight state",
+            )
+        )
         plugin._sanitize_schedule_context_for_private_user = lambda value, _user: value
 
         class _StopAfterStateBranch(Exception):
             pass
 
-        plugin._format_private_identity_anchor_for_prompt = Mock(side_effect=_StopAfterStateBranch)
+        plugin._format_private_identity_anchor_prompt_section = Mock(
+            side_effect=_StopAfterStateBranch
+        )
         event = SimpleNamespace(
             unified_msg_origin="default:FriendMessage:10001",
             message_str="嗯",
@@ -879,7 +919,7 @@ class CycleReplyContextTests(unittest.IsolatedAsyncioTestCase):
             await plugin.inject_humanized_state(event, request)
 
         plugin._private_passive_state_update_for_prompt.assert_not_called()
-        plugin._prepared_lightweight_state_injection.assert_called_once()
+        plugin._prepared_lightweight_state_prompt_section.assert_called_once()
 
 
 if __name__ == "__main__":

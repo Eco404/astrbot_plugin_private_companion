@@ -7,11 +7,21 @@ from typing import Any
 
 try:
     from ...helpers import _safe_float, _single_line
-    from ...conversation_prompt_section import prompt_section
+    from ...conversation_prompt_section import (
+        PromptRenderMode,
+        PromptSection,
+        prompt_section,
+        render_prompt_sections,
+    )
     from ...logging_util import get_module_logger
 except ImportError:  # pragma: no cover - direct import from the plugin directory
     from helpers import _safe_float, _single_line  # type: ignore
-    from conversation_prompt_section import prompt_section  # type: ignore
+    from conversation_prompt_section import (  # type: ignore
+        PromptRenderMode,
+        PromptSection,
+        prompt_section,
+        render_prompt_sections,
+    )
     from logging_util import get_module_logger  # type: ignore
 
 from .external_bridge_resolver import resolve_external_bridge
@@ -80,9 +90,25 @@ class RealityCompanionBridgeMixin:
     def _format_reality_touch_continuity_context(
         self,
         user: dict[str, Any],
-        *,
-        as_section: bool = False,
-    ) -> str | dict[str, Any]:
+    ) -> str:
+        section = self._format_reality_touch_continuity_context_prompt_section(user)
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+
+    def _format_reality_touch_continuity_context_prompt_section(
+        self,
+        user: dict[str, Any],
+    ) -> PromptSection:
+        def build_section(content: str = "") -> PromptSection:
+            return prompt_section(
+                key="reality_touch.continuity",
+                title="刚刚发生的跨设备对话",
+                source="reality_touch",
+                content=content,
+            )
+
         user_id = self._reality_bridge_user_id(user)
         api = self._reality_companion_api()
         reader = getattr(api, "recent_output", None) if api is not None else None
@@ -99,7 +125,7 @@ class RealityCompanionBridgeMixin:
         binder = getattr(self, "_req041_reality_private_binding", None)
         binding = binder(user_id, purpose="memory_read") if callable(binder) else None
         if callable(binder) and (not isinstance(binding, dict) or binding.get("ok") is not True):
-            return ""
+            return build_section()
         continuity_user = binding.get("user") if isinstance(binding, dict) else user
         if not isinstance(continuity_user, dict):
             continuity_user = user
@@ -110,12 +136,12 @@ class RealityCompanionBridgeMixin:
             else:
                 output = user.get("last_reality_touch_output") if isinstance(user, dict) else None
         if not isinstance(output, dict):
-            return ""
+            return build_section()
         text = _single_line(output.get("text"), 300)
         delivered_at = _safe_float(output.get("delivered_at"), 0.0, 0.0)
         age = time.time() - delivered_at
         if not text or delivered_at <= 0 or age < -60 or age > 2 * 3600:
-            return ""
+            return build_section()
         lines = [
             f"Bot 已通过现实音频设备对用户说：{text}",
         ]
@@ -127,7 +153,7 @@ class RealityCompanionBridgeMixin:
             "这是真实发生且与当前私聊连续的对话。自然承接用户此刻的回应；不要把它当作首次问候，也不要重复刚才已经说过的话。"
         )
         body = "\n".join(lines)
-        return prompt_section("刚刚发生的跨设备对话", body) if as_section else f"【刚刚发生的跨设备对话】\n{body}"
+        return build_section(body)
 
     def _reality_companion_enabled(self) -> bool:
         api = self._reality_companion_api()

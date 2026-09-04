@@ -178,15 +178,17 @@ class GroupShareFactGroundingTests(unittest.TestCase):
         self.assertIn("没有保存可核验", context)
         self.assertIn("不要猜", context)
 
-        section = self.harness._format_recent_group_share_snapshot_for_reply(
+        section = self.harness._format_recent_group_share_snapshot_for_reply_prompt_section(
             user,
             "具体是谁？",
             event_umo="default:FriendMessage:10001",
             now=2100,
-            as_section=True,
         )
-        self.assertEqual("群聊主动消息追问的事实边界", section["title"])
-        self.assertNotIn("【群聊主动消息追问的事实边界】", section["content"])
+        self.assertIsNotNone(section)
+        self.assertEqual("群聊主动消息追问的事实边界", section.title)
+        self.assertEqual("group_share.reply_boundary", section.key)
+        self.assertEqual("group_observation", section.source)
+        self.assertNotIn("【群聊主动消息追问的事实边界】", section.content)
 
     def test_source_snapshot_is_not_injected_into_another_session(self) -> None:
         user = {

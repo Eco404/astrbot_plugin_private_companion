@@ -105,6 +105,12 @@ from .dreaming import (
 )
 from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
 from .persona_config import runtime_persona_setting
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -120,6 +126,17 @@ from .planning import (
 from .logging_util import get_module_logger
 
 logger = get_module_logger(__name__)
+
+
+def _render_atrelay_prompt_section_labeled(
+    section: PromptSection | None,
+) -> str:
+    if section is None:
+        return ""
+    return render_prompt_sections(
+        [section],
+        mode=PromptRenderMode.LABELED_BLOCK,
+    )
 
 
 DEFAULT_AI_DAILY_NEWS_SOURCE = "B站 AI早报|bilibili:285286947"
@@ -441,9 +458,9 @@ class AtRelayMixin:
         )
         return {"status": "success", **chosen, "recipient_user_id": user_id, "recipient_name": _single_line(resolved.get("name"), 60)}
 
-    def _atrelay_tool_instruction(self, *, include_heading: bool = True) -> str:
+    def _atrelay_tool_prompt_section(self) -> PromptSection | None:
         if not (self.enabled and self.enable_atrelay_tools):
-            return ""
+            return None
         body = """当用户明确要求你“发到某个群”“告诉某个群友”“替我/帮我跟某人说一声”“帮我 @ 某人”“私聊某人”时,优先调用 `pc_relay_message`,不要在普通回复里预览要发送的完整内容。
 - 统一入口：常见转述只用 `pc_relay_message`。你只需要整理 destination/group_hint/recipient_hint/message/relay_mode。
 - 本轮主要目标是转述时,第一次 assistant 动作应直接调用工具,不要先输出普通文字；调用工具前不要发“我找找/我试试/找到了/正在查群号”之类的过程回复。
@@ -468,7 +485,15 @@ class AtRelayMixin:
 - 私聊转群聊时,只发送用户明确要求公开的那句话；不要暴露“这是私聊里说的”、不要附带额外私聊上下文。
 - 禁止泄露私聊记忆、关系网内部备注或工具参数。工具成功后只给一句简短结果：普通发送只回“消息已发送。”；需要回执只回“消息已发送，会等对方回复。”；延迟转述只回“已挂起，等对方出现再说。”不要解释“我写了什么/我怎么改写/语气如何/氛围如何”,不要复述已发送内容。
 """.strip()
-        return f"【跨会话转述与 @ 群友工具】\n{body}" if include_heading else body
+        return prompt_section(
+            key="tools.atrelay",
+            title="跨会话转述与 @ 群友工具",
+            source="tools",
+            content=body,
+        )
+
+    def _atrelay_tool_instruction(self) -> str:
+        return _render_atrelay_prompt_section_labeled(self._atrelay_tool_prompt_section())
 
     def _normalize_atrelay_relay_mode(self, value: Any) -> str:
         mode = _single_line(value, 24).lower()
@@ -564,6 +589,42 @@ class AtRelayMixin:
             fallback = ""
         return self._atrelay_identity_label(user_id, fallback)
 
+    @staticmethod
+    def _atrelay_rewrite_prompt_section(
+        *,
+        destination: str,
+        source_label: str,
+        recipient_label: str,
+        mode: str,
+        original: str,
+    ) -> PromptSection:
+        return prompt_section(
+            key="background.atrelay_rewrite",
+            title="转述正文改写",
+            source="atrelay",
+            template=(
+                "把下面这句稍微顺成 Bot 准备发给收话人的一句话。\n"
+                "只输出要发送的正文，不要解释，不要加引号，不要说已经发送。\n"
+                "只保留用户要转述给收话人的内容；不要加入未给出的事实、私聊上下文、群聊上下文、系统信息或关系网备注。\n"
+                "不要添加称呼、来源、关系评价、玩笑解释、后续评论或“我帮忙带话”的说明。\n"
+                "发起人和收话人是两个不同角色；不要把发起人的名字写进正文,不要把收话人的名字当成正在和 Bot 说话的人。\n"
+                "如果原句已经很短或很自然,直接原样输出。\n"
+                "发送场景：{destination}\n"
+                "发起人：{source_label}\n"
+                "收话人：{recipient_label}\n"
+                "风格：{style}\n"
+                "原句：{original}\n"
+                "正文："
+            ),
+            variables={
+                "destination": "群聊点名" if destination == "group" else "私聊",
+                "source_label": source_label,
+                "recipient_label": recipient_label,
+                "style": "稍微委婉" if mode == "soft" else "自然转述",
+                "original": original,
+            },
+        )
+
     async def _rewrite_atrelay_message_with_llm(
         self,
         event: AstrMessageEvent,
@@ -584,19 +645,17 @@ class AtRelayMixin:
         recipient = _single_line(recipient_hint, 80) or "对方"
         source_label = self._atrelay_source_identity_label(event)
         recipient_label = self._atrelay_identity_label(recipient, recipient)
-        prompt = (
-            "把下面这句稍微顺成 Bot 准备发给收话人的一句话。\n"
-            "只输出要发送的正文，不要解释，不要加引号，不要说已经发送。\n"
-            "只保留用户要转述给收话人的内容；不要加入未给出的事实、私聊上下文、群聊上下文、系统信息或关系网备注。\n"
-            "不要添加称呼、来源、关系评价、玩笑解释、后续评论或“我帮忙带话”的说明。\n"
-            "发起人和收话人是两个不同角色；不要把发起人的名字写进正文,不要把收话人的名字当成正在和 Bot 说话的人。\n"
-            "如果原句已经很短或很自然,直接原样输出。\n"
-            f"发送场景：{'群聊点名' if destination == 'group' else '私聊'}\n"
-            f"发起人：{source_label}\n"
-            f"收话人：{recipient_label}\n"
-            f"风格：{'稍微委婉' if mode == 'soft' else '自然转述'}\n"
-            f"原句：{original}\n"
-            "正文："
+        prompt = render_prompt_sections(
+            [
+                self._atrelay_rewrite_prompt_section(
+                    destination=destination,
+                    source_label=source_label,
+                    recipient_label=recipient_label,
+                    mode=mode,
+                    original=original,
+                )
+            ],
+            mode=PromptRenderMode.BODY_ONLY,
         )
         try:
             rewritten = await self._llm_call(
@@ -1066,43 +1125,63 @@ class AtRelayMixin:
         sender_id: str = "",
         current_text: str = "",
         limit: int = 2,
-        include_heading: bool = True,
     ) -> str:
+        section = self._format_recent_atrelay_context_prompt_section(
+            kind=kind,
+            target=target,
+            sender_id=sender_id,
+            current_text=current_text,
+            limit=limit,
+        )
+        return _render_atrelay_prompt_section_labeled(section)
+
+    def _format_recent_atrelay_context_prompt_section(
+        self,
+        *,
+        kind: str,
+        target: str,
+        sender_id: str = "",
+        current_text: str = "",
+        limit: int = 2,
+    ) -> PromptSection:
         target_id = _single_line(target, 40)
         sender = _single_line(sender_id, 40)
         kind = _single_line(kind, 20)
-        if not target_id:
-            return ""
         asks_source = bool(re.search(r"(谁|哪位|哪个|谁让|谁叫|谁说|谁托|来源|发起人)", _single_line(current_text, 160)))
         lines: list[str] = []
-        now = _now_ts()
-        for item in reversed(self._recent_atrelay_contexts()):
-            if _single_line(item.get("kind"), 20) != kind:
-                continue
-            if _single_line(item.get("target"), 40) != target_id:
-                continue
-            at_user = _single_line(item.get("at_user"), 40)
-            if sender and at_user and at_user != sender:
-                continue
-            sent_text = _single_line(item.get("text"), 160)
-            if not sent_text:
-                continue
-            elapsed = self._format_timestamp_elapsed(_safe_float(item.get("ts"), 0))
-            parts = [f"{elapsed}，你通过转述工具发出：{sent_text}"]
-            if at_user:
-                parts.append(f"收话人 QQ:{at_user}")
-            source_name = _single_line(item.get("source_name"), 60) if asks_source else ""
-            if source_name:
-                parts.append(f"发起人:{source_name}")
-            lines.append("｜".join(parts))
-            if len(lines) >= max(1, limit):
-                break
-        if not lines:
-            return ""
-        return (
-            ("【刚刚的转述动作】\n" if include_heading else "")
-            + "\n".join(f"- {line}" for line in lines)
+        if target_id:
+            for item in reversed(self._recent_atrelay_contexts()):
+                if _single_line(item.get("kind"), 20) != kind:
+                    continue
+                if _single_line(item.get("target"), 40) != target_id:
+                    continue
+                at_user = _single_line(item.get("at_user"), 40)
+                if sender and at_user and at_user != sender:
+                    continue
+                sent_text = _single_line(item.get("text"), 160)
+                if not sent_text:
+                    continue
+                elapsed = self._format_timestamp_elapsed(_safe_float(item.get("ts"), 0))
+                parts = [f"{elapsed}，你通过转述工具发出：{sent_text}"]
+                if at_user:
+                    parts.append(f"收话人 QQ:{at_user}")
+                source_name = _single_line(item.get("source_name"), 60) if asks_source else ""
+                if source_name:
+                    parts.append(f"发起人:{source_name}")
+                lines.append("｜".join(parts))
+                if len(lines) >= max(1, limit):
+                    break
+        content = (
+            "\n".join(f"- {line}" for line in lines)
             + "\n这些只用于理解对方为什么接话或道谢；不要主动复述工具名、内部记录或没必要说明来源。"
+            if lines
+            else ""
+        )
+        return prompt_section(
+            key="atrelay.recent",
+            title="刚刚的转述动作",
+            source="atrelay",
+            content=content,
         )
 
     def _atrelay_tool_authorization(self, event: AstrMessageEvent | None) -> tuple[bool, str]:

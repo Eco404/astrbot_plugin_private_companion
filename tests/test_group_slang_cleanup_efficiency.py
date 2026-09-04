@@ -144,7 +144,10 @@ class GroupSlangEmbeddingTests(unittest.IsolatedAsyncioTestCase):
         }
 
         context = await harness._group_slang_embedding_context(group, "真的顶")
+        section = await harness._group_slang_embedding_prompt_section(group, "真的顶")
 
+        self.assertEqual("group.slang_similarity", section.key)
+        self.assertEqual("group_observation", section.source)
         self.assertIn("仅作软参考", context)
         self.assertIn("当前“真的顶”可能接近本群“牛啤”", context)
         self.assertIn("不要把向量近似当成确定词义", context)

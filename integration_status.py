@@ -32,7 +32,12 @@ from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 from xml.etree import ElementTree as ET
 
 from astrbot.api import AstrBotConfig
-from .conversation_prompt_section import prompt_section
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
 from .persona_config import runtime_persona_setting
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 try:
@@ -659,11 +664,8 @@ class IntegrationStatusMixin:
             "reading_archive": "翻资料柜夹层",
         }
 
-    def _format_worldview_adaptation_prompt(
+    def _format_worldview_adaptation_prompt_body(
         self,
-        *,
-        include_heading: bool = True,
-        include_knowledge: bool = True,
     ) -> str:
         mode = self._worldview_mode_effective()
         if mode == "off":
@@ -678,29 +680,48 @@ class IntegrationStatusMixin:
             "如果人格/世界观与现代词冲突，优先使用世界内说法；但不要编造会改变功能结果的事实，也不要向用户解释后台实现。",
             "未在人格、世界观、关系网、近期对话或用户输入中明确出现的人际关系不得凭空添加；家人、父母、兄弟姐妹、亲戚、室友、同学、老师、同事、朋友、邻居、前辈、后辈等关系只能在材料有依据时使用。",
         ]
-        if include_heading:
-            base.insert(0, "【世界观适配】")
         if custom:
             base.append(f"自定义适配：{custom}")
-        knowledge_formatter = getattr(self, "_format_roleplay_knowledge_context", None)
-        if include_knowledge and callable(knowledge_formatter):
-            knowledge_context = knowledge_formatter(purpose="worldview", max_chars=1800, max_chunks=10)
-            if knowledge_context:
-                base.append(knowledge_context)
         return "\n".join(base)
 
-    def _format_worldview_adaptation_prompt_section(self) -> dict[str, Any]:
+    def _format_worldview_adaptation_prompt(
+        self,
+        *,
+        include_knowledge: bool = True,
+    ) -> str:
+        sections = (
+            self._format_worldview_adaptation_prompt_sections()
+            if include_knowledge
+            else [self._format_worldview_adaptation_prompt_section()]
+        )
+        if not sections:
+            return ""
+        rendered = [
+            render_prompt_sections(
+                sections[:1],
+                mode=PromptRenderMode.LABELED_BLOCK,
+            )
+        ]
+        rendered.extend(
+            render_prompt_sections(
+                [section],
+                mode=PromptRenderMode.LABELED_BLOCK,
+            )
+            for section in sections[1:]
+        )
+        return "\n".join(part for part in rendered if part)
+
+    def _format_worldview_adaptation_prompt_section(self) -> PromptSection:
         return prompt_section(
-            "世界观适配",
-            self._format_worldview_adaptation_prompt(
-                include_heading=False,
-                include_knowledge=False,
-            ),
+            key="worldview.adaptation",
+            title="世界观适配",
+            source="integration_status",
+            content=self._format_worldview_adaptation_prompt_body(),
         )
 
-    def _format_worldview_adaptation_prompt_sections(self) -> list[dict[str, Any]]:
+    def _format_worldview_adaptation_prompt_sections(self) -> list[PromptSection]:
         section = self._format_worldview_adaptation_prompt_section()
-        if not str(section.get("content") or "").strip():
+        if not str(section.content or "").strip():
             return []
         sections = [section]
         knowledge_formatter = getattr(
@@ -715,8 +736,8 @@ class IntegrationStatusMixin:
                 max_chunks=10,
             )
             if (
-                isinstance(knowledge_section, dict)
-                and str(knowledge_section.get("content") or "").strip()
+                isinstance(knowledge_section, PromptSection)
+                and str(knowledge_section.content or "").strip()
             ):
                 sections.append(knowledge_section)
         return sections
@@ -806,25 +827,19 @@ class IntegrationStatusMixin:
         self,
         *,
         scope: str = "private",
-        include_heading: bool = True,
     ) -> str:
-        if not self.enable_livingmemory_integration or not self._livingmemory_available():
+        sections = self._format_livingmemory_guidance_sections(scope=scope)
+        if not sections:
             return ""
-        tool_name = _single_line(self.livingmemory_tool_name, 60) or "recall_long_term_memory"
-        if scope == "group":
-            boundary = "群聊只查当前群可公开使用的旧事。"
-        else:
-            boundary = "私聊可查当前用户相关的旧约定、偏好和共同经历。"
-        guidance, joke_boundary = self._livingmemory_guidance_parts(
-            tool_name=tool_name,
-            boundary=boundary,
+        guidance = render_prompt_sections(
+            sections[:1],
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
-        return (
-            ("【长期记忆检索】\n" if include_heading else "")
-            + guidance
-            + "\n【群聊玩笑边界】"
-            + joke_boundary
+        joke_boundary = render_prompt_sections(
+            sections[1:],
+            mode=PromptRenderMode.LABELED_INLINE,
         )
+        return "\n".join(part for part in (guidance, joke_boundary) if part)
 
     @staticmethod
     def _livingmemory_guidance_parts(
@@ -848,7 +863,7 @@ class IntegrationStatusMixin:
         self,
         *,
         scope: str = "private",
-    ) -> list[dict[str, Any]]:
+    ) -> list[PromptSection]:
         if not self.enable_livingmemory_integration or not self._livingmemory_available():
             return []
         tool_name = _single_line(self.livingmemory_tool_name, 60) or "recall_long_term_memory"
@@ -862,8 +877,18 @@ class IntegrationStatusMixin:
             boundary=boundary,
         )
         return [
-            prompt_section("长期记忆检索", guidance),
-            prompt_section("群聊玩笑边界", joke_boundary),
+            prompt_section(
+                key="livingmemory.guidance",
+                title="长期记忆检索",
+                source="livingmemory",
+                content=guidance,
+            ),
+            prompt_section(
+                key="livingmemory.group_joke_boundary",
+                title="群聊玩笑边界",
+                source="livingmemory",
+                content=joke_boundary,
+            ),
         ]
 
     def _format_livingmemory_status(self) -> str:
@@ -1438,11 +1463,9 @@ class IntegrationStatusMixin:
             return f"auto（候选：{external_label()}）"
         return "auto（当前无可用生图后端）"
 
-    async def _format_environment_perception(
+    async def _format_environment_perception_body(
         self,
         event: AstrMessageEvent,
-        *,
-        include_heading: bool = True,
     ) -> str:
         checker = getattr(self, "_feature_enabled_or_temp_unlocked", None)
         if callable(checker):
@@ -1454,8 +1477,6 @@ class IntegrationStatusMixin:
         lines = [
             "这是当前消息的背景边界，主要影响语境判断、节奏和措辞；如果用户明确问到时间、节日、平台或环境线索，可以按需要自然回答，没问到时就把它当作背景参考。",
         ]
-        if include_heading:
-            lines.insert(0, "【环境感知】")
         holiday = self._format_holiday_perception(current)
         if holiday:
             lines.append(f"时间：{current.strftime('%Y-%m-%d %H:%M')}（{holiday}）")
@@ -1502,16 +1523,25 @@ class IntegrationStatusMixin:
             lines.append(f"模型：{model}")
         return "\n".join(lines)
 
+    async def _format_environment_perception(
+        self,
+        event: AstrMessageEvent,
+    ) -> str:
+        section = await self._format_environment_perception_prompt_section(event)
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+
     async def _format_environment_perception_prompt_section(
         self,
         event: AstrMessageEvent,
-    ) -> dict[str, Any]:
+    ) -> PromptSection:
         return prompt_section(
-            "环境感知",
-            await self._format_environment_perception(
-                event,
-                include_heading=False,
-            ),
+            key="environment.perception",
+            title="环境感知",
+            source="integration_status",
+            content=await self._format_environment_perception_body(event),
         )
 
     def _environment_timezone(self) -> zoneinfo.ZoneInfo | None:

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from astrbot_plugin_private_companion.core_store import CoreStoreMixin
+from astrbot_plugin_private_companion.conversation_prompt_section import prompt_section
 from astrbot_plugin_private_companion.main import PrivateCompanionExtensionAPI
 
 
@@ -28,6 +29,15 @@ class _Plugin:
     @staticmethod
     def _format_companion_scene_snapshot(snapshot, *, purpose="prompt"):
         return f"场景：{snapshot['relationship']['name']}；用途：{purpose}"
+
+    @staticmethod
+    def _format_companion_scene_snapshot_prompt_section(snapshot, *, purpose="prompt"):
+        return prompt_section(
+            key="scene.snapshot",
+            title="陪伴场景快照",
+            source="scene_context",
+            content=f"场景：{snapshot['relationship']['name']}；用途：{purpose}",
+        )
 
 
 class RealtimeExtensionAPITests(unittest.TestCase):

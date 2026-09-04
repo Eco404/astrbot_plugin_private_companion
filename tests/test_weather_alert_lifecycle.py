@@ -262,6 +262,36 @@ class WeatherAlertLifecycleTests(unittest.IsolatedAsyncioTestCase):
         harness._weather_alert_append_pending_events([event])
         self.assertEqual(harness.data["weather_alert_awareness"]["pending_events"], [])
 
+    def test_weather_alert_prompt_is_canonically_authored(self) -> None:
+        harness = _AlertLifecycleHarness()
+        user = {
+            "planned_weather_alert_context": {
+                "kind": "updated",
+                "alert": {
+                    "event": "雷电",
+                    "color": "橙色",
+                    "headline": "雷电橙色预警",
+                    "instruction": "减少户外活动",
+                },
+            }
+        }
+
+        section = harness._format_weather_alert_prompt_section(
+            user,
+            reason="weather_alert",
+        )
+
+        self.assertEqual("weather.alert", section.key)
+        self.assertEqual("当前气象预警", section.title)
+        self.assertEqual("daily_state", section.source)
+        self.assertNotIn("【当前气象预警】", section.content)
+        self.assertTrue(
+            harness._format_weather_alert_prompt(
+                user,
+                reason="weather_alert",
+            ).startswith("【当前气象预警】\n")
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

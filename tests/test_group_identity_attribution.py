@@ -85,7 +85,14 @@ class GroupIdentityAttributionTests(unittest.TestCase):
             sender_id="100000001",
             text=text,
         )
+        worldbook_section = self.harness._format_worldbook_group_members_prompt_section(
+            group,
+            sender_id="100000001",
+            text=text,
+        )
 
+        self.assertEqual("worldbook.group_members", worldbook_section.key)
+        self.assertEqual("worldbook", worldbook_section.source)
         self.assertIn("小林[QQ:100000001]", guard)
         self.assertIn("最高优先级身份事实", guard)
         self.assertIn("小周[QQ:100000002]", guard)
@@ -199,7 +206,10 @@ class GroupIdentityAttributionTests(unittest.TestCase):
 
         selected = self.harness._select_worldbook_member_profiles_for_private_text("林林，你在吗")
         rendered = self.harness._format_worldbook_private_mentions_for_prompt("林林，你在吗")
+        section = self.harness._format_worldbook_private_mentions_prompt_section("林林，你在吗")
 
+        self.assertEqual("worldbook.private_mentions", section.key)
+        self.assertEqual("worldbook", section.source)
         self.assertEqual([], selected)
         self.assertIn("称呼线索存在多个稳定用户", rendered)
         self.assertIn("不能仅凭这个称呼判断对象", rendered)

@@ -12,6 +12,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
+
 try:
     from astrbot.api import logger
 except ImportError:  # Standalone unit tests do not load the AstrBot runtime.
@@ -591,11 +598,27 @@ class BodyMonitorIntegration:
         }
 
     def format_health_prompt(self, user: dict[str, Any], *, reason: str = "") -> str:
+        section = self.format_health_prompt_section(user, reason=reason)
+        return (
+            render_prompt_sections(
+                [section],
+                mode=PromptRenderMode.LABELED_BLOCK,
+            )
+            if section is not None
+            else ""
+        )
+
+    def format_health_prompt_section(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str = "",
+    ) -> PromptSection | None:
         if reason != "health_alert" or not isinstance(user, dict):
-            return ""
+            return None
         context = user.get(CONTEXT_KEY)
         if not isinstance(context, dict):
-            return ""
+            return None
         metric = self._metric_label(context.get("metric") or context.get("topic"))
         unit = _unit(context.get("unit"))
         current = self._display_measure(context.get("value"), unit)
@@ -615,13 +638,17 @@ class BodyMonitorIntegration:
         if occurred:
             facts.append(f"记录时间：{occurred}")
         if not facts:
-            return ""
-        return (
-            "【身体状态关心线索】\n"
+            return None
+        return prompt_section(
+            key="health.care_hint",
+            title="身体状态关心线索",
+            source="body_monitor",
+            content=(
             f"- {'；'.join(facts)}。\n"
             "- 只把它作为一次温和问候的由头，不下结论，不夸大风险，也不要求对方立即解释或回复。\n"
             "- 可以自然问问现在感觉如何、是否需要休息；如对方明显不舒服，可建议联系可信赖的人或专业人员。\n"
             "- 不复述后台字段、统计方法、内部来源或系统术语。"
+            ),
         )
 
     @staticmethod

@@ -4,7 +4,12 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from .conversation_prompt_section import prompt_section
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
 from .helpers import _single_line
 from .persona_config import runtime_persona_setting
 
@@ -358,13 +363,17 @@ class PlatformCompatibilityMixin:
         )
 
     def _platform_capability_prompt(self, event: Any | None) -> str:
-        body = self._platform_capability_prompt_body(event)
-        return f"【QQ 官方机器人平台边界】\n{body}" if body else ""
+        return render_prompt_sections(
+            [self._platform_capability_prompt_section(event)],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
 
-    def _platform_capability_prompt_section(self, event: Any | None) -> dict[str, Any]:
+    def _platform_capability_prompt_section(self, event: Any | None) -> PromptSection:
         return prompt_section(
-            "QQ 官方机器人平台边界",
-            self._platform_capability_prompt_body(event),
+            key="platform.qq_official_boundary",
+            title="QQ 官方机器人平台边界",
+            source="platform_compat",
+            content=self._platform_capability_prompt_body(event),
         )
 
     def _platform_adaptation_overview(self) -> dict[str, Any]:

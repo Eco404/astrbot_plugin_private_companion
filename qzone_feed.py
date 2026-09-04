@@ -13,6 +13,7 @@ from typing import Any
 from astrbot.api.event import AstrMessageEvent
 
 from .helpers import _safe_float, _safe_int, _single_line
+from .conversation_prompt_section import PromptRenderMode, prompt_section, render_prompt_sections
 from .persona_config import runtime_persona_setting
 from .qzone_recent_parser import is_official_qzone_promotion
 from .logging_util import get_module_logger
@@ -513,7 +514,7 @@ class QzoneFeedMixin:
         logger.info("QQ 空间删除说说成功: uin=%s tid=%s", uin, tid)
 
     async def _qzone_generate_comment(self, post: Any) -> str:
-        prompt = f"""
+        instruction = """
 请以当前 Bot 人格，为下面这条 QQ 空间说说写一句自然评论。
 只输出评论正文，不要解释。
 
@@ -522,13 +523,23 @@ class QzoneFeedMixin:
 - 像真实熟人评论，不要像客服或总结。
 - 不要泄露私聊内容、插件内部信息、关系网资料或状态数值。
 - 如果内容信息不足，可以写轻量回应。
-
-【作者】
-{_single_line(getattr(post, "name", ""), 40) or _single_line(getattr(post, "uin", ""), 40) or "对方"}
-
-【说说内容】
-{_single_line(getattr(post, "text", "") or getattr(post, "rt_con", ""), 240) or "无文本"}
 """.strip()
+
+        prompt = "\n\n".join(
+            (
+                render_prompt_sections(
+                    [prompt_section(key="qzone.comment.instruction", title="QQ 空间评论任务", source="qzone_feed", content=instruction)],
+                    mode=PromptRenderMode.BODY_ONLY,
+                ),
+                render_prompt_sections(
+                    [
+                        prompt_section(key="qzone.comment.author", title="作者", source="qzone_feed", content=_single_line(getattr(post, "name", ""), 40) or _single_line(getattr(post, "uin", ""), 40) or "对方"),
+                        prompt_section(key="qzone.comment.post", title="说说内容", source="qzone_feed", content=_single_line(getattr(post, "text", "") or getattr(post, "rt_con", ""), 240) or "无文本"),
+                    ],
+                    mode=PromptRenderMode.LABELED_BLOCK,
+                ),
+            )
+        )
         text = await self._llm_call(
             prompt,
             max_tokens=80,

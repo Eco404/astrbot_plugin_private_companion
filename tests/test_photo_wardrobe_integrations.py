@@ -166,7 +166,7 @@ class PhotoWardrobeIntegrationTests(unittest.TestCase):
         self.assertIn('"prompt_sections_after"', proactive)
         self.assertNotIn("def _append_photo_prompt_conflict_resolution", proactive)
         self.assertNotIn("_natural_photo_prompt_has_explicit_wardrobe_request", commands)
-        self.assertIn("structured=True", commands)
+        self.assertIn("_build_natural_language_photo_prompt_sections", commands)
         self.assertIn("preserve character identity and stable appearance", commands)
         self.assertIn('"reference_removed"', page_api)
         self.assertIn('"residual_conflicts"', page_api)

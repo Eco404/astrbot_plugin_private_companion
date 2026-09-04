@@ -18,6 +18,7 @@ from astrbot_plugin_private_companion.planning import (
     normalize_detail_location,
     split_detail_prompt_cache_sections,
 )
+from astrbot_plugin_private_companion.conversation_prompt_section import prompt_section
 from astrbot_plugin_private_companion.daily_state import DailyStateMixin
 from astrbot_plugin_private_companion.helpers import _today_key
 
@@ -162,9 +163,14 @@ class DailyPlanGenerationHarness:
     async def _ensure_weather_context(self):
         return None
 
-    def _build_daily_plan_prompt(self, _now, *, memory_companion_context=""):
+    def _build_daily_plan_prompt_section(self, _now, *, memory_companion_context=""):
         self.prompt_contexts.append(memory_companion_context)
-        return "DAILY_PLAN_PROMPT"
+        return prompt_section(
+            key="background.schedule.daily_plan",
+            title="每日生活日程生成",
+            source="planning",
+            content="DAILY_PLAN_PROMPT",
+        )
 
     def _task_provider(self, *provider_ids):
         return next((item for item in provider_ids if item), "")

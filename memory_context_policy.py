@@ -5,15 +5,38 @@ from __future__ import annotations
 
 from typing import Any
 
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
+
 
 def core_memory_usage_contract(memory_context: Any, *, stage: str) -> str:
     """Describe how proactive models may use a structured core-memory block."""
+    section = core_memory_usage_contract_section(memory_context, stage=stage)
+    return (
+        render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+        if section is not None
+        else ""
+    )
+
+
+def core_memory_usage_contract_section(
+    memory_context: Any,
+    *,
+    stage: str,
+) -> PromptSection | None:
+    """Author the evidence contract once; callers choose the required wire format."""
     text = str(memory_context or "")
     if "<core_memory>" not in text.lower():
-        return ""
+        return None
 
     common = (
-        "【核心记忆证据权限】\n"
         "以下规则只约束你如何使用 <core_memory>；不要向用户复述这些分类或内部结构。\n"
         "- rule / boundary：作为必须遵守的表达规则和禁区，可据此改写或拦下冲突内容。\n"
         "- preference / profile：只用于称呼、语气和稳定偏好，不证明用户此刻正在做什么、需要什么或希望被联系。\n"
@@ -26,17 +49,24 @@ def core_memory_usage_contract(memory_context: Any, *, stage: str) -> str:
     )
     normalized_stage = str(stage or "").strip().lower()
     if normalized_stage == "review":
-        return (
+        content = (
             f"{common}\n"
             "- 当前主动计划的 route / source / reason 是本轮既有触发来源。不得仅凭核心记忆新建主动候选、改换路线，"
             "或把无关候选改造成吃药、吃饭、睡觉、健康检查等提醒。\n"
             "- 若核心边界与候选冲突，优先 rewrite；无法在原路线内消除冲突时再 defer/drop。"
         )
-    if normalized_stage == "generation":
-        return (
+    elif normalized_stage == "generation":
+        content = (
             f"{common}\n"
             "- 核心记忆只能帮助落实当前计划的表达和边界，不得改变既定 reason/action/topic/motive，"
             "也不得把无关计划转成提醒、查岗、健康询问或关系确认。\n"
             "- 可以自然体现相关稳定偏好，但不得声称记得、查到或依据核心记忆采取行动。"
         )
-    return common
+    else:
+        content = common
+    return prompt_section(
+        key=f"memory.core_evidence.{normalized_stage or 'default'}",
+        title="核心记忆证据权限",
+        source="memory_context_policy",
+        content=content,
+    )

@@ -29,11 +29,20 @@ from .constants import (
 )
 from .helpers import _now_ts, _path_text, _safe_float, _safe_int, _single_line, _text_similarity
 from .persona_config import runtime_persona_setting
+from .conversation_prompt_section import PromptRenderMode, PromptSection, prompt_section, render_prompt_sections
 from .story_authority import (
     story_legacy_context,
     story_legacy_operation,
     story_legacy_sync_operation,
 )
+
+
+def _render_creative_prompt(section: PromptSection) -> str:
+    return render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY)
+
+
+def _render_creative_labeled_section(section: PromptSection) -> str:
+    return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
 
 
 def _persona_provider_id(owner: Any, canonical_key: str, legacy_attr: str, quick_role: str) -> str:
@@ -725,18 +734,45 @@ class CreativeMixin:
                 )
             except Exception as exc:
                 logger.debug("创作立项 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
-        prompt = f"""
+        persona_block = _render_creative_labeled_section(
+            prompt_section(
+                key="background.creative.project.persona",
+                title="人格与身份",
+                source="creative",
+                content=persona_context,
+            )
+        )
+        memory_block = _render_creative_labeled_section(
+            prompt_section(
+                key="background.creative.project.memory",
+                title="我会牢牢记住你 创作连续性参考",
+                source="creative",
+                content=(
+                    f"{memory_context or '暂无外部长期创作记忆。'}\n"
+                    "使用方式：优先尊重用户长期偏好、已有项目、人工修订和避雷；不要说自己“查了记忆”。"
+                ),
+            )
+        )
+        direction_block = _render_creative_labeled_section(
+            prompt_section(
+                key="background.creative.project.direction",
+                title="用户配置的创作方向",
+                source="creative",
+                content=direction_prompt or "未指定，按人格、灵感和连续性自然决定。",
+            )
+        )
+        prompt = prompt_section(
+            key="background.creative.project",
+            title="私人创作立项",
+            source="creative",
+            content=f"""
  你是一个拟人化 Bot 的私人创作状态生成器。这个 Bot/角色会因为一个生活小事、日记碎片或梦境灵感,突然想开一个自己的创作项目。
 
-【人格与身份】
-{persona_context}
+{persona_block}
 
-【我会牢牢记住你 创作连续性参考】
-{memory_context or '暂无外部长期创作记忆。'}
-使用方式：优先尊重用户长期偏好、已有项目、人工修订和避雷；不要说自己“查了记忆”。
+{memory_block}
 
-【用户配置的创作方向】
-{direction_prompt or '未指定，按人格、灵感和连续性自然决定。'}
+{direction_block}
 
 要求：
 1. 只设计“正在做的创作计划”,不要写正文。
@@ -762,9 +798,10 @@ class CreativeMixin:
   "opening_story_time": "故事开场的具体时刻,10到20字",
   "next_hint": "第一段准备写什么"
 }}
-""".strip()
+""".strip(),
+        )
         text = await self._llm_call(
-            prompt,
+            _render_creative_prompt(prompt),
             max_tokens=500,
             provider_id=self._task_provider(
                 _persona_provider_id(self, "CREATIVE_PROVIDER_ID", "creative_provider_id", "creative"),
@@ -863,7 +900,11 @@ class CreativeMixin:
                 )
             except Exception as exc:
                 logger.debug("创作大纲 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
-        prompt = f"""
+        prompt = prompt_section(
+            key="background.creative.outline",
+            title="私人创作大纲",
+            source="creative",
+            content=f"""
 你在为一个私人创作项目安排本次要写的一小段,先给出简短大纲。
 
 作品类型：{self._creative_work_type(project)}
@@ -896,9 +937,10 @@ class CreativeMixin:
 4. 如果人工大纲/角色表/人工修订存在,本次大纲必须顺着它们走。
 5. 不要解释,不要写正文,不要 JSON。
 6. 本次字数预算大约 {budget} 字。
-""".strip()
+""".strip(),
+        )
         text = await self._llm_call(
-            prompt, max_tokens=200,
+            _render_creative_prompt(prompt), max_tokens=200,
             provider_id=self._task_provider(
                 _persona_provider_id(
                     self, "CREATIVE_OUTLINE_PROVIDER_ID", "creative_outline_provider_id", "creative"
@@ -947,7 +989,11 @@ class CreativeMixin:
                 )
             except Exception as exc:
                 logger.debug("创作审稿 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
-        prompt = f"""
+        prompt = prompt_section(
+            key="background.creative.review",
+            title="私人创作审稿",
+            source="creative",
+            content=f"""
 你是一个严格但懂文风的审稿人。检查这段私人创作片段是否满足：贴合人格、推进作品、避免重复。
 
 作者人格：{self._creative_persona_style_context()}
@@ -993,9 +1039,10 @@ class CreativeMixin:
   "issues": ["问题"],
   "rewrite_focus": "如果需要重写，用一句话说清楚怎么改"
 }}
-""".strip()
+""".strip(),
+        )
         text = await self._llm_call(
-            prompt, max_tokens=220,
+            _render_creative_prompt(prompt), max_tokens=220,
             provider_id=self._task_provider(
                 _persona_provider_id(
                     self, "CREATIVE_REVIEW_PROVIDER_ID", "creative_review_provider_id", "creative"
@@ -1036,7 +1083,11 @@ class CreativeMixin:
                 )
             except Exception as exc:
                 logger.debug("创作抽取 我会牢牢记住你 上下文读取失败: %s", _single_line(exc, 120))
-        prompt = f"""
+        prompt = prompt_section(
+            key="background.creative.extract",
+            title="私人创作连续性提取",
+            source="creative",
+            content=f"""
 整理一个长期创作项目刚写出的新片段,提取对后续续写最有用的结构化信息。
 
 当前主线：{_single_line(story_bible.get('mainline_direction'), 140)}
@@ -1067,9 +1118,10 @@ class CreativeMixin:
   "story_time": "写完这个片段后,故事内现在处于什么时刻,10到24字",
   "next_direction": "一句话描述下一段最自然该写什么"
 }}
-""".strip()
+""".strip(),
+        )
         text = await self._llm_call(
-            prompt, max_tokens=300,
+            _render_creative_prompt(prompt), max_tokens=300,
             provider_id=self._task_provider(
                 _persona_provider_id(
                     self, "CREATIVE_REVIEW_PROVIDER_ID", "creative_review_provider_id", "creative"
@@ -1353,11 +1405,22 @@ class CreativeMixin:
 
         async def _do_generate(extra_notice: str = "") -> str:
             story_time = _single_line(story_bible.get("story_time"), 60)
-            prompt = f"""
+            persona_block = _render_creative_labeled_section(
+                prompt_section(
+                    key="background.creative.writing.persona",
+                    title="作者人格与身份",
+                    source="creative",
+                    content=persona_context,
+                )
+            )
+            prompt = prompt_section(
+                key="background.creative.writing",
+                title="私人创作正文",
+                source="creative",
+                content=f"""
 你就是下面这个人格,此刻正在闲暇时写自己想写的作品。请只写本次随手能写下的一小段。
 
-【作者人格与身份】
-{persona_context}
+{persona_block}
 
 作品类型：{work_type}
 标题：{_single_line(project.get("title"), 40)}
@@ -1399,9 +1462,10 @@ class CreativeMixin:
 5. 顺着故事内时间写：本段接续"故事内时间"或自然向前推进；有意的倒叙、闪回要在文内自然交代,不能无声倒流,也不要原地停在同一个时刻。
 6. {finish_hint} 本段至少推进一个叙事元素,不能只是换皮重复前文；严格参考本段大纲,但要写得自然,不是提纲照抄。如果人工维护大纲、角色表或人工修订存在,必须优先服从；同时遵守用户配置的创作方向。
 {extra_notice}
-""".strip()
+""".strip(),
+            )
             text = await self._llm_call(
-                prompt, max_tokens=max(220, budget + 160),
+                _render_creative_prompt(prompt), max_tokens=max(220, budget + 160),
                 provider_id=self._task_provider(
                     _persona_provider_id(
                         self, "CREATIVE_PROVIDER_ID", "creative_provider_id", "creative"

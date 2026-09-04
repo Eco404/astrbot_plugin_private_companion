@@ -237,7 +237,7 @@ def correct_mood_for_member(
 
 
 def joke_guard_suggestion(boundary: Any, *, member_id: Any = None) -> dict[str, Any]:
-    """Explicit do-not-joke suggestion for persistence/injection."""
+    """Return a stable guard decision without prompt-facing prose."""
     boundary = project_joke_boundary(boundary, now=0)
     members = boundary.get("members") or {}
     key = str(member_id or "")
@@ -246,16 +246,20 @@ def joke_guard_suggestion(boundary: Any, *, member_id: Any = None) -> dict[str, 
     if sensitivity >= _BLOCK_THRESHOLD:
         return {
             "blocked": True,
-            "reason": "该成员已多次严肃反对或撤回玩笑，避免再向其开玩笑",
+            "reason_code": "repeated_serious_objection_or_recall",
             "sensitivity": round(sensitivity, 2),
         }
     if sensitivity >= _BLOCK_THRESHOLD * 0.55:
         return {
             "blocked": False,
-            "reason": "该成员对玩笑的接受度偏低，开玩笑前先确认",
+            "reason_code": "low_joke_acceptance",
             "sensitivity": round(sensitivity, 2),
         }
-    return {"blocked": False, "reason": "", "sensitivity": round(sensitivity, 2)}
+    return {
+        "blocked": False,
+        "reason_code": "",
+        "sensitivity": round(sensitivity, 2),
+    }
 
 
 __all__ = [

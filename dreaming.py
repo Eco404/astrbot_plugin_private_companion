@@ -10,6 +10,16 @@ from typing import Any
 
 from .helpers import _now_ts, _safe_float, _safe_int, _single_line, _today_key
 from .persona_config import runtime_persona_setting
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
+
+
+def _render_dreaming_prompt(section: PromptSection) -> str:
+    return render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY)
 
 
 _ABSTRACT_DREAM_FRAGMENT_MARKERS = (
@@ -595,7 +605,63 @@ async def generate_enhanced_dream_pick(plugin, weather: dict[str, Any] | None = 
     if callable(formatter):
         worldview_adaptation = formatter()
     weather_text = plugin._weather_summary_text(weather or plugin.data.get("daily_weather", {}))
-    prompt = f"""
+    input_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.dream.generate.input",
+                title="本次输入",
+                source="dreaming",
+                content="",
+                children=(
+                    prompt_section(
+                        key="background.dream.generate.persona",
+                        title="人格参考",
+                        source="dreaming",
+                        content=persona,
+                    ),
+                ),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
+    )
+    theme_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.dream.generate.theme",
+                title="梦境主题",
+                source="dreaming",
+                content=f"{theme_name}：{theme_hint}",
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
+    )
+    fragments_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.dream.generate.fragments",
+                title="碎片记忆",
+                source="dreaming",
+                content="\n".join(f"- {item}" for item in fragments),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
+    )
+    weather_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.dream.generate.weather",
+                title="天气",
+                source="dreaming",
+                content=weather_text,
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
+    )
+    prompt = prompt_section(
+        key="background.dream.generate",
+        title="梦境生成",
+        source="dreaming",
+        content=f"""
 你现在是 Private Companion 的梦境生成器。请根据本次输入的记忆碎片,写一个拟人化 Bot 今早残留的完整梦境。
 这个梦可以跳接、荒诞、前后不完全合逻辑,但读起来必须摸得到一条“梦里的情绪线”：她在找什么、躲什么、靠近什么、误认了什么,或为什么醒来后还残留那种感觉。不要只把碎片随机拼贴。
 
@@ -626,24 +692,20 @@ async def generate_enhanced_dream_pick(plugin, weather: dict[str, Any] | None = 
   "duration_hours": 3到8之间的整数
 }}
 
-【本次输入】
-【人格参考】
-{persona}
+{input_block}
 
 {worldview_adaptation}
 
-【梦境主题】
-{theme_name}：{theme_hint}
+{theme_block}
 
-【碎片记忆】
-{chr(10).join(f"- {item}" for item in fragments)}
+{fragments_block}
 
-【天气】
-{weather_text}
+{weather_block}
 
-""".strip()
+""".strip(),
+    )
     raw_text = await plugin._llm_call(
-        prompt,
+        _render_dreaming_prompt(prompt),
         max_tokens=1050,
         task="dream",
         provider_id=plugin._task_provider(
@@ -935,7 +997,11 @@ async def _rewrite_daily_diary_once(
     max_chars: int,
 ) -> dict[str, Any]:
     current = payload if isinstance(payload, dict) else {}
-    prompt = f"""
+    prompt = prompt_section(
+        key="background.diary.rewrite",
+        title="私人日记修订",
+        source="dreaming",
+        content=f"""
 请修订下面这篇私人日记，只修一次。保留原稿的第一人称质感、情绪浓度和细节，只纠正没有依据的外部事件与模板化补景。
 
 问题：{'；'.join(issues)}
@@ -958,10 +1024,11 @@ async def _rewrite_daily_diary_once(
 3. 连续性记忆可以支撑关系熟悉感、情绪余味、共同历史和未完成心事，但只能自然承接，不能把旧日情节搬到今天重演。
 4. 只删除无中生有的外部场景、人物互动、对话和完成结果；不要补桌面、窗光、茶水、便签等无来源场景。材料少时允许写短，但不要用“记录很少”替换原稿已有的真实感受。
 只输出 JSON：{{"summary":"15-55字题眼","body":"日记正文","tags":["1-4个正文标签"]}}
-""".strip()
+""".strip(),
+    )
     try:
         raw = await plugin._llm_call(
-            prompt,
+            _render_dreaming_prompt(prompt),
             max_tokens=520,
             task="diary_rewrite",
             provider_id=plugin._task_provider(
@@ -980,7 +1047,11 @@ async def _extract_daily_diary_derivatives(plugin, payload: dict[str, Any]) -> d
     if not body:
         return {}
     share_enabled = bool(runtime_persona_setting(plugin, "daily_diary_generate_share_seed", True))
-    prompt = f"""
+    prompt = prompt_section(
+        key="background.diary.derivatives",
+        title="私人日记结构提取",
+        source="dreaming",
+        content=f"""
 请从这篇已经写好的私人日记中提取后台结构，不要改写日记正文，也不要新增事件。
 
 日记：
@@ -995,10 +1066,11 @@ async def _extract_daily_diary_derivatives(plugin, payload: dict[str, Any]) -> d
 }}
 
 要求：dream_fragments 0–6 个，只提取正文确实存在的碎片，不足时留空；long_term_events 0–2 个。不要生成主动计划、今日事件或不存在的后续剧情。
-""".strip()
+""".strip(),
+    )
     try:
         raw = await plugin._llm_call(
-            prompt,
+            _render_dreaming_prompt(prompt),
             max_tokens=320,
             task="diary_derivatives",
             provider_id=plugin._task_provider(
@@ -1046,7 +1118,80 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
     formatter = getattr(plugin, "_format_worldview_adaptation_prompt", None)
     if callable(formatter):
         worldview_adaptation = formatter()
-    prompt = f"""
+    input_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.diary.generate.input",
+                title="本次输入",
+                source="dreaming",
+                content=f"日期：{today}",
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
+    )
+    persona_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.diary.generate.persona",
+                title="AstrBot 默认人格",
+                source="dreaming",
+                content=persona,
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
+    )
+    identity_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.diary.generate.identity",
+                title="生活身份补充",
+                source="dreaming",
+                content=schedule_persona or "（无）",
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
+    )
+    worldview_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.diary.generate.worldview",
+                title="生活/世界观补充",
+                source="dreaming",
+                content=schedule_worldview or "（无）",
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
+    )
+    evidence_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.diary.generate.evidence",
+                title="今日经历账本",
+                source="dreaming",
+                content=evidence_text,
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
+    )
+    continuity_block = render_prompt_sections(
+        [
+            prompt_section(
+                key="background.diary.generate.continuity",
+                title="连续性记忆参考",
+                source="dreaming",
+                content=(
+                    "以下内容只帮助保持关系、情绪和未完成线索的连贯，不是今天新发生的事件，也不是必须写入正文的清单：\n"
+                    f"{continuity_memory_context or '（没有检索到足够相关的连续性记忆）'}"
+                ),
+            )
+        ],
+        mode=PromptRenderMode.LABELED_BLOCK,
+    )
+    prompt = prompt_section(
+        key="background.diary.generate",
+        title="私人日记生成",
+        source="dreaming",
+        content=f"""
 请以当前人格的第一人称，写一篇今天的私人日记。只写日记，不安排主动消息、梦境素材或后续剧情。
 
 写作方式：{form_instruction}
@@ -1069,29 +1214,22 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
   "tags": ["正文确实体现的1–4个短标签"]
 }}
 
-【本次输入】
-日期：{today}
+{input_block}
 
-【AstrBot 默认人格】
-{persona}
+{persona_block}
 
-【生活身份补充】
-{schedule_persona or "（无）"}
+{identity_block}
 
-【生活/世界观补充】
-{schedule_worldview or "（无）"}
+{worldview_block}
 
 {worldview_adaptation}
 
 日期语境：
 {calendar_context}
 
-【今日经历账本】
-{evidence_text}
+{evidence_block}
 
-【连续性记忆参考】
-以下内容只帮助保持关系、情绪和未完成线索的连贯，不是今天新发生的事件，也不是必须写入正文的清单：
-{continuity_memory_context or '（没有检索到足够相关的连续性记忆）'}
+{continuity_block}
 
 最近日记：
 {plugin._recent_diary_context()}
@@ -1101,10 +1239,11 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 
 近期重要日期：
 {plugin._format_important_dates_for_prompt()}
-""".strip()
+""".strip(),
+    )
     try:
         raw_text = await plugin._llm_call(
-            prompt,
+            _render_dreaming_prompt(prompt),
             max_tokens=620,
             task="diary",
             provider_id=plugin._task_provider(

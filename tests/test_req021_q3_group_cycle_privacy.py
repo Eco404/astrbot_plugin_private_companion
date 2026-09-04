@@ -8,7 +8,11 @@ from types import SimpleNamespace
 from typing import Any
 import unittest
 
-from group_cycle_boundary import build_group_cycle_boundary, cycle_phase_from_label
+from group_cycle_boundary import (
+    build_group_cycle_boundary,
+    cycle_phase_from_label,
+    group_cycle_boundary_prompt_section,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +27,8 @@ class GroupCycleBoundaryTests(unittest.TestCase):
         ):
             result = build_group_cycle_boundary(**kwargs)
             self.assertFalse(result["active"])
-            self.assertEqual("", result["prompt"])
+            self.assertNotIn("prompt", result)
+            self.assertIsNone(group_cycle_boundary_prompt_section(result))
 
     def test_six_phase_labels_classify_without_exposing_an_unrelated_phase(self) -> None:
         cases = {
@@ -41,7 +46,10 @@ class GroupCycleBoundaryTests(unittest.TestCase):
             )
             self.assertTrue(result["active"])
             self.assertFalse(result["topic_related"])
-            self.assertNotIn(label, result["prompt"])
+            self.assertNotIn("prompt", result)
+            section = group_cycle_boundary_prompt_section(result)
+            self.assertIsNotNone(section)
+            self.assertNotIn(label, section.content)
 
     def test_related_topic_allows_only_non_medical_minimal_expression_without_echo(self) -> None:
         secret = "unique-group-body-message"
@@ -54,8 +62,11 @@ class GroupCycleBoundaryTests(unittest.TestCase):
 
         self.assertTrue(result["topic_related"])
         self.assertFalse(result["private_boundary"])
-        self.assertIn("not feeling great", result["prompt"])
-        self.assertNotIn(secret, result["prompt"])
+        self.assertNotIn("prompt", result)
+        section = group_cycle_boundary_prompt_section(result)
+        self.assertIsNotNone(section)
+        self.assertIn("not feeling great", section.content)
+        self.assertNotIn(secret, section.content)
 
     def test_menstrual_highly_private_request_has_fixed_boundary_not_affected_by_relationship_inputs(self) -> None:
         result = build_group_cycle_boundary(
@@ -66,8 +77,10 @@ class GroupCycleBoundaryTests(unittest.TestCase):
         )
 
         self.assertTrue(result["private_boundary"])
-        self.assertIn("Fixed boundary", result["prompt"])
-        self.assertIn("Affinity, intimacy, pressure", result["prompt"])
+        section = group_cycle_boundary_prompt_section(result)
+        self.assertIsNotNone(section)
+        self.assertIn("Fixed boundary", section.content)
+        self.assertIn("Affinity, intimacy, pressure", section.content)
         non_menstrual = build_group_cycle_boundary(
             enabled=True,
             group_allowed=True,
@@ -90,7 +103,9 @@ def _load_hook() -> Any:
         # the selected method body and therefore needs a no-op decorator stub.
         "_multi_persona_event_context": lambda target: target,
         "filter": SimpleNamespace(on_llm_request=lambda **_kwargs: lambda target: target),
+        "PLACEMENT_DYNAMIC_SYSTEM": "dynamic_system",
         "build_group_cycle_boundary": build_group_cycle_boundary,
+        "group_cycle_boundary_prompt_section": group_cycle_boundary_prompt_section,
         "runtime_persona_setting": lambda host, key, default=None: getattr(host, key, default),
     }
     module = ast.Module(body=[copy.deepcopy(hook)], type_ignores=[])
@@ -103,11 +118,19 @@ GROUP_CYCLE_HOOK = _load_hook()
 
 
 class _GroupCycleHost:
-    def __init__(self, *, enabled: bool, group_allowed: bool) -> None:
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        group_allowed: bool,
+        append_to_turn: bool = True,
+    ) -> None:
         self.enable_group_cycle_awareness = enabled
         self.group_allowed = group_allowed
+        self.append_to_turn = append_to_turn
         self.data = {"daily_state": {"body_cycle": "处于月经期"}}
         self.fragments: list[tuple[Any, ...]] = []
+        self.system_sections: list[dict[str, Any]] = []
 
     def _extract_group_id_from_event(self, _event: object) -> str:
         return "group-a"
@@ -117,6 +140,10 @@ class _GroupCycleHost:
 
     def _append_turn_prompt_fragment_by_position(self, *args: Any, **kwargs: Any) -> bool:
         self.fragments.append(args)
+        return self.append_to_turn
+
+    def _materialize_conversation_system_block(self, _request: Any, **kwargs: Any) -> bool:
+        self.system_sections.append(kwargs)
         return True
 
 
@@ -133,10 +160,13 @@ class GroupCycleHookTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(1, len(host.fragments))
         marker = host.fragments[0][1]
-        prompt = host.fragments[0][2]
+        section = host.fragments[0][2]
         self.assertEqual("<!-- private_companion_group_cycle_boundary_v1 -->", marker)
-        self.assertIn("Group cycle privacy boundary", prompt)
-        self.assertNotIn("月经会不舒服吗", prompt)
+        self.assertEqual("group.cycle_privacy_boundary", section.key)
+        self.assertEqual("Group cycle privacy boundary", section.title)
+        self.assertEqual("safety", section.source)
+        self.assertIn("Group cycle privacy boundary", section.content)
+        self.assertNotIn("月经会不舒服吗", section.content)
         self.assertEqual({"daily_state"}, set(host.data))
 
     async def test_default_off_or_group_access_failure_is_a_noop(self) -> None:
@@ -156,6 +186,28 @@ class GroupCycleHookTests(unittest.IsolatedAsyncioTestCase):
         )) or ""
         self.assertNotIn("_ensure_daily_state", source)
         self.assertNotIn("_schedule_data_save", source)
+        self.assertIn("group_cycle_boundary_prompt_section", source)
+        self.assertNotIn("boundary.get(\"prompt\")", source)
+
+    async def test_system_fallback_keeps_the_typed_section(self) -> None:
+        host = _GroupCycleHost(
+            enabled=True,
+            group_allowed=True,
+            append_to_turn=False,
+        )
+        event = SimpleNamespace(
+            is_private_chat=lambda: False,
+            private_companion_group_text="月经会不舒服吗",
+            message_str="",
+        )
+        request = SimpleNamespace(system_prompt="", prompt="")
+
+        await host.append_group_cycle_privacy_boundary(event, request)
+
+        self.assertEqual(1, len(host.system_sections))
+        section = host.system_sections[0]["section"]
+        self.assertEqual("group.cycle_privacy_boundary", section.key)
+        self.assertEqual("<!-- private_companion_group_cycle_boundary_v1 -->", host.system_sections[0]["marker"])
 
 
 if __name__ == "__main__":

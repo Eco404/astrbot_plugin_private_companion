@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from astrbot.api.message_components import Plain
 from astrbot.core.platform.platform import PlatformStatus
 
+from astrbot_plugin_private_companion.conversation_prompt_section import exact_text, prompt_section
 from astrbot_plugin_private_companion.proactive_chat_runtime_bridge import (
     ProactiveChatRuntimeBridge,
 )
@@ -148,11 +149,18 @@ class _Owner:
         self.cancelled: list[str] = []
 
     async def _prepare_proactive_chat_bridge(self, _session_id, *, unanswered_count=0):
+        fragment = f"深度上下文：未回应 {unanswered_count} 次；当前关系稳定；使用已审核表达。"
         return {
             "enabled": True,
             "allowed": True,
             "token": "token-1",
-            "prompt_fragment": f"深度上下文：未回应 {unanswered_count} 次；当前关系稳定；使用已审核表达。",
+            "prompt_fragment": fragment,
+            "prompt_fragment_section": prompt_section(
+                key="proactive_chat.bridge.fragment",
+                title="Private Companion × Proactive Chat 联动",
+                source="test",
+                content=exact_text(fragment),
+            ),
         }
 
     async def _review_proactive_chat_bridge_message(
@@ -256,6 +264,28 @@ class RuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, proactive.finalized)
         self.assertEqual(1, proactive.rescheduled)
         self.assertEqual(1, bridge.status()["counters"]["delivery_failed"])
+        await bridge.stop()
+
+    async def test_legacy_string_fragment_is_wrapped_without_wire_changes(self):
+        class LegacyOwner(_Owner):
+            async def _prepare_proactive_chat_bridge(self, session_id, *, unanswered_count=0):
+                prepared = await super()._prepare_proactive_chat_bridge(
+                    session_id,
+                    unanswered_count=unanswered_count,
+                )
+                prepared.pop("prompt_fragment_section", None)
+                return prepared
+
+        platform = _Platform()
+        proactive = _ProactiveChat(platform)
+        owner = LegacyOwner(proactive)
+        bridge = ProactiveChatRuntimeBridge(owner)
+        self.assertTrue(bridge.attach(proactive))
+
+        await proactive.check_and_chat(SESSION_ID)
+
+        self.assertIn("深度上下文：未回应 2 次", proactive.prepared_system_prompt)
+        self.assertEqual(1, len(platform.sent))
         await bridge.stop()
 
 

@@ -11,6 +11,7 @@ from typing import Any
 from astrbot.api.event import AstrMessageEvent
 
 from .helpers import _now_ts, _safe_float, _safe_int, _single_line
+from .conversation_prompt_section import PromptRenderMode, prompt_section, render_prompt_sections
 from .persona_config import runtime_persona_setting
 from .logging_util import get_module_logger
 
@@ -210,6 +211,20 @@ class QzoneCommentMixin:
         return reply.strip(" ，,。")
 
     def _qzone_comment_author_context(self, comment: Any) -> str:
+        return render_prompt_sections(
+            [self._qzone_comment_author_prompt_section(comment)],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+
+    def _qzone_comment_author_prompt_section(self, comment: Any):
+        def build_section(content: str):
+            return prompt_section(
+                key="qzone.comment.author_identity",
+                title="评论者身份",
+                source="qzone_comments",
+                content=content,
+            )
+
         uin = _single_line(getattr(comment, "uin", ""), 40)
         name = _single_line(getattr(comment, "name", ""), 40)
         profile: dict[str, Any] | None = None
@@ -225,17 +240,17 @@ class QzoneCommentMixin:
                 match_note = "按评论显示名弱命中关系网。"
             elif len(matches) > 1:
                 names = "、".join(_single_line(item.get("name"), 24) for item in matches[:3] if _single_line(item.get("name"), 24))
-                return (
-                    "【评论者身份】\n"
+                body = (
                     f"评论显示名：{name}；QQ：{uin or '未知'}。\n"
                     f"关系网里有多个同名/近似对象：{names or '多个候选'}；本轮不要擅自认定身份，也不要当成主要用户。"
                 )
+                return build_section(body)
         if not profile:
-            return (
-                "【评论者身份】\n"
+            body = (
                 f"评论显示名：{name or '未知'}；QQ：{uin or '未知'}。\n"
                 "关系网未确认此人；按普通空间评论者处理，不要把对方当成主要用户、私聊对象或熟人。"
             )
+            return build_section(body)
 
         profile_uid = _single_line(profile.get("linked_qq_user_id") or profile.get("user_id") or uin, 40)
         stable_name = _single_line(profile.get("name"), 40) or name or profile_uid
@@ -247,10 +262,7 @@ class QzoneCommentMixin:
             if len(aliases) >= 4:
                 break
         identity_note = _single_line(profile.get("identity_note") or profile.get("note") or profile.get("content"), 120)
-        lines = [
-            "【评论者身份】",
-            f"已识别：{stable_name}[QQ:{profile_uid or uin or '未知'}]；{match_note or '命中关系网。'}",
-        ]
+        lines = [f"已识别：{stable_name}[QQ:{profile_uid or uin or '未知'}]；{match_note or '命中关系网。'}"]
         if name and name != stable_name:
             lines.append(f"当前空间显示名：{name}。")
         if aliases:
@@ -258,7 +270,7 @@ class QzoneCommentMixin:
         if identity_note:
             lines.append(f"关系备注：{identity_note}")
         lines.append("这些资料只用于判断称呼和边界，公开回复里不要复述关系网资料。")
-        return "\n".join(lines)
+        return build_section("\n".join(lines))
 
     def _qzone_post_time_text(self, value: Any) -> str:
         ts = _safe_float(value, 0)
@@ -273,6 +285,12 @@ class QzoneCommentMixin:
             return ""
 
     def _qzone_post_brief_context(self, post: Any) -> str:
+        return render_prompt_sections(
+            [self._qzone_post_brief_prompt_section(post)],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+
+    def _qzone_post_brief_prompt_section(self, post: Any):
         tid = _single_line(getattr(post, "tid", ""), 80)
         author = _single_line(getattr(post, "name", ""), 40) or _single_line(getattr(post, "uin", ""), 40) or "我"
         text = _single_line(getattr(post, "text", "") or getattr(post, "rt_con", ""), 240) or "无文本"
@@ -281,14 +299,14 @@ class QzoneCommentMixin:
         image_count = len(images) if isinstance(images, list) else 0
         post_type = "转发" if rt_text else ("图文" if image_count else "文字")
         created = self._qzone_post_time_text(getattr(post, "create_time", 0)) or "未知"
-        return (
-            "【所在说说】\n"
+        body = (
             f"说说ID：{tid or '未知'}\n"
             f"作者：{author}\n"
             f"发布时间：{created}\n"
             f"类型：{post_type}；图片数量：{image_count}\n"
             f"正文：{text}"
         )
+        return prompt_section(key="qzone.comment.post", title="所在说说", source="qzone_comments", content=body)
 
     async def _qzone_memory_companion_context(self, *, purpose: str, query: str = "") -> str:
         getter = getattr(self, "_memory_companion_compose_feature_context", None)
@@ -310,13 +328,13 @@ class QzoneCommentMixin:
             return {"decision": "skip", "reply": "", "reason": "评论为空"}
         if own_uin and _safe_int(getattr(comment, "uin", 0), 0, 0) == int(own_uin):
             return {"decision": "skip", "reply": "", "reason": "自己的评论"}
-        author_context = self._qzone_comment_author_context(comment)
-        post_context = self._qzone_post_brief_context(post)
+        author_section = self._qzone_comment_author_prompt_section(comment)
+        post_section = self._qzone_post_brief_prompt_section(post)
         memory_context = await self._qzone_memory_companion_context(
             purpose="comment_reply",
             query=f"QQ空间评论回复 {content} 所在说说 {_single_line(getattr(post, 'text', ''), 180)} 关系边界 最近公开生活",
         )
-        prompt = f"""
+        instruction = """
 你在处理 Bot 自己 QQ 空间说说下的新评论。请判断是否需要公开回复。
 只输出 JSON，不要解释。
 
@@ -336,21 +354,31 @@ class QzoneCommentMixin:
 
 输出格式：
 {{"decision":"reply|skip","reply":"","reason":"12字以内原因"}}
-
-{post_context}
-
-【评论者】
-{_single_line(getattr(comment, "name", ""), 40) or str(getattr(comment, "uin", "") or "对方")}
-
-{author_context}
-
-【我会牢牢记住你 公开边界参考】
-{memory_context or "暂无"}
-使用方式：只帮助判断公开回复边界和最近生活连续性；不要泄露私聊、记忆来源或内部记录。
-
-【评论内容】
-{content}
 """.strip()
+
+        prompt = "\n\n".join(
+            (
+                render_prompt_sections(
+                    [prompt_section(key="qzone.comment_reply.instruction", title="空间评论回复决策", source="qzone_comments", content=instruction)],
+                    mode=PromptRenderMode.BODY_ONLY,
+                ),
+                render_prompt_sections(
+                    [
+                        post_section,
+                        prompt_section(key="qzone.comment_reply.author", title="评论者", source="qzone_comments", content=_single_line(getattr(comment, "name", ""), 40) or str(getattr(comment, "uin", "") or "对方")),
+                        author_section,
+                        prompt_section(
+                            key="qzone.comment_reply.memory_boundary",
+                            title="我会牢牢记住你 公开边界参考",
+                            source="qzone_comments",
+                            content=(memory_context or "暂无") + "\n使用方式：只帮助判断公开回复边界和最近生活连续性；不要泄露私聊、记忆来源或内部记录。",
+                        ),
+                        prompt_section(key="qzone.comment_reply.content", title="评论内容", source="qzone_comments", content=content),
+                    ],
+                    mode=PromptRenderMode.LABELED_BLOCK,
+                ),
+            )
+        )
         raw = await self._llm_call(
             prompt,
             max_tokens=120,

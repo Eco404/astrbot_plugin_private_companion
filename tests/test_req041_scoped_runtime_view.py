@@ -8,6 +8,11 @@ import uuid
 
 from expression_scope_ownership import bind_expression_item
 from persona_config import runtime_persona_setting
+from conversation_prompt_section import (
+    PromptRenderMode,
+    prompt_section,
+    render_prompt_sections,
+)
 from scoped_runtime_view import (
     overlay_group_runtime_view,
     overlay_private_runtime_view,
@@ -205,6 +210,11 @@ _ExpressionHarness._expression_voice_selection = _method_from(
         "_safe_int": _safe_int,
         "runtime_persona_setting": runtime_persona_setting,
         "scoped_approved_expression_rules": scoped_approved_expression_rules,
+        "prompt_section": prompt_section,
+        "_render_conversation_section_labeled": lambda section: render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        ),
     },
 )
 
@@ -224,6 +234,8 @@ class ScopedLearningSelectionTests(unittest.TestCase):
         )
         self.assertEqual(["private-a"], [item["id"] for item in result["rules"]])
         self.assertNotIn("legacy-cross-domain", result["prompt"])
+        self.assertEqual("expression.voice", result["section"].key)
+        self.assertEqual("expression", result["section"].source)
         self.assertEqual("current_namespace", result["selection_scope"])
         self.assertEqual(0, harness.legacy_reads)
 

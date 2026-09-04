@@ -10,6 +10,7 @@ from astrbot_plugin_private_companion.conversation_injection_plan import (
     PLACEMENT_DYNAMIC_SYSTEM,
     get_conversation_injection_plan,
 )
+from astrbot_plugin_private_companion.conversation_prompt_section import prompt_section
 from astrbot_plugin_private_companion.private_scope_isolation import (
     GROUP_SCOPE_MARKERS,
     sanitize_private_request_group_artifacts,
@@ -145,17 +146,39 @@ class PrivateGroupPromptIsolationTests(unittest.TestCase):
         )
         plan = get_conversation_injection_plan(request)
         plan.add(
-            key="group.context",
+            section=prompt_section(
+                key="group.context",
+                title="群聊上下文",
+                source="group",
+                content="group-only",
+            ),
             marker="<!-- private_companion_group_context_v1 -->",
-            content="group-only",
-            source="group",
             placement=PLACEMENT_DYNAMIC_SYSTEM,
+            metadata={
+                "delivery_group_marker": "<!-- private_companion_group_context_v1 -->"
+            },
         )
         plan.add(
-            key="private.style",
+            section=prompt_section(
+                key="group.recent_atrelay",
+                title="群聊转述上下文",
+                source="group",
+                content="same-group-secondary",
+            ),
+            marker="",
+            placement=PLACEMENT_DYNAMIC_SYSTEM,
+            metadata={
+                "delivery_group_marker": "<!-- private_companion_group_context_v1 -->"
+            },
+        )
+        plan.add(
+            section=prompt_section(
+                key="private.style",
+                title="私聊风格",
+                source="style",
+                content="private-style",
+            ),
             marker="<!-- private_companion_reply_style_v1 -->",
-            content="private-style",
-            source="style",
             placement=PLACEMENT_DYNAMIC_SYSTEM,
         )
         plan.render_into(request)
@@ -165,8 +188,9 @@ class PrivateGroupPromptIsolationTests(unittest.TestCase):
         )
         plan.render_into(request)
 
-        self.assertEqual(1, removed)
+        self.assertEqual(2, removed)
         self.assertNotIn("group-only", request.system_prompt)
+        self.assertNotIn("same-group-secondary", request.system_prompt)
         self.assertIn("private-style", request.system_prompt)
         plan.freeze()
         with self.assertRaisesRegex(RuntimeError, "frozen"):

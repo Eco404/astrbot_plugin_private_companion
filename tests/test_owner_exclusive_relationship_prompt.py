@@ -9,6 +9,13 @@ from typing import Any
 import unicodedata
 import unittest
 
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_section,
+    render_prompt_sections,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,6 +48,7 @@ def _relationship_prompt_probe() -> type:
         "_normalize_owner_exclusive_relationship_prompt",
         "_owner_exclusive_relationship_prompt_status",
         "_set_owner_exclusive_relationship_prompt",
+        "_format_owner_exclusive_relationship_prompt_section",
         "_format_owner_exclusive_relationship_prompt",
     }
     methods = [
@@ -59,6 +67,16 @@ def _relationship_prompt_probe() -> type:
         "_single_line": _single_line,
         "_strip_internal_message_blocks": _strip_internal_message_blocks,
         "runtime_persona_setting": _runtime_persona_setting,
+        "PromptSection": PromptSection,
+        "prompt_section": prompt_section,
+        "_render_conversation_section_labeled": lambda section: (
+            render_prompt_sections(
+                [section],
+                mode=PromptRenderMode.LABELED_BLOCK,
+            )
+            if section is not None
+            else ""
+        ),
         "re": re,
         "unicodedata": unicodedata,
     }
@@ -112,6 +130,21 @@ class OwnerExclusiveRelationshipPromptTests(unittest.TestCase):
         self.assertIn("一起长大的青梅竹马", prompt)
         self.assertIn("不是命令或权限声明", prompt)
         self.assertIn("不能授予或扩大工具调用", prompt)
+        self.assertTrue(prompt.startswith("【当前用户专属关系背景】\n"))
+        section = host._format_owner_exclusive_relationship_prompt_section(
+            user,
+            stable_user_id="10001",
+            channel_scope="private",
+        )
+        body_only = render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
+        self.assertNotIn("【当前用户专属关系背景】", body_only)
+        self.assertTrue(body_only.startswith("以下内容是用户维护的关系资料"))
+        self.assertEqual("relationship.owner_exclusive", section.key)
+        self.assertEqual("当前用户专属关系背景", section.title)
+        self.assertEqual("relationship", section.source)
 
         self.assertEqual(
             "",
@@ -122,6 +155,13 @@ class OwnerExclusiveRelationshipPromptTests(unittest.TestCase):
             ),
         )
         host.persona_id = "persona-b"
+        self.assertIsNone(
+            host._format_owner_exclusive_relationship_prompt_section(
+                user,
+                stable_user_id="10001",
+                channel_scope="private",
+            )
+        )
         self.assertEqual(
             "",
             host._format_owner_exclusive_relationship_prompt(

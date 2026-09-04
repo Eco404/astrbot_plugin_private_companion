@@ -10,6 +10,7 @@ import unittest
 from types import SimpleNamespace
 
 from astrbot_plugin_private_companion.command_handlers import CommandHandlersMixin
+from astrbot_plugin_private_companion.conversation_prompt_section import PhotoPromptContent
 from astrbot_plugin_private_companion.llm_tool_actions import (
     LlmToolActionsMixin,
     PHOTO_TOOL_SILENT_SENTINEL,
@@ -831,8 +832,17 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
         prompt_sections = harness.generation_kwargs["prompt_sections"]
-        positive = "\n".join(section.positive for section in prompt_sections if section.positive)
-        negative = "\n".join(section.negative for section in prompt_sections if section.negative)
+        self.assertTrue(all(isinstance(section.content, PhotoPromptContent) for section in prompt_sections))
+        positive = "\n".join(
+            section.content.positive
+            for section in prompt_sections
+            if section.content.positive
+        )
+        negative = "\n".join(
+            section.content.negative
+            for section in prompt_sections
+            if section.content.negative
+        )
         self.assertEqual(payload["status"], "success")
         self.assertIn("multi-person photo based only on the explicitly supplied source reference", positive)
         self.assertNotIn("single character selfie", positive)
@@ -1051,10 +1061,11 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
         prompt_sections = harness.generation_kwargs["prompt_sections"]
+        self.assertTrue(all(isinstance(section.content, PhotoPromptContent) for section in prompt_sections))
         prompt_text = "\n".join(
             part
             for section in prompt_sections
-            for part in (section.positive, section.negative)
+            for part in (section.content.positive, section.content.negative)
             if part
         )
         self.assertEqual(harness.workflow_kind, "text2img")
@@ -1078,8 +1089,17 @@ class PhotoToolDeliveryContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
         prompt_sections = harness.generation_kwargs["prompt_sections"]
-        positive = "\n".join(section.positive for section in prompt_sections if section.positive)
-        negative = "\n".join(section.negative for section in prompt_sections if section.negative)
+        self.assertTrue(all(isinstance(section.content, PhotoPromptContent) for section in prompt_sections))
+        positive = "\n".join(
+            section.content.positive
+            for section in prompt_sections
+            if section.content.positive
+        )
+        negative = "\n".join(
+            section.content.negative
+            for section in prompt_sections
+            if section.content.negative
+        )
         self.assertEqual(harness.workflow_kind, "selfie")
         self.assertEqual(payload["intent_kind"], "selfie")
         self.assertIn("the requested back view is intentional", positive)

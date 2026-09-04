@@ -7,6 +7,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from astrbot_plugin_private_companion.conversation_prompt_section import ExactText, PromptSection
+
 from astrbot.api.message_components import Plain, Record
 
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
@@ -304,12 +306,43 @@ class ProactiveChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         correct = await harness._cancel_proactive_chat_bridge(SESSION_ID, token=prepared["token"])
 
         self.assertTrue(prepared["allowed"])
+        self.assertIsInstance(prepared["prompt_fragment_section"], PromptSection)
+        self.assertIsInstance(prepared["prompt_fragment_section"].content, ExactText)
+        self.assertEqual(
+            prepared["prompt_fragment"],
+            prepared["prompt_fragment_section"].content.text,
+        )
         self.assertIn("当前连续未回应次数：2", prepared["prompt_fragment"])
         self.assertIn("关系熟悉度：亲近", prepared["prompt_fragment"])
         self.assertIn("当前是傍晚", prepared["prompt_fragment"])
         self.assertIn("刚收好手边的东西", prepared["prompt_fragment"])
         self.assertIn("主动场景位置线索", prepared["prompt_fragment"])
         self.assertIn("已审核的表达学习规则", prepared["prompt_fragment"])
+        self.assertEqual(
+            "【Private Companion × Proactive Chat 联动】\n"
+            "这是一条由 Proactive Chat 定时触发的主动消息，不是在回复用户刚发来的话。\n"
+            "当前连续未回应次数：2。不要因此质问、催促或制造负担。\n"
+            "当前收件人是小明\n"
+            "【当前关系】\n"
+            "关系熟悉度：亲近；互动偏好：自然\n"
+            "【当前互动气氛】\n"
+            "气氛轻松\n"
+            "【当前时机】\n"
+            "当前是傍晚\n"
+            "【当前运行态】\n"
+            "当前关系稳定\n"
+            "【Bot 当前状态底色】\n"
+            "语气可以轻快一点\n"
+            "【主动场景位置线索】用户当前位于已标记地点“公司”（工作地点）范围内\n"
+            "【当前生活片段候选】\n"
+            "刚收好手边的东西\n"
+            "自然短句\n"
+            "【已审核的表达学习规则】\n"
+            "避免客服腔\n"
+            "先沿用 Proactive Chat 本轮自己的主动动机，再从以上信息中只取与当前收件人和此刻真正相关的少量线索；不要拼成状态播报。\n"
+            "只吸收与当前收件人、关系和时机有关的内容；不要提到插件、调度器、状态字段或联动过程。",
+            prepared["prompt_fragment"],
+        )
         self.assertFalse(wrong)
         self.assertTrue(correct)
         self.assertFalse(harness.data["users"]["10001"]["proactive_sending"])

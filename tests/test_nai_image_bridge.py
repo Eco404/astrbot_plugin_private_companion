@@ -6,11 +6,76 @@ from types import SimpleNamespace
 import pytest
 
 from astrbot_plugin_private_companion.nai_image_bridge import NAIImageBridgeMixin
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PhotoPromptContent,
+    PromptSection,
+    prompt_section,
+)
+
+
+def _photo_section(
+    name: str,
+    source: str,
+    positive: str = "",
+    negative: str = "",
+    protected: bool = False,
+    sanitize_conflicts: bool | None = None,
+) -> PromptSection:
+    return prompt_section(
+        key=f"photo.test.{source}.{name}",
+        title=name,
+        source="photo_prompt_context",
+        content=PhotoPromptContent(
+            positive=positive,
+            negative=negative,
+            domain_source=source,
+            protected=protected,
+            sanitize_conflicts=sanitize_conflicts,
+        ),
+    )
 
 
 class _BridgeHarness(NAIImageBridgeMixin):
     context = None
     photo_generation_backend = "nai"
+
+
+def test_nai_request_adapter_preserves_wire_dicts_and_serializes_typed_sections() -> None:
+    legacy = {
+        "name": "legacy",
+        "source": "scene_context",
+        "positive": "legacy scene",
+        "negative": "",
+        "protected": False,
+        "sanitize_conflicts": None,
+    }
+    typed = _photo_section(
+        "typed",
+        "fixed_prompt",
+        positive="cinematic light",
+        negative="watermark",
+        protected=True,
+    )
+
+    payload = _BridgeHarness._nai_image_request_payload(
+        {
+            "prompt_text": "portrait",
+            "prompt_sections": [legacy, typed],
+            "workflow_kind": "selfie",
+        }
+    )
+
+    assert payload["prompt_text"] == "portrait"
+    assert payload["workflow_kind"] == "selfie"
+    assert payload["prompt_sections"][0] is legacy
+    assert payload["prompt_sections"][1] == {
+        "name": "typed",
+        "source": "fixed_prompt",
+        "positive": "cinematic light",
+        "negative": "watermark",
+        "protected": True,
+        "sanitize_conflicts": None,
+    }
 
 
 @pytest.mark.asyncio

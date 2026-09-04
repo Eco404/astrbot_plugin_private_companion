@@ -5,6 +5,10 @@ import time
 import unittest
 from types import SimpleNamespace
 
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PromptSection,
+    render_prompt_sections,
+)
 from astrbot_plugin_private_companion.daily_state import DailyStateMixin
 
 
@@ -26,8 +30,15 @@ class _WeatherQueryHarness(DailyStateMixin):
         return marker in str(getattr(req, "system_prompt", "") or "")
 
     @staticmethod
-    def _append_turn_prompt_fragment_by_position(req, marker: str, text: str, **_kwargs) -> bool:
-        req.prompt = f"{req.prompt}\n\n{marker}\n{text}".strip()
+    def _append_turn_prompt_fragment_by_position(
+        req,
+        marker: str,
+        section: PromptSection,
+        **_kwargs,
+    ) -> bool:
+        req.prompt = (
+            f"{req.prompt}\n\n{marker}\n{render_prompt_sections([section])}".strip()
+        )
         return True
 
     async def _record_request_prompt_fragment(self, _event, **kwargs) -> None:

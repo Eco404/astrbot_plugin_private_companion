@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+from xml.etree import ElementTree as ET
 
 from astrbot_plugin_private_companion.astrbot_knowledge import AstrBotKnowledgeMixin
 from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PromptRenderMode,
     prompt_section,
     render_prompt_sections,
 )
@@ -14,6 +16,7 @@ from astrbot_plugin_private_companion.llm_tool_actions import LlmToolActionsMixi
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 from astrbot_plugin_private_companion.passive_state_pipeline import (
     _persona_core_emphasis_prompt_section,
+    _turn_continuation_prompt_section,
 )
 from astrbot_plugin_private_companion.platform_compat import PlatformCompatibilityMixin
 from astrbot_plugin_private_companion.private_image import PrivateImageMixin
@@ -67,7 +70,12 @@ class _WorldviewHarness(IntegrationStatusMixin):
 
     @staticmethod
     def _format_roleplay_knowledge_context_section(**_kwargs):
-        return prompt_section("AstrBot 知识库世界观参考", "世界资料")
+        return prompt_section(
+            key="worldview.astrbot_knowledge",
+            title="AstrBot 知识库世界观参考",
+            source="test",
+            content="世界资料",
+        )
 
 
 class _KnowledgeHarness(AstrBotKnowledgeMixin):
@@ -141,19 +149,99 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
         self.assertNotIn('<section title="提示词片段">', rendered)
         self.assert_no_legacy_headings(rendered)
 
+    def test_turn_continuation_uses_one_section_for_private_and_group_variants(self) -> None:
+        private_section = _turn_continuation_prompt_section(
+            "第一句\n第二句",
+            private_chat=True,
+        )
+        group_section = _turn_continuation_prompt_section(
+            "第一句\n第二句",
+            private_chat=False,
+        )
+
+        self.assertEqual("turn.continuation", private_section.key)
+        self.assertEqual("本轮用户连续补充", private_section.title)
+        private_body = render_prompt_sections(
+            [private_section],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
+        group_body = render_prompt_sections(
+            [group_section],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
+        self.assertIn("也不要表现得像用户重复催促", private_body)
+        self.assertNotIn("也不要表现得像用户重复催促", group_body)
+        self.assertIn("第一句\n第二句", private_body)
+
     def test_platform_boundary_keeps_legacy_text_and_structures_main_chain(self) -> None:
         harness = _PlatformHarness()
+        section = harness._platform_capability_prompt_section(None)
 
         self.assertTrue(harness._platform_capability_prompt(None).startswith("【QQ 官方机器人平台边界】\n"))
+        self.assertEqual("platform.qq_official_boundary", section.key)
+        self.assertEqual("platform_compat", section.source)
         rendered = render_prompt_sections(
             [
-                prompt_section("能力边界", "通用能力约束"),
-                harness._platform_capability_prompt_section(None),
+                prompt_section(
+                    key="guard.capability_boundary",
+                    title="能力边界",
+                    source="test",
+                    content="通用能力约束",
+                ),
+                section,
             ]
         )
 
         self.assertIn('<section title="QQ 官方机器人平台边界">', rendered)
         self.assert_no_legacy_headings(rendered)
+
+    async def test_capability_boundary_injection_keeps_platform_rule_as_a_sibling(self) -> None:
+        plugin = object.__new__(PrivateCompanionPlugin)
+        platform = _PlatformHarness()
+        plugin._platform_capability_prompt_section = platform._platform_capability_prompt_section
+        plugin._record_request_prompt_fragment = AsyncMock()
+        request = SimpleNamespace(
+            system_prompt="persona",
+            prompt="hello",
+            extra_user_content_parts=[],
+        )
+
+        await plugin._append_capability_boundary_to_request(SimpleNamespace(), request)
+
+        payload = ET.fromstring(request.system_prompt.split("\n\n", 1)[1])
+        self.assertEqual(
+            ["能力边界", "QQ 官方机器人平台边界"],
+            [item.attrib["title"] for item in payload.findall("./section")],
+        )
+        self.assertEqual([], payload.findall("./section/section"))
+        plugin._record_request_prompt_fragment.assert_awaited_once()
+
+    async def test_reply_style_and_technical_accuracy_are_sibling_sections(self) -> None:
+        plugin = object.__new__(PrivateCompanionPlugin)
+        plugin.passive_injection_position = "prompt"
+        plugin._format_reply_style_prompt_section = lambda: prompt_section(
+            key="reply.style",
+            title="回复风格约束",
+            source="reply_style",
+            content="保持自然简洁。",
+        )
+        plugin._record_request_prompt_fragment = AsyncMock()
+        event = SimpleNamespace(message_str="请解释这段代码")
+        request = SimpleNamespace(
+            system_prompt="persona",
+            prompt="请解释这段代码",
+            extra_user_content_parts=[],
+        )
+
+        await plugin._append_reply_style_to_request(event, request)
+
+        payload = ET.fromstring(request.extra_user_content_parts[0].text)
+        self.assertEqual(
+            ["回复风格约束", "技术解释准确性"],
+            [item.attrib["title"] for item in payload.findall("./section")],
+        )
+        self.assertEqual([], payload.findall("./section/section"))
+        plugin._record_request_prompt_fragment.assert_awaited_once()
 
     def test_group_denoise_splits_joke_boundary_and_preserves_legacy_output(self) -> None:
         plugin = object.__new__(PrivateCompanionPlugin)
@@ -172,9 +260,17 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
         rendered = render_prompt_sections(
             plugin._format_group_persona_denoise_prompt_sections(event)
         )
+        keys = [
+            section.key
+            for section in plugin._format_group_persona_denoise_prompt_sections(event)
+        ]
 
         self.assertTrue(legacy.startswith("【群聊人格降噪】\n"))
         self.assertIn("【群聊玩笑边界】", legacy)
+        self.assertEqual(
+            ["group.persona_denoise", "group.persona_denoise.joke_boundary"],
+            keys,
+        )
         self.assertIn('<section title="群聊人格降噪">', rendered)
         self.assertIn('<section title="群聊玩笑边界">', rendered)
         self.assert_no_legacy_headings(rendered)
@@ -183,10 +279,16 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
         harness = _LivingMemoryHarness()
 
         legacy = harness._format_livingmemory_guidance(scope="group")
+        sections = harness._format_livingmemory_guidance_sections(scope="group")
         rendered = render_prompt_sections(
-            harness._format_livingmemory_guidance_sections(scope="group")
+            sections
         )
 
+        self.assertEqual(
+            ["livingmemory.guidance", "livingmemory.group_joke_boundary"],
+            [section.key for section in sections],
+        )
+        self.assertTrue(all(section.source == "livingmemory" for section in sections))
         self.assertTrue(legacy.startswith("【长期记忆检索】\n"))
         self.assertIn("【群聊玩笑边界】", legacy)
         self.assertIn('<section title="长期记忆检索">', rendered)
@@ -202,17 +304,23 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
         )
 
         self.assertTrue(legacy.startswith("【书柜夹层】\n"))
-        self.assertIn('<section title="资料柜夹层">', rendered)
+        section = await harness._format_bookshelf_secret_prompt_section("密码是多少", {})
+        self.assertEqual("bookshelf.secret", section.key)
+        self.assertEqual("reading_archive", section.source)
+        self.assertIn('<section title="书柜夹层">', rendered)
         self.assert_no_legacy_headings(rendered)
 
     def test_worldview_splits_knowledge_reference_and_preserves_legacy_output(self) -> None:
         harness = _WorldviewHarness()
 
         legacy = harness._format_worldview_adaptation_prompt()
+        sections = harness._format_worldview_adaptation_prompt_sections()
         rendered = render_prompt_sections(
-            harness._format_worldview_adaptation_prompt_sections()
+            sections
         )
 
+        self.assertEqual("worldview.adaptation", sections[0].key)
+        self.assertEqual("integration_status", sections[0].source)
         self.assertTrue(legacy.startswith("【世界观适配】\n"))
         self.assertIn("【AstrBot 知识库世界观参考】", legacy)
         self.assertIn('<section title="世界观适配">', rendered)
@@ -223,10 +331,13 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
         harness = _KnowledgeHarness()
 
         legacy = harness._format_roleplay_knowledge_context(purpose="worldview")
+        section = harness._format_roleplay_knowledge_context_section(purpose="worldview")
         rendered = render_prompt_sections(
-            [harness._format_roleplay_knowledge_context_section(purpose="worldview")]
+            [section]
         )
 
+        self.assertEqual("worldview.astrbot_knowledge", section.key)
+        self.assertEqual("astrbot_knowledge", section.source)
         self.assertTrue(legacy.startswith("【AstrBot 知识库世界观参考】\n"))
         self.assertIn("天空城漂浮在云层上", rendered)
         self.assert_no_legacy_headings(rendered)
@@ -253,7 +364,12 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
             legacy = harness._format_recent_group_messages_for_private_image_prompt("user-1")
             rendered = render_prompt_sections(
                 [
-                    prompt_section("本轮图片回复边界", "优先回应当前图片。"),
+                    prompt_section(
+                        key="private.image_reply_boundary",
+                        title="本轮图片回复边界",
+                        source="test",
+                        content="优先回应当前图片。",
+                    ),
                     harness._format_recent_group_messages_for_private_image_prompt_section("user-1"),
                 ]
             )
@@ -265,7 +381,14 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
 
     def test_user_bracket_text_is_preserved(self) -> None:
         rendered = render_prompt_sections(
-            [prompt_section("引用内容", "用户原话是【这个括号要保留】")]
+            [
+                prompt_section(
+                    key="turn.quote",
+                    title="引用内容",
+                    source="test",
+                    content="用户原话是【这个括号要保留】",
+                )
+            ]
         )
 
         self.assertIn("【这个括号要保留】", rendered)

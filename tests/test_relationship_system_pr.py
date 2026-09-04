@@ -1404,7 +1404,8 @@ def test_non_adult_output_guard_and_shared_consumers_are_wired() -> None:
     plugin = next(node for node in main_tree.body if isinstance(node, ast.ClassDef) and node.name == "PrivateCompanionPlugin")
     hook = next(node for node in plugin.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "inject_unified_relationship_expression")
     hook_names = {node.id for node in ast.walk(hook) if isinstance(node, ast.Name)}
-    assert {"content_intent_from_text", "expression_decision_prompt"} <= hook_names
+    assert {"content_intent_from_text", "expression_decision_prompt_section"} <= hook_names
+    assert "prompt_section" not in hook_names
     assert "_private_companion_expression_decision" in ast.unparse(hook)
 
     for filename in ("proactive.py", "proactive_message.py"):
@@ -1465,7 +1466,7 @@ def test_legacy_relationship_state_has_no_parallel_expression_consumers() -> Non
     assert "_build_expression_decision_for_user" in tool_source
 
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert main_source.count("expression_decision_prompt(projection)") == 1
+    assert main_source.count("expression_decision_prompt_section(projection)") == 1
 
 
 def test_owner_group_projection_is_defaulted_and_never_mutates_real_relationship() -> None:

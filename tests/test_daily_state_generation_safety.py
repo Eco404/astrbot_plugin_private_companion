@@ -139,7 +139,10 @@ class DailyStateGenerationSafetyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(state.get("body_cycle"), "不处于生理期")
         self.assertEqual(state.get("conditions", []), [])
-        self.assertEqual(harness._format_active_period_boundary_for_prompt(state), "")
+        self.assertEqual(
+            harness._format_active_period_boundary_prompt_section(state).content,
+            "",
+        )
 
     async def test_force_state_failure_preserves_previous_state(self) -> None:
         harness = _StateHarness()

@@ -10,15 +10,34 @@ from __future__ import annotations
 from typing import Any
 
 
+from .conversation_prompt_section import PromptSection
 from .helpers import _single_line
 from .external_bridge_resolver import resolve_external_bridge
 from .persona_config import runtime_persona_setting
+from .photo_prompt_context import _photo_prompt_section_payload
 from .logging_util import get_module_logger
 
 logger = get_module_logger(__name__)
 
 
 class NAIImageBridgeMixin:
+    @staticmethod
+    def _nai_image_request_payload(request: dict[str, Any]) -> dict[str, Any]:
+        """Adapt canonical prompt sections without changing legacy request values."""
+
+        payload = dict(request)
+        sections = payload.get("prompt_sections")
+        if isinstance(sections, PromptSection):
+            payload["prompt_sections"] = _photo_prompt_section_payload(sections)
+        elif type(sections) in (list, tuple):
+            payload["prompt_sections"] = [
+                _photo_prompt_section_payload(item)
+                if isinstance(item, PromptSection)
+                else item
+                for item in sections
+            ]
+        return payload
+
     def _nai_image_api(self) -> Any | None:
         return resolve_external_bridge(
             self,
@@ -127,7 +146,7 @@ class NAIImageBridgeMixin:
                 "生图后端已选择 NAI 直连，请安装并启用 NAI 生图插件 astrbot_plugin_nai_image。",
             )
         try:
-            response = await generator(self, dict(request))
+            response = await generator(self, self._nai_image_request_payload(request))
         except Exception as exc:
             logger.warning(
                 "NAI 生图插件调用异常: workflow=%s error=%s",

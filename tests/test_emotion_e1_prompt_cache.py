@@ -41,7 +41,7 @@ class EmotionE1PromptCacheTests(unittest.TestCase):
         ]
         self.assertEqual([], assignments)
 
-    def test_forced_dynamic_fragments_ignore_system_prompt_preference(self) -> None:
+    def test_turn_fragment_helper_delegates_typed_section_and_force_dynamic(self) -> None:
         source = (ROOT / "main.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         helper = next(
@@ -50,10 +50,29 @@ class EmotionE1PromptCacheTests(unittest.TestCase):
             if isinstance(node, ast.FunctionDef)
             and node.name == "_append_turn_prompt_fragment_by_position"
         )
-        rendered = ast.unparse(helper)
-        self.assertIn("force_dynamic", rendered)
-        self.assertIn("and (not force_dynamic)", rendered)
-        self.assertIn("prefer_extra_user_content=True", rendered)
+        parameters = [arg.arg for arg in helper.args.args + helper.args.kwonlyargs]
+        self.assertEqual(
+            ["self", "req", "marker", "section", "priority", "force_dynamic"],
+            parameters,
+        )
+        for removed in ("key", "content", "title", "source", "structured", "opaque"):
+            self.assertNotIn(removed, parameters)
+
+        placement_calls = [
+            node
+            for node in ast.walk(helper)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_place_conversation_prompt_section"
+        ]
+        self.assertEqual(1, len(placement_calls))
+        call = placement_calls[0]
+        self.assertGreaterEqual(len(call.args), 3)
+        self.assertIsInstance(call.args[2], ast.Name)
+        self.assertEqual("section", call.args[2].id)
+        keywords = {item.arg: item.value for item in call.keywords if item.arg}
+        self.assertIsInstance(keywords.get("force_dynamic"), ast.Name)
+        self.assertEqual("force_dynamic", keywords["force_dynamic"].id)
 
 
 if __name__ == "__main__":

@@ -218,28 +218,46 @@ def settle_group_mood(
     }
 
 
-def summarize_group_mood(value: Any, *, now: Any, max_detail: int = 3) -> str:
-    """Human-readable mood paragraph for prompt injection."""
+def project_group_mood_prompt_facts(
+    value: Any,
+    *,
+    now: Any,
+    max_detail: int = 3,
+) -> dict[str, Any]:
+    """Return structured mood facts for the group prompt adapter."""
     mood = project_group_mood(value, now=now)
     if not mood:
-        return ""
+        return {}
     scores = mood.get("mood_scores") or {}
-    ranked = [label for label in sorted(MOOD_LABELS, key=lambda label: _finite(scores.get(label)), reverse=True) if _finite(scores.get(label)) >= 6.0]
-    parts: list[str] = []
-    if mood.get("top_mood") and mood.get("top_mood") != "dead_silence":
-        parts.append(f"当前氛围以「{MOOD_LABELS_ZH.get(mood.get('top_mood'), mood.get('top_mood'))}」为主")
-    for label in ranked[:max_detail]:
-        if label == mood.get("top_mood"):
-            continue
-        parts.append(f"含「{MOOD_LABELS_ZH.get(label, label)}」成分")
+    ranked = [
+        label
+        for label in sorted(
+            MOOD_LABELS,
+            key=lambda label: _finite(scores.get(label)),
+            reverse=True,
+        )
+        if _finite(scores.get(label)) >= 6.0
+    ]
+    top_mood = str(mood.get("top_mood") or "dead_silence")
+    detail_moods = [
+        {
+            "key": label,
+            "label": MOOD_LABELS_ZH.get(label, label),
+            "score": round(_finite(scores.get(label)), 2),
+        }
+        for label in ranked[: max(0, int(max_detail))]
+        if label != top_mood
+    ]
     tension = _finite(mood.get("social_tension"))
-    if tension >= 55:
-        parts.append(f"群内社交张力较高（{int(tension)}）")
-    elif tension <= 12:
-        parts.append("群内气氛轻松无火药味")
-    if not parts:
-        parts.append("群聊最近无明显情绪信号，保持自然回应")
-    return "；".join(parts)
+    tension_level = "high" if tension >= 55 else "low" if tension <= 12 else "normal"
+    return {
+        "top_mood": top_mood,
+        "top_mood_label": MOOD_LABELS_ZH.get(top_mood, top_mood),
+        "top_mood_score": round(_finite(scores.get(top_mood)), 2),
+        "detail_moods": detail_moods,
+        "social_tension": round(tension, 2),
+        "tension_level": tension_level,
+    }
 
 
 def _top_mood(scores: Mapping[str, Any]) -> str:
@@ -258,5 +276,5 @@ __all__ = [
     "MOOD_LABELS_ZH",
     "project_group_mood",
     "settle_group_mood",
-    "summarize_group_mood",
+    "project_group_mood_prompt_facts",
 ]

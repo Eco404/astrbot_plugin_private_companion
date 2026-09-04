@@ -71,7 +71,54 @@ from astrbot.core.star.star_handler import EventType, star_handlers_registry
 from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .conversation_prompt_section import prompt_section
+from .conversation_prompt_section import (
+    PhotoPromptContent,
+    PromptDocument,
+    PromptDocumentPart,
+    PromptLabel,
+    PromptLabelStyle,
+    PromptRenderMode,
+    PromptRenderSpec,
+    PromptSection,
+    exact_text,
+    prompt_cdata,
+    prompt_document,
+    prompt_document_part,
+    prompt_section,
+    render_prompt_document,
+    render_prompt_sections,
+)
+
+
+_PROACTIVE_DOCUMENT_RENDER = PromptRenderSpec(
+    mode=PromptRenderMode.LABELED_BLOCK,
+    trim=True,
+)
+
+
+def _proactive_prompt_part(
+    section: PromptSection,
+    *,
+    mode: PromptRenderMode | None = None,
+    label_style: PromptLabelStyle | None = None,
+    prefix: str = "",
+    separator_before: str = "\n\n",
+) -> PromptDocumentPart:
+    label = (
+        PromptLabel(style=label_style, separator=exact_text("\n"))
+        if label_style is not None
+        else None
+    )
+    return prompt_document_part(
+        section,
+        render_spec=PromptRenderSpec(
+            mode=PromptRenderMode.BODY_ONLY if label is not None else mode,
+            label=label,
+            prefix=exact_text(prefix) if prefix else None,
+            separator_before=exact_text(separator_before),
+            trim=True,
+        ),
+    )
 
 try:
     import chinese_calendar as calendar_cn
@@ -141,7 +188,9 @@ from .helpers import (
     _today_key,
     normalize_bot_relationship_cards,
 )
-from .memory_context_policy import core_memory_usage_contract
+from .memory_context_policy import (
+    core_memory_usage_contract_section,
+)
 from .final_response_persistence import (
     FinalResponsePersistenceMixin,
     collect_proactive_delivery,
@@ -181,7 +230,6 @@ from .photo_reference_catalog import (
     project_reference_candidate,
 )
 from .photo_prompt_context import (
-    PhotoPromptSection,
     _clip as _clip_photo_prompt_text,
     compile_local_photo_prompt,
     resolve_photo_prompt_context,
@@ -837,20 +885,39 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 schedule_context = str(schedule_sanitizer(schedule_context, user) or "").strip()
             except Exception:
                 schedule_context = ""
+        def labeled_bridge_section(key: str, title: str, content: str) -> str:
+            return render_prompt_sections(
+                [
+                    prompt_section(
+                        key=key,
+                        title=title,
+                        source="proactive_message",
+                        content=content,
+                    )
+                ],
+                mode=PromptRenderMode.LABELED_BLOCK,
+            )
+
+        bridge_intro = labeled_bridge_section(
+            "proactive_chat.bridge",
+            "Private Companion × Proactive Chat 联动",
+            (
+                "这是一条由 Proactive Chat 定时触发的主动消息，不是在回复用户刚发来的话。\n"
+                f"当前连续未回应次数：{max(0, int(unanswered_count or 0))}。不要因此质问、催促或制造负担。"
+            ),
+        )
         fragment = "\n".join(
             part
             for part in (
-                "【Private Companion × Proactive Chat 联动】",
-                "这是一条由 Proactive Chat 定时触发的主动消息，不是在回复用户刚发来的话。",
-                f"当前连续未回应次数：{max(0, int(unanswered_count or 0))}。不要因此质问、催促或制造负担。",
+                bridge_intro,
                 recipient_identity,
-                f"【当前关系】\n{relationship_context}" if relationship_context else "",
-                f"【当前互动气氛】\n{_single_line(intent_context, 360)}" if intent_context else "",
-                f"【当前时机】\n{time_context}" if time_context else "",
-                f"【当前运行态】\n{runtime_context}" if runtime_context else "",
-                f"【Bot 当前状态底色】\n{state_context}" if state_context else "",
+                labeled_bridge_section("proactive_chat.relationship", "当前关系", relationship_context) if relationship_context else "",
+                labeled_bridge_section("proactive_chat.atmosphere", "当前互动气氛", _single_line(intent_context, 360)) if intent_context else "",
+                labeled_bridge_section("proactive_chat.timing", "当前时机", time_context) if time_context else "",
+                labeled_bridge_section("proactive_chat.runtime", "当前运行态", runtime_context) if runtime_context else "",
+                labeled_bridge_section("proactive_chat.state", "Bot 当前状态底色", state_context) if state_context else "",
                 location_context,
-                f"【当前生活片段候选】\n{schedule_context[:700]}" if schedule_context and schedule_context != "（暂无）" else "",
+                labeled_bridge_section("proactive_chat.schedule", "当前生活片段候选", schedule_context[:700]) if schedule_context and schedule_context != "（暂无）" else "",
                 proactive_voice,
                 expression_voice,
                 "先沿用 Proactive Chat 本轮自己的主动动机，再从以上信息中只取与当前收件人和此刻真正相关的少量线索；不要拼成状态播报。",
@@ -878,6 +945,13 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "allowed": True,
             "token": token,
             "prompt_fragment": fragment[:5200].strip(),
+            "prompt_fragment_section": prompt_section(
+                key="proactive_chat.bridge.fragment",
+                title="Private Companion × Proactive Chat 联动",
+                source="proactive_message",
+                content=exact_text(fragment[:5200].strip()),
+                metadata={"wire": "legacy_exact"},
+            ),
             "user_id": user_id,
         }
 
@@ -1448,13 +1522,31 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
     def _format_recent_web_exploration_context_for_reply(
         self,
         inbound_text: str = "",
-        *,
-        as_section: bool = False,
-    ) -> str | dict[str, Any]:
+    ) -> str:
+        section = self._format_recent_web_exploration_context_prompt_section(inbound_text)
+        if section is None:
+            return ""
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+
+    def _format_recent_web_exploration_context_prompt_section(
+        self,
+        inbound_text: str = "",
+    ) -> PromptSection | None:
         if not runtime_persona_setting(self, "enable_web_exploration", False):
-            return ""
+            return None
         if not self._user_asks_web_exploration_context(inbound_text):
-            return ""
+            return None
+        def build_section(content: str) -> PromptSection:
+            return prompt_section(
+                key="web_exploration.recent",
+                title="主动搜索上下文",
+                source="web_exploration",
+                content=content,
+            )
+
         state = self.data.get("web_exploration") if isinstance(self.data.get("web_exploration"), dict) else {}
         digest = state.get("last_digest") if isinstance(state.get("last_digest"), dict) else {}
         notes = state.get("notes") if isinstance(state.get("notes"), list) else []
@@ -1463,7 +1555,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             body = (
                 "用户正在询问你最近主动搜索/上网探索过什么,但当前没有可用的主动搜索记录。请自然说明自己最近还没搜到能说的东西,不要编造搜索内容。"
             )
-            return prompt_section("主动搜索上下文", body) if as_section else "【主动搜索上下文】\n" + body
+            return build_section(body)
         rows: list[str] = []
         if digest:
             rows.append(
@@ -1504,18 +1596,36 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "可以用第一人称自然概括“我刚查了/我之前搜到”,但不要说成后台系统日志。\n"
             + "\n".join(rows[:12])
         )
-        return prompt_section("主动搜索上下文", body) if as_section else "【主动搜索上下文】\n" + body
+        return build_section(body)
 
     def _format_recent_ai_daily_context_for_reply(
         self,
         inbound_text: str = "",
-        *,
-        as_section: bool = False,
-    ) -> str | dict[str, Any]:
+    ) -> str:
+        section = self._format_recent_ai_daily_context_prompt_section(inbound_text)
+        if section is None:
+            return ""
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+
+    def _format_recent_ai_daily_context_prompt_section(
+        self,
+        inbound_text: str = "",
+    ) -> PromptSection | None:
         if not runtime_persona_setting(self, "enable_news_integration", False):
-            return ""
+            return None
         if not self._user_asks_ai_daily_context(inbound_text):
-            return ""
+            return None
+        def build_section(content: str) -> PromptSection:
+            return prompt_section(
+                key="news.ai_daily_context",
+                title="新闻阅读上下文",
+                source="news",
+                content=content,
+            )
+
         state = self.data.get("news_integration") if isinstance(self.data.get("news_integration"), dict) else {}
         ai_state = state.get("ai_daily") if isinstance(state.get("ai_daily"), dict) else {}
         digest, selected_item = self._select_ai_daily_digest_item(ai_state)
@@ -1536,7 +1646,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             body = (
                 "用户正在询问 AI 日报/早报,但当前没有可用的 AI 日报记录。请直接说明最近还没读到可确认的 AI 日报,不要编造。"
             )
-            return prompt_section("新闻阅读上下文", body) if as_section else "【新闻阅读上下文】\n" + body
+            return build_section(body)
         today = _today_key()
         rows: list[str] = []
         if record_date:
@@ -1566,24 +1676,39 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "回答只能基于这些内容，不要编造额外新闻。\n"
             + "\n".join(rows[:10])
         )
-        return prompt_section("新闻阅读上下文", body) if as_section else "【新闻阅读上下文】\n" + body
+        return build_section(body)
 
     def _format_recent_news_context_for_reply(
         self,
         inbound_text: str = "",
-        *,
-        as_section: bool = False,
-    ) -> str | dict[str, Any]:
-        if not runtime_persona_setting(self, "enable_news_integration", False):
+    ) -> str:
+        section = self._format_recent_news_context_prompt_section(inbound_text)
+        if section is None:
             return ""
-        ai_daily_context = self._format_recent_ai_daily_context_for_reply(
-            inbound_text,
-            as_section=as_section,
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LABELED_BLOCK,
         )
-        if ai_daily_context:
+
+    def _format_recent_news_context_prompt_section(
+        self,
+        inbound_text: str = "",
+    ) -> PromptSection | None:
+        if not runtime_persona_setting(self, "enable_news_integration", False):
+            return None
+        ai_daily_context = self._format_recent_ai_daily_context_prompt_section(inbound_text)
+        if ai_daily_context is not None:
             return ai_daily_context
         if not self._user_asks_news_context(inbound_text):
-            return ""
+            return None
+        def build_section(content: str) -> PromptSection:
+            return prompt_section(
+                key="news.recent",
+                title="新闻阅读上下文",
+                source="news",
+                content=content,
+            )
+
         state = self.data.get("news_integration") if isinstance(self.data.get("news_integration"), dict) else {}
         digest = state.get("last_digest") if isinstance(state.get("last_digest"), dict) else {}
         digests = state.get("digests") if isinstance(state.get("digests"), list) else []
@@ -1592,7 +1717,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             body = (
                 "用户正在询问今天的新闻/AI 新闻,但当前还没有可用的新闻阅读记录。请自然说明自己还没读到今天的新闻,不要编造新闻。"
             )
-            return prompt_section("新闻阅读上下文", body) if as_section else "【新闻阅读上下文】\n" + body
+            return build_section(body)
         rows: list[str] = []
         if digest:
             rows.append(
@@ -1629,7 +1754,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "可以按人格自然概括,如果记录不够新或不完整,要直接说明。\n"
             + "\n".join(rows[:12])
         )
-        return prompt_section("新闻阅读上下文", body) if as_section else "【新闻阅读上下文】\n" + body
+        return build_section(body)
 
     def _format_news_digest_for_command(self) -> str:
         state = self.data.get("news_integration") if isinstance(self.data.get("news_integration"), dict) else {}
@@ -1893,13 +2018,60 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         return "\n".join(part for part in parts if part)
 
     @staticmethod
-    def _creative_share_excerpt_prompt_hint() -> str:
-        return (
-            "【创作分享的正文边界】\n"
-            "- 如果要把作品原文发给对方，只能从“刚写到的片段”中连续截取，不得改写、拼接或另编一段冒充原文。\n"
-            "- 把实际作品摘录完整放在一组成对的 `「...」` 中；`「」` 内只放作品原文，聊天式引入、感受、提问和收尾都放在引号外。\n"
-            "- 不要把整条聊天都包进 `「」`。如果本轮只聊创作进度、没有实际摘录作品，就不要使用 `「」`。\n"
-            "- `「...」` 会作为一个完整作品气泡发送；它前后的普通聊天仍按自然聊天节奏分段。"
+    def _creative_share_excerpt_prompt_section() -> PromptSection:
+        return prompt_section(
+            key="proactive.creative_excerpt",
+            title="创作分享的正文边界",
+            source="proactive_message",
+            content=(
+                "- 如果要把作品原文发给对方，只能从“刚写到的片段”中连续截取，不得改写、拼接或另编一段冒充原文。\n"
+                "- 把实际作品摘录完整放在一组成对的 `「...」` 中；`「」` 内只放作品原文，聊天式引入、感受、提问和收尾都放在引号外。\n"
+                "- 不要把整条聊天都包进 `「」`。如果本轮只聊创作进度、没有实际摘录作品，就不要使用 `「」`。\n"
+                "- `「...」` 会作为一个完整作品气泡发送；它前后的普通聊天仍按自然聊天节奏分段。"
+            ),
+        )
+
+    @classmethod
+    def _creative_share_excerpt_prompt_hint(cls) -> str:
+        return render_prompt_sections(
+            [cls._creative_share_excerpt_prompt_section()],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+
+    @staticmethod
+    def _screen_narration_prompt_document(
+        *,
+        screen_term: str,
+        worldview_adaptation: str,
+        cleaned_context: str,
+    ) -> PromptDocument:
+        return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
+            user=(
+                _proactive_prompt_part(prompt_section(
+                    key="background.screen_narration",
+                    title="屏幕观察内部摘要",
+                    source="proactive_message",
+                    template=(
+                        "请把下面的{screen_term}观察结果转成“视觉识别后的内部摘要”,供角色继续私聊使用。\n"
+                        "要求：\n"
+                        "1. 只描述视觉上看出来的内容,不要猜测工具调用过程,不要输出工具名、action 名、报错栈。\n"
+                        "2. 只概括用户大概正在看什么、做什么、情绪上是否像在忙,不要复述完整文字、账号、聊天原文、隐私细节。\n"
+                        "3. 绝对不要直接对用户说话,不要安慰、提醒、陪伴、劝休息,不要写成一条完整回复。\n"
+                        "4. 要像看了一眼{screen_term}后留在脑子里的印象,不要写成建议列表。\n"
+                        "5. 50 字以内,只输出摘要本身。\n\n"
+                        "{worldview_adaptation}\n\n"
+                        "原始结果：\n"
+                        "{cleaned_context}"
+                    ),
+                    variables={
+                        "screen_term": screen_term,
+                        "worldview_adaptation": worldview_adaptation,
+                        "cleaned_context": cleaned_context,
+                    },
+                ), mode=PromptRenderMode.BODY_ONLY),
+            ),
+            metadata={"task": "screen_narration"},
         )
 
     async def _narrate_action_context(self, action: str, action_context: str) -> str:
@@ -1913,20 +2085,13 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         cleaned_context = self._sanitize_action_context_text(action, action_context)
         terms = self._worldview_terms()
         worldview_adaptation = self._format_worldview_adaptation_prompt()
-        prompt = f"""
-请把下面的{terms['screen']}观察结果转成“视觉识别后的内部摘要”,供角色继续私聊使用。
-要求：
-1. 只描述视觉上看出来的内容,不要猜测工具调用过程,不要输出工具名、action 名、报错栈。
-2. 只概括用户大概正在看什么、做什么、情绪上是否像在忙,不要复述完整文字、账号、聊天原文、隐私细节。
-3. 绝对不要直接对用户说话,不要安慰、提醒、陪伴、劝休息,不要写成一条完整回复。
-4. 要像看了一眼{terms['screen']}后留在脑子里的印象,不要写成建议列表。
-5. 50 字以内,只输出摘要本身。
-
-{worldview_adaptation}
-
-原始结果：
-{cleaned_context}
-""".strip()
+        prompt = render_prompt_document(
+            self._screen_narration_prompt_document(
+                screen_term=terms["screen"],
+                worldview_adaptation=worldview_adaptation,
+                cleaned_context=cleaned_context,
+            )
+        )["user"]
         text = await self._llm_call(
             prompt,
             max_tokens=80,
@@ -2008,7 +2173,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         )
         return "；".join(parts) if parts else "只作为语气底色：整体平稳,不要在正文里汇报状态。"
 
-    def _proactive_expression_shape_hint(
+    def _proactive_expression_shape_prompt_section(
         self,
         user: dict[str, Any],
         *,
@@ -2019,7 +2184,6 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         state = self.data.get("daily_state", {})
         energy = _safe_int(state.get("energy"), 70, 0, 100) if isinstance(state, dict) else 70
         lines = [
-            "【主动消息的表达形状】",
             "主动消息通常比正式回复更碎、更口语；大多数控制在 20 个汉字左右，能停在半句就不要补成完整段落。",
             "除非语义确实需要，不要每句都用完整句号收尾；不要为了显得自然而堆叠解释、背景和客套。",
         ]
@@ -2049,7 +2213,24 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 "如果正文只是‘收到/好的/笑死/辛苦了’这类语义明确的短回应，"
                 "可以考虑在正文之后追加一个匹配情绪的语义表情标签；正文较长、信息重要或语气不确定时不要追加。"
             )
-        return "\n".join(lines)
+        return prompt_section(
+            key="proactive.expression_shape",
+            title="主动消息的表达形状",
+            source="proactive_message",
+            content="\n".join(lines),
+        )
+
+    def _proactive_expression_shape_hint(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str,
+        action: str,
+    ) -> str:
+        return render_prompt_sections(
+            [self._proactive_expression_shape_prompt_section(user, reason=reason, action=action)],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
 
     def _format_plan_item_for_framework_prompt(self, item: dict[str, Any] | None) -> str:
         if not isinstance(item, dict):
@@ -2366,16 +2547,16 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 exclusive_context = ""
         return "\n\n".join(part for part in (relationship_fact, exclusive_context) if part)
 
-    def _format_proactive_relationship_initiative_hint(
+    def _format_proactive_relationship_initiative_prompt_section(
         self,
         user: dict[str, Any],
         *,
         reason: str = "",
         action: str = "message",
-    ) -> str:
+    ) -> PromptSection | None:
         """Offer high-affinity relational initiative without making it a quota."""
         if not isinstance(user, dict) or _safe_int(user.get("ignored_streak"), 0, 0) > 0:
-            return ""
+            return None
         allowed_reasons = {
             "activity_share",
             "background_schedule",
@@ -2386,24 +2567,23 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "state_share",
         }
         if _single_line(reason, 48) not in allowed_reasons:
-            return ""
+            return None
         normalized_action = _single_line(action, 80).lower()
         if not normalized_action or any(token in normalized_action for token in ("photo", "image", "screen")):
-            return ""
+            return None
         profile_getter = getattr(self, "_relationship_profile", None)
         if not callable(profile_getter):
-            return ""
+            return None
         try:
             profile = profile_getter(user)
         except Exception:
-            return ""
+            return None
         if not isinstance(profile, dict):
-            return ""
+            return None
         stage_key = _single_line(profile.get("stage_key"), 32).lower()
         if stage_key not in {"close", "intimate", "deeply_bonded"}:
-            return ""
+            return None
         lines = [
-            "【高亲密关系主动性】",
             "- 如果本轮原本就是想靠近、关系试探或想听对方的声音，可以把泛泛关心变成一次具体而真诚的好奇：好奇用户自己的想法、对彼此相处的感受，或想一起形成的小默契。一次只选一个，不盘问，也不抢过明确的事实话题。",
             "- 这种好奇是偶尔出现的关系表达，不是每条主动消息的固定任务；不要试探用户是否喜欢你，不索取表态、秘密、承诺、排他性或即时回复。",
         ]
@@ -2412,7 +2592,30 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 "- 也可以自然请用户帮一个低负担、很具体且容易拒绝的小忙，例如给一个选择或意见、推荐一首歌、替某样东西取名，或拍一张指定主题但不敏感的生活照片。请求要来自当前话题或角色自己的真实愿望，不能只是随意给用户派任务。"
                 "照片可以是此刻看到的天空、手边物件、食物或环境一角；不要索取人脸、身体私密部位、证件票据、屏幕聊天、门牌住址、实时定位或他人隐私。不能命令、查岗、要求证明感情，也不能把拒绝或没回复写成关系受损。"
             )
-        return "\n".join(lines)
+        return prompt_section(
+            key="proactive.relationship_initiative",
+            title="高亲密关系主动性",
+            source="proactive_message",
+            content="\n".join(lines),
+        )
+
+    def _format_proactive_relationship_initiative_hint(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str = "",
+        action: str = "message",
+    ) -> str:
+        section = self._format_proactive_relationship_initiative_prompt_section(
+            user,
+            reason=reason,
+            action=action,
+        )
+        return (
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
+            if section is not None
+            else ""
+        )
 
     @staticmethod
     def _normalize_proactive_address_token(value: Any) -> str:
@@ -2488,9 +2691,13 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             forbidden.append(candidate)
         return forbidden
 
-    def _format_proactive_recipient_identity_guard(self, user: dict[str, Any] | None, name: str = "") -> str:
+    def _format_proactive_recipient_identity_guard_prompt_section(
+        self,
+        user: dict[str, Any] | None,
+        name: str = "",
+    ) -> PromptSection | None:
         if not isinstance(user, dict):
-            return ""
+            return None
         role = self._private_user_role(user)
         labeler = getattr(self, "_private_user_role_label", None)
         role_label = labeler(role) if callable(labeler) else ("主要用户" if role == "owner" else "次要用户")
@@ -2504,7 +2711,6 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         allowed = self._proactive_recipient_allowed_names(user, name)
         forbidden = self._proactive_forbidden_recipient_addresses(user, name)
         lines = [
-            "【当前主动消息收件人身份锚点】",
             f"- 稳定 ID：{user_id or '未知'}；关系角色：{role_label}。",
             (
                 f"- 已验证平台主体：{subject_id}；平台：{platform_kind}；账号实例：{account_instance}。"
@@ -2522,15 +2728,61 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 lines.append(f"- 这些固定称呼不属于当前对象：{'、'.join(forbidden)}。需要称呼时使用上面的当前昵称，也可以自然省略称呼。")
         else:
             lines.append("- 如果人格明确规定了对主要用户的专属称呼，优先遵循该称呼；不要把当前显示名自行拼接后缀来发明新称呼。")
-        boundary_getter = getattr(self, "_format_private_user_boundary_hint", None)
-        if callable(boundary_getter):
+        boundary_section_getter = getattr(
+            self,
+            "_format_private_user_boundary_prompt_section",
+            None,
+        )
+        boundary_section: PromptSection | None = None
+        if callable(boundary_section_getter):
             try:
-                boundary = str(boundary_getter(user) or "").strip()
+                candidate = boundary_section_getter(user)
             except Exception:
-                boundary = ""
-            if boundary:
-                lines.append(boundary)
-        return "\n".join(lines)
+                candidate = None
+            if isinstance(candidate, PromptSection):
+                boundary_section = candidate
+        return prompt_section(
+            key="proactive.recipient_identity",
+            title="当前主动消息收件人身份锚点",
+            source="proactive_message",
+            content="\n".join(lines),
+            children=(boundary_section,) if boundary_section is not None else (),
+        )
+
+    def _format_proactive_recipient_identity_guard(
+        self,
+        user: dict[str, Any] | None,
+        name: str = "",
+    ) -> str:
+        section = self._format_proactive_recipient_identity_guard_prompt_section(user, name)
+        return (
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
+            if section is not None
+            else ""
+        )
+
+    def _proactive_recipient_identity_prompt_text(
+        self,
+        user: dict[str, Any] | None,
+        name: str = "",
+    ) -> str:
+        try:
+            section = self._format_proactive_recipient_identity_guard_prompt_section(user, name)
+        except (AttributeError, TypeError):
+            section = None
+        if section is not None:
+            return render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
+        legacy_formatter = getattr(self, "_format_proactive_recipient_identity_guard", None)
+        if (
+            callable(legacy_formatter)
+            and getattr(legacy_formatter, "__func__", None)
+            is not ProactiveMessageMixin._format_proactive_recipient_identity_guard
+        ):
+            try:
+                return str(legacy_formatter(user, name) or "").strip()
+            except Exception:
+                pass
+        return ""
 
     async def _resolve_proactive_persona_prompt(self, user: dict[str, Any] | None = None, *, umo: str = "") -> str:
         session = str(umo or (user.get("umo") if isinstance(user, dict) else "") or "").strip()
@@ -2589,35 +2841,93 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         repaired, count = re.subn(pattern, lambda match: f"{match.group(1)}{replacement}", cleaned, count=1)
         return (repaired, wrong) if count else (cleaned, "")
 
+    def _default_proactive_prompt_document(
+        self,
+        variables: dict[str, Any] | None = None,
+    ) -> PromptDocument:
+        values = dict(variables or {})
+
+        def value(name: str) -> Any:
+            return values.get(name, "{{" + name + "}}")
+
+        return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
+            user=(
+                _proactive_prompt_part(prompt_section(
+                    key="proactive.template.introduction",
+                    title="主动私聊任务",
+                    source="proactive_message",
+                    template=(
+                        "你正在给 {name} 发一条主动私聊。这不是回复刚收到的新消息，也不是任务说明、"
+                        "状态汇报或例行打卡。"
+                    ),
+                    variables={"name": value("name")},
+                ), mode=PromptRenderMode.BODY_ONLY),
+                prompt_section(
+                    key="proactive.template.clues",
+                    title="这次可以使用的线索",
+                    source="proactive_message",
+                    template=(
+                        "当前时间：{current_time}。{unanswered_hint}\n"
+                        "开口动机：{motive}。话题方向：{topic}。刚发生或看到的事：{action_context}。\n"
+                        "此刻状态：{state_hint}。生活片段（只作叙事背景，不等同于已执行事实）："
+                        "{current_schedule}。时段边界：{time_guard}。\n"
+                        "最近已经主动聊过：{recent_topics}。关系事实：{relationship_fact}。\n"
+                        "{timer_hint}\n"
+                        "{expression_shape_hint}"
+                    ),
+                    variables={
+                        "current_time": value("current_time"),
+                        "unanswered_hint": value("unanswered_hint"),
+                        "motive": value("motive"),
+                        "topic": value("topic"),
+                        "action_context": value("action_context"),
+                        "state_hint": value("state_hint"),
+                        "current_schedule": value("current_schedule"),
+                        "time_guard": value("time_guard"),
+                        "recent_topics": value("recent_topics"),
+                        "relationship_fact": value("relationship_fact"),
+                        "timer_hint": value("timer_hint"),
+                        "expression_shape_hint": value("expression_shape_hint"),
+                    },
+                ),
+                prompt_section(
+                    key="proactive.template.selection",
+                    title="先判断，再开口",
+                    source="proactive_message",
+                    content=(
+                        "- 从线索中只选一个此刻最真实、最具体、最值得说的切口；无关线索直接忽略。\n"
+                        "- 天气通常只是环境底色，不是默认话题。只有“话题方向/开口动机”明确来自刚发生的环境突变或当前官方预警时，才把天气写进正文；其他主动不要顺手聊天气、报温度、问对方那边天气如何。\n"
+                        "- 开口动机是内部决策依据，不是你要说出口的话；不要照抄动机里的措辞，用你自己的方式开口。\n"
+                        "- 有明确的人、事、画面或感受时，就贴着它说；不要把多个来源拼成一段“近况播报”。\n"
+                        "- 日程、状态和记忆只能帮助确定语气与话题，不可单独证明某个动作已经完成；只有本轮真实动作结果可以支撑具体的已发生陈述。\n"
+                        "- 线索偏弱、对方尚未回复或时段不适合展开时，把话说得更轻：可以分享、留白或自然收住，但不追问、不催回应、不索取陪伴。\n"
+                        "- 不要凭空补事实，不要把旧事写成刚刚发生；不要为了主动而主动。"
+                    ),
+                ),
+                prompt_section(
+                    key="proactive.template.composition",
+                    title="成文方式",
+                    source="proactive_message",
+                    content=(
+                        "- 像角色在聊天窗口里自然想到后说出的一小句，而不是客服关怀、情绪鸡汤、日记、总结、推荐文或任务汇报。\n"
+                        "- 口语、具体、有一点个人温度；少解释，不复述上下文，不列清单，不使用“检测到/根据/安排/提醒你”等系统或管理口吻。\n"
+                        "- 如果想关心对方，用能自然接住的话表达，不把“在吗”“忙不忙”“怎么不回”“记得回复”当作开场。\n"
+                        "- 一两句即可；一个画面、一点感受或一个轻问题已经足够。说完就停，不追加自我解释或结尾客套。"
+                    ),
+                ),
+                _proactive_prompt_part(prompt_section(
+                    key="proactive.template.output",
+                    title="主动私聊输出要求",
+                    source="proactive_message",
+                    content="最终文本会直接成为聊天窗口里的下一句话。只输出要发出的正文，不要标题、引号、前缀、分析或说明。",
+                ), mode=PromptRenderMode.BODY_ONLY),
+            ),
+            metadata={"kind": "proactive_generation_template"},
+        )
+
     def _default_proactive_prompt_template(self) -> str:
-        return """
-你正在给 {{name}} 发一条主动私聊。这不是回复刚收到的新消息，也不是任务说明、状态汇报或例行打卡。
-
-【这次可以使用的线索】
-当前时间：{{current_time}}。{{unanswered_hint}}
-开口动机：{{motive}}。话题方向：{{topic}}。刚发生或看到的事：{{action_context}}。
-此刻状态：{{state_hint}}。生活片段（只作叙事背景，不等同于已执行事实）：{{current_schedule}}。时段边界：{{time_guard}}。
-最近已经主动聊过：{{recent_topics}}。关系事实：{{relationship_fact}}。
-{{timer_hint}}
-{{expression_shape_hint}}
-
-【先判断，再开口】
-- 从线索中只选一个此刻最真实、最具体、最值得说的切口；无关线索直接忽略。
-- 天气通常只是环境底色，不是默认话题。只有“话题方向/开口动机”明确来自刚发生的环境突变或当前官方预警时，才把天气写进正文；其他主动不要顺手聊天气、报温度、问对方那边天气如何。
-- 开口动机是内部决策依据，不是你要说出口的话；不要照抄动机里的措辞，用你自己的方式开口。
-- 有明确的人、事、画面或感受时，就贴着它说；不要把多个来源拼成一段“近况播报”。
-- 日程、状态和记忆只能帮助确定语气与话题，不可单独证明某个动作已经完成；只有本轮真实动作结果可以支撑具体的已发生陈述。
-- 线索偏弱、对方尚未回复或时段不适合展开时，把话说得更轻：可以分享、留白或自然收住，但不追问、不催回应、不索取陪伴。
-- 不要凭空补事实，不要把旧事写成刚刚发生；不要为了主动而主动。
-
-【成文方式】
-- 像角色在聊天窗口里自然想到后说出的一小句，而不是客服关怀、情绪鸡汤、日记、总结、推荐文或任务汇报。
-- 口语、具体、有一点个人温度；少解释，不复述上下文，不列清单，不使用“检测到/根据/安排/提醒你”等系统或管理口吻。
-- 如果想关心对方，用能自然接住的话表达，不把“在吗”“忙不忙”“怎么不回”“记得回复”当作开场。
-- 一两句即可；一个画面、一点感受或一个轻问题已经足够。说完就停，不追加自我解释或结尾客套。
-
-最终文本会直接成为聊天窗口里的下一句话。只输出要发出的正文，不要标题、引号、前缀、分析或说明。
-""".strip()
+        return render_prompt_document(self._default_proactive_prompt_document())["user"]
 
     def _proactive_reaction_expression_enabled(self, action: str = "message") -> bool:
         normalized_action = _single_line(action, 40).lower().split("+")[-1]
@@ -2679,9 +2989,12 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         entry = self._proactive_reaction_intent_cache().pop(key, None)
         return entry if isinstance(entry, dict) else {}
 
-    def _proactive_reaction_expression_prompt_hint(self, action: str) -> str:
+    def _proactive_reaction_expression_prompt_section(
+        self,
+        action: str,
+    ) -> PromptSection | None:
         if not self._proactive_reaction_expression_enabled(action):
-            return ""
+            return None
         high_frequency_hint = (
             "- 当前触发概率为 100%：只要正文是轻松、社交或带明确情绪的正常主动消息，默认追加标签；"
             "不要把‘是否自然’再次当作概率筛选。事实通知、严肃或敏感话题、低压提醒和边界场景仍只输出正文。"
@@ -2690,8 +3003,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             )
             else "- 只有轻松分享、玩笑、庆祝、撒娇、接梗、轻吐槽、温和安慰，或‘收到/好的/笑死’这类语义明确的短回应中，追加一张表情包确实比纯文字更自然时，才在全部可见正文之后留下一个内部标签。"
         )
-        return """
-【主动消息的可选表情表达】
+        content = """
 - 通常先写一条完整、自然、没有图片也能独立成立的主动私聊正文；除下一条明确允许的轻量插话外，表情包只补充语气，不替代、缩短或省略正文。
 - 只有在低信息量的主动插话（例如轻轻打招呼、接梗、表达一个明确情绪）中，纯表情包比文字更自然时，才允许省略正文，并在标签 JSON 中设置 `"sticker_only":true`；事实通知、提醒、重要信息、关系边界不明或语气不确定时禁止只发图。
 - __HIGH_FREQUENCY_HINT__
@@ -2701,6 +3013,20 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
 - 每条主动消息最多一个标签，放在全部可见正文和 TTS 标签之后；不要用 Markdown 代码块，不要解释这个标签，也不要调用图片工具。
 - 插件之后仍可能因概率、冷却、用户偏好、重复图片或图库不匹配而只发送正文；正文必须始终自然成立。
         """.replace("__HIGH_FREQUENCY_HINT__", high_frequency_hint).strip()
+        return prompt_section(
+            key="proactive.reaction_expression",
+            title="主动消息的可选表情表达",
+            source="proactive_message",
+            content=content,
+        )
+
+    def _proactive_reaction_expression_prompt_hint(self, action: str) -> str:
+        section = self._proactive_reaction_expression_prompt_section(action)
+        return (
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
+            if section is not None
+            else ""
+        )
 
     @staticmethod
     def _proactive_reaction_text_is_compact(visible_text: Any) -> bool:
@@ -2803,15 +3129,29 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             ),
         )
 
-    def _proactive_natural_delivery_hint(self) -> str:
-        return (
-            "【自然交付提醒】\n"
-            "这一轮的最终文本会成为对话里的下一句。"
-            "请把注意力放在这句聊天内容本身，像平时主动开口那样自然收住；"
-            "过程中的执行状态只供系统判断，不需要写进正文。"
+    def _proactive_natural_delivery_prompt_section(self) -> PromptSection:
+        return prompt_section(
+            key="proactive.delivery",
+            title="自然交付提醒",
+            source="proactive_message",
+            content=(
+                "这一轮的最终文本会成为对话里的下一句。"
+                "请把注意力放在这句聊天内容本身，像平时主动开口那样自然收住；"
+                "过程中的执行状态只供系统判断，不需要写进正文。"
+            ),
         )
 
-    def _format_proactive_future_schedule_hint(self, *, reason: str) -> str:
+    def _proactive_natural_delivery_hint(self) -> str:
+        return render_prompt_sections(
+            [self._proactive_natural_delivery_prompt_section()],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+
+    def _format_proactive_future_schedule_hint_section(
+        self,
+        *,
+        reason: str,
+    ) -> PromptSection | None:
         """Expose a small, policy-filtered future schedule hint to select routes."""
 
         if reason not in {
@@ -2822,17 +3162,17 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "check_in",
             "quiet_care",
         }:
-            return ""
+            return None
         disclosure = getattr(self, "_agenda_disclosure_view", None)
         if not callable(disclosure):
-            return ""
+            return None
         try:
             view = disclosure("future_schedule", max_entries=4)
         except Exception:
-            return ""
+            return None
         entries = view.get("entries", []) if isinstance(view, dict) else getattr(view, "entries", [])
         if not isinstance(entries, list):
-            return ""
+            return None
         lines: list[str] = []
         for item in entries:
             if not isinstance(item, dict):
@@ -2854,15 +3194,27 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             if len(lines) >= 2:
                 break
         if not lines:
-            return ""
-        return (
-            "【接下来可参考的日程】\n"
-            "以下内容已通过日程披露层筛选，只是未来安排，不是已经发生的事实。"
-            "如果和本轮动机自然贴合，可以像顺口提到明天或等会儿一样带一句；不贴合就忽略。\n"
-            + "\n".join(lines)
+            return None
+        return prompt_section(
+            key="proactive.future_schedule",
+            title="接下来可参考的日程",
+            source="proactive_message",
+            content=(
+                "以下内容已通过日程披露层筛选，只是未来安排，不是已经发生的事实。"
+                "如果和本轮动机自然贴合，可以像顺口提到明天或等会儿一样带一句；不贴合就忽略。\n"
+                + "\n".join(lines)
+            ),
         )
 
-    def _format_proactive_calendar_constraint_hint(self) -> str:
+    def _format_proactive_future_schedule_hint(self, *, reason: str) -> str:
+        section = self._format_proactive_future_schedule_hint_section(reason=reason)
+        return (
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
+            if section is not None
+            else ""
+        )
+
+    def _format_proactive_calendar_constraint_hint_section(self) -> PromptSection | None:
         """Expose longitudinal calendar context without turning it into a gate."""
 
         timeline_getter = getattr(self, "_agenda_calendar_timeline", None)
@@ -2877,13 +3229,13 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         if not timeline:
             snapshot_getter = getattr(self, "_agenda_calendar_snapshot", None)
             if not callable(snapshot_getter):
-                return ""
+                return None
             try:
                 snapshot = snapshot_getter()
             except Exception:
-                return ""
+                return None
             if not isinstance(snapshot, dict):
-                return ""
+                return None
             timeline = {
                 "date": snapshot.get("date"),
                 "today": snapshot.get("events", []),
@@ -2953,40 +3305,84 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         if candidate_lines:
             sections.append("对话待确认候选：" + "、".join(candidate_lines))
         if not sections:
-            return ""
+            return None
+        return prompt_section(
+            key="proactive.calendar_context",
+            title="生活时间线参考",
+            source="proactive_message",
+            content=(
+                "\n".join(f"- {item}" for item in sections)
+                + "\n这些是跨日背景和可能的生活节奏，不代表事情已经执行。保持同一生活阶段的连续感，不要因为一次旧日程或单个标题就擅自改写阶段；用户当前明确说法优先，待确认变化只用轻量、可回退的语气。"
+                + "待确认候选只能用于自然询问，不能据此断言用户已经安排、正在执行或已经完成。"
+            ),
+        )
+
+    def _format_proactive_calendar_constraint_hint(self) -> str:
+        section = self._format_proactive_calendar_constraint_hint_section()
         return (
-            "【生活时间线参考】\n"
-            + "\n".join(f"- {item}" for item in sections)
-            + "\n这些是跨日背景和可能的生活节奏，不代表事情已经执行。保持同一生活阶段的连续感，不要因为一次旧日程或单个标题就擅自改写阶段；用户当前明确说法优先，待确认变化只用轻量、可回退的语气。"
-            + "待确认候选只能用于自然询问，不能据此断言用户已经安排、正在执行或已经完成。"
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
+            if section is not None
+            else ""
+        )
+
+    def _proactive_troubleshooting_request_prompt_section(
+        self,
+        user: dict[str, Any] | None,
+    ) -> PromptSection | None:
+        if not isinstance(user, dict) or _single_line(user.get("planned_proactive_source"), 40).lower() != "troubleshooting":
+            return None
+        return prompt_section(
+            key="proactive.troubleshooting_origin",
+            title="本轮真实开口由头",
+            source="proactive_message",
+            content=(
+                "用户刚刚在控制面板明确发起了一次主动消息链路测试，这个请求本身就是当前、可核验的开口由头。"
+                "请仍像角色平时私聊那样自然来找对方一次，不要提测试、控制面板、系统、调度或链路。"
+                "不需要另编“刚刷到、刚看到、翻书、收到消息”等生活小剧场；如果当前较晚或普通主动间隔较近，"
+                "只把语气收轻、句子缩短，不追问、不催回复。"
+            ),
         )
 
     def _proactive_troubleshooting_request_hint(self, user: dict[str, Any] | None) -> str:
-        if not isinstance(user, dict) or _single_line(user.get("planned_proactive_source"), 40).lower() != "troubleshooting":
-            return ""
+        section = self._proactive_troubleshooting_request_prompt_section(user)
         return (
-            "【本轮真实开口由头】\n"
-            "用户刚刚在控制面板明确发起了一次主动消息链路测试，这个请求本身就是当前、可核验的开口由头。"
-            "请仍像角色平时私聊那样自然来找对方一次，不要提测试、控制面板、系统、调度或链路。"
-            "不需要另编“刚刷到、刚看到、翻书、收到消息”等生活小剧场；如果当前较晚或普通主动间隔较近，"
-            "只把语气收轻、句子缩短，不追问、不催回复。"
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
+            if section is not None
+            else ""
+        )
+
+    def _deferred_immediate_share_tense_prompt_section(
+        self,
+        user: dict[str, Any],
+        action: str,
+    ) -> PromptSection | None:
+        del action
+        freshness_getter = getattr(self, "_planned_proactive_freshness_class", None)
+        if not callable(freshness_getter):
+            return None
+        try:
+            if freshness_getter(user) != "immediate":
+                return None
+        except Exception:
+            return None
+        if _single_line(user.get("planned_proactive_delivery_state"), 24) != "deferred":
+            return None
+        return prompt_section(
+            key="proactive.deferred_tense",
+            title="延后分享的时态",
+            source="proactive_message",
+            content=(
+                "这段生活分享发生在稍早一些的时候，但仍在自然分享窗口内。正文要用已经发生的说法，"
+                "不要暗示拍摄或事件与发送处于同一时刻，也不要提延后、等待、系统或调度。"
+            ),
         )
 
     def _deferred_immediate_share_tense_hint(self, user: dict[str, Any], action: str) -> str:
-        freshness_getter = getattr(self, "_planned_proactive_freshness_class", None)
-        if not callable(freshness_getter):
-            return ""
-        try:
-            if freshness_getter(user) != "immediate":
-                return ""
-        except Exception:
-            return ""
-        if _single_line(user.get("planned_proactive_delivery_state"), 24) != "deferred":
-            return ""
+        section = self._deferred_immediate_share_tense_prompt_section(user, action)
         return (
-            "【延后分享的时态】\n"
-            "这段生活分享发生在稍早一些的时候，但仍在自然分享窗口内。正文要用已经发生的说法，"
-            "不要暗示拍摄或事件与发送处于同一时刻，也不要提延后、等待、系统或调度。"
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
+            if section is not None
+            else ""
         )
 
     def _proactive_current_plan_item(self, plan: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -3037,14 +3433,14 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         relationship_fact = self._format_proactive_relationship_fact(user)
         current_item = self._proactive_current_plan_item(self.data.get("daily_plan", {}))
         current_schedule = self._format_schedule_context_for_prompt() or self._format_plan_item_for_prompt(current_item)
-        troubleshooting_hint = self._proactive_troubleshooting_request_hint(user)
+        troubleshooting_section = self._proactive_troubleshooting_request_prompt_section(user)
         source_focused_reasons = {
             "bili_video_share",
             "news_share",
             "web_exploration_share",
             "creative_share",
         }
-        if troubleshooting_hint:
+        if troubleshooting_section is not None:
             current_schedule = "（本轮不使用生活片段；只按用户刚发起的测试请求自然开口，不补写虚构见闻）"
         elif reason in source_focused_reasons:
             current_schedule = "（本轮不取生活片段，只围绕主动来源本身）"
@@ -3060,7 +3456,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             if last_sidecar_at > 0 and _now_ts() - last_sidecar_at < 6 * 3600:
                 current_schedule = "（最近群分享已经顺手带过生活片段，本轮只围绕群里那件事）"
         external_material = ""
-        if not troubleshooting_hint and reason not in source_focused_reasons and reason not in {
+        if troubleshooting_section is None and reason not in source_focused_reasons and reason not in {
             "goodnight_screen_check",
             "meal_care",
             "meal_care_followup",
@@ -3077,41 +3473,64 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         )
         state_hint = self._sanitize_owner_environment_context_for_private_user(state_hint, user)
         state_hint = sanitize_relationship_source(state_hint, "proactive.current_state")
-        location_formatter = getattr(self, "_format_mobile_user_location_context_for_proactive", None)
+        location_section_formatter = getattr(
+            self,
+            "_format_mobile_user_location_context_for_proactive_prompt_section",
+            None,
+        )
         try:
-            location_context = location_formatter(user) if callable(location_formatter) else ""
-        except Exception:
-            location_context = ""
-        anonymous_area_hint = ""
-        if reason in {"anonymous_area_dwell", "anonymous_area_familiarity"}:
-            anonymous_area_hint = (
-                "【离开后的模糊熟悉感】\n"
-                "这是一条位置相关但延迟表达的生活念头：用户已经离开一个没有命名的区域。"
-                "不要提城市、城区、地图、高德、定位、停留时长或‘我知道你在哪里’，也不要追问具体地点。"
-                "只把它写成后来想起的一点生活关心；如果觉得不自然，可以只分享一句轻松的近况，不必提问。"
-                if reason == "anonymous_area_dwell"
-                else (
-                    "【重复到访后的模糊熟悉感】\n"
-                    "这是一条从多次匿名区域到访形成的轻微熟悉感。不要声称知道用户有固定去处，"
-                    "不要提城市、城区、地图、高德、定位、次数或地点名称；用‘最近好像有个常去的地方’这类开放表达，"
-                    "把是否解释留给用户，也可以完全不点破这份观察。"
-                )
+            location_section = (
+                location_section_formatter(user)
+                if callable(location_section_formatter)
+                else None
             )
-        mobile_arrival_hint = ""
+        except Exception:
+            location_section = None
+        anonymous_area_section: PromptSection | None = None
+        if reason in {"anonymous_area_dwell", "anonymous_area_familiarity"}:
+            anonymous_area_section = prompt_section(
+                key=(
+                    "proactive.anonymous_area_departure"
+                    if reason == "anonymous_area_dwell"
+                    else "proactive.anonymous_area_familiarity"
+                ),
+                title=(
+                    "离开后的模糊熟悉感"
+                    if reason == "anonymous_area_dwell"
+                    else "重复到访后的模糊熟悉感"
+                ),
+                source="proactive_message",
+                content=(
+                    "这是一条位置相关但延迟表达的生活念头：用户已经离开一个没有命名的区域。"
+                    "不要提城市、城区、地图、高德、定位、停留时长或‘我知道你在哪里’，也不要追问具体地点。"
+                    "只把它写成后来想起的一点生活关心；如果觉得不自然，可以只分享一句轻松的近况，不必提问。"
+                    if reason == "anonymous_area_dwell"
+                    else (
+                        "这是一条从多次匿名区域到访形成的轻微熟悉感。不要声称知道用户有固定去处，"
+                        "不要提城市、城区、地图、高德、定位、次数或地点名称；用‘最近好像有个常去的地方’这类开放表达，"
+                        "把是否解释留给用户，也可以完全不点破这份观察。"
+                    )
+                ),
+            )
+        mobile_arrival_section: PromptSection | None = None
         if _single_line(user.get("planned_mobile_location_event_type"), 32) == "home_arrival":
-            mobile_arrival_hint = (
-                "【回家后的自然开口】\n"
-                "用户刚进入已标记的家，可以自然提到刚到家、回来了或先歇一会儿。"
-                "不要提定位、坐标、手机、设备或监听，也不要写成系统通知；像顺手想到后说一句。"
+            mobile_arrival_section = prompt_section(
+                key="proactive.home_arrival",
+                title="回家后的自然开口",
+                source="proactive_message",
+                content=(
+                    "用户刚进入已标记的家，可以自然提到刚到家、回来了或先歇一会儿。"
+                    "不要提定位、坐标、手机、设备或监听，也不要写成系统通知；像顺手想到后说一句。"
+                ),
             )
         timer_hint = self._format_llm_timer_context(user)
         time_guard = self._proactive_time_guard_hint(reason, current_item)
-        deferred_share_tense_hint = self._deferred_immediate_share_tense_hint(user, action)
-        future_schedule_hint = self._format_proactive_future_schedule_hint(reason=reason)
-        calendar_constraint_hint = self._format_proactive_calendar_constraint_hint()
+        deferred_share_tense_section = self._deferred_immediate_share_tense_prompt_section(user, action)
+        future_schedule_section = self._format_proactive_future_schedule_hint_section(reason=reason)
+        calendar_constraint_section = self._format_proactive_calendar_constraint_hint_section()
         recent_topics_hint = self._format_recent_proactive_topics_hint(user)
         # Search for unresolved open-loop / promise memories from the memory plugin
-        open_loops_hint = ""
+        open_loops_section: PromptSection | None = None
         try:
             umo = str(user.get("umo") or "").strip()
             if umo:
@@ -3150,13 +3569,18 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         else:
                             age_str = ""
                         loop_texts.append(f"- {content_preview}{age_str}")
-                    open_loops_hint = (
-                        "【未完成话题候选】\n"
-                        "这些只是可选候选，不是必须提起的任务。本轮主动动机、当前用户消息和最近私聊实况优先级更高；"
-                        "只有候选与它们有明确语义贴合，或你本来就是想兑现这件事时，才轻轻带一句。"
-                        "如果不贴，就先放着，不得把旧话题变成本轮开场、主线或回复第一句，也不要为了连续性改变当前动机。\n"
-                        + "\n".join(loop_texts)
-                    )
+                    if loop_texts:
+                        open_loops_section = prompt_section(
+                            key="proactive.open_loops",
+                            title="未完成话题候选",
+                            source="proactive_message",
+                            content=(
+                                "这些只是可选候选，不是必须提起的任务。本轮主动动机、当前用户消息和最近私聊实况优先级更高；"
+                                "只有候选与它们有明确语义贴合，或你本来就是想兑现这件事时，才轻轻带一句。"
+                                "如果不贴，就先放着，不得把旧话题变成本轮开场、主线或回复第一句，也不要为了连续性改变当前动机。\n"
+                                + "\n".join(loop_texts)
+                            ),
+                        )
         except Exception:
             pass
         current_schedule = self._sanitize_schedule_context_for_private_user(current_schedule, user)
@@ -3175,22 +3599,30 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         unanswered_count = _safe_int(user.get("ignored_streak"), 0)
         unanswered_hint = f"此前连续 {unanswered_count} 次主动还没等到回复。" if unanswered_count > 0 else ""
         awaiting_since = _safe_float(user.get("awaiting_reply_since"), 0)
-        unanswered_afterglow_hint = ""
+        unanswered_afterglow_section: PromptSection | None = None
         if unanswered_count > 0 and awaiting_since > 0:
-            unanswered_afterglow_hint = (
-                "【上一条主动的余波】\n"
-                "上一条主动消息目前还没有收到回应。这只是背景事实，不要求你在正文里点破；"
-                "由你根据当前关系和动机决定是否轻轻带过。若提及，只能像熟人自然察觉到对方沉默，"
-                "不能质问、催促、索取解释或写成‘你怎么不回我’。"
+            unanswered_afterglow_section = prompt_section(
+                key="proactive.unanswered_afterglow",
+                title="上一条主动的余波",
+                source="proactive_message",
+                content=(
+                    "上一条主动消息目前还没有收到回应。这只是背景事实，不要求你在正文里点破；"
+                    "由你根据当前关系和动机决定是否轻轻带过。若提及，只能像熟人自然察觉到对方沉默，"
+                    "不能质问、催促、索取解释或写成‘你怎么不回我’。"
+                ),
             )
-        burst_hint = ""
+        burst_section: PromptSection | None = None
         if bool(user.get("planned_proactive_burst")):
-            burst_hint = (
-                "【同一阵念头的短连发】\n"
-                "这是同一阵主动念头里的后一条独立消息，不是上一条的分段；换一个更短、更口语的角度，"
-                "不要复述上一条，也不要因此连续追问。"
+            burst_section = prompt_section(
+                key="proactive.burst",
+                title="同一阵念头的短连发",
+                source="proactive_message",
+                content=(
+                    "这是同一阵主动念头里的后一条独立消息，不是上一条的分段；换一个更短、更口语的角度，"
+                    "不要复述上一条，也不要因此连续追问。"
+                ),
             )
-        expression_shape_hint = self._proactive_expression_shape_hint(
+        expression_shape_section = self._proactive_expression_shape_prompt_section(
             user,
             reason=reason,
             action=action,
@@ -3213,19 +3645,117 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             recent_topics_hint,
             "proactive.recent_topics",
         )
-        temporal_grounding_hint = (
-            "【时间锚定】\n"
-            f"- 当前真实时间：{current_time}。\n"
-            "- 优先贴今天最新私聊、当前日程和当前时段；旧记忆只能作背景，不要改写成今天/现在正在发生。\n"
-            "- 如果记忆或历史里是昨天、昨晚、之前的天气/通勤/身体状态，除非当前日程或最新私聊明确延续，否则不要拿来当本轮主动切口。\n"
-            "- 如果必须提旧事，要明确说“昨晚/昨天/那次”，不要写成“今天刚遇到/现在还在/刚才发生”。"
+        temporal_grounding_section = prompt_section(
+            key="proactive.temporal_grounding",
+            title="时间锚定",
+            source="proactive_message",
+            content=(
+                f"- 当前真实时间：{current_time}。\n"
+                "- 优先贴今天最新私聊、当前日程和当前时段；旧记忆只能作背景，不要改写成今天/现在正在发生。\n"
+                "- 如果记忆或历史里是昨天、昨晚、之前的天气/通勤/身体状态，除非当前日程或最新私聊明确延续，否则不要拿来当本轮主动切口。\n"
+                "- 如果必须提旧事，要明确说“昨晚/昨天/那次”，不要写成“今天刚遇到/现在还在/刚才发生”。"
+            ),
         )
-        relationship_initiative_hint = self._format_proactive_relationship_initiative_hint(
+        relationship_initiative_section = self._format_proactive_relationship_initiative_prompt_section(
             user,
             reason=reason,
             action=action,
         )
-        prompt = runtime_persona_setting(self, "proactive_prompt_template", "") or self._default_proactive_prompt_template()
+        custom_template = str(runtime_persona_setting(self, "proactive_prompt_template", "") or "")
+        template_document = (
+            prompt_document(
+                user_render=_PROACTIVE_DOCUMENT_RENDER,
+                user=(
+                    _proactive_prompt_part(prompt_section(
+                        key="proactive.template.custom",
+                        title="用户自定义主动消息模板",
+                        source="proactive_message.config",
+                        content=custom_template,
+                    ), mode=PromptRenderMode.BODY_ONLY),
+                ),
+                metadata={"kind": "proactive_generation_template"},
+            )
+            if custom_template
+            else self._default_proactive_prompt_document()
+        )
+        template_text = render_prompt_document(template_document)["user"]
+        included_keys = {section.key for section in (*template_document.system, *template_document.user)}
+        appended_parts: list[PromptDocumentPart] = []
+
+        def make_part(
+            section: PromptSection | None,
+            *,
+            mode: PromptRenderMode | None = None,
+            prefix: str = "",
+            separator_before: str = "\n\n",
+        ) -> PromptDocumentPart | None:
+            if section is None:
+                return None
+            return _proactive_prompt_part(
+                section,
+                mode=mode,
+                prefix=prefix,
+                separator_before=separator_before,
+            )
+
+        def render_part(part: PromptDocumentPart | None) -> str:
+            if part is None:
+                return ""
+            return render_prompt_document(
+                prompt_document(
+                    user=(part,),
+                    user_render=_PROACTIVE_DOCUMENT_RENDER,
+                )
+            )["user"]
+
+        def append_part(part: PromptDocumentPart | None) -> None:
+            if part is None:
+                return
+            section = part.section
+            if not section.key or section.key in included_keys:
+                return
+            if not render_part(part):
+                return
+            appended_parts.append(part)
+            included_keys.add(section.key)
+
+        def append_section(
+            section: PromptSection | None,
+            *,
+            mode: PromptRenderMode | None = None,
+            prefix: str = "",
+            separator_before: str = "\n\n",
+        ) -> None:
+            append_part(
+                make_part(
+                    section,
+                    mode=mode,
+                    prefix=prefix,
+                    separator_before=separator_before,
+                )
+            )
+
+        def sanitized_section(
+            section: PromptSection | None,
+            *,
+            relationship_source: str,
+        ) -> PromptSection | None:
+            if section is None:
+                return None
+            body = sanitize_relationship_source(
+                render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY),
+                relationship_source,
+            )
+            if not body:
+                return None
+            return prompt_section(
+                key=section.key,
+                title=section.title,
+                source=section.source,
+                content=body,
+                metadata=section.metadata,
+            )
+
         worldview_adaptation = ""
         reason_text = _REASON_TEXT.get(reason, reason).replace("{name}", name)
         action_text = _ACTION_TEXT.get(action.split("+")[0], action).replace("{name}", name)
@@ -3251,189 +3781,300 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "{{action_context}}": action_prompt_context if action_prompt_context and action_prompt_context != "（无额外上下文）" else "什么都没做,就是忽然想来找你",
             "{{unanswered_count}}": str(unanswered_count) if unanswered_count > 0 else "",
             "{{unanswered_hint}}": unanswered_hint,
-            "{{unanswered_afterglow_hint}}": unanswered_afterglow_hint,
-            "{{burst_hint}}": burst_hint,
-            "{{expression_shape_hint}}": expression_shape_hint,
-            "{{open_loops_hint}}": open_loops_hint,
-            "{{future_schedule_hint}}": future_schedule_hint,
+            "{{unanswered_afterglow_hint}}": render_part(make_part(unanswered_afterglow_section)),
+            "{{burst_hint}}": render_part(make_part(burst_section)),
+            "{{expression_shape_hint}}": render_part(make_part(expression_shape_section)),
+            "{{open_loops_hint}}": render_part(make_part(open_loops_section)),
+            "{{future_schedule_hint}}": render_part(make_part(future_schedule_section)),
             "{{current_time}}": current_time,
         }
+        placeholder_sections = {
+            "{{timer_hint}}": make_part(
+                prompt_section(
+                    key="proactive.timer_context",
+                    title="主动定时上下文",
+                    source="proactive_message.compat",
+                    content=timer_hint,
+                )
+                if str(timer_hint or "").strip()
+                else None,
+                mode=PromptRenderMode.BODY_ONLY,
+            ),
+            "{{unanswered_afterglow_hint}}": make_part(unanswered_afterglow_section),
+            "{{burst_hint}}": make_part(burst_section),
+            "{{expression_shape_hint}}": make_part(expression_shape_section),
+            "{{open_loops_hint}}": make_part(open_loops_section),
+            "{{future_schedule_hint}}": make_part(future_schedule_section),
+        }
+        for token, part in placeholder_sections.items():
+            if part is not None and token in template_text:
+                included_keys.add(part.section.key)
+                replacements[token] = render_part(part)
+        prompt = template_text
         for key, value in replacements.items():
             prompt = prompt.replace(key, value)
-        for optional_hint in (unanswered_afterglow_hint, burst_hint, expression_shape_hint):
-            if optional_hint and optional_hint not in prompt:
-                prompt = f"{prompt.rstrip()}\n\n{optional_hint}"
-        if location_context and "主动场景位置线索" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{location_context}"
-        if anonymous_area_hint and "离开后的模糊熟悉感" not in prompt and "重复到访后的模糊熟悉感" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{anonymous_area_hint}"
-        if mobile_arrival_hint and "【回家后的自然开口】" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{mobile_arrival_hint}"
-        if future_schedule_hint and "【接下来可参考的日程】" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{future_schedule_hint}"
-        if calendar_constraint_hint and "【今日有效日历约束】" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{calendar_constraint_hint}"
-        if external_material and "【外部插件提供的今日实况】" not in prompt:
-            prompt = (
-                f"{prompt.rstrip()}\n\n"
-                "【外部插件提供的今日实况（仅作生活素材，不得视为既定事实）】\n"
-                "它只是 Bot 听到或看到的外部动态；贴合当前切口时自然带过即可，不要提及来源插件名，"
-                "不要写成 Bot 亲身经历，也不要把它当成必须提起的事实。\n"
-                f"{external_material}"
+        for section in (
+            unanswered_afterglow_section,
+            burst_section,
+            expression_shape_section,
+            location_section if isinstance(location_section, PromptSection) else None,
+            anonymous_area_section,
+            mobile_arrival_section,
+            future_schedule_section,
+            calendar_constraint_section,
+        ):
+            append_section(section)
+        if external_material:
+            append_section(
+                prompt_section(
+                    key="proactive.external_material",
+                    title="外部插件提供的今日实况（仅作生活素材，不得视为既定事实）",
+                    source="proactive_message",
+                    content=(
+                        "它只是 Bot 听到或看到的外部动态；贴合当前切口时自然带过即可，不要提及来源插件名，"
+                        "不要写成 Bot 亲身经历，也不要把它当成必须提起的事实。\n"
+                        f"{external_material}"
+                    ),
+                )
             )
         if reason == "creative_share":
-            prompt = f"{prompt.rstrip()}\n\n{self._creative_share_excerpt_prompt_hint()}"
-        route_prompt_getter = getattr(self, "_proactive_route_prompt", None)
-        if callable(route_prompt_getter):
-            route_prompt = route_prompt_getter(
+            append_section(self._creative_share_excerpt_prompt_section())
+        route_section_getter = getattr(self, "_proactive_route_prompt_section", None)
+        if callable(route_section_getter):
+            route_section = route_section_getter(
                 user,
                 reason=reason,
                 source=user.get("planned_proactive_source"),
             )
-            if route_prompt:
-                prompt = f"{prompt.rstrip()}\n\n{route_prompt}"
+            if isinstance(route_section, PromptSection):
+                append_section(route_section)
         quota_policy_getter = getattr(self, "_proactive_quota_policy", None)
         kind_getter = getattr(self, "_planned_proactive_kind", None)
         quota_tier = _safe_int(quota_policy_getter(user).get("tier"), 0, 0, 5) if callable(quota_policy_getter) else 0
         proactive_kind = kind_getter(user) if callable(kind_getter) else "relational"
         relaxed_unanswered_route = quota_tier >= 4 and proactive_kind in {"self_life", "content_share"}
-        if unanswered_count >= 2 and not relaxed_unanswered_route and "连续未回应时的成文边界" not in prompt:
-            prompt = (
-                f"{prompt.rstrip()}\n\n"
-                "【连续未回应时的成文边界】\n"
-                "- 这次优先只表达一个完整意思，用一句自然短句或两个紧密相连的短分句说完。\n"
-                "- 不要把近况、提问和叮嘱叠在同一条里；更适合分享后自然收住，不要求对方回复。\n"
-                "- 如果原本想说的内容较多，应重新组织成完整短句，绝不能留下主谓宾未完成的半句话。"
+        if unanswered_count >= 2 and not relaxed_unanswered_route:
+            unanswered_boundary = prompt_section(
+                key="proactive.unanswered_boundary",
+                title="连续未回应时的成文边界",
+                source="proactive_message",
+                content=(
+                    "- 这次优先只表达一个完整意思，用一句自然短句或两个紧密相连的短分句说完。\n"
+                    "- 不要把近况、提问和叮嘱叠在同一条里；更适合分享后自然收住，不要求对方回复。\n"
+                    "- 如果原本想说的内容较多，应重新组织成完整短句，绝不能留下主谓宾未完成的半句话。"
+                ),
             )
+            append_section(unanswered_boundary)
         elif unanswered_count >= 2 and relaxed_unanswered_route:
-            prompt = (
-                f"{prompt.rstrip()}\n\n"
-                "【高配额生活流的未回应边界】\n"
-                "- 对方没有逐条回应不等于拒绝继续接收生活片段或可靠内容分享，不要因此突然写得疏远或只剩客套话。\n"
-                "- 本条仍应自成一件具体的事，不追问上一条、不催促、不抱怨，也不要暗示对方欠你回复。"
+            relaxed_boundary = prompt_section(
+                key="proactive.relaxed_unanswered_boundary",
+                title="高配额生活流的未回应边界",
+                source="proactive_message",
+                content=(
+                    "- 对方没有逐条回应不等于拒绝继续接收生活片段或可靠内容分享，不要因此突然写得疏远或只剩客套话。\n"
+                    "- 本条仍应自成一件具体的事，不追问上一条、不催促、不抱怨，也不要暗示对方欠你回复。"
+                ),
             )
+            append_section(relaxed_boundary)
         persona_marker = "<!-- private_companion_proactive_persona_v1 -->"
-        if persona and persona_marker not in prompt:
-            prompt = (
-                f"{prompt.rstrip()}\n\n{persona_marker}\n"
-                "【当前主动消息必须遵循的人格】\n"
-                f"{self._truncate_proactive_context(persona, 2600)}\n"
-                "这份人格约束最终说话者的身份、性格、关系站位、称呼和措辞。"
-                "日程、记忆、主动动机及工具结果只能提供本轮内容，不能覆盖或改写人格。"
+        if persona:
+            append_section(
+                prompt_section(
+                    key="proactive.persona",
+                    title="当前主动消息必须遵循的人格",
+                    source="proactive_message",
+                    content=(
+                        f"{self._truncate_proactive_context(persona, 2600)}\n"
+                        "这份人格约束最终说话者的身份、性格、关系站位、称呼和措辞。"
+                        "日程、记忆、主动动机及工具结果只能提供本轮内容，不能覆盖或改写人格。"
+                    ),
+                ),
+                prefix=persona_marker,
             )
-        proactive_voice = self._format_proactive_voice_prompt() if callable(getattr(self, "_format_proactive_voice_prompt", None)) else ""
         proactive_voice_marker = "<!-- private_companion_proactive_voice_v1 -->"
-        if proactive_voice and proactive_voice_marker not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{proactive_voice_marker}\n{proactive_voice}"
-        expression_formatter = getattr(self, "_format_expression_voice_for_prompt", None)
-        expression_voice = (
-            expression_formatter(
+        proactive_voice_sections_getter = getattr(self, "_format_proactive_voice_prompt_sections", None)
+        if callable(proactive_voice_sections_getter):
+            try:
+                proactive_voice_sections = list(proactive_voice_sections_getter() or ())
+            except Exception:
+                proactive_voice_sections = []
+            for index, proactive_voice_section in enumerate(proactive_voice_sections):
+                if not isinstance(proactive_voice_section, PromptSection):
+                    continue
+                append_section(
+                    proactive_voice_section,
+                    prefix=proactive_voice_marker if index == 0 else "",
+                )
+        else:
+            proactive_voice_getter = getattr(self, "_format_proactive_voice_prompt", None)
+            proactive_voice = proactive_voice_getter() if callable(proactive_voice_getter) else ""
+            proactive_voice = str(proactive_voice or "").strip()
+            if proactive_voice:
+                append_section(
+                    prompt_section(
+                    key="proactive.voice.compat",
+                    title="主动消息说话方式",
+                    source="main.compat",
+                    content=proactive_voice,
+                    ),
+                    mode=PromptRenderMode.BODY_ONLY,
+                    prefix=proactive_voice_marker,
+                )
+        expression_section_getter = getattr(self, "_format_expression_voice_prompt_section", None)
+        expression_voice_section = (
+            expression_section_getter(
                 scope="proactive",
                 target_id=_single_line(user.get("user_id") or user.get("id"), 80),
                 context_owner=user,
                 stage_owner=user,
             )
-            if callable(expression_formatter)
-            else ""
+            if callable(expression_section_getter)
+            else None
         )
         expression_voice_marker = "<!-- private_companion_expression_voice_v1 -->"
-        if expression_voice and expression_voice_marker not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{expression_voice_marker}\n{expression_voice}"
-        delivery_hint = self._proactive_natural_delivery_hint()
-        if delivery_hint and "自然交付提醒" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{delivery_hint}"
-        if deferred_share_tense_hint and "延后分享的时态" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{deferred_share_tense_hint}"
-        tool_boundary_hint = (
-            "【主动生成工具边界】\n"
-            "- 这一轮只面向当前私聊对象，不调用任何转述、私聊发送、群发、QQ空间，"
-            "也不调用除 `pc_generate_photo` 以外的其他 Private Companion 工具。\n"
-            "- 当本轮主动动机、模板或当前生活场景确实适合用真实图片一起表达时，"
-            "允许调用一次 `pc_generate_photo`（`send=true`）；不需要图片时只生成一句自然正文。\n"
-            "- 主动链中的 `pc_generate_photo` 成图会由插件统一发送；工具确认 `delivery_deferred=true` 后，"
-            "只输出工具要求的内部静默标记，不要补写生成成功、等待发送或图片已发送等回执。\n"
-            "- `caption` 不是工具回执栏；只在有贴合当前情境的自然正文时填写。若只能写“图生好了/给你看”，就留空只发图片。\n"
-            "- 生图成功后，不要再说相机没反应、下次再拍或上游失败；生图失败时按工具返回的 "
-            "`final_response_instruction` 收束，本轮不要重试。\n"
-            "- 不要写“已发送/已转述/消息已发给某人/工具执行完成”等状态回执。\n"
-            "- 如果本轮 Provider/API 返回英文报错、内容策略拒绝、敏感词提示或政策链接，那是内部失败，不是给用户的正文；"
-            "不要复述、翻译或润色，直接停止输出，交给插件稍后重试。\n"
-            "- 如果想分享一件事，就直接把那句自然聊天内容写出来。"
+        if isinstance(expression_voice_section, PromptSection):
+            append_section(
+                expression_voice_section,
+                prefix=expression_voice_marker,
+            )
+        elif not callable(expression_section_getter):
+            expression_formatter = getattr(self, "_format_expression_voice_for_prompt", None)
+            expression_voice = (
+                expression_formatter(
+                    scope="proactive",
+                    target_id=_single_line(user.get("user_id") or user.get("id"), 80),
+                    context_owner=user,
+                    stage_owner=user,
+                )
+                if callable(expression_formatter)
+                else ""
+            )
+            expression_voice = str(expression_voice or "").strip()
+            if expression_voice:
+                append_section(
+                    prompt_section(
+                    key="proactive.expression_voice.compat",
+                    title="主动消息表达方式",
+                    source="user_memory.compat",
+                    content=expression_voice,
+                    ),
+                    mode=PromptRenderMode.BODY_ONLY,
+                    prefix=expression_voice_marker,
+                )
+        append_section(self._proactive_natural_delivery_prompt_section())
+        append_section(deferred_share_tense_section)
+        tool_boundary_section = prompt_section(
+            key="proactive.tool_boundary",
+            title="主动生成工具边界",
+            source="proactive_message",
+            content=(
+                "- 这一轮只面向当前私聊对象，不调用任何转述、私聊发送、群发、QQ空间，"
+                "也不调用除 `pc_generate_photo` 以外的其他 Private Companion 工具。\n"
+                "- 当本轮主动动机、模板或当前生活场景确实适合用真实图片一起表达时，"
+                "允许调用一次 `pc_generate_photo`（`send=true`）；不需要图片时只生成一句自然正文。\n"
+                "- 主动链中的 `pc_generate_photo` 成图会由插件统一发送；工具确认 `delivery_deferred=true` 后，"
+                "只输出工具要求的内部静默标记，不要补写生成成功、等待发送或图片已发送等回执。\n"
+                "- `caption` 不是工具回执栏；只在有贴合当前情境的自然正文时填写。若只能写“图生好了/给你看”，就留空只发图片。\n"
+                "- 生图成功后，不要再说相机没反应、下次再拍或上游失败；生图失败时按工具返回的 "
+                "`final_response_instruction` 收束，本轮不要重试。\n"
+                "- 不要写“已发送/已转述/消息已发给某人/工具执行完成”等状态回执。\n"
+                "- 如果本轮 Provider/API 返回英文报错、内容策略拒绝、敏感词提示或政策链接，那是内部失败，不是给用户的正文；"
+                "不要复述、翻译或润色，直接停止输出，交给插件稍后重试。\n"
+                "- 如果想分享一件事，就直接把那句自然聊天内容写出来。"
+            ),
         )
-        if "主动生成工具边界" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{tool_boundary_hint}"
-        reaction_hint = self._proactive_reaction_expression_prompt_hint(action)
-        if reaction_hint and "主动消息的可选表情表达" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{reaction_hint}"
-        visible_format_hint = self._proactive_visible_text_format_hint(action)
-        if visible_format_hint and "主动可见正文格式" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{visible_format_hint}"
-        if "时间锚定" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{temporal_grounding_hint}"
-        if relationship_initiative_hint and "高亲密关系主动性" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{relationship_initiative_hint}"
-        if troubleshooting_hint and "本轮真实开口由头" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{troubleshooting_hint}"
-        if recent_history_hint and "最近私聊实况" not in prompt:
-            prompt = (
-                f"{prompt.rstrip()}\n\n"
-                "【最近私聊实况】\n"
-                f"{recent_history_hint}\n"
-                "使用方式：这是当前会话最近真实发生的内容。它优先级高于旧记忆；不要把更早的记录写成今天刚发生。"
+        append_section(tool_boundary_section)
+        append_section(self._proactive_reaction_expression_prompt_section(action))
+        append_section(self._proactive_visible_text_format_prompt_section(action))
+        append_section(temporal_grounding_section)
+        append_section(relationship_initiative_section)
+        append_section(troubleshooting_section)
+        if recent_history_hint:
+            append_section(
+                prompt_section(
+                    key="proactive.recent_private_history",
+                    title="最近私聊实况",
+                    source="proactive_message",
+                    content=(
+                        f"{recent_history_hint}\n"
+                        "使用方式：这是当前会话最近真实发生的内容。它优先级高于旧记忆；不要把更早的记录写成今天刚发生。"
+                    ),
+                )
             )
-        if reason == "goodnight_screen_check" and "晚安识屏提醒边界" not in prompt:
-            prompt = (
-                f"{prompt.rstrip()}\n\n"
-                "【晚安识屏提醒边界】\n"
-                "- 内部状态只说明互道晚安后仍有明确活动迹象；没有向你提供屏幕画面、应用、窗口、账号或文字内容。\n"
-                "- 只生成一句轻声、低压力的休息提醒，可以说‘还没睡的话，忙完就早点休息’，但不要声称看见了屏幕或知道对方在做什么。\n"
-                "- 不提识屏、监控、查岗、电脑、软件、窗口、具体活动或任何隐私细节，不复述刚才的晚安。\n"
-                "- 不追问、不催促、不要求解释，也不要要求对方回复。"
+        if reason == "goodnight_screen_check":
+            append_section(
+                prompt_section(
+                    key="proactive.goodnight_screen_boundary",
+                    title="晚安识屏提醒边界",
+                    source="proactive_message",
+                    content=(
+                        "- 内部状态只说明互道晚安后仍有明确活动迹象；没有向你提供屏幕画面、应用、窗口、账号或文字内容。\n"
+                        "- 只生成一句轻声、低压力的休息提醒，可以说‘还没睡的话，忙完就早点休息’，但不要声称看见了屏幕或知道对方在做什么。\n"
+                        "- 不提识屏、监控、查岗、电脑、软件、窗口、具体活动或任何隐私细节，不复述刚才的晚安。\n"
+                        "- 不追问、不催促、不要求解释，也不要要求对方回复。"
+                    ),
+                )
             )
-        body_health_hint_getter = getattr(self, "_format_body_monitor_health_prompt", None)
-        if callable(body_health_hint_getter):
-            body_health_hint = body_health_hint_getter(user, reason=reason)
-            if body_health_hint:
-                body_health_hint = sanitize_relationship_source(body_health_hint, "proactive.body_health_hint")
-                if body_health_hint:
-                    prompt = f"{prompt.rstrip()}\n\n{body_health_hint}"
-        balance_hint_getter = getattr(self, "_format_balance_awareness_prompt", None)
-        if callable(balance_hint_getter):
-            balance_hint = balance_hint_getter(user, reason=reason)
-            if balance_hint:
-                balance_hint = sanitize_relationship_source(balance_hint, "proactive.balance_hint")
-                if balance_hint:
-                    prompt = f"{prompt.rstrip()}\n\n{balance_hint}"
-        environment_hint_getter = getattr(self, "_format_environment_change_prompt", None)
-        if callable(environment_hint_getter):
-            environment_hint = environment_hint_getter(user, reason=reason)
-            if environment_hint:
-                environment_hint = sanitize_relationship_source(environment_hint, "proactive.environment_hint")
-                if environment_hint:
-                    prompt = f"{prompt.rstrip()}\n\n{environment_hint}"
-        weather_alert_hint_getter = getattr(self, "_format_weather_alert_prompt", None)
-        if callable(weather_alert_hint_getter):
-            weather_alert_hint = weather_alert_hint_getter(user, reason=reason)
-            if weather_alert_hint:
-                weather_alert_hint = sanitize_relationship_source(weather_alert_hint, "proactive.weather_alert_hint")
-                if weather_alert_hint:
-                    prompt = f"{prompt.rstrip()}\n\n{weather_alert_hint}"
-        personal_goal_hint_getter = getattr(self, "_format_personal_goal_prompt", None)
-        if callable(personal_goal_hint_getter):
-            personal_goal_hint = personal_goal_hint_getter(user, reason=reason)
-            if personal_goal_hint:
-                personal_goal_hint = sanitize_relationship_source(personal_goal_hint, "proactive.personal_goal_hint")
-                if personal_goal_hint:
-                    prompt = f"{prompt.rstrip()}\n\n{personal_goal_hint}"
-        memo_hint_getter = getattr(self, "_format_memo_note_prompt", None)
-        if callable(memo_hint_getter):
-            memo_hint = memo_hint_getter(user, reason=reason)
-            if memo_hint:
-                memo_hint = sanitize_relationship_source(memo_hint, "proactive.memo_hint")
-                if memo_hint:
-                    prompt = f"{prompt.rstrip()}\n\n{memo_hint}"
-        if open_loops_hint and "未完成话题候选" not in prompt:
-            prompt = f"{prompt.rstrip()}\n\n{open_loops_hint}"
+        body_health_section_getter = getattr(self, "format_health_prompt_section", None)
+        if callable(body_health_section_getter):
+            try:
+                body_health_section = body_health_section_getter(user, reason=reason)
+            except Exception:
+                body_health_section = None
+            if isinstance(body_health_section, PromptSection):
+                append_section(
+                    sanitized_section(
+                        body_health_section,
+                        relationship_source="proactive.body_health_hint",
+                    )
+                )
+        balance_section_getter = getattr(self, "_format_balance_awareness_prompt_section", None)
+        if callable(balance_section_getter):
+            try:
+                balance_section = balance_section_getter(user, reason=reason)
+            except Exception:
+                balance_section = None
+            if isinstance(balance_section, PromptSection):
+                append_section(
+                    sanitized_section(
+                        balance_section,
+                        relationship_source="proactive.balance_hint",
+                    )
+                )
+        typed_hint_specs = (
+            (
+                "_format_environment_change_prompt_section",
+                "proactive.environment_hint",
+            ),
+            (
+                "_format_weather_alert_prompt_section",
+                "proactive.weather_alert_hint",
+            ),
+            (
+                "_format_personal_goal_prompt_section",
+                "proactive.personal_goal_hint",
+            ),
+            (
+                "_format_memo_note_prompt_section",
+                "proactive.memo_hint",
+            ),
+        )
+        for getter_name, relationship_source in typed_hint_specs:
+            hint_getter = getattr(self, getter_name, None)
+            if not callable(hint_getter):
+                continue
+            try:
+                hint_section = hint_getter(user, reason=reason)
+            except Exception:
+                hint_section = None
+            if isinstance(hint_section, PromptSection):
+                append_section(
+                    sanitized_section(
+                        hint_section,
+                        relationship_source=relationship_source,
+                    )
+                )
+        append_section(open_loops_section)
         memory_context = ""
         memory_getter = getattr(self, "_memory_companion_compose_feature_context", None)
         if callable(memory_getter):
@@ -3461,33 +4102,56 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 max_chars=760,
             )
         if memory_context:
-            core_memory_contract = core_memory_usage_contract(memory_context, stage="generation")
-            core_memory_section = f"\n\n{core_memory_contract}" if core_memory_contract else ""
-            prompt = (
-                f"{prompt.rstrip()}\n\n"
-                "<!-- private_companion_memory_generation_context_v1 -->\n"
-                "【我会牢牢记住你 可用记忆】\n"
-                f"{memory_context}\n"
-                "使用方式：只作为自然连续性和边界参考；能贴住当前切口就轻轻用,不相关就忽略。不要说“我查到/我记忆里”。"
-                f"{core_memory_section}"
+            append_section(
+                prompt_section(
+                    key="proactive.memory_context",
+                    title="我会牢牢记住你 可用记忆",
+                    source="proactive_message",
+                    content=(
+                        f"{memory_context}\n"
+                        "使用方式：只作为自然连续性和边界参考；能贴住当前切口就轻轻用,不相关就忽略。不要说“我查到/我记忆里”。"
+                    ),
+                ),
+                prefix="<!-- private_companion_memory_generation_context_v1 -->",
             )
+            append_section(core_memory_usage_contract_section(memory_context, stage="generation"))
         relationship_guard_getter = getattr(self, "_format_generation_relationship_authority_guard", None)
-        if callable(relationship_guard_getter) and "关系事实权限" not in prompt:
+        if callable(relationship_guard_getter):
             try:
                 relationship_guard = str(relationship_guard_getter() or "").strip()
             except Exception:
                 relationship_guard = ""
             if relationship_guard:
-                prompt = f"{prompt.rstrip()}\n\n{relationship_guard}"
-        identity_guard = self._format_proactive_recipient_identity_guard(user, name)
-        if identity_guard:
-            prompt = f"{prompt.rstrip()}\n\n{identity_guard}"
-        segmenting_hint = self._proactive_llm_segmenting_instruction(
-            umo=_single_line(user.get("umo"), 240),
-        )
-        if segmenting_hint:
-            prompt = f"{prompt.rstrip()}\n\n{segmenting_hint}"
-        return prompt.strip()
+                append_section(
+                    prompt_section(
+                        key="proactive.relationship_authority",
+                        title="关系事实权限",
+                        source="user_memory.compat",
+                        content=relationship_guard,
+                    ),
+                    mode=PromptRenderMode.BODY_ONLY,
+                )
+        append_section(self._format_proactive_recipient_identity_guard_prompt_section(user, name))
+        if self._proactive_llm_segmenting_allowed(umo=_single_line(user.get("umo"), 240)):
+            segmenting_section_getter = getattr(self, "_llm_controlled_segmenting_prompt_section", None)
+            if callable(segmenting_section_getter):
+                try:
+                    segmenting_section = segmenting_section_getter()
+                except Exception:
+                    segmenting_section = None
+                if isinstance(segmenting_section, PromptSection):
+                    append_section(
+                        segmenting_section,
+                        mode=PromptRenderMode.CONVERSATION_XML,
+                    )
+        suffix = render_prompt_document(
+            prompt_document(
+                user=tuple(appended_parts),
+                user_render=_PROACTIVE_DOCUMENT_RENDER,
+                metadata={"kind": "proactive_generation_appendix"},
+            )
+        )["user"]
+        return "\n\n".join(part for part in (prompt.strip(), suffix) if part).strip()
 
     def _proactive_llm_segmenting_allowed(self, *, umo: str = "") -> bool:
         if not bool(runtime_persona_setting(self, "enable_segmented_proactive_reply", False)):
@@ -3512,30 +4176,36 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         """Return the marker contract only for user-visible proactive text."""
         if not self._proactive_llm_segmenting_allowed(umo=umo):
             return ""
-        prompt_getter = getattr(self, "_llm_controlled_segmenting_prompt", None)
-        if not callable(prompt_getter):
+        section_getter = getattr(self, "_llm_controlled_segmenting_prompt_section", None)
+        if not callable(section_getter):
             return ""
-        instruction = str(prompt_getter() or "").strip()
-        if not instruction:
+        section = section_getter()
+        if not isinstance(section, PromptSection):
             return ""
-        safe_instruction = instruction.replace("]]>", "]]]]><![CDATA[>")
-        return (
-            '<private_companion_context><section title="回复分段控制"><![CDATA['
-            f"{safe_instruction}"
-            "]]></section></private_companion_context>"
-        )
+        return render_prompt_sections([section])
 
     @staticmethod
-    def _proactive_visible_text_format_hint(action: str) -> str:
+    def _proactive_visible_text_format_prompt_section(action: str) -> PromptSection:
         action_name = _single_line(action, 80) or "message"
-        return (
-            "【主动可见正文格式】\n"
-            f"- 当前动作：{action_name}。这里生成的是最终显示在聊天里的普通正文；图片动作写可见附言，语音动作的朗读内容和音频会由独立链路生成。\n"
-            "- 人格中的 TTS 专用规则只约束独立语音脚本，不约束这里的可见正文。不要输出 <tts>/<pc_tts>、[happy]/[sad] 等情绪控制词、语音专用日语或外语朗读稿、音标，也不要把语音内容再作为文字重复发送。\n"
-            "- 可见正文继续遵守人格平时的聊天语言和口吻；只有当人格本身明确要求日常可见聊天使用某种语言时，才使用该语言，不能仅凭 TTS 语种要求切换。"
+        return prompt_section(
+            key="proactive.visible_text_format",
+            title="主动可见正文格式",
+            source="proactive_message",
+            content=(
+                f"- 当前动作：{action_name}。这里生成的是最终显示在聊天里的普通正文；图片动作写可见附言，语音动作的朗读内容和音频会由独立链路生成。\n"
+                "- 人格中的 TTS 专用规则只约束独立语音脚本，不约束这里的可见正文。不要输出 <tts>/<pc_tts>、[happy]/[sad] 等情绪控制词、语音专用日语或外语朗读稿、音标，也不要把语音内容再作为文字重复发送。\n"
+                "- 可见正文继续遵守人格平时的聊天语言和口吻；只有当人格本身明确要求日常可见聊天使用某种语言时，才使用该语言，不能仅凭 TTS 语种要求切换。"
+            ),
         )
 
-    def _format_proactive_generation_intent_hint(
+    @classmethod
+    def _proactive_visible_text_format_hint(cls, action: str) -> str:
+        return render_prompt_sections(
+            [cls._proactive_visible_text_format_prompt_section(action)],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+
+    def _format_proactive_generation_intent_prompt_section(
         self,
         user: dict[str, Any],
         *,
@@ -3543,7 +4213,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         action: str,
         motive: str = "",
         action_context: str = "",
-    ) -> str:
+    ) -> PromptSection | None:
         semantics: dict[str, Any] = {}
         semantic_getter = getattr(self, "_planned_proactive_semantics", None)
         if callable(semantic_getter):
@@ -3575,7 +4245,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         motivation = readiness.get("motivation") if isinstance(readiness.get("motivation"), dict) else {}
         expression_decision = readiness.get("expression_decision") if isinstance(readiness.get("expression_decision"), dict) else {}
 
-        lines = ["【这次主动的内在约束】"]
+        lines: list[str] = []
         troubleshooting_hint = self._proactive_troubleshooting_request_hint(user)
         if troubleshooting_hint:
             lines.append(troubleshooting_hint)
@@ -3755,7 +4425,36 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         if "message" == str(action or "message") and not _single_line(action_context, 120):
             lines.append("本轮没有真实媒体或工具结果：正文只围绕聊天内容本身，不描述动作结果。")
         lines.append("以上只用于决定怎么写，最终正文里不要出现“语义/自然度/压力/风险/开口欲/主动表达温度/犹豫”等分析词。")
-        return "\n".join(lines) if len(lines) > 2 else ""
+        if len(lines) <= 1:
+            return None
+        return prompt_section(
+            key="proactive.generation_intent",
+            title="这次主动的内在约束",
+            source="proactive_message",
+            content="\n".join(lines),
+        )
+
+    def _format_proactive_generation_intent_hint(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str,
+        action: str,
+        motive: str = "",
+        action_context: str = "",
+    ) -> str:
+        section = self._format_proactive_generation_intent_prompt_section(
+            user,
+            reason=reason,
+            action=action,
+            motive=motive,
+            action_context=action_context,
+        )
+        return (
+            render_prompt_sections([section], mode=PromptRenderMode.LABELED_BLOCK)
+            if section is not None
+            else ""
+        )
 
     def _unexecuted_relay_claim_reason(self, text: str, *, action_context: str = "") -> str:
         cleaned = _single_line(text, 260)
@@ -3799,6 +4498,68 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             return f"{prefix} 优先贴着这一小段生活片段来开口：{activity}。不要忽然跳成不在这个时段里的“刚醒”“赖床”或“要睡了”。"
         return f"{prefix} 贴着当前这小段生活片段开口，不要忽然跳成不在这个时段里的“刚醒”“赖床”或“要睡了”。"
 
+    @staticmethod
+    def _framework_voice_prompt_document(
+        *,
+        name: str,
+        reason: str,
+        last_user_message: str,
+        relationship_level: str,
+        relationship_preference: str,
+        state_hint: str,
+        busy_hint: str,
+        tts_prompt: str,
+        requirement_summary: str,
+        strict_tts: bool,
+    ) -> PromptDocument:
+        rules = [
+            "1. 只输出这句真正要被念出来的语音内容，不要解释。",
+            "2. 如果当前人格或 TTS 规则要求使用 <tts>...</tts>、日语、情绪标签、双语格式，就严格遵守。",
+            "3. 如果没有明确格式要求，就写成适合私聊语音的一小句，不像朗读稿。",
+            "4. 可以有一点嘴硬、黏人、藏着的想念，但不要把喜欢说满。",
+            "5. 不要提 AI、模型、插件、TTS、语音合成这些词。",
+        ]
+        if strict_tts:
+            rules.append("6. 这次必须优先满足语音格式要求；如果有日语或 <tts> 规则，不要退回普通中文句子。")
+        return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
+            user=(
+                _proactive_prompt_part(prompt_section(
+                    key="background.voice_framework.task",
+                    title="主动语音正文生成",
+                    source="proactive_message",
+                    content=(
+                        "你现在要在同一段私聊会话里，准备一小句真正会被念出来的主动语音内容。\n"
+                        "当前会话里已有的人格、关系、上下文会继续生效，这里不要再重复铺陈。\n"
+                        "站位必须清楚：这是你主动发语音,不是对方刚刚来找你、叫醒你或问候你。"
+                        "聊天历史只作背景,不要把最后一句历史当成当前新消息。"
+                    ),
+                ), mode=PromptRenderMode.BODY_ONLY),
+                _proactive_prompt_part(prompt_section(
+                    key="background.voice_framework.context",
+                    title="补充信息",
+                    source="proactive_message",
+                    content=(
+                        f"- 对方称呼：{name}\n"
+                        f"- 主动原因：{reason}\n"
+                        f"- 最近一句用户消息：{last_user_message or '（暂无）'}\n"
+                        f"- 关系画像：{relationship_level}｜偏好：{relationship_preference}\n"
+                        f"- 当前状态底色：{state_hint or '今天整体比较平稳。'}\n"
+                        f"- 忙碌表达倾向：{busy_hint or '当前没有额外的忙碌表达倾向。'}\n"
+                        f"- 当前会话 TTS 规则：{tts_prompt or '（当前没有额外 TTS 提示词,就按人格自己的语音习惯来）'}\n"
+                        f"- 当前语音格式重点：{requirement_summary}"
+                    ),
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
+                _proactive_prompt_part(prompt_section(
+                    key="background.voice_framework.rules",
+                    title="要求",
+                    source="proactive_message",
+                    content="\n".join(rules),
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
+            ),
+            metadata={"task": "proactive_voice"},
+        )
+
     def _build_framework_voice_prompt(
         self,
         *,
@@ -3830,29 +4591,20 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 "正处于忙碌片段，像腾不出手时顺手留的一句；"
                 "控制在一两句短口语，不复述日程、不报内部状态，也不要扩展成说明。"
             )
-        return f"""
-你现在要在同一段私聊会话里，准备一小句真正会被念出来的主动语音内容。
-当前会话里已有的人格、关系、上下文会继续生效，这里不要再重复铺陈。
-站位必须清楚：这是你主动发语音,不是对方刚刚来找你、叫醒你或问候你。聊天历史只作背景,不要把最后一句历史当成当前新消息。
-
-补充信息：
-- 对方称呼：{name}
-- 主动原因：{reason}
-- 最近一句用户消息：{last_user_message or "（暂无）"}
-- 关系画像：{profile['level']}｜偏好：{profile['preference']}
-- 当前状态底色：{state_hint or "今天整体比较平稳。"}
-- 忙碌表达倾向：{busy_hint or "当前没有额外的忙碌表达倾向。"}
-- 当前会话 TTS 规则：{tts_prompt or "（当前没有额外 TTS 提示词,就按人格自己的语音习惯来）"}
-- 当前语音格式重点：{req['summary']}
-
-要求：
-1. 只输出这句真正要被念出来的语音内容，不要解释。
-2. 如果当前人格或 TTS 规则要求使用 <tts>...</tts>、日语、情绪标签、双语格式，就严格遵守。
-3. 如果没有明确格式要求，就写成适合私聊语音的一小句，不像朗读稿。
-4. 可以有一点嘴硬、黏人、藏着的想念，但不要把喜欢说满。
-5. 不要提 AI、模型、插件、TTS、语音合成这些词。
-{"6. 这次必须优先满足语音格式要求；如果有日语或 <tts> 规则，不要退回普通中文句子。" if strict_tts else ""}
-""".strip()
+        return render_prompt_document(
+            self._framework_voice_prompt_document(
+                name=name,
+                reason=reason,
+                last_user_message=last_user_message,
+                relationship_level=profile["level"],
+                relationship_preference=profile["preference"],
+                state_hint=state_hint,
+                busy_hint=busy_hint,
+                tts_prompt=tts_prompt,
+                requirement_summary=req["summary"],
+                strict_tts=strict_tts,
+            )
+        )["user"]
 
     async def _capture_framework_send_message_calls(
         self,
@@ -4579,24 +5331,47 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             fitted = self._fit_proactive_history_lines(cleaned_lines, max_chars)
             return "\n".join(fitted)
 
+        def history_section(key: str, title: str, content: str) -> PromptSection:
+            return prompt_section(
+                key=key,
+                title=title,
+                source="proactive_message",
+                content=content,
+            )
+
+        def labeled_overhead(key: str, title: str) -> int:
+            probe = render_prompt_sections(
+                [history_section(key, title, "x")],
+                mode=PromptRenderMode.LABELED_BLOCK,
+            )
+            return len(probe) - 1
+
         recent_lines = cleaned_lines[-recent_count:]
         older_lines = [_single_line(line, 160) for line in cleaned_lines[:-recent_count]]
-        recent_header = "【最近对话（保留原文）】"
-        recent_budget = max(0, max_chars - len(recent_header) - 1)
+        recent_key = "proactive.history.recent"
+        recent_title = "最近对话（保留原文）"
+        recent_overhead = labeled_overhead(recent_key, recent_title)
+        recent_budget = max(0, max_chars - recent_overhead)
         fitted_recent = self._fit_proactive_history_lines(recent_lines, recent_budget)
-        recent_block = recent_header
-        if fitted_recent:
-            recent_block += "\n" + "\n".join(fitted_recent)
+        recent_block = render_prompt_sections(
+            [history_section(recent_key, recent_title, "\n".join(fitted_recent))],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
         if not older_lines:
             return recent_block[:max_chars]
 
-        older_header = "【较早对话（已压缩）】"
-        remaining = max_chars - len(recent_block) - len(older_header) - 2
+        older_key = "proactive.history.older"
+        older_title = "较早对话（已压缩）"
+        older_overhead = labeled_overhead(older_key, older_title)
+        remaining = max_chars - len(recent_block) - older_overhead - 1
         fitted_older = self._fit_proactive_history_lines(older_lines, remaining)
         if not fitted_older:
             return recent_block[:max_chars]
-        older_text = "\n".join(fitted_older)
-        return f"{older_header}\n{older_text}\n{recent_block}"[:max_chars]
+        older_block = render_prompt_sections(
+            [history_section(older_key, older_title, "\n".join(fitted_older))],
+            mode=PromptRenderMode.LABELED_BLOCK,
+        )
+        return f"{older_block}\n{recent_block}"[:max_chars]
 
     async def _recent_private_conversation_for_proactive_review(
         self,
@@ -4645,6 +5420,99 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             return ""
         return _single_line(cleaned, limit)
 
+    @staticmethod
+    def _reference_rewrite_prompt_document(
+        *,
+        persona: str,
+        style_title: str,
+        reply_style: str,
+        history: str,
+        recipient_identity: str,
+        scene: str,
+        reference: str,
+        creative_excerpt_rule: str,
+        status_rule: str,
+        segmenting_section: PromptSection | None = None,
+    ) -> PromptDocument:
+        sections: list[PromptSection | PromptDocumentPart] = [
+            _proactive_prompt_part(prompt_section(
+                key="background.reference_rewrite.task",
+                title="人格参考意图改写",
+                source="proactive_message",
+                content=(
+                    "你要把一条“参考意图”改写成当前人格会自然说出的聊天正文。"
+                    "参考意图只说明要表达什么，不是要照抄的句子。"
+                ),
+            ), mode=PromptRenderMode.BODY_ONLY),
+            prompt_section(
+                key="background.reference_rewrite.persona",
+                title="当前人格",
+                source="proactive_message",
+                content=persona or "保持自然、简洁、有边界。",
+            ),
+            prompt_section(
+                key="background.reference_rewrite.style",
+                title=style_title,
+                source="proactive_message",
+                content=reply_style or "像日常聊天一样短一点，不要报告式。",
+            ),
+            prompt_section(
+                key="background.reference_rewrite.history",
+                title="最近对话",
+                source="proactive_message",
+                content=history or "（无可用历史）",
+            ),
+            prompt_section(
+                key="background.reference_rewrite.recipient",
+                title="当前收件人",
+                source="proactive_message",
+                content=(
+                    recipient_identity
+                    or "当前收件人身份未知；不要猜测名字或套用人格中的专属称呼。"
+                ),
+            ),
+            prompt_section(
+                key="background.reference_rewrite.scene",
+                title="场景",
+                source="proactive_message",
+                content=scene or "普通聊天回执",
+            ),
+            prompt_section(
+                key="background.reference_rewrite.intent",
+                title="参考意图",
+                source="proactive_message",
+                content=reference,
+            ),
+            _proactive_prompt_part(prompt_section(
+                key="background.reference_rewrite.rules",
+                title="要求",
+                source="proactive_message",
+                content=(
+                    "- 只输出最终聊天正文，不要解释。\n"
+                    "- 1 句，最多 2 句；尽量像这个人格平时聊天，不要像客服、公告或模板。\n"
+                    "- 不要照抄参考意图里的固定说法；只保留事实和语义。\n"
+                    "- 不要出现“参考/兜底/模板/系统/工具/执行/已发送给用户/消息已发送”等字样。\n"
+                    "- 不要新增事实、承诺、动作小剧场或没有发生的状态。\n"
+                    f"{creative_excerpt_rule}\n"
+                    "- 如果参考意图或模型结果包含 Provider/API 报错、内容策略拒绝、敏感词提示、政策链接或内部诊断，"
+                    "视为本轮失败并输出空文本；不要翻译、复述或润色这类内容。\n"
+                    f"{status_rule}"
+                ),
+            ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
+        ]
+        if segmenting_section is not None:
+            sections.append(
+                _proactive_prompt_part(
+                    segmenting_section,
+                    mode=PromptRenderMode.CONVERSATION_XML,
+                )
+            )
+        return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
+            user=sections,
+            metadata={"task": "proactive_reference_rewrite"},
+        )
+
     async def _rewrite_reference_reply_with_persona(
         self,
         reference_text: str,
@@ -4670,13 +5538,51 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         persona = await self._resolve_proactive_persona_prompt(user, umo=umo)
         proactive_rewrite = str(task or "").startswith("proactive")
         if proactive_rewrite:
-            reply_style = self._format_proactive_voice_prompt() if callable(getattr(self, "_format_proactive_voice_prompt", None)) else ""
-            expression_voice = self._format_expression_voice_for_prompt(
-                scope="proactive",
-                target_id=_single_line(user.get("user_id") or user.get("id"), 80) if isinstance(user, dict) else "",
-                context_owner=user if isinstance(user, dict) else None,
-                stage_owner=user if isinstance(user, dict) else None,
+            voice_sections_getter = getattr(self, "_format_proactive_voice_prompt_sections", None)
+            if callable(voice_sections_getter):
+                reply_style = render_prompt_sections(
+                    voice_sections_getter(),
+                    mode=PromptRenderMode.LABELED_BLOCK,
+                )
+            else:
+                voice_getter = getattr(self, "_format_proactive_voice_prompt", None)
+                reply_style = voice_getter() if callable(voice_getter) else ""
+            expression_section_getter = getattr(self, "_format_expression_voice_prompt_section", None)
+            expression_section = (
+                expression_section_getter(
+                    scope="proactive",
+                    target_id=(
+                        _single_line(user.get("user_id") or user.get("id"), 80)
+                        if isinstance(user, dict)
+                        else ""
+                    ),
+                    context_owner=user if isinstance(user, dict) else None,
+                    stage_owner=user if isinstance(user, dict) else None,
+                )
+                if callable(expression_section_getter)
+                else None
             )
+            expression_voice = (
+                render_prompt_sections([expression_section], mode=PromptRenderMode.LABELED_BLOCK)
+                if isinstance(expression_section, PromptSection)
+                else ""
+            )
+            if not callable(expression_section_getter):
+                expression_formatter = getattr(self, "_format_expression_voice_for_prompt", None)
+                expression_voice = (
+                    expression_formatter(
+                        scope="proactive",
+                        target_id=(
+                            _single_line(user.get("user_id") or user.get("id"), 80)
+                            if isinstance(user, dict)
+                            else ""
+                        ),
+                        context_owner=user if isinstance(user, dict) else None,
+                        stage_owner=user if isinstance(user, dict) else None,
+                    )
+                    if callable(expression_formatter)
+                    else ""
+                )
             if expression_voice:
                 reply_style = f"{reply_style}\n\n{expression_voice}".strip()
         else:
@@ -4687,7 +5593,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 history = await self._recent_private_conversation_for_proactive_review(user, limit=history_limit)
             except Exception:
                 history = ""
-        recipient_identity = self._format_proactive_recipient_identity_guard(
+        recipient_identity = self._proactive_recipient_identity_prompt_text(
             user,
             _single_line(user.get("nickname"), 40) if isinstance(user, dict) else "",
         )
@@ -4697,41 +5603,31 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             if "创作" in str(scene or "")
             else ""
         )
-        prompt = f"""
-你要把一条“参考意图”改写成当前人格会自然说出的聊天正文。参考意图只说明要表达什么，不是要照抄的句子。
-
-【当前人格】
-{persona or "保持自然、简洁、有边界。"}
-
-【{"主动开口风格" if proactive_rewrite else "回复风格"}】
-{reply_style or "像日常聊天一样短一点，不要报告式。"}
-
-【最近对话】
-{history or "（无可用历史）"}
-
-【当前收件人】
-{recipient_identity or "当前收件人身份未知；不要猜测名字或套用人格中的专属称呼。"}
-
-【场景】
-{_single_line(scene, 180) or "普通聊天回执"}
-
-【参考意图】
-{reference}
-
-要求：
-- 只输出最终聊天正文，不要解释。
-- 1 句，最多 2 句；尽量像这个人格平时聊天，不要像客服、公告或模板。
-- 不要照抄参考意图里的固定说法；只保留事实和语义。
-- 不要出现“参考/兜底/模板/系统/工具/执行/已发送给用户/消息已发送”等字样。
-- 不要新增事实、承诺、动作小剧场或没有发生的状态。
-{creative_excerpt_rule}
-- 如果参考意图或模型结果包含 Provider/API 报错、内容策略拒绝、敏感词提示、政策链接或内部诊断，视为本轮失败并输出空文本；不要翻译、复述或润色这类内容。
-{"- 必须保留成功/失败/等待/完成/稍后再说等状态语义，不要把失败说成成功。" if preserve_status else "- 如果只是轻轻递一句，不要补多余解释。"}
-""".strip()
-        if proactive_rewrite:
-            segmenting_hint = self._proactive_llm_segmenting_instruction(umo=umo)
-            if segmenting_hint:
-                prompt = f"{prompt.rstrip()}\n\n{segmenting_hint}"
+        segmenting_section: PromptSection | None = None
+        if proactive_rewrite and self._proactive_llm_segmenting_allowed(umo=umo):
+            segmenting_getter = getattr(self, "_llm_controlled_segmenting_prompt_section", None)
+            if callable(segmenting_getter):
+                candidate = segmenting_getter()
+                if isinstance(candidate, PromptSection):
+                    segmenting_section = candidate
+        prompt = render_prompt_document(
+            self._reference_rewrite_prompt_document(
+                persona=persona,
+                style_title="主动开口风格" if proactive_rewrite else "回复风格",
+                reply_style=reply_style,
+                history=history,
+                recipient_identity=recipient_identity,
+                scene=_single_line(scene, 180),
+                reference=reference,
+                creative_excerpt_rule=creative_excerpt_rule,
+                status_rule=(
+                    "- 必须保留成功/失败/等待/完成/稍后再说等状态语义，不要把失败说成成功。"
+                    if preserve_status
+                    else "- 如果只是轻轻递一句，不要补多余解释。"
+                ),
+                segmenting_section=segmenting_section,
+            )
+        )["user"]
         try:
             raw = await self._llm_call(
                 prompt,
@@ -5729,6 +6625,127 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "delay_minutes": delay_minutes if decision == "defer" else 0,
         }
 
+    @staticmethod
+    def _proactive_send_review_prompt_document(
+        *,
+        creative_excerpt_section: PromptSection | None,
+        history: str,
+        runtime_context: str,
+        troubleshooting_context: str,
+        fact_source_context: str,
+        local_context: str,
+        source_context: str,
+        route_review_directive: str,
+        persona_context: str,
+        intent_hint: str,
+        proactive_voice: str,
+        expression_voice: str,
+        recipient_identity: str,
+        candidate: str,
+    ) -> PromptDocument:
+        def square(
+            key: str,
+            title: str,
+            content: str,
+            *,
+            separator_before: str = "\n\n",
+        ) -> PromptDocumentPart:
+            return _proactive_prompt_part(
+                prompt_section(
+                    key=key,
+                    title=title,
+                    source="proactive_message",
+                    content=content,
+                ),
+                label_style=PromptLabelStyle.SQUARE,
+                separator_before=separator_before,
+            )
+
+        sections: list[PromptSection | PromptDocumentPart] = [
+            _proactive_prompt_part(prompt_section(
+                key="background.proactive_send_review.contract",
+                title="主动消息发送终审",
+                source="proactive_message",
+                content=(
+                    "You are the final content gate immediately before one proactive private message is sent.\n"
+                    "Return JSON only. You must decide exactly one of send, rewrite, or drop.\n\n"
+                    "Decision contract:\n"
+                    "- send: the candidate is natural, persona-consistent, useful now, and ready to send unchanged. Leave text empty.\n"
+                    "- rewrite: the message still has a concrete reason to exist, but needs a small rewrite to sound natural in this exact conversation. text must be the complete sendable final message.\n"
+                    "- drop: do not send this candidate. Use it for weak, generic, intrusive, fabricated, context-conflicting, reply-to-nothing, internal-status, tool-result, or unsafe content.\n\n"
+                    "Rules:\n"
+                    "- This is a content gate, not a scheduler. Never output defer, waiting, or a delay.\n"
+                    "- Read the recent conversation and runtime context first. The candidate must read like a natural message from the current persona, not a system-triggered interruption.\n"
+                    "- Do not invent facts or promise tools, searches, media, relays, or actions that were not actually performed.\n"
+                    "- Planned schedules, persona continuity, and message seeds are narrative inspiration, not evidence that an action happened.\n"
+                    "- Relative dates such as yesterday must be supported by the recent conversation or an explicitly dated reliable source.\n"
+                    "- Preserve real media context. Do not claim an image exists when none is attached.\n"
+                    "- A rewrite must be shorter or similarly sized and must not add new factual claims.\n"
+                    "- A rewrite must preserve the candidate's concrete communicative purpose. Never collapse a meaningful reminder, question, warning, or check-in into a standalone filler such as “嗯。”, “哦。”, “唔。”, or “诶。”. If no complete rewrite is better, choose send and keep the candidate unchanged.\n"
+                    "- If a user has just been discussing something and the candidate cannot naturally fit, drop it; do not defer it.\n"
+                    "- If the candidate or any model output contains a Provider/API error, policy refusal, sensitive-word notice, policy URL, or internal diagnostic, choose drop with an empty text; never translate, quote, or polish it.\n"
+                    "- When the current request context says the user explicitly requested this troubleshooting message, treat that request as a concrete reason to speak. Do not drop solely because it is late, the normal proactive interval is short, or there is no spontaneous life story. If the wording is too strong or generic, prefer a shorter, softer rewrite. Fact, safety, privacy, identity, and conversation-conflict checks still apply.\n"
+                    "- For a creative share, preserve any `「...」` excerpt exactly as one continuous source quote. Keep conversational introduction and closing outside it; never paraphrase or fabricate text inside the excerpt."
+                ),
+            ), mode=PromptRenderMode.BODY_ONLY),
+        ]
+        if creative_excerpt_section is not None:
+            sections.append(creative_excerpt_section)
+        sections.extend(
+            (
+                square(
+                    "background.proactive_send_review.history",
+                    "Recent conversation",
+                    history or "(none)",
+                    separator_before="\n\n\n\n" if creative_excerpt_section is None else "",
+                ),
+                square("background.proactive_send_review.runtime", "Runtime state", runtime_context),
+                square(
+                    "background.proactive_send_review.request",
+                    "Current request context",
+                    troubleshooting_context
+                    or "(ordinary proactive message; no explicit user-requested test)",
+                ),
+                square("background.proactive_send_review.fact_boundary", "Verified fact boundary", fact_source_context),
+                square("background.proactive_send_review.local", "Local safety result", local_context or "local gate passed"),
+                square("background.proactive_send_review.source", "Proactive source", source_context),
+                square("background.proactive_send_review.route", "Route-specific final gate", route_review_directive),
+                square("background.proactive_send_review.persona", "Full persona", persona_context),
+                square("background.proactive_send_review.intent", "Persona and intent constraints", intent_hint or "(none)"),
+                square(
+                    "background.proactive_send_review.voice",
+                    "Proactive voice",
+                    proactive_voice or "(natural, low-pressure private chat)",
+                ),
+                square(
+                    "background.proactive_send_review.expression",
+                    "Learned expression voice",
+                    expression_voice or "(none)",
+                ),
+                square(
+                    "background.proactive_send_review.recipient",
+                    "Recipient identity boundary",
+                    recipient_identity
+                    or "Use only the current recipient identity. Do not guess or copy an exclusive name from persona examples.",
+                ),
+                square("background.proactive_send_review.candidate", "Candidate", candidate),
+                _proactive_prompt_part(
+                    prompt_section(
+                        key="background.proactive_send_review.output",
+                        title="Output",
+                        source="proactive_message",
+                        content='{"decision":"send|rewrite|drop","text":"","reason":"brief reason"}',
+                    ),
+                    label_style=PromptLabelStyle.COLON,
+                ),
+            )
+        )
+        return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
+            user=sections,
+            metadata={"task": "proactive_send_review"},
+        )
+
     async def _review_proactive_message_send_decision(
         self,
         user: dict[str, Any],
@@ -5948,19 +6965,47 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             motive=motive,
             action_context=review_context,
         )
-        proactive_voice = self._format_proactive_voice_prompt() if callable(getattr(self, "_format_proactive_voice_prompt", None)) else ""
-        expression_formatter = getattr(self, "_format_expression_voice_for_prompt", None)
-        expression_voice = (
-            expression_formatter(
+        proactive_voice_sections_getter = getattr(self, "_format_proactive_voice_prompt_sections", None)
+        proactive_voice = (
+            render_prompt_sections(
+                proactive_voice_sections_getter(),
+                mode=PromptRenderMode.LABELED_BLOCK,
+            )
+            if callable(proactive_voice_sections_getter)
+            else ""
+        )
+        if not callable(proactive_voice_sections_getter):
+            proactive_voice_getter = getattr(self, "_format_proactive_voice_prompt", None)
+            proactive_voice = proactive_voice_getter() if callable(proactive_voice_getter) else ""
+        expression_section_getter = getattr(self, "_format_expression_voice_prompt_section", None)
+        expression_section = (
+            expression_section_getter(
                 scope="proactive",
                 target_id=_single_line(user.get("user_id") or user.get("id"), 80),
                 context_owner=user,
                 stage_owner=user,
             )
-            if callable(expression_formatter)
+            if callable(expression_section_getter)
+            else None
+        )
+        expression_voice = (
+            render_prompt_sections([expression_section], mode=PromptRenderMode.LABELED_BLOCK)
+            if isinstance(expression_section, PromptSection)
             else ""
         )
-        recipient_identity = self._format_proactive_recipient_identity_guard(
+        if not callable(expression_section_getter):
+            expression_formatter = getattr(self, "_format_expression_voice_for_prompt", None)
+            expression_voice = (
+                expression_formatter(
+                    scope="proactive",
+                    target_id=_single_line(user.get("user_id") or user.get("id"), 80),
+                    context_owner=user,
+                    stage_owner=user,
+                )
+                if callable(expression_formatter)
+                else ""
+            )
+        recipient_identity = self._proactive_recipient_identity_prompt_text(
             user,
             _single_line(user.get("nickname"), 40),
         )
@@ -5986,84 +7031,42 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             )
             if part
         )
-        creative_excerpt_rule = (
-            self._creative_share_excerpt_prompt_hint()
-            if reason == "creative_share"
-            else ""
-        )
         route_review_directive = route.review_directive()
         persona_context = (
             "(Creative-share compact review: use the proactive voice and excerpt rule below; do not restate the full persona.)"
             if reason == "creative_share"
             else self._truncate_proactive_context(persona, 2600)
         ) if persona else "(No explicit persona was resolved. Preserve the candidate instead of inventing a new voice.)"
-        prompt = f"""
-You are the final content gate immediately before one proactive private message is sent.
-Return JSON only. You must decide exactly one of send, rewrite, or drop.
-
-Decision contract:
-- send: the candidate is natural, persona-consistent, useful now, and ready to send unchanged. Leave text empty.
-- rewrite: the message still has a concrete reason to exist, but needs a small rewrite to sound natural in this exact conversation. text must be the complete sendable final message.
-- drop: do not send this candidate. Use it for weak, generic, intrusive, fabricated, context-conflicting, reply-to-nothing, internal-status, tool-result, or unsafe content.
-
-Rules:
-- This is a content gate, not a scheduler. Never output defer, waiting, or a delay.
-- Read the recent conversation and runtime context first. The candidate must read like a natural message from the current persona, not a system-triggered interruption.
-- Do not invent facts or promise tools, searches, media, relays, or actions that were not actually performed.
-- Planned schedules, persona continuity, and message seeds are narrative inspiration, not evidence that an action happened.
-- Relative dates such as yesterday must be supported by the recent conversation or an explicitly dated reliable source.
-- Preserve real media context. Do not claim an image exists when none is attached.
-- A rewrite must be shorter or similarly sized and must not add new factual claims.
-- A rewrite must preserve the candidate's concrete communicative purpose. Never collapse a meaningful reminder, question, warning, or check-in into a standalone filler such as “嗯。”, “哦。”, “唔。”, or “诶。”. If no complete rewrite is better, choose send and keep the candidate unchanged.
-- If a user has just been discussing something and the candidate cannot naturally fit, drop it; do not defer it.
-- If the candidate or any model output contains a Provider/API error, policy refusal, sensitive-word notice, policy URL, or internal diagnostic, choose drop with an empty text; never translate, quote, or polish it.
-- When the current request context says the user explicitly requested this troubleshooting message, treat that request as a concrete reason to speak. Do not drop solely because it is late, the normal proactive interval is short, or there is no spontaneous life story. If the wording is too strong or generic, prefer a shorter, softer rewrite. Fact, safety, privacy, identity, and conversation-conflict checks still apply.
-- For a creative share, preserve any `「...」` excerpt exactly as one continuous source quote. Keep conversational introduction and closing outside it; never paraphrase or fabricate text inside the excerpt.
-
-{creative_excerpt_rule}
-
-[Recent conversation]
-{history or "(none)"}
-
-[Runtime state]
-{runtime_context}
-
-[Current request context]
-{troubleshooting_hint or "(ordinary proactive message; no explicit user-requested test)"}
-
-[Verified fact boundary]
-{fact_source_context}
-
-[Local safety result]
-{local_context or "local gate passed"}
-
-[Proactive source]
-route={route.key}({route.label}); review_profile={route.review_profile}; reason={reason or "check_in"}; action={action or "message"}; topic={_single_line(topic, 80) or "none"}; motive={_single_line(motive, 120) or "none"}; summary={_single_line(action_summary, 80) or "none"}
-
-[Route-specific final gate]
-{route_review_directive}
-
-[Full persona]
-{persona_context}
-
-[Persona and intent constraints]
-{intent_hint or "(none)"}
-
-[Proactive voice]
-{proactive_voice or "(natural, low-pressure private chat)"}
-
-[Learned expression voice]
-{expression_voice or "(none)"}
-
-[Recipient identity boundary]
-{recipient_identity or "Use only the current recipient identity. Do not guess or copy an exclusive name from persona examples."}
-
-[Candidate]
-{text}
-
-Output:
-{{"decision":"send|rewrite|drop","text":"","reason":"brief reason"}}
-""".strip()
+        creative_excerpt_section = (
+            self._creative_share_excerpt_prompt_section()
+            if reason == "creative_share"
+            else None
+        )
+        source_context = (
+            f"route={route.key}({route.label}); review_profile={route.review_profile}; "
+            f"reason={reason or 'check_in'}; action={action or 'message'}; "
+            f"topic={_single_line(topic, 80) or 'none'}; "
+            f"motive={_single_line(motive, 120) or 'none'}; "
+            f"summary={_single_line(action_summary, 80) or 'none'}"
+        )
+        prompt = render_prompt_document(
+            self._proactive_send_review_prompt_document(
+                creative_excerpt_section=creative_excerpt_section,
+                history=history,
+                runtime_context=runtime_context,
+                troubleshooting_context=troubleshooting_hint,
+                fact_source_context=fact_source_context,
+                local_context=local_context,
+                source_context=source_context,
+                route_review_directive=route_review_directive,
+                persona_context=persona_context,
+                intent_hint=intent_hint,
+                proactive_voice=proactive_voice,
+                expression_voice=expression_voice,
+                recipient_identity=recipient_identity,
+                candidate=text,
+            )
+        )["user"]
         started = time.perf_counter()
         review_provider_id = self._task_provider(
             _persona_provider_id(self, "RESPONSE_REVIEW_PROVIDER_ID", "response_review_provider_id", "fast"),
@@ -6928,6 +7931,122 @@ Output:
                 repaired.append(self._ensure_chat_sentence_punctuation(candidate))
         return "\n".join(repaired).strip()
 
+    @staticmethod
+    def _response_review_prompt_document(
+        *,
+        original_text: str,
+        flags: str,
+        reason: str,
+        motive: str,
+        topic: str,
+        action_context: str,
+        intent_hint: str,
+        persona: str,
+        proactive_voice: str,
+        expression_voice: str,
+        recipient_identity: str,
+        creative_excerpt_rule: str,
+    ) -> PromptDocument:
+        return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
+            user=(
+                _proactive_prompt_part(prompt_section(
+                    key="background.response_review.task",
+                    title="主动回复空气修正",
+                    source="proactive_message",
+                    content=(
+                        "把下面这条主动私聊消息改成真正的主动开口。\n"
+                        "它不是在回复用户刚发来的消息；聊天历史只能当背景。"
+                    ),
+                ), mode=PromptRenderMode.BODY_ONLY),
+                prompt_section(
+                    key="background.response_review.original",
+                    title="原主动消息",
+                    source="proactive_message",
+                    content=original_text,
+                ),
+                prompt_section(
+                    key="background.response_review.flags",
+                    title="问题",
+                    source="proactive_message",
+                    content=flags,
+                ),
+                prompt_section(
+                    key="background.response_review.reason",
+                    title="主动原因",
+                    source="proactive_message",
+                    content=reason or "check_in",
+                ),
+                prompt_section(
+                    key="background.response_review.motive_topic",
+                    title="动机/话题",
+                    source="proactive_message",
+                    content=f"{motive}\n{topic}",
+                ),
+                _proactive_prompt_part(
+                    prompt_section(
+                        key="background.response_review.action_context",
+                        title="动作上下文",
+                        source="proactive_message",
+                        content=action_context or "（无）",
+                    ),
+                    separator_before="\n\n\n" if not topic else "\n\n",
+                ),
+                prompt_section(
+                    key="background.response_review.intent",
+                    title="内在约束",
+                    source="proactive_message",
+                    content=intent_hint or "（无额外约束）",
+                ),
+                prompt_section(
+                    key="background.response_review.persona",
+                    title="完整人格",
+                    source="proactive_message",
+                    content=(
+                        persona
+                        or "（没有解析到显式人格；尽量保留原文语气，不要另造一种通用陪伴人格）"
+                    ),
+                ),
+                prompt_section(
+                    key="background.response_review.voice",
+                    title="主动开口风格",
+                    source="proactive_message",
+                    content=proactive_voice or "（无额外主动风格；保持原文已有的人格语气）",
+                ),
+                prompt_section(
+                    key="background.response_review.expression",
+                    title="已形成的表达底色",
+                    source="proactive_message",
+                    content=expression_voice or "（无额外表达底色）",
+                ),
+                prompt_section(
+                    key="background.response_review.recipient",
+                    title="当前收件人",
+                    source="proactive_message",
+                    content=recipient_identity or "不要猜名字或套用其他对象的专属称呼。",
+                ),
+                _proactive_prompt_part(prompt_section(
+                    key="background.response_review.rules",
+                    title="要求",
+                    source="proactive_message",
+                    content=(
+                        "- 只输出要发送的正文\n"
+                        "- 不要把“用户”“对方”“收信人”这类内部称呼写进正文；需要称呼时用自然的“你”或对方昵称\n"
+                        "- 不要写成“好呀/确实/我也觉得/刚看到/你刚刚问我/你来找我了”\n"
+                        "- 不要把历史消息当成当前正在发生的对话\n"
+                        "- 没有真实图片或工具结果时，只写聊天内容本身，不描述动作结果\n"
+                        "- 如果原文只是过程状态或工具结果，请不要改写成另一种状态汇报；改不成自然聊天就输出空文本\n"
+                        "- 如果原文或模型结果包含 Provider/API 报错、内容策略拒绝、敏感词提示、政策链接或内部诊断，输出空文本；不要翻译、复述或润色\n"
+                        "- 改写后仍要贴合内在约束里的候选语义；不能把分享型改成泛泛问候，也不能把低压关心改成追问\n"
+                        "- 只修正“回复空气”的问题；不得把原文改成另一种人格，也不得降低或升级当前关系亲密度\n"
+                        "- 尽量 1 到 2 句，像自然想起对方后随手说一句\n"
+                        f"{creative_excerpt_rule}"
+                    ),
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
+            ),
+            metadata={"task": "response_review"},
+        )
+
     async def _review_proactive_message_stance(
         self,
         user: dict[str, Any],
@@ -7040,19 +8159,47 @@ Output:
             260,
         )
         persona = await self._resolve_proactive_persona_prompt(user)
-        proactive_voice = self._format_proactive_voice_prompt() if callable(getattr(self, "_format_proactive_voice_prompt", None)) else ""
-        expression_formatter = getattr(self, "_format_expression_voice_for_prompt", None)
-        expression_voice = (
-            expression_formatter(
+        proactive_voice_sections_getter = getattr(self, "_format_proactive_voice_prompt_sections", None)
+        proactive_voice = (
+            render_prompt_sections(
+                proactive_voice_sections_getter(),
+                mode=PromptRenderMode.LABELED_BLOCK,
+            )
+            if callable(proactive_voice_sections_getter)
+            else ""
+        )
+        if not callable(proactive_voice_sections_getter):
+            proactive_voice_getter = getattr(self, "_format_proactive_voice_prompt", None)
+            proactive_voice = proactive_voice_getter() if callable(proactive_voice_getter) else ""
+        expression_section_getter = getattr(self, "_format_expression_voice_prompt_section", None)
+        expression_section = (
+            expression_section_getter(
                 scope="proactive",
                 target_id=_single_line(user.get("user_id") or user.get("id"), 80),
                 context_owner=user,
                 stage_owner=user,
             )
-            if callable(expression_formatter)
+            if callable(expression_section_getter)
+            else None
+        )
+        expression_voice = (
+            render_prompt_sections([expression_section], mode=PromptRenderMode.LABELED_BLOCK)
+            if isinstance(expression_section, PromptSection)
             else ""
         )
-        recipient_identity = self._format_proactive_recipient_identity_guard(
+        if not callable(expression_section_getter):
+            expression_formatter = getattr(self, "_format_expression_voice_for_prompt", None)
+            expression_voice = (
+                expression_formatter(
+                    scope="proactive",
+                    target_id=_single_line(user.get("user_id") or user.get("id"), 80),
+                    context_owner=user,
+                    stage_owner=user,
+                )
+                if callable(expression_formatter)
+                else ""
+            )
+        recipient_identity = self._proactive_recipient_identity_prompt_text(
             user,
             _single_line(user.get("nickname"), 40),
         )
@@ -7061,54 +8208,22 @@ Output:
             if reason == "creative_share"
             else ""
         )
-        prompt = f"""
-把下面这条主动私聊消息改成真正的主动开口。
-它不是在回复用户刚发来的消息；聊天历史只能当背景。
-
-【原主动消息】
-{cleaned}
-
-【问题】
-{", ".join(flags)}
-
-【主动原因】
-{reason or "check_in"}
-
-【动机/话题】
-{review_motive}
-{review_topic}
-
-【动作上下文】
-{review_action_context or "（无）"}
-
-【内在约束】
-{intent_hint or "（无额外约束）"}
-
-【完整人格】
-{self._truncate_proactive_context(persona, 2600) if persona else "（没有解析到显式人格；尽量保留原文语气，不要另造一种通用陪伴人格）"}
-
-【主动开口风格】
-{proactive_voice or "（无额外主动风格；保持原文已有的人格语气）"}
-
-【已形成的表达底色】
-{expression_voice or "（无额外表达底色）"}
-
-【当前收件人】
-{recipient_identity or "不要猜名字或套用其他对象的专属称呼。"}
-
-要求：
-- 只输出要发送的正文
-- 不要把“用户”“对方”“收信人”这类内部称呼写进正文；需要称呼时用自然的“你”或对方昵称
-- 不要写成“好呀/确实/我也觉得/刚看到/你刚刚问我/你来找我了”
-- 不要把历史消息当成当前正在发生的对话
-- 没有真实图片或工具结果时，只写聊天内容本身，不描述动作结果
-- 如果原文只是过程状态或工具结果，请不要改写成另一种状态汇报；改不成自然聊天就输出空文本
-- 如果原文或模型结果包含 Provider/API 报错、内容策略拒绝、敏感词提示、政策链接或内部诊断，输出空文本；不要翻译、复述或润色
-- 改写后仍要贴合内在约束里的候选语义；不能把分享型改成泛泛问候，也不能把低压关心改成追问
-- 只修正“回复空气”的问题；不得把原文改成另一种人格，也不得降低或升级当前关系亲密度
-- 尽量 1 到 2 句，像自然想起对方后随手说一句
-{creative_excerpt_rule}
-""".strip()
+        prompt = render_prompt_document(
+            self._response_review_prompt_document(
+                original_text=cleaned,
+                flags=", ".join(flags),
+                reason=reason,
+                motive=review_motive,
+                topic=review_topic,
+                action_context=review_action_context,
+                intent_hint=intent_hint,
+                persona=(self._truncate_proactive_context(persona, 2600) if persona else ""),
+                proactive_voice=proactive_voice,
+                expression_voice=expression_voice,
+                recipient_identity=recipient_identity,
+                creative_excerpt_rule=creative_excerpt_rule,
+            )
+        )["user"]
         started = time.perf_counter()
         rewritten = await self._llm_call(
             prompt,
@@ -8126,6 +9241,48 @@ Output:
             return "screen_glance_unavailable"
         return ""
 
+    @staticmethod
+    def _goodnight_screen_check_prompt_document() -> PromptDocument:
+        return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
+            user=(
+                _proactive_prompt_part(prompt_section(
+                    key="background.goodnight_screen_check",
+                    title="晚安后屏幕状态判断",
+                    source="proactive_message",
+                    content=(
+                        "这是一次用户已授权的晚安后单次状态确认，只用于决定是否需要轻声提醒休息。"
+                        "请只判断当前画面是否能明确证明用户仍在主动使用电脑，不要转述或摘录任何屏幕内容。"
+                        "active 仅用于存在明确持续操作或正在进行活动的证据；画面静止、锁屏、黑屏、无人操作、"
+                        "证据不足或无法判断都输出 inactive 或 uncertain。"
+                        '只输出 JSON：{"state":"active|inactive|uncertain","reason":"不含隐私的极短判断依据"}。'
+                        "reason 禁止包含应用名、窗口名、账号、联系人、文件名、聊天内容、网页内容或屏幕文字。"
+                    ),
+                ), mode=PromptRenderMode.BODY_ONLY),
+            ),
+            metadata={"task": "goodnight_screen_check"},
+        )
+
+    @staticmethod
+    def _goodnight_screen_check_history_text(name: str) -> str:
+        section = prompt_section(
+            key="background.goodnight_screen_check.history",
+            title="晚安后单次确认历史问题",
+            source="proactive_message",
+            content=f"晚安后单次确认 {name or '用户'} 是否仍在主动使用电脑。",
+        )
+        return render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY)
+
+    @staticmethod
+    def _screen_peek_history_text(name: str) -> str:
+        section = prompt_section(
+            key="background.screen_peek.history",
+            title="主动屏幕观察历史问题",
+            source="proactive_message",
+            content=f"主动陪伴想轻轻看一眼 {name} 现在在忙什么。",
+        )
+        return render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY)
+
     async def _classify_goodnight_screen_activity(
         self,
         user_id: str,
@@ -8148,19 +9305,14 @@ Output:
                 event = plugin._create_virtual_event(target)
             except Exception as exc:
                 logger.debug("创建晚安识屏虚拟事件失败: %s", _single_line(exc, 160))
-        prompt = (
-            "这是一次用户已授权的晚安后单次状态确认，只用于决定是否需要轻声提醒休息。"
-            "请只判断当前画面是否能明确证明用户仍在主动使用电脑，不要转述或摘录任何屏幕内容。"
-            "active 仅用于存在明确持续操作或正在进行活动的证据；画面静止、锁屏、黑屏、无人操作、"
-            "证据不足或无法判断都输出 inactive 或 uncertain。"
-            "只输出 JSON：{\"state\":\"active|inactive|uncertain\",\"reason\":\"不含隐私的极短判断依据\"}。"
-            "reason 禁止包含应用名、窗口名、账号、联系人、文件名、聊天内容、网页内容或屏幕文字。"
-        )
+        prompt = render_prompt_document(
+            self._goodnight_screen_check_prompt_document()
+        )["user"]
         try:
             result = await plugin._invoke_screen_skill(
                 event,
                 request_prompt=prompt,
-                history_user_text=f"晚安后单次确认 {name or '用户'} 是否仍在主动使用电脑。",
+                history_user_text=self._goodnight_screen_check_history_text(name),
                 task_id="private_companion_goodnight_screen_check",
             )
         except Exception as exc:
@@ -8352,6 +9504,27 @@ Output:
                     current["proactive_sending_started_at"] = 0
                     self._save_data_sync(sections={"users"})
 
+    @staticmethod
+    def _screen_peek_prompt_document(reason: str) -> PromptDocument:
+        return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
+            user=(
+                _proactive_prompt_part(prompt_section(
+                    key="background.screen_peek",
+                    title="主动屏幕观察",
+                    source="proactive_message",
+                    template=(
+                        "这是一次用户已授权的主动陪伴行为。请只做视觉观察,"
+                        "用很短的话描述用户电脑当前大概在看什么、做什么、是不是像在忙。"
+                        "不要直接对用户说话,不要安慰、提醒、关心、陪伴,不要输出隐私细节、账号、完整文本、聊天内容。"
+                        "只留一个内部观察印象。主动原因：{reason}"
+                    ),
+                    variables={"reason": reason},
+                ), mode=PromptRenderMode.BODY_ONLY),
+            ),
+            metadata={"task": "screen_peek"},
+        )
+
     async def _run_screen_peek_action(
         self,
         user: dict[str, Any],
@@ -8381,17 +9554,14 @@ Output:
                 event = plugin._create_virtual_event(target)
             except Exception as e:
                 logger.debug(f"创建屏幕虚拟事件失败: {e}")
-        prompt = (
-            f"这是一次用户已授权的主动陪伴行为。请只做视觉观察,"
-            f"用很短的话描述用户电脑当前大概在看什么、做什么、是不是像在忙。"
-            f"不要直接对用户说话,不要安慰、提醒、关心、陪伴,不要输出隐私细节、账号、完整文本、聊天内容。"
-            f"只留一个内部观察印象。主动原因：{reason}"
-        )
+        prompt = render_prompt_document(
+            self._screen_peek_prompt_document(reason)
+        )["user"]
         try:
             result = await plugin._invoke_screen_skill(
                 event,
                 request_prompt=prompt,
-                history_user_text=f"主动陪伴想轻轻看一眼 {name} 现在在忙什么。",
+                history_user_text=self._screen_peek_history_text(name),
                 task_id="private_companion_screen_peek",
             )
             context = "screen_peek：\n" + (_single_line(result, 300) if result else "没有得到屏幕观察结果")
@@ -9069,6 +10239,78 @@ Output:
         except Exception:
             return None
 
+    @staticmethod
+    def _voice_fallback_prompt_document(
+        *,
+        persona: str,
+        name: str,
+        relationship_level: str,
+        relationship_preference: str,
+        last_user_message: str,
+        reason: str,
+        state: str,
+        tts_prompt: str,
+        max_chars: int,
+    ) -> PromptDocument:
+        return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
+            user=(
+                _proactive_prompt_part(prompt_section(
+                    key="background.voice.task",
+                    title="主动语音生成",
+                    source="proactive_message",
+                    content="你正在替角色写一条马上要发出去的语音。这条语音是真的会被 TTS 念出来,不是文字陪聊。",
+                ), mode=PromptRenderMode.BODY_ONLY),
+                prompt_section(
+                    key="background.voice.persona",
+                    title="人格",
+                    source="proactive_message",
+                    content=persona,
+                ),
+                prompt_section(
+                    key="background.voice.recipient",
+                    title="对象",
+                    source="proactive_message",
+                    content=(
+                        f"称呼：{name}\n"
+                        f"关系：{relationship_level}｜偏好：{relationship_preference}\n"
+                        f"最近一句：{last_user_message or '（暂无）'}"
+                    ),
+                ),
+                prompt_section(
+                    key="background.voice.reason",
+                    title="主动原因",
+                    source="proactive_message",
+                    content=reason,
+                ),
+                prompt_section(
+                    key="background.voice.state",
+                    title="当前状态",
+                    source="proactive_message",
+                    content=state,
+                ),
+                prompt_section(
+                    key="background.voice.tts",
+                    title="当前会话 TTS 规则",
+                    source="proactive_message",
+                    content=tts_prompt or "（当前没有额外 TTS 提示词,就按人格自己的语音习惯来）",
+                ),
+                _proactive_prompt_part(prompt_section(
+                    key="background.voice.rules",
+                    title="要求",
+                    source="proactive_message",
+                    content=(
+                        "1. 优先遵守人格里自己写的特殊 TTS 规则；如果人格或当前会话 TTS 规则要求使用 <tts>...</tts>、日语、情绪标签或双语格式,就按那个格式输出。\n"
+                        "2. 如果没有明确格式要求,就只输出适合真正念出来的一小句语音内容,不要解释。\n"
+                        f"3. 整体要短,适合私聊语音,不像朗读稿,也不要太正式；纯中文可控制在 {max_chars} 个字以内。\n"
+                        "4. 可以有一点嘴硬、黏人、藏着的想念,但不要把喜欢说满。\n"
+                        "5. 不要提 AI、模型、插件、TTS、语音合成这些词。"
+                    ),
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
+            ),
+            metadata={"task": "voice"},
+        )
+
     async def _build_voice_note_text(
         self,
         user: dict[str, Any],
@@ -9143,33 +10385,19 @@ Output:
         last_user_message = _single_line(user.get("last_user_message"), 80)
         profile = self._relationship_profile(user)
         tts_prompt = self._get_tts_prompt_text(target)
-        prompt = f"""
-你正在替角色写一条马上要发出去的语音。这条语音是真的会被 TTS 念出来,不是文字陪聊。
-
-【人格】
-{persona}
-
-【对象】
-称呼：{name}
-关系：{profile['level']}｜偏好：{profile['preference']}
-最近一句：{last_user_message or '（暂无）'}
-
-【主动原因】
-{reason}
-
-【当前状态】
-{self._format_state_for_prompt(state if isinstance(state, dict) else {})}
-
-【当前会话 TTS 规则】
-{tts_prompt or "（当前没有额外 TTS 提示词,就按人格自己的语音习惯来）"}
-
-要求：
-1. 优先遵守人格里自己写的特殊 TTS 规则；如果人格或当前会话 TTS 规则要求使用 <tts>...</tts>、日语、情绪标签或双语格式,就按那个格式输出。
-2. 如果没有明确格式要求,就只输出适合真正念出来的一小句语音内容,不要解释。
-3. 整体要短,适合私聊语音,不像朗读稿,也不要太正式；纯中文可控制在 {runtime_persona_setting(self, "voice_action_max_chars", 30)} 个字以内。
-4. 可以有一点嘴硬、黏人、藏着的想念,但不要把喜欢说满。
-5. 不要提 AI、模型、插件、TTS、语音合成这些词。
-""".strip()
+        prompt = render_prompt_document(
+            self._voice_fallback_prompt_document(
+                persona=persona,
+                name=name,
+                relationship_level=profile["level"],
+                relationship_preference=profile["preference"],
+                last_user_message=last_user_message,
+                reason=reason,
+                state=self._format_state_for_prompt(state if isinstance(state, dict) else {}),
+                tts_prompt=tts_prompt,
+                max_chars=runtime_persona_setting(self, "voice_action_max_chars", 30),
+            )
+        )["user"]
         text = await self._llm_call(
             prompt,
             max_tokens=120,
@@ -9360,6 +10588,62 @@ Output:
                 return False
         return True
 
+    @staticmethod
+    def _voice_repair_prompt_document(
+        *,
+        persona: str,
+        tts_prompt: str,
+        requirement_summary: str,
+        spoken: str,
+    ) -> PromptDocument:
+        return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
+            user=(
+                _proactive_prompt_part(prompt_section(
+                    key="background.voice_repair.task",
+                    title="主动语音格式修正",
+                    source="proactive_message",
+                    content="你要把下面这句主动语音修正成符合当前语音规则的最终版本。",
+                ), mode=PromptRenderMode.BODY_ONLY),
+                prompt_section(
+                    key="background.voice_repair.persona",
+                    title="人格",
+                    source="proactive_message",
+                    content=persona,
+                ),
+                prompt_section(
+                    key="background.voice_repair.tts",
+                    title="当前会话 TTS 规则",
+                    source="proactive_message",
+                    content=tts_prompt or "（当前没有额外 TTS 提示词）",
+                ),
+                prompt_section(
+                    key="background.voice_repair.requirement",
+                    title="必须满足的格式重点",
+                    source="proactive_message",
+                    content=requirement_summary or "按人格自己的语音习惯处理",
+                ),
+                prompt_section(
+                    key="background.voice_repair.current",
+                    title="当前版本",
+                    source="proactive_message",
+                    content=spoken,
+                ),
+                _proactive_prompt_part(prompt_section(
+                    key="background.voice_repair.rules",
+                    title="要求",
+                    source="proactive_message",
+                    content=(
+                        "1. 只输出修正后的最终语音内容，不要解释。\n"
+                        "2. 如果需要 <tts>...</tts>，必须补齐。\n"
+                        "3. 如果要求日语语音，就让真正会被念出来的那一部分变成自然的日语，而不是普通中文。\n"
+                        "4. 如果没有强制格式，也保持私聊语音的自然感。"
+                    ),
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
+            ),
+            metadata={"task": "voice_repair"},
+        )
+
     def _build_voice_repair_prompt(
         self,
         *,
@@ -9369,27 +10653,14 @@ Output:
     ) -> str:
         persona = self._get_default_persona_prompt()
         tts_prompt = self._get_tts_prompt_text(target)
-        return f"""
-你要把下面这句主动语音修正成符合当前语音规则的最终版本。
-
-【人格】
-{persona}
-
-【当前会话 TTS 规则】
-{tts_prompt or "（当前没有额外 TTS 提示词）"}
-
-【必须满足的格式重点】
-{requirement.get("summary") or "按人格自己的语音习惯处理"}
-
-【当前版本】
-{spoken}
-
-要求：
-1. 只输出修正后的最终语音内容，不要解释。
-2. 如果需要 <tts>...</tts>，必须补齐。
-3. 如果要求日语语音，就让真正会被念出来的那一部分变成自然的日语，而不是普通中文。
-4. 如果没有强制格式，也保持私聊语音的自然感。
-""".strip()
+        return render_prompt_document(
+            self._voice_repair_prompt_document(
+                persona=persona,
+                tts_prompt=tts_prompt,
+                requirement_summary=str(requirement.get("summary") or ""),
+                spoken=spoken,
+            )
+        )["user"]
 
     async def _build_tts_modify_components(
         self,
@@ -9820,11 +11091,10 @@ Output:
             memory_context=memory_context,
             outfit_profile=outfit_profile,
         )
-        prompt_sections = self._build_daily_outfit_photo_prompt(
+        prompt_sections = self._build_daily_outfit_photo_prompt_sections(
             diary if isinstance(diary, dict) else {},
             memory_context=memory_context,
             outfit_profile=outfit_profile,
-            structured=True,
         )
         backend_name, image_path, note = await self._generate_photo_image(
             workflow_kind="selfie",
@@ -10273,8 +11543,38 @@ Output:
         *,
         memory_context: str = "",
         outfit_profile: dict[str, Any] | None = None,
-        structured: bool = False,
-    ) -> str | tuple[PhotoPromptSection, ...]:
+    ) -> str:
+        sections = self._build_daily_outfit_photo_prompt_sections(
+            diary,
+            memory_context=memory_context,
+            outfit_profile=outfit_profile,
+        )
+        prompt = (
+            "Positive prompt: "
+            + ", ".join(
+                section.content.positive
+                for section in sections
+                if isinstance(section.content, PhotoPromptContent)
+                and section.content.positive
+            )
+            + ". Negative prompt: "
+            + ", ".join(
+                section.content.negative
+                for section in sections
+                if isinstance(section.content, PhotoPromptContent)
+                and section.content.negative
+            )
+            + "."
+        )
+        return _single_line(prompt, 1400)
+
+    def _build_daily_outfit_photo_prompt_sections(
+        self,
+        diary: dict[str, Any],
+        *,
+        memory_context: str = "",
+        outfit_profile: dict[str, Any] | None = None,
+    ) -> tuple[PromptSection, ...]:
         persona = self._daily_outfit_role_appearance_text()
         style_name, style_instruction = self._get_photo_style_instruction()
         style_prompt = self._photo_style_prompt_en(style_name, style_instruction)
@@ -10415,55 +11715,62 @@ Output:
                 ]
             )
         sections = [
-            PhotoPromptSection(
-                name="user_request",
-                source="user_request",
-                positive=_single_line(
-                    ", ".join(
-                        _single_line(part, 400)
-                        for part in positive
-                        if _single_line(part, 400)
+            prompt_section(
+                key="photo.daily_outfit.user_request",
+                title="user_request",
+                source="photo_prompt_context",
+                content=PhotoPromptContent(
+                    positive=_single_line(
+                        ", ".join(
+                            _single_line(part, 400)
+                            for part in positive
+                            if _single_line(part, 400)
+                        ),
+                        1400,
                     ),
-                    1400,
+                    domain_source="user_request",
+                    protected=True,
                 ),
-                protected=True,
             ),
-            PhotoPromptSection(
-                name="daily_outfit_contract",
-                # These are resolved workflow exclusions rather than ambient
-                # visual context.  Freeze them for this task so the N-1
-                # resolver preserves safety and wardrobe-rotation rules.
-                source="fixed_prompt",
-                negative=_single_line(", ".join(negative), 760),
-                protected=True,
+            prompt_section(
+                key="photo.daily_outfit.contract",
+                title="daily_outfit_contract",
+                source="photo_prompt_context",
+                content=PhotoPromptContent(
+                    # These are resolved workflow exclusions rather than ambient
+                    # visual context. Freeze them for this task so the N-1 resolver
+                    # preserves safety and wardrobe-rotation rules.
+                    negative=_single_line(", ".join(negative), 760),
+                    domain_source="fixed_prompt",
+                    protected=True,
+                ),
             ),
         ]
         if visual_memory:
             sections.append(
-                PhotoPromptSection(
-                    name="visual_memory",
-                    source="visual_memory",
-                    positive=f"visual continuity reference: {visual_memory}",
+                prompt_section(
+                    key="photo.daily_outfit.visual_memory",
+                    title="visual_memory",
+                    source="photo_prompt_context",
+                    content=PhotoPromptContent(
+                        positive=f"visual continuity reference: {visual_memory}",
+                        domain_source="visual_memory",
+                    ),
                 )
             )
         if custom:
             sections.append(
-                PhotoPromptSection(
-                    name="daily_outfit_preference",
-                    source="fixed_prompt",
-                    positive=f"additional outfit preference: {custom}",
+                prompt_section(
+                    key="photo.daily_outfit.preference",
+                    title="daily_outfit_preference",
+                    source="photo_prompt_context",
+                    content=PhotoPromptContent(
+                        positive=f"additional outfit preference: {custom}",
+                        domain_source="fixed_prompt",
+                    ),
                 )
             )
-        if structured:
-            return tuple(sections)
-        prompt = (
-            "Positive prompt: "
-            + ", ".join(section.positive for section in sections if section.positive)
-            + ". Negative prompt: "
-            + ", ".join(section.negative for section in sections if section.negative)
-            + "."
-        )
-        return _single_line(prompt, 1400)
+        return tuple(sections)
 
     def _photo_style_prompt_en(self, style_name: str, style_instruction: str = "") -> str:
         name = _single_line(style_name, 40)
@@ -11657,7 +12964,7 @@ Output:
     def _photo_generation_workflow_fixed_prompt_section(
         self,
         workflow_kind: str,
-    ) -> tuple[PhotoPromptSection, dict[str, Any]]:
+    ) -> tuple[PromptSection, dict[str, Any]]:
         normalized = str(workflow_kind or "").strip().lower()
         if normalized in {"edit", "改图", "修图", "重绘", "p图"}:
             scope = "edit"
@@ -11675,13 +12982,17 @@ Output:
         raw = str(runtime_persona_setting(self, config_key, "") or "")
         normalized_prompt = self._sanitize_photo_generation_fixed_prompt_config(raw)
         positive, negative = self._photo_generation_semantic_prompt_parts(normalized_prompt)
-        section = PhotoPromptSection(
-            name="workflow_fixed_prompt",
-            source="fixed_prompt",
-            positive=f"{label}: {positive}" if positive else "",
-            negative=negative,
-            protected=True,
-            sanitize_conflicts=True,
+        section = prompt_section(
+            key=f"photo.workflow_fixed.{scope}",
+            title="workflow_fixed_prompt",
+            source="photo_prompt_context",
+            content=PhotoPromptContent(
+                positive=f"{label}: {positive}" if positive else "",
+                negative=negative,
+                domain_source="fixed_prompt",
+                protected=True,
+                sanitize_conflicts=True,
+            ),
         )
         raw_trimmed = raw.strip()
         audit = {
@@ -11802,9 +13113,9 @@ Output:
 
     def _apply_photo_generation_negative_prompt_policy(
         self,
-        sections: tuple[PhotoPromptSection, ...],
+        sections: tuple[PromptSection, ...],
         workflow_kind: str,
-    ) -> tuple[PhotoPromptSection, ...]:
+    ) -> tuple[PromptSection, ...]:
         mode = self._photo_generation_negative_prompt_mode()
         adjusted = list(sections)
         if mode == "replace":
@@ -11816,8 +13127,13 @@ Output:
                 "subject_count",
             }
             adjusted = [
-                replace(section, negative="")
-                if section.name in replaceable_names and section.negative
+                replace(
+                    section,
+                    content=replace(section.content, negative=""),
+                )
+                if section.title in replaceable_names
+                and isinstance(section.content, PhotoPromptContent)
+                and section.content.negative
                 else section
                 for section in adjusted
             ]
@@ -11825,12 +13141,16 @@ Output:
             custom_negative = self._photo_generation_custom_negative_prompt(workflow_kind)
             if custom_negative:
                 adjusted.append(
-                    PhotoPromptSection(
-                        name="custom_negative_prompt",
-                        source="fixed_prompt",
-                        negative=custom_negative,
-                        protected=True,
-                        sanitize_conflicts=True,
+                    prompt_section(
+                        key="photo.custom_negative_prompt",
+                        title="custom_negative_prompt",
+                        source="photo_prompt_context",
+                        content=PhotoPromptContent(
+                            negative=custom_negative,
+                            domain_source="fixed_prompt",
+                            protected=True,
+                            sanitize_conflicts=True,
+                        ),
                     )
                 )
         return tuple(adjusted)
@@ -12834,6 +14154,135 @@ Output:
             failure_stage=_single_line(metadata.get("failure_stage"), 60),
         )
 
+    @staticmethod
+    def _photo_scene_generation_prompt_document(
+        *,
+        persona: str,
+        recipient_name: str,
+        scene_context: str,
+        topic_hint: str,
+        motive_hint: str,
+        relationship_section: PromptSection | None,
+        birthday_rule: str,
+        content_options: str,
+        style_name: str,
+        style_instruction: str,
+        prompt_format_instruction: str,
+        reason: str,
+    ) -> PromptDocument:
+        sections: list[PromptSection | PromptDocumentPart] = [
+            _proactive_prompt_part(prompt_section(
+                key="background.photo_scene.task",
+                title="主动生活图片提示词生成",
+                source="proactive_message",
+                content="请根据 AstrBot 默认人格和主动原因,生成一张要通过生图后端制作的“社交媒体随手拍/自拍/生活碎片图”提示词。",
+            ), mode=PromptRenderMode.BODY_ONLY),
+            prompt_section(
+                key="background.photo_scene.persona",
+                title="人格",
+                source="proactive_message",
+                content=persona,
+            ),
+            prompt_section(
+                key="background.photo_scene.recipient",
+                title="收信人",
+                source="proactive_message",
+                content=recipient_name,
+            ),
+            prompt_section(
+                key="background.photo_scene.snapshot",
+                title="当前统一情境快照",
+                source="proactive_message",
+                content=(
+                    f"{scene_context}\n"
+                    "使用方式：这是当前事实和连续性参考。优先保持时间、地点、日程和情绪互相一致；"
+                    "今日穿搭只在本次没有新的服装请求时用于连续性。若话题、动机或画面需求明确要求睡衣、居家服、礼服、COS 等服装变化，"
+                    "以本次明确请求为准，不要被今日穿搭覆盖。它只帮助选择自然画面，不要求把所有字段都画出来或写进配文。"
+                ),
+            ),
+            prompt_section(
+                key="background.photo_scene.hook",
+                title="这次想分享的画面钩子",
+                source="proactive_message",
+                content=(
+                    f"话题：{topic_hint or '（未指定）'}\n"
+                    f"那一刻的小动机：{motive_hint or '（未指定）'}"
+                ),
+            ),
+        ]
+        if relationship_section is not None:
+            sections.append(relationship_section)
+        sections.extend(
+            (
+                prompt_section(
+                    key="background.photo_scene.birthday",
+                    title="生日卡特殊规则",
+                    source="proactive_message",
+                    content=birthday_rule,
+                ),
+                prompt_section(
+                    key="background.photo_scene.options",
+                    title="内容选择菜单",
+                    source="proactive_message",
+                    content=content_options,
+                ),
+                prompt_section(
+                    key="background.photo_scene.style",
+                    title="生图风格",
+                    source="proactive_message",
+                    content=f"{style_name}\n风格要求：{style_instruction}",
+                ),
+                prompt_section(
+                    key="background.photo_scene.format",
+                    title="提示词表达方式",
+                    source="proactive_message",
+                    content=prompt_format_instruction,
+                ),
+                _proactive_prompt_part(prompt_section(
+                    key="background.photo_scene.reason",
+                    title="主动原因",
+                    source="proactive_message",
+                    content=f"主动原因：{reason}",
+                ), mode=PromptRenderMode.BODY_ONLY),
+                _proactive_prompt_part(prompt_section(
+                    key="background.photo_scene.output",
+                    title="输出 JSON",
+                    source="proactive_message",
+                    content=(
+                        "{\n"
+                        '  "kind": "selfie 或 text2img；自拍/人像用 selfie,其他随手拍用 text2img",\n'
+                        '  "use_persona_reference": true,\n'
+                        '  "prompt": "按上方提示词表达方式输出的英文生图提示词",\n'
+                        '  "caption": "图片完成后可转述给最终私聊模型的一句话画面描述"\n'
+                        "}"
+                    ),
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
+                _proactive_prompt_part(prompt_section(
+                    key="background.photo_scene.rules",
+                    title="要求",
+                    source="proactive_message",
+                    content=(
+                        "1. 画面必须符合当前时间、日程和人格,不要把身份设定里没有的场景、职业、服装或外观细节写进去。日程是背景参考，不可单独当作动作已经发生的证明。\n"
+                        "2. 图片不要总是天气或窗外。先从“内容选择菜单”里单选一个视觉锚点；当前日程、话题和人格只用于筛选主体和调整画面气质,不要把多个主体拼在一张图里。若本次来自延后候选，画面应与原话题连续，不应伪装成发送当下的新现场。\n"
+                        "3. 可以是路上风景、桌面小物、随手自拍、偶遇小动物等,但不要每次都是自拍；没有明确自拍动机时优先 text2img。\n"
+                        "4. `prompt` 必须使用英文，并严格遵守“提示词表达方式”；可以把必要中文专名作为 visual note 保留，但不要写任务说明或聊天口吻。\n"
+                        "5. `prompt` 里要明确体现上面的风格要求。\n"
+                        "6. 不要包含 NSFW、隐私信息、用户真实电脑画面。\n"
+                        "7. 如果“话题”已经很具体,就优先把那个具体视觉主体画出来；如果话题很抽象,从菜单里另选一个适合拍照的具体画面。不要退回成泛泛的天气图、手部动作或普通记录照。\n"
+                        "8. 不要默认生成全身镜/对镜自拍/手机挡脸自拍；只有话题、动机或当前日程明确出现“镜前/对镜/镜子/全身镜/mirror”时才允许。普通穿搭图用当前地点里的手持自拍、半身或四分之三身环境人像。\n"
+                        "9. `use_persona_reference` 仅表示画面中是否出现 Bot 本人：自拍、人物生活照、人物穿搭图填 true；纯风景、食物、桌面物品、动物、手机屏幕或生日卡填 false。\n"
+                        "10. 服装语义优先级为：本次明确服装需求优先；具体场景服装参考用于落实该需求；今日穿搭仅在没有新服装意图时作为连续性补充。不要同时写入彼此冲突的两套服装。\n"
+                        "11. 只有当前请求明确要求关系角色出现/合影，且选中了对应的角色参考图时，才可让该角色按参考图自然入镜；否则禁止凭文字补画另一人的脸、身体、背影、剪影、倒影或肖像。未明确要求时，关系卡只影响情境，并用非人物生活线索间接表达关系。"
+                    ),
+                ), label_style=PromptLabelStyle.FULLWIDTH_COLON),
+            )
+        )
+        return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
+            user=sections,
+            metadata={"task": "photo_prompt"},
+        )
+
     async def _build_photo_scene_prompt(
         self, user: dict[str, Any], name: str, reason: str
     ) -> dict[str, Any]:
@@ -12945,7 +14394,7 @@ Output:
                 ),
                 1200,
             )
-        relationship_block = ""
+        relationship_section: PromptSection | None = None
         if runtime_persona_setting(self, "enable_bot_relationship_network", False):
             card_lines: list[str] = []
             for raw_card in self._normalize_bot_relationship_cards(
@@ -12956,67 +14405,39 @@ Output:
                 appearance = parts[2] if len(parts) > 2 else ""
                 card_lines.append(f"- 角色：{parts[0]}；与Bot的关系：{relation or '（未填写）'}；外貌描述：{appearance or '（未填写）'}")
             if card_lines:
-                relationship_block = (
-                    "【Bot 关系网】\n"
-                    + "\n".join(card_lines)
-                    + "\n使用方式：这些角色卡首先用于理解关系情境；角色卡文字不能替代人物参考图。只有当前请求明确点名角色/关系，或明确要求合影、合照、一起入镜时，"
-                    "并且候选中确实选中了对应的角色参考图，才可让该角色按参考图自然入镜；没有匹配参考图时不要凭文字补画脸、身体、背影、剪影或倒影。"
-                    "未明确要求角色出现时，仍不得让关系卡人物本人入镜，保持 Bot 单人或纯场景；在没有其他可验证人物参考时，禁止合影、合照、双人/多人同框。"
-                    "可用第二只杯子、礼物、便签、空座位等非人物线索间接表达；不合适时忽略本节。\n\n"
+                relationship_section = prompt_section(
+                    key="background.photo_scene.relationships",
+                    title="Bot 关系网",
+                    source="proactive_message",
+                    content=(
+                        "\n".join(card_lines)
+                        + "\n使用方式：这些角色卡首先用于理解关系情境；角色卡文字不能替代人物参考图。只有当前请求明确点名角色/关系，或明确要求合影、合照、一起入镜时，"
+                        "并且候选中确实选中了对应的角色参考图，才可让该角色按参考图自然入镜；没有匹配参考图时不要凭文字补画脸、身体、背影、剪影或倒影。"
+                        "未明确要求角色出现时，仍不得让关系卡人物本人入镜，保持 Bot 单人或纯场景；在没有其他可验证人物参考时，禁止合影、合照、双人/多人同框。"
+                        "可用第二只杯子、礼物、便签、空座位等非人物线索间接表达；不合适时忽略本节。"
+                    ),
                 )
-        prompt = f"""
-请根据 AstrBot 默认人格和主动原因,生成一张要通过生图后端制作的“社交媒体随手拍/自拍/生活碎片图”提示词。
-
-【人格】
-{persona}
-
-【收信人】
-{name}
-
-【当前统一情境快照】
-{scene_context}
-使用方式：这是当前事实和连续性参考。优先保持时间、地点、日程和情绪互相一致；今日穿搭只在本次没有新的服装请求时用于连续性。若话题、动机或画面需求明确要求睡衣、居家服、礼服、COS 等服装变化，以本次明确请求为准，不要被今日穿搭覆盖。它只帮助选择自然画面，不要求把所有字段都画出来或写进配文。
-
-【这次想分享的画面钩子】
-话题：{topic_hint or '（未指定）'}
-那一刻的小动机：{motive_hint or '（未指定）'}
-
-{relationship_block}【生日卡特殊规则】
-{"如果主动原因是 birthday_celebration：制作一张没有文字、没有姓名、没有日期的温柔生日小卡。只选一个与人格和用户偏好相称的具体意象，不画蛋糕上文字、不出现年龄、不要节庆海报或营销风。" if reason == "birthday_celebration" else "（非生日卡）"}
-
-【内容选择菜单】
-{self._format_content_choice_options_for_prompt("photo_text")}
-
-【生图风格】
-{style_name}
-风格要求：{style_instruction}
-
-【提示词表达方式】
-{prompt_format_instruction}
-
-主动原因：{reason}
-
-输出 JSON：
-{{
-  "kind": "selfie 或 text2img；自拍/人像用 selfie,其他随手拍用 text2img",
-  "use_persona_reference": true,
-  "prompt": "按上方提示词表达方式输出的英文生图提示词",
-  "caption": "图片完成后可转述给最终私聊模型的一句话画面描述"
-}}
-
-要求：
-1. 画面必须符合当前时间、日程和人格,不要把身份设定里没有的场景、职业、服装或外观细节写进去。日程是背景参考，不可单独当作动作已经发生的证明。
-2. 图片不要总是天气或窗外。先从“内容选择菜单”里单选一个视觉锚点；当前日程、话题和人格只用于筛选主体和调整画面气质,不要把多个主体拼在一张图里。若本次来自延后候选，画面应与原话题连续，不应伪装成发送当下的新现场。
-3. 可以是路上风景、桌面小物、随手自拍、偶遇小动物等,但不要每次都是自拍；没有明确自拍动机时优先 text2img。
-4. `prompt` 必须使用英文，并严格遵守“提示词表达方式”；可以把必要中文专名作为 visual note 保留，但不要写任务说明或聊天口吻。
-5. `prompt` 里要明确体现上面的风格要求。
-6. 不要包含 NSFW、隐私信息、用户真实电脑画面。
-7. 如果“话题”已经很具体,就优先把那个具体视觉主体画出来；如果话题很抽象,从菜单里另选一个适合拍照的具体画面。不要退回成泛泛的天气图、手部动作或普通记录照。
-8. 不要默认生成全身镜/对镜自拍/手机挡脸自拍；只有话题、动机或当前日程明确出现“镜前/对镜/镜子/全身镜/mirror”时才允许。普通穿搭图用当前地点里的手持自拍、半身或四分之三身环境人像。
-9. `use_persona_reference` 仅表示画面中是否出现 Bot 本人：自拍、人物生活照、人物穿搭图填 true；纯风景、食物、桌面物品、动物、手机屏幕或生日卡填 false。
-10. 服装语义优先级为：本次明确服装需求优先；具体场景服装参考用于落实该需求；今日穿搭仅在没有新服装意图时作为连续性补充。不要同时写入彼此冲突的两套服装。
-11. 只有当前请求明确要求关系角色出现/合影，且选中了对应的角色参考图时，才可让该角色按参考图自然入镜；否则禁止凭文字补画另一人的脸、身体、背影、剪影、倒影或肖像。未明确要求时，关系卡只影响情境，并用非人物生活线索间接表达关系。
-""".strip()
+        prompt = render_prompt_document(
+            self._photo_scene_generation_prompt_document(
+                persona=persona,
+                recipient_name=name,
+                scene_context=scene_context,
+                topic_hint=topic_hint,
+                motive_hint=motive_hint,
+                relationship_section=relationship_section,
+                birthday_rule=(
+                    "如果主动原因是 birthday_celebration：制作一张没有文字、没有姓名、没有日期的温柔生日小卡。"
+                    "只选一个与人格和用户偏好相称的具体意象，不画蛋糕上文字、不出现年龄、不要节庆海报或营销风。"
+                    if reason == "birthday_celebration"
+                    else "（非生日卡）"
+                ),
+                content_options=self._format_content_choice_options_for_prompt("photo_text"),
+                style_name=style_name,
+                style_instruction=style_instruction,
+                prompt_format_instruction=prompt_format_instruction,
+                reason=reason,
+            )
+        )["user"]
         text = ""
         try:
             text = await self._llm_call(
@@ -14117,6 +15538,70 @@ Output:
                 score += min(1.0, float(len(token)) / 4.0)
         return score
 
+    @staticmethod
+    def _photo_reference_selection_prompt_document(
+        *,
+        request_text: str,
+        ambient_context: str,
+        suggested_scene_preset: str,
+        schedule_history_context: str,
+        candidate_options: str,
+    ) -> PromptDocument:
+        return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
+            user=(
+                _proactive_prompt_part(prompt_section(
+                    key="background.photo_reference_selection.task",
+                    title="人物参考图选择",
+                    source="proactive_message",
+                    content=(
+                        "你在为角色生图选择一张人物参考图。结合最终画面需求中的日程、位置、当前场景和服装需求，按管理员给每张图的用途注释判断。\n"
+                        "优先选择用途更具体且与当前场景兼容的参考图；只有没有更具体的场景或服装参考时，才选择基础人物身份图。\n"
+                        "严格遵守候选的选用策略、排除场景与排除时间；条件不匹配时输出 0，不要为了使用参考图而曲解用户原话。\n"
+                        "明确处于家里、卧室、睡前或刚起床时，优先在适用的居家服/睡衣参考中选择；只有明确外出、通勤、上学、逛街或展示今日穿搭时才选今日穿搭。\n"
+                        "当前要求明确否定某类服装时，不得选择以该服装为职责的参考图；即使它是唯一候选，也应输出 0。普通换装或自定义衣服没有匹配参考时，可选身份图或输出 0，不要让旧衣服反向覆盖新要求。\n"
+                        "用户原始要求高于环境上下文；两者冲突时必须按用户原始要求选图，不能让日程或位置覆盖用户明确要求。\n"
+                        "若用户没有明确服装要求，但结构化场景预设给出了服装类别，且候选中存在同类别服装参考，优先选择该服装参考，不要改选基础身份图。结构化预设只用于补足空白，不得覆盖用户明确要求。\n"
+                        "当天已发生日程只可作为较弱的经历、服装和连续性线索，不代表当前位置或当前活动。不得用历史中的旧地点覆盖当前环境；用户原始要求和当前环境始终优先于历史日程。\n"
+                        "不要仅凭疲惫、揉眼睛、电脑桌等间接描述猜测地点或服装；场景不明确时保持保守，不要虚构居家或外出状态。\n"
+                        "若候选带有“角色”和“关系”，且用户在本轮明确点名该角色或关系，优先选择对应的关系角色参考图；它只代表该角色本人，不要把该身份转移给 Bot。没有明确点名角色时，不要因为关系卡文字而选择关系角色参考图。\n"
+                        "只输出候选编号，不要解释。"
+                    ),
+                ), mode=PromptRenderMode.BODY_ONLY),
+                prompt_section(
+                    key="background.photo_reference_selection.request",
+                    title="最终画面需求",
+                    source="proactive_message",
+                    content=request_text,
+                ),
+                prompt_section(
+                    key="background.photo_reference_selection.environment",
+                    title="环境上下文",
+                    source="proactive_message",
+                    content=ambient_context or "无",
+                ),
+                prompt_section(
+                    key="background.photo_reference_selection.preset",
+                    title="结构化场景预设",
+                    source="proactive_message",
+                    content=suggested_scene_preset or "无",
+                ),
+                prompt_section(
+                    key="background.photo_reference_selection.schedule",
+                    title="当天已发生日程",
+                    source="proactive_message",
+                    content=schedule_history_context or "无",
+                ),
+                prompt_section(
+                    key="background.photo_reference_selection.candidates",
+                    title="候选参考图",
+                    source="proactive_message",
+                    content=candidate_options,
+                ),
+            ),
+            metadata={"task": "photo_reference_selection"},
+        )
+
     async def _select_photo_reference_candidate_async(
         self,
         workflow_kind: str,
@@ -14355,34 +15840,15 @@ Output:
                 for index, item in enumerate(eligible_candidates, start=1)
             )
             none_option = "\n0. 不使用这些候选参考图，按当前要求生成全新画面"
-            prompt = f"""
-你在为角色生图选择一张人物参考图。结合最终画面需求中的日程、位置、当前场景和服装需求，按管理员给每张图的用途注释判断。
-优先选择用途更具体且与当前场景兼容的参考图；只有没有更具体的场景或服装参考时，才选择基础人物身份图。
-严格遵守候选的选用策略、排除场景与排除时间；条件不匹配时输出 0，不要为了使用参考图而曲解用户原话。
-明确处于家里、卧室、睡前或刚起床时，优先在适用的居家服/睡衣参考中选择；只有明确外出、通勤、上学、逛街或展示今日穿搭时才选今日穿搭。
-当前要求明确否定某类服装时，不得选择以该服装为职责的参考图；即使它是唯一候选，也应输出 0。普通换装或自定义衣服没有匹配参考时，可选身份图或输出 0，不要让旧衣服反向覆盖新要求。
-用户原始要求高于环境上下文；两者冲突时必须按用户原始要求选图，不能让日程或位置覆盖用户明确要求。
-若用户没有明确服装要求，但结构化场景预设给出了服装类别，且候选中存在同类别服装参考，优先选择该服装参考，不要改选基础身份图。结构化预设只用于补足空白，不得覆盖用户明确要求。
-当天已发生日程只可作为较弱的经历、服装和连续性线索，不代表当前位置或当前活动。不得用历史中的旧地点覆盖当前环境；用户原始要求和当前环境始终优先于历史日程。
-不要仅凭疲惫、揉眼睛、电脑桌等间接描述猜测地点或服装；场景不明确时保持保守，不要虚构居家或外出状态。
-若候选带有“角色”和“关系”，且用户在本轮明确点名该角色或关系，优先选择对应的关系角色参考图；它只代表该角色本人，不要把该身份转移给 Bot。没有明确点名角色时，不要因为关系卡文字而选择关系角色参考图。
-只输出候选编号，不要解释。
-
-【最终画面需求】
-{_single_line(request_text, 1200)}
-
-【环境上下文】
-{_single_line(ambient_context, 800) or "无"}
-
-【结构化场景预设】
-{suggested_scene_preset or "无"}
-
-【当天已发生日程】
-{_single_line(schedule_history_context, 1200) or "无"}
-
-【候选参考图】
-{options}{none_option}
-            """.strip()
+            prompt = render_prompt_document(
+                self._photo_reference_selection_prompt_document(
+                    request_text=_single_line(request_text, 1200),
+                    ambient_context=_single_line(ambient_context, 800),
+                    suggested_scene_preset=suggested_scene_preset,
+                    schedule_history_context=_single_line(schedule_history_context, 1200),
+                    candidate_options=f"{options}{none_option}",
+                )
+            )["user"]
             try:
                 llm_kwargs = {
                     "max_tokens": 12,
@@ -14539,6 +16005,30 @@ Output:
             return structured_selection
         return self._normalize_photo_reference_candidate_metadata(selected) if isinstance(selected, dict) else {}
 
+    @staticmethod
+    def _photo_reference_intent_prompt_document(request_text: str) -> PromptDocument:
+        return prompt_document(
+            user_render=_PROACTIVE_DOCUMENT_RENDER,
+            user=(
+                _proactive_prompt_part(prompt_section(
+                    key="background.photo_reference_intent",
+                    title="参考图职责识别",
+                    source="proactive_message",
+                    template=(
+                        "分析用户对显式参考图的职责要求，只输出一个 JSON 对象：\n"
+                        '{{"requested_roles":[],"excluded_roles":[],"continuity_mode":"ambiguous","confidence":0.0}}\n'
+                        "roles 只能是 identity、outfit、pose、scene、style、continuity、source。\n"
+                        "continuity_mode 只能是 continuation、edit、new_topic、ambiguous。\n"
+                        "否定表达放进 excluded_roles，不能同时作为 requested_roles。\n"
+                        "无法确定时 confidence 必须低于 0.7；不要猜测服装、场景或连续性。\n\n"
+                        "用户要求：{request_text}"
+                    ),
+                    variables={"request_text": request_text},
+                ), mode=PromptRenderMode.BODY_ONLY),
+            ),
+            metadata={"task": "photo_reference_intent"},
+        )
+
     async def _analyze_photo_reference_intent_async(
         self,
         request_text: str,
@@ -14584,16 +16074,11 @@ Output:
                 ),
             )
 
-        prompt = f"""
-分析用户对显式参考图的职责要求，只输出一个 JSON 对象：
-{{"requested_roles":[],"excluded_roles":[],"continuity_mode":"ambiguous","confidence":0.0}}
-roles 只能是 identity、outfit、pose、scene、style、continuity、source。
-continuity_mode 只能是 continuation、edit、new_topic、ambiguous。
-否定表达放进 excluded_roles，不能同时作为 requested_roles。
-无法确定时 confidence 必须低于 0.7；不要猜测服装、场景或连续性。
-
-用户要求：{_single_line(request_text, 1200)}
-        """.strip()
+        prompt = render_prompt_document(
+            self._photo_reference_intent_prompt_document(
+                _single_line(request_text, 1200)
+            )
+        )["user"]
         try:
             raw = await llm_call(
                 prompt,

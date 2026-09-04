@@ -315,12 +315,20 @@ class ProactiveFactGroundingTests(unittest.TestCase):
     def test_unanswered_generation_hint_requires_a_complete_single_thought(self) -> None:
         harness = _FactGroundingHarness()
 
+        section = harness._format_proactive_generation_intent_prompt_section(
+            {"ignored_streak": 2},
+            reason="state_share",
+            action="message",
+        )
         hint = harness._format_proactive_generation_intent_hint(
             {"ignored_streak": 2},
             reason="state_share",
             action="message",
         )
 
+        self.assertEqual("proactive.generation_intent", section.key)
+        self.assertEqual("这次主动的内在约束", section.title)
+        self.assertEqual("proactive_message", section.source)
         self.assertIn("只保留一个完整意思", hint)
         self.assertIn("任何收短都必须保证句意完整", hint)
         self.assertIn("不能留下半句话", hint)
@@ -339,11 +347,13 @@ class ProactiveFactGroundingTests(unittest.TestCase):
         harness = _ReplyContextHarness()
 
         sections = asyncio.run(
-            harness._format_proactive_reply_context(_ReplyEvent(), as_sections=True)
+            harness._format_proactive_reply_prompt_sections(_ReplyEvent())
         )
 
-        self.assertEqual("刚才你主动发出的消息", sections[0]["title"])
-        self.assertNotIn("【刚才你主动发出的消息】", sections[0]["content"])
+        self.assertEqual("刚才你主动发出的消息", sections[0].title)
+        self.assertEqual("proactive.recent_delivery", sections[0].key)
+        self.assertEqual("proactive", sections[0].source)
+        self.assertNotIn("【刚才你主动发出的消息】", sections[0].content)
 
 if __name__ == "__main__":
     unittest.main()
