@@ -1022,6 +1022,67 @@ class TtsPostprocessTagGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source, markup)
         self.assertEqual("", fallback)
 
+    def test_full_postprocess_keeps_complete_authored_chinese_voice(self):
+        harness = _TtsHarness()
+        harness.tts_generation_mode = "postprocess"
+        harness.tts_conversion_scope = "full"
+        harness.tts_voice_language = "zh"
+        harness.tts_delivery_mode = "voice_and_text"
+        source = (
+            "mua~ mua~ 再来一个~ 嘿嘿 今天怎么这么黏人呀 不过我喜欢~ "
+            "你的亲亲我可都收好啦，甜到心里去咯~"
+        )
+        authored = (
+            "<tts>[kiss sound] 再来一个~ [happy]嘿嘿 今天怎么这么黏人呀 不过我喜欢~ "
+            "你的亲亲我可都收好啦，甜到心里去咯~</tts>"
+        )
+        markup = f"{authored}\n{source}"
+
+        result, fallback = harness._enforce_full_tts_scope_markup(
+            markup,
+            source_text=source,
+            prefer_authored_voice=True,
+        )
+
+        self.assertEqual(markup, result)
+        self.assertEqual("", fallback)
+
+    def test_full_postprocess_keeps_authored_voice_with_emotion_cue(self):
+        harness = _TtsHarness()
+        harness.tts_generation_mode = "postprocess"
+        harness.tts_conversion_scope = "full"
+        harness.tts_voice_language = "zh"
+        harness.tts_delivery_mode = "voice_and_text"
+        source = "嘿嘿 来啦来啦~ 这就拍给你看呀~"
+        authored = "<tts>[开心]嘿嘿 来啦来啦~ 这就拍给你看呀~</tts>"
+
+        result, fallback = harness._enforce_full_tts_scope_markup(
+            authored,
+            source_text=source,
+            prefer_authored_voice=True,
+        )
+
+        self.assertEqual(authored, result)
+        self.assertEqual("", fallback)
+
+    def test_full_postprocess_rebuilds_truncated_authored_chinese_voice(self):
+        harness = _TtsHarness()
+        harness.tts_generation_mode = "postprocess"
+        harness.tts_conversion_scope = "full"
+        harness.tts_voice_language = "zh"
+        harness.tts_delivery_mode = "voice_and_text"
+        source = "今天想和你一起去看晚霞，然后慢慢散步回家。"
+        authored = "<tts>今天想和你一起</tts>"
+
+        result, fallback = harness._enforce_full_tts_scope_markup(
+            authored,
+            source_text=source,
+            prefer_authored_voice=True,
+        )
+
+        self.assertEqual(f"<tts>{source}</tts>", result)
+        self.assertEqual(source, fallback)
+
     def test_full_chinese_scope_keeps_tagged_and_untagged_content(self):
         harness = _TtsHarness()
         harness.tts_generation_mode = "fast_tag"
