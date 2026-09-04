@@ -2883,6 +2883,148 @@ class PrivateCompanionPlugin(
                 return True
         return False
 
+    def _astrbot_persona_ids_snapshot(self) -> tuple[set[str] | None, str]:
+        """Return AstrBot's complete in-memory persona set when verifiable."""
+        manager = getattr(getattr(self, "context", None), "persona_manager", None)
+        if manager is None:
+            return None, "persona_manager_unavailable"
+        source = getattr(manager, "personas", None)
+        source_name = "personas"
+        # PersonaManager creates both attributes eagerly, but only populates
+        # them during initialize().  Treat the pre-initialize empty state as
+        # unknown instead of interpreting it as an authoritative empty list.
+        if (
+            isinstance(source, (list, tuple))
+            and not source
+            and getattr(manager, "selected_default_persona", None) is None
+            and getattr(manager, "selected_default_persona_v3", None) is None
+        ):
+            return None, "persona_manager_not_initialized"
+        if source is None and hasattr(manager, "personas_v3"):
+            source = getattr(manager, "personas_v3", None)
+            source_name = "personas_v3"
+        if not isinstance(source, (list, tuple)):
+            return None, f"{source_name}_unavailable"
+        ids: set[str] = set()
+        for item in source:
+            if isinstance(item, dict):
+                item_id = item.get("persona_id") or item.get("name") or item.get("id")
+            else:
+                item_id = (
+                    getattr(item, "persona_id", None)
+                    or getattr(item, "name", None)
+                    or getattr(item, "id", None)
+                )
+            pid = self._sanitize_persona_id(item_id)
+            if not pid:
+                return None, f"{source_name}_item_invalid"
+            ids.add(pid)
+        return ids, "ok"
+
+    def _backup_deleted_persona_store_sync(self, persona_id: str, path: Path) -> Path | None:
+        """Make a recoverable copy before retiring a deleted persona store."""
+        if not path.is_file():
+            return None
+        root = Path(str(getattr(self, "data_dir", "") or "").strip() or Path(self._persona_profiles_dir).parent)
+        backup_dir = root / "persona_backups" / self._persona_profile_stem(persona_id)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup = backup_dir / f"deleted-{int(time.time())}-{uuid.uuid4().hex[:8]}-{path.name}"
+        try:
+            shutil.copy2(path, backup)
+            return backup
+        except Exception as exc:
+            logger.warning("已删除人格档案备份失败，保留原文件: persona=%s path=%s error=%s", persona_id, path, _single_line(exc, 160))
+            return None
+
+    def _retire_deleted_persona_store_sync(self, persona_id: Any) -> dict[str, Any]:
+        pid = self._sanitize_persona_id(persona_id)
+        if not pid or pid == self._primary_persona_id():
+            return {"persona_id": pid, "removed": [], "failed": []}
+        removed: list[str] = []
+        failed: list[str] = []
+        legacy_path, database_path = self._persona_profile_store_paths(pid)
+        backups: list[str] = []
+        for path in (
+            legacy_path,
+            database_path,
+            database_path.with_name(database_path.name + "-wal"),
+            database_path.with_name(database_path.name + "-shm"),
+        ):
+            if not path.is_file():
+                continue
+            backup = self._backup_deleted_persona_store_sync(pid, path)
+            if backup is None:
+                failed.append(str(path))
+                continue
+            backups.append(str(backup))
+            try:
+                path.unlink()
+                removed.append(str(path))
+            except Exception as exc:
+                failed.append(str(path))
+                logger.warning("已删除人格档案清理失败，保留原文件: persona=%s path=%s error=%s", pid, path, _single_line(exc, 160))
+        if not failed:
+            registry = getattr(self, "_persona_sqlite_store_registry", None)
+            discard = getattr(registry, "discard", None)
+            if callable(discard):
+                try:
+                    discard(database_path)
+                except Exception:
+                    pass
+            profiles = getattr(self, "_persona_data_profiles", None)
+            if isinstance(profiles, dict):
+                profiles.pop(pid, None)
+            errors = getattr(self, "_persona_profile_errors", None)
+            if isinstance(errors, dict):
+                errors.pop(pid, None)
+            self._reset_persona_prompt_caches(pid)
+            if self._sanitize_persona_id(getattr(self, "_page_current_persona_id", "")) == pid:
+                self._page_current_persona_id = self._primary_persona_id()
+        return {"persona_id": pid, "removed": removed, "failed": failed, "backups": backups}
+
+    async def _reconcile_deleted_personas_async(self) -> dict[str, Any]:
+        """Reconcile plugin persona state with AstrBot's official persona list."""
+        official_ids, reason = self._astrbot_persona_ids_snapshot()
+        result: dict[str, Any] = {"ok": official_ids is not None, "state": "verified" if official_ids is not None else "unverifiable", "reason": reason, "removed": [], "backups": {}}
+        if official_ids is None:
+            logger.info("跳过已删除人格对账: AstrBot 人格列表不可验证 reason=%s", reason)
+            return result
+        primary = self._primary_persona_id()
+        configured = self._configured_multi_persona_ids()
+        try:
+            candidates = set(self._persona_profile_ids())
+        except Exception:
+            candidates = set(configured)
+        stale = sorted(pid for pid in candidates if pid and pid != primary and pid not in official_ids)
+        if not stale:
+            return result
+        next_ids = [pid for pid in configured if pid == primary or pid in official_ids]
+        config_changed = next_ids != configured
+        before_config = deepcopy(self._cfg_raw(self.config, "multi_persona_ids", []))
+        if config_changed:
+            _set_into_config(self.config, "multi_persona_ids", next_ids)
+            try:
+                if not bool(await self._save_config_if_possible()):
+                    raise RuntimeError("AstrBot 配置未能持久化")
+            except Exception as exc:
+                _set_into_config(self.config, "multi_persona_ids", before_config)
+                result.update({"ok": False, "state": "degraded", "reason": "config_save_failed", "error": _single_line(exc, 180)})
+                logger.warning("已删除人格对账未完成，配置保存失败: %s", _single_line(exc, 180))
+                return result
+        self.multi_persona_ids = next_ids
+        for pid in stale:
+            retired = self._retire_deleted_persona_store_sync(pid)
+            if retired["removed"] and not retired["failed"]:
+                result["removed"].append(pid)
+            if retired["failed"]:
+                result.setdefault("failed", {})[pid] = retired["failed"]
+            if retired.get("backups"):
+                result["backups"][pid] = retired["backups"]
+        result["config_changed"] = config_changed
+        if result["removed"] or config_changed:
+            logger.info("已同步 AstrBot 删除的人格: removed=%s config_changed=%s", ",".join(result["removed"]) or "-", config_changed)
+        return result
+
     async def _astrbot_effective_persona_for_event(self, event: Any) -> dict[str, Any]:
         """Resolve AstrBot's request persona using AstrBot's own precedence."""
         umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
@@ -3743,6 +3885,9 @@ class PrivateCompanionPlugin(
             },
             "profile_errors": deepcopy(getattr(self, "_persona_profile_errors", {})),
             "settings_migration": deepcopy(getattr(self, "_persona_settings_migration_status", {})),
+            "deleted_persona_reconciliation": deepcopy(
+                getattr(self, "_persona_deleted_reconciliation_status", {})
+            ),
         }
 
     def _persona_config_state(self, persona_id: Any) -> dict[str, Any]:
@@ -8200,6 +8345,13 @@ class PrivateCompanionPlugin(
         await asyncio.sleep(0)
         started = time.perf_counter()
         try:
+            reconcile = getattr(self, "_reconcile_deleted_personas_async", None)
+            if callable(reconcile):
+                try:
+                    self._persona_deleted_reconciliation_status = await reconcile()
+                except Exception as exc:
+                    self._persona_deleted_reconciliation_status = {"ok": False, "state": "degraded", "reason": "reconciliation_failed", "error": _single_line(exc, 180)}
+                    logger.warning("启动已删除人格对账失败，保留现有插件数据: %s", _single_line(exc, 180))
             if bool(getattr(self, "_startup_photo_reference_catalog_migration_pending", False)):
                 config_started = time.perf_counter()
                 catalog_saved = await self._save_config_if_possible()

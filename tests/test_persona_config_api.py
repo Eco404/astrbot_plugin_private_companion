@@ -528,6 +528,82 @@ def test_startup_migration_backs_up_invalid_profile_and_uses_persona_label():
         assert migrated["persona_settings"]["bot_name"] == "次人格显示名"
 
 
+def test_deleted_astrbot_persona_is_reconciled_with_plugin_state():
+    async def run():
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _harness(root)
+            profiles = Path(root) / "persona_profiles"
+            profiles.mkdir(parents=True, exist_ok=True)
+            (profiles / "alt.json").write_text(
+                json.dumps({"users": {}, "persona_settings": {"bot_name": "次人格"}}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            plugin.context = SimpleNamespace(
+                persona_manager=SimpleNamespace(
+                    personas=[SimpleNamespace(persona_id="main")],
+                )
+            )
+
+            result = await plugin._reconcile_deleted_personas_async()
+
+            assert result["ok"] is True
+            assert result["removed"] == ["alt"]
+            assert plugin.config["multi_persona_ids"] == ["main"]
+            assert plugin.multi_persona_ids == ["main"]
+            assert "alt" not in plugin._persona_data_profiles
+            assert not (profiles / "alt.json").exists()
+            assert result["backups"]["alt"]
+            assert all(Path(path).is_file() for path in result["backups"]["alt"])
+
+    asyncio.run(run())
+
+
+def test_deleted_persona_reconciliation_is_non_destructive_when_manager_unavailable():
+    async def run():
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _harness(root)
+            plugin.context = SimpleNamespace(persona_manager=None)
+            profiles = Path(root) / "persona_profiles"
+            profiles.mkdir(parents=True, exist_ok=True)
+            profile_path = profiles / "alt.json"
+            profile_path.write_text(json.dumps({"persona_settings": {"bot_name": "次人格"}}), encoding="utf-8")
+            before = list(plugin.config["multi_persona_ids"])
+
+            result = await plugin._reconcile_deleted_personas_async()
+
+            assert result["state"] == "unverifiable"
+            assert result["removed"] == []
+            assert plugin.config["multi_persona_ids"] == before
+            assert profile_path.is_file()
+
+    asyncio.run(run())
+
+
+def test_deleted_persona_reconciliation_keeps_data_when_config_save_fails():
+    async def run():
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _harness(root)
+            profiles = Path(root) / "persona_profiles"
+            profiles.mkdir(parents=True, exist_ok=True)
+            profile_path = profiles / "alt.json"
+            profile_path.write_text(json.dumps({"persona_settings": {"bot_name": "次人格"}}), encoding="utf-8")
+            plugin.context = SimpleNamespace(
+                persona_manager=SimpleNamespace(
+                    personas=[SimpleNamespace(persona_id="main")],
+                )
+            )
+            plugin._save_config_if_possible = AsyncMock(return_value=False)
+
+            result = await plugin._reconcile_deleted_personas_async()
+
+            assert result["state"] == "degraded"
+            assert result["reason"] == "config_save_failed"
+            assert plugin.config["multi_persona_ids"] == ["main", "alt"]
+            assert profile_path.is_file()
+
+    asyncio.run(run())
+
+
 def test_disabling_multi_persona_rolls_back_default_store_on_write_failure():
     with tempfile.TemporaryDirectory() as root:
         plugin = _harness(root)

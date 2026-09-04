@@ -14019,6 +14019,12 @@ class PrivateCompanionPageApi(
 
     async def list_roleplay_personas(self) -> dict[str, Any]:
         try:
+            reconcile = getattr(self.plugin, "_reconcile_deleted_personas_async", None)
+            if callable(reconcile):
+                # AstrBot may delete personas while the plugin remains loaded;
+                # reconcile before projecting the list so stale plugin-only
+                # entries do not reappear in the WebUI.
+                await reconcile()
             items = await self._roleplay_persona_items()
             enabled = bool(getattr(self.plugin, "enable_multi_persona_mode", False))
             if enabled:
