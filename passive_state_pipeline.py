@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any
+from typing import Any, Iterable
 
 
 from .conversation_injection_plan import (
+    DELIVERY_GROUP_MARKER_METADATA_KEY,
     PLACEMENT_DYNAMIC_SYSTEM,
     PLACEMENT_STABLE_SYSTEM,
     PLACEMENT_TURN_TAIL,
@@ -26,6 +27,46 @@ logger = get_module_logger(__name__)
 
 
 GROUP_CONTEXT_FINAL_PRIORITY = 10_000
+
+
+def _turn_continuation_prompt_section(
+    messages: str,
+    *,
+    private_chat: bool,
+) -> PromptSection:
+    ending = (
+        "不要逐条回复,也不要表现得像用户重复催促：\n{messages}"
+        if private_chat
+        else "不要逐条回复：\n{messages}"
+    )
+    return prompt_section(
+        key="turn.continuation",
+        title="本轮用户连续补充",
+        source="message_debounce",
+        template=(
+            "用户刚刚在短时间内连续补充了几句,请把它们当作同一轮完整发言理解,"
+            + ending
+        ),
+        variables={"messages": messages},
+    )
+
+
+def _deferred_private_image_prompt_section(*, key: str, content: str) -> PromptSection:
+    return prompt_section(
+        key=key,
+        title="本轮延迟图片",
+        source="private_image",
+        content=content,
+    )
+
+
+def _reply_private_image_prompt_section(*, key: str, content: str) -> PromptSection:
+    return prompt_section(
+        key=key,
+        title="本轮引用图片",
+        source="private_image",
+        content=content,
+    )
 
 
 def _persona_core_emphasis_prompt_section() -> PromptSection:
@@ -119,13 +160,21 @@ async def inject_humanized_state(
             )
         logger_func(reason, source_text, user if isinstance(user, dict) else None)
 
-    def place_section(
+    def place_sections(
         marker: str,
-        section: PromptSection,
+        sections: Iterable[PromptSection],
         *,
         priority: int,
         force_dynamic: bool = False,
     ) -> str:
+        authored = tuple(
+            section
+            for section in sections
+            if isinstance(section, PromptSection)
+            and render_prompt_sections([section], mode="body_only").strip()
+        )
+        if not authored:
+            return "none"
         position = str(
             runtime_persona_setting(self, "passive_injection_position", "prompt")
             or "prompt"
@@ -138,23 +187,39 @@ async def inject_humanized_state(
         if plan is None:
             raise RuntimeError("conversation injection plan is unavailable")
         if not plan.contains_marker(marker):
-            plan.add(
-                section=section,
-                marker=marker,
-                priority=priority,
-                placement=(
-                    PLACEMENT_DYNAMIC_SYSTEM
-                    if use_system_prompt
-                    else PLACEMENT_TURN_TAIL
-                ),
-                materialized=False,
-            )
+            for index, section in enumerate(authored):
+                plan.add(
+                    section=section,
+                    marker=marker if index == 0 else "",
+                    priority=priority,
+                    placement=(
+                        PLACEMENT_DYNAMIC_SYSTEM
+                        if use_system_prompt
+                        else PLACEMENT_TURN_TAIL
+                    ),
+                    materialized=False,
+                    metadata={DELIVERY_GROUP_MARKER_METADATA_KEY: marker},
+                )
         plan.render_into(req, prefer_extra_user_content=True)
         if use_system_prompt:
             return "system_prompt"
         return str(
             getattr(req, "_private_companion_turn_prompt_placement", "prompt")
             or "prompt"
+        )
+
+    def place_section(
+        marker: str,
+        section: PromptSection,
+        *,
+        priority: int,
+        force_dynamic: bool = False,
+    ) -> str:
+        return place_sections(
+            marker,
+            (section,),
+            priority=priority,
+            force_dynamic=force_dynamic,
         )
 
     if not self.enabled:
@@ -426,14 +491,11 @@ async def inject_humanized_state(
                     context_owner=group,
                 )
                 expression_section = group_expression_selection.get("section")
-                if not isinstance(expression_section, PromptSection):
-                    expression_section = prompt_section(
-                        key="expression.voice",
-                        title="已审核的表达学习规则",
-                        source="expression",
-                        content=str(group_expression_selection.get("prompt") or ""),
-                    )
-                expression_voice = str(expression_section.content or "")
+                expression_voice = (
+                    str(expression_section.content or "")
+                    if isinstance(expression_section, PromptSection)
+                    else ""
+                )
                 semantic_expression_rules = group_expression_selection.get("rules")
                 if isinstance(semantic_expression_rules, list) and semantic_expression_rules:
                     try:
@@ -501,15 +563,9 @@ async def inject_humanized_state(
                             )
                         else:
                             extra_sections.append(
-                                prompt_section(
-                                    key="turn.continuation",
-                                    title="本轮用户连续补充",
-                                    source="message_debounce",
-                                    template=(
-                                        "用户刚刚在短时间内连续补充了几句,请把它们当作同一轮完整发言理解,"
-                                        "不要逐条回复：\n{messages}"
-                                    ),
-                                    variables={"messages": combined_text},
+                                _turn_continuation_prompt_section(
+                                    combined_text,
+                                    private_chat=False,
                                 )
                             )
                     wakeup_effect = getattr(event, "private_companion_group_wakeup_state_effect", None)
@@ -604,16 +660,9 @@ async def inject_humanized_state(
                     if group_context_section is not None:
                         group_sections.append(group_context_section)
                     group_context_text = render_prompt_sections(group_sections)
-                    group_context_batch = prompt_section(
-                        key="group.context.batch",
-                        title="群聊上下文",
-                        source="group",
-                        content="",
-                        children=group_sections,
-                    )
-                    placement = place_section(
+                    placement = place_sections(
                         marker,
-                        group_context_batch,
+                        group_sections,
                         priority=GROUP_CONTEXT_FINAL_PRIORITY,
                     )
                     if group_prompt_context_history_count(group_context_section) > 0:
@@ -862,12 +911,8 @@ async def inject_humanized_state(
         important_section = self._format_important_dates_prompt_section()
         if important_section.content:
             prompt_surface.add(important_section, priority=36)
-        memo_section = prompt_section(
-            key="memo.active_notes",
-            title="备忘便签",
-            source="daily_state",
-            content="",
-        )
+        memo_section: PromptSection | None = None
+        memo_notes = ""
         if self._private_user_role(current_user, user_id) == "owner":
             memo_section = (
                 self._format_memo_notes_prompt_section(
@@ -891,9 +936,7 @@ async def inject_humanized_state(
                     source=memo_section.source,
                     content=memo_notes,
                 )
-        else:
-            memo_notes = ""
-        if memo_notes:
+        if memo_notes and memo_section is not None:
             prompt_surface.add(memo_section, priority=37)
         worldview_sections = (
             self._format_worldview_adaptation_prompt_sections()
@@ -954,16 +997,8 @@ async def inject_humanized_state(
     )
     if recent_atrelay_section.content:
         prompt_surface.add(recent_atrelay_section, priority=26)
-    target_summary_builder = getattr(self, "_format_atrelay_target_summary_prompt_section", None)
-    target_summary_section = (
-        target_summary_builder(inbound_text)
-        if callable(target_summary_builder)
-        else prompt_section(
-            key="atrelay.target_summary",
-            title="本轮转述目标摘要",
-            source="atrelay",
-            content=self._format_atrelay_target_summary_for_prompt(inbound_text),
-        )
+    target_summary_section = self._format_atrelay_target_summary_prompt_section(
+        inbound_text
     )
     if target_summary_section is None or not target_summary_section.content:
         worldbook_section = self._format_worldbook_private_mentions_prompt_section(
@@ -1174,15 +1209,9 @@ async def inject_humanized_state(
         combined_text = await self._consume_semantic_message_buffer_for_event(event, private_chat=True)
     if combined_text:
         prompt_surface.add(
-            prompt_section(
-                key="turn.continuation",
-                title="本轮用户连续补充",
-                source="message_debounce",
-                template=(
-                    "用户刚刚在短时间内连续补充了几句,请把它们当作同一轮完整发言理解,"
-                    "不要逐条回复,也不要表现得像用户重复催促：\n{messages}"
-                ),
-                variables={"messages": combined_text},
+            _turn_continuation_prompt_section(
+                combined_text,
+                private_chat=True,
             ),
             priority=50,
         )
@@ -1292,10 +1321,8 @@ async def inject_humanized_state(
                 else "用户刚刚先单独发了一张图片,随后补充了文字。"
             )
             prompt_surface.add(
-                prompt_section(
+                _deferred_private_image_prompt_section(
                     key="image.vision",
-                    title="本轮延迟图片",
-                    source="private_image",
                     content=(
                         f"{image_context_intro}下面是这张图的视觉摘要；请按摘要理解当前图片，不要说没看到图。"
                         "只回应本轮图片和用户文字，不要提模型、插件或路径。"
@@ -1322,10 +1349,8 @@ async def inject_humanized_state(
                 else "用户刚刚先单独发了一张图片,随后补充了文字。"
             )
             prompt_surface.add(
-                prompt_section(
+                _deferred_private_image_prompt_section(
                     key="image.fallback",
-                    title="本轮延迟图片",
-                    source="private_image",
                     content=(
                         f"{image_context_intro}图片已暂存，但暂无可靠视觉摘要；"
                         "如果用户问图片内容，请自然说暂时没看清，不要编造画面。\n"
@@ -1337,10 +1362,8 @@ async def inject_humanized_state(
     elif bool(getattr(event, "private_companion_deferred_private_image_only_ready", False)):
         if buffered_image_vision:
             prompt_surface.add(
-                prompt_section(
+                _deferred_private_image_prompt_section(
                     key="image.only.vision",
-                    title="本轮延迟图片",
-                    source="private_image",
                     content=(
                         "用户只发了一张图片。下面是这张图的视觉摘要；请自然接住图片内容或表达意图，不要提处理过程。"
                         "如果最近对话里用户明确规定了这张/下一张图片的回复方式（例如只回复某句话、不要回复其他内容）,必须优先照做。\n"
@@ -1359,10 +1382,8 @@ async def inject_humanized_state(
             )
         else:
             prompt_surface.add(
-                prompt_section(
+                _deferred_private_image_prompt_section(
                     key="image.only.fallback",
-                    title="本轮延迟图片",
-                    source="private_image",
                     content="用户只发了一张图片，但当前没有可靠图片内容；请自然表示暂时没看清，可以请用户补一句，不要编造画面。",
                 ),
                 priority=55,
@@ -1414,10 +1435,8 @@ async def inject_humanized_state(
                     f"{reply_image_vision}"
                 )
                 prompt_surface.add(
-                    prompt_section(
+                    _reply_private_image_prompt_section(
                         key="image.reply.vision",
-                        title="本轮引用图片",
-                        source="private_image",
                         content=(
                             f"用户这轮引用/回复了一张图片,并发送文字：{inbound_text or '（空）'}。\n"
                             "下面是被引用图片的视觉摘要；请优先回答用户当前文字针对这张图提出的问题。\n"
@@ -1466,10 +1485,8 @@ async def inject_humanized_state(
                     pass
             else:
                 prompt_surface.add(
-                    prompt_section(
+                    _reply_private_image_prompt_section(
                         key="image.reply.fallback",
-                        title="本轮引用图片",
-                        source="private_image",
                         content=(
                             f"用户这轮引用/回复了一张图片,并发送文字：{inbound_text or '（空）'}。"
                             "当前未能拿到可用视觉摘要；如果用户问图片内容，请自然说明暂时没看清，不要编造。"
@@ -1516,31 +1533,7 @@ async def inject_humanized_state(
     static_sections, dynamic_sections = prompt_surface.partition_sections(
         lambda fragment: fragment.normalized_key() in static_fragment_keys
     )
-    static_batch = (
-        prompt_section(
-            key="passive.static",
-            title="稳定回复约束",
-            source="passive_state",
-            content="",
-            children=static_sections,
-        )
-        if static_sections
-        else None
-    )
-    dynamic_batch = (
-        prompt_section(
-            key="passive.dynamic",
-            title="本轮回复上下文",
-            source="passive_state",
-            content="",
-            children=dynamic_sections,
-        )
-        if dynamic_sections
-        else None
-    )
-    injection_sections = tuple(
-        section for section in (static_batch, dynamic_batch) if section is not None
-    )
+    injection_sections = (*static_sections, *dynamic_sections)
     injection = render_prompt_sections(injection_sections)
     static_marker = "<!-- private_companion_static_v1 -->"
     marker = "<!-- private_companion_state_v1 -->"
@@ -1558,24 +1551,24 @@ async def inject_humanized_state(
     conversation_plan = get_conversation_injection_plan(req)
     if conversation_plan is None:
         raise RuntimeError("conversation injection plan is unavailable")
-    if static_batch is not None and not self._request_has_managed_prompt_marker(req, static_marker):
+    if static_sections and not self._request_has_managed_prompt_marker(req, static_marker):
         static_placement = "system_prompt"
-        conversation_plan.add(
-            section=static_batch,
-            marker=static_marker,
-            priority=12,
-            placement=PLACEMENT_STABLE_SYSTEM,
-            materialized=False,
-            metadata={"batch": True},
-        )
-    if dynamic_batch is not None:
-        dynamic_placement = place_section(
+        for index, section in enumerate(static_sections):
+            conversation_plan.add(
+                section=section,
+                marker=static_marker if index == 0 else "",
+                priority=12,
+                placement=PLACEMENT_STABLE_SYSTEM,
+                materialized=False,
+                metadata={DELIVERY_GROUP_MARKER_METADATA_KEY: static_marker},
+            )
+    if dynamic_sections:
+        dynamic_placement = place_sections(
             marker,
-            dynamic_batch,
+            dynamic_sections,
             priority=40,
         )
-        conversation_plan.annotate_marker(marker, metadata={"batch": True})
-    elif static_batch is not None:
+    elif static_sections:
         conversation_plan.render_into(req, prefer_extra_user_content=True)
     injection_placement = "+".join(part for part in (static_placement, dynamic_placement) if part) or "none"
     await self._append_conditional_tool_instructions_to_request(event, req)

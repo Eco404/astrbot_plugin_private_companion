@@ -128,7 +128,9 @@ from .memo_notes import memo_note_due_state, memo_note_sort_key, normalize_memo_
 from .agenda_contracts import normalize_plan_item
 from .planning import (
     build_daily_plan_prompt,
+    build_daily_plan_prompt_section,
     build_detail_enhancement_prompt,
+    build_detail_enhancement_prompt_section,
     evaluate_detail_quality,
     format_plan_for_diary,
     generate_daily_plan,
@@ -4891,21 +4893,19 @@ class DailyStateMixin(DailyStateTickMixin):
         *,
         reason: str = "",
     ) -> PromptSection:
-        if reason != "environment_change" or not isinstance(user, dict):
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="environment.change",
                 title="刚发生的环境变化",
                 source="daily_state",
-                content="",
+                content=content,
             )
+
+        if reason != "environment_change" or not isinstance(user, dict):
+            return build_section()
         context = user.get("planned_environment_change_context")
         if not isinstance(context, dict):
-            return prompt_section(
-                key="environment.change",
-                title="刚发生的环境变化",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         before = context.get("previous") if isinstance(context.get("previous"), dict) else {}
         after = context.get("current") if isinstance(context.get("current"), dict) else {}
         body = (
@@ -4915,12 +4915,7 @@ class DailyStateMixin(DailyStateTickMixin):
             "这是刚刷新到的实时环境变化，只能贴着上述事实自然说一句。不要说监测、接口、天气缓存或系统提醒；"
             "不要扩写成天气预报，也不要虚构用户正在室外。"
         )
-        return prompt_section(
-            key="environment.change",
-            title="刚发生的环境变化",
-            source="daily_state",
-            content=body,
-        )
+        return build_section(body)
 
     def _format_weather_alert_prompt(self, user: dict[str, Any], *, reason: str = "") -> str:
         """Render one structured alert for the proactive generation prompt."""
@@ -4934,30 +4929,22 @@ class DailyStateMixin(DailyStateTickMixin):
         *,
         reason: str = "",
     ) -> PromptSection:
+        def build_section(content: str = "") -> PromptSection:
+            return prompt_section(
+                key="weather.alert",
+                title="当前气象预警",
+                source="daily_state",
+                content=content,
+            )
 
         if reason != "weather_alert" or not isinstance(user, dict):
-            return prompt_section(
-                key="weather.alert",
-                title="当前气象预警",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         context = user.get("planned_weather_alert_context")
         if not isinstance(context, dict):
-            return prompt_section(
-                key="weather.alert",
-                title="当前气象预警",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         alert = context.get("alert") if isinstance(context.get("alert"), dict) else context
         if not isinstance(alert, dict):
-            return prompt_section(
-                key="weather.alert",
-                title="当前气象预警",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         kind = _single_line(context.get("kind"), 20)
         status = _single_line(context.get("status"), 32) or {
             "new": "刚发布",
@@ -4988,12 +4975,7 @@ class DailyStateMixin(DailyStateTickMixin):
             "可以提醒减少外出、留意雷雨或按防护建议行动，但不要虚构用户正在室外、已经受灾或一定会发生的结果。"
             "不要说监测、接口、缓存、轮询、API、数据源或内部字段，也不要把普通天气背景和这条预警混成播报清单。"
         )
-        return prompt_section(
-            key="weather.alert",
-            title="当前气象预警",
-            source="daily_state",
-            content="\n".join(lines),
-        )
+        return build_section("\n".join(lines))
 
     async def _maybe_refresh_environment_change(self) -> None:
         if not bool(runtime_persona_setting(self, "enable_environment_change_proactive", True)) or not runtime_persona_setting(self, "enable_weather_context", True):
@@ -8297,30 +8279,23 @@ class DailyStateMixin(DailyStateTickMixin):
         user: dict[str, Any],
         text: str,
     ) -> PromptSection:
-        if not isinstance(user, dict):
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="meal.care_reply",
                 title="吃饭关心承接",
                 source="daily_state",
-                content="",
+                content=content,
             )
+
+        if not isinstance(user, dict):
+            return build_section()
         hint = user.get("meal_care_reply_hint")
         if not isinstance(hint, dict) or _now_ts() - _safe_float(hint.get("ts"), 0) > 10 * 60:
-            return prompt_section(
-                key="meal.care_reply",
-                title="吃饭关心承接",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         hint_text = _single_line(hint.get("text"), 220)
         current_text = _single_line(text, 260)
         if hint_text and not (hint_text == current_text or hint_text in current_text):
-            return prompt_section(
-                key="meal.care_reply",
-                title="吃饭关心承接",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         kind = _single_line(hint.get("kind"), 30)
         meal_label = _single_line(hint.get("meal_label"), 12) or "这顿饭"
         foods = [_single_line(item, 30) for item in hint.get("foods", []) if _single_line(item, 30)] if isinstance(hint.get("foods"), list) else []
@@ -8335,12 +8310,7 @@ class DailyStateMixin(DailyStateTickMixin):
             body = f"用户明确说{meal_label}还没吃。不要追问“吃了什么”，改为关心准备什么时候吃、想吃什么；如果下方有吃饭候选，只给少量选择，不要一次报菜单。"
         elif kind == "not_eaten_final":
             body = f"用户补问后仍说{meal_label}没吃。简短关心一句就收住，不再继续追问；不要责怪或说教。"
-        return prompt_section(
-            key="meal.care_reply",
-            title="吃饭关心承接",
-            source="daily_state",
-            content=body,
-        )
+        return build_section(body)
 
     @staticmethod
     def _food_menu_type_label(value: Any) -> str:
@@ -8566,22 +8536,20 @@ class DailyStateMixin(DailyStateTickMixin):
         limit: int = 3,
         user: dict[str, Any] | None = None,
     ) -> PromptSection:
+        def build_section(content: str = "") -> PromptSection:
+            return prompt_section(
+                key="meal.food_candidates",
+                title="吃饭候选",
+                source="daily_state",
+                content=content,
+            )
+
         profile = self._food_menu_query_profile(text, user=user)
         if not profile.get("is_query"):
-            return prompt_section(
-                key="meal.food_candidates",
-                title="吃饭候选",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         candidates = self._food_menu_candidates_for_prompt(text, limit=limit, user=user)
         if not candidates:
-            return prompt_section(
-                key="meal.food_candidates",
-                title="吃饭候选",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         self._mark_food_menu_items_recommended(candidates)
         lines: list[str] = []
         for item in candidates:
@@ -8605,12 +8573,7 @@ class DailyStateMixin(DailyStateTickMixin):
             lines.append(line)
         meal = _single_line(profile.get("meal"), 12) or self._food_menu_time_label(profile.get("time_key")) or "这顿"
         body = f"这轮用户在问{meal}吃什么。可参考：" + "；".join(lines) + "。"
-        return prompt_section(
-            key="meal.food_candidates",
-            title="吃饭候选",
-            source="daily_state",
-            content=body,
-        )
+        return build_section(body)
 
     def _mark_food_menu_item_used_from_text(self, text: str) -> list[str]:
         query = _single_line(text, 220)
@@ -9429,6 +9392,14 @@ class DailyStateMixin(DailyStateTickMixin):
         include_pinned: bool = True,
         limit: int = 6,
     ) -> PromptSection:
+        def build_section(content: str = "") -> PromptSection:
+            return prompt_section(
+                key="memo.active_notes",
+                title="备忘便签",
+                source="daily_state",
+                content=content,
+            )
+
         now = _now_ts()
         horizon = now + max(0, int(days)) * 86400
         rows: list[dict[str, Any]] = []
@@ -9438,12 +9409,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 continue
             rows.append(note)
         if not rows:
-            return prompt_section(
-                key="memo.active_notes",
-                title="备忘便签",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         lines: list[str] = []
         for note in rows[: max(1, int(limit or 1))]:
             due_at = _safe_float(note.get("due_at"), 0)
@@ -9460,12 +9426,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 text = f"{text}；{detail}"
             lines.append(f"- {due_text}｜{repeat}｜{text}")
         lines.append("这些是用户主动保存的待办/提醒，不是已经发生的经历；只在当前话题或时间相关时自然承接。")
-        return prompt_section(
-            key="memo.active_notes",
-            title="备忘便签",
-            source="daily_state",
-            content="\n".join(lines),
-        )
+        return build_section("\n".join(lines))
 
     def _format_memo_notes_for_prompt(
         self,
@@ -9493,33 +9454,26 @@ class DailyStateMixin(DailyStateTickMixin):
         *,
         reason: str = "",
     ) -> PromptSection:
-        if reason != "memo_note_reminder" or not isinstance(user, dict):
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="memo.due_reminder",
                 title="到期备忘便签",
                 source="daily_state",
-                content="",
+                content=content,
             )
+
+        if reason != "memo_note_reminder" or not isinstance(user, dict):
+            return build_section()
         context = user.get("planned_memo_note_context")
         if not isinstance(context, dict):
-            return prompt_section(
-                key="memo.due_reminder",
-                title="到期备忘便签",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         body = (
             f"- 标题：{_single_line(context.get('title'), 60) or '未命名便签'}\n"
             f"- 内容：{_single_line(context.get('content'), 240) or '无补充内容'}\n"
             f"- 到期：{_single_line(context.get('due_text'), 40) or '刚刚到期'}\n"
             "这是用户自己设置并已到期的提醒。直接自然提醒事项本身，不解释便签系统、调度或后台字段，不责怪用户，也不要虚构已完成。"
         )
-        return prompt_section(
-            key="memo.due_reminder",
-            title="到期备忘便签",
-            source="daily_state",
-            content=body,
-        )
+        return build_section(body)
 
     def _next_memo_due_in_seconds(self, now: float | None = None) -> float | None:
         check_now = _safe_float(now, _now_ts())
@@ -10547,6 +10501,17 @@ class DailyStateMixin(DailyStateTickMixin):
     def _build_daily_plan_prompt(self, now: str, memory_companion_context: str = "") -> str:
         return build_daily_plan_prompt(self, now, memory_companion_context=memory_companion_context)
 
+    def _build_daily_plan_prompt_section(
+        self,
+        now: str,
+        memory_companion_context: str = "",
+    ) -> PromptSection:
+        return build_daily_plan_prompt_section(
+            self,
+            now,
+            memory_companion_context=memory_companion_context,
+        )
+
     async def _ensure_yesterday_conversation_summary(self, force: bool = False) -> dict[str, Any]:
         today = _today_key()
         cached = self.data.get("yesterday_conversation_summary", {})
@@ -10993,6 +10958,21 @@ class DailyStateMixin(DailyStateTickMixin):
         memory_companion_context: str = "",
     ) -> str:
         return build_detail_enhancement_prompt(self, segment, plan, state, memory_companion_context=memory_companion_context)
+
+    def _build_detail_enhancement_prompt_section(
+        self,
+        segment: dict[str, Any],
+        plan: dict[str, Any],
+        state: dict[str, Any],
+        memory_companion_context: str = "",
+    ) -> PromptSection:
+        return build_detail_enhancement_prompt_section(
+            self,
+            segment,
+            plan,
+            state,
+            memory_companion_context=memory_companion_context,
+        )
 
     @staticmethod
     def _persona_prompt_cache_scope(umo: str = "", specific_id: str = "") -> str:
@@ -11456,19 +11436,14 @@ class DailyStateMixin(DailyStateTickMixin):
         user_id = _single_line((user or {}).get("user_id"), 80) if isinstance(user, dict) else ""
         snapshot = self._current_dialogue_outfit_override(user_id=user_id)
         instruction = _single_line(snapshot.get("instruction"), 180)
-        if not instruction:
-            return prompt_section(
-                key="dialogue.outfit_continuity",
-                title="当前会话服装连续性",
-                source="daily_state",
-                content="",
+        body = ""
+        if instruction:
+            body = (
+                f"最近一次明确换装：用户说“{instruction}”。\n"
+                "把它理解为当前剧情中已经发生、需要继续承接的服装变化，不要逐字复述。"
+                "它高于人格默认服装、今日穿搭参考、旧日程、旧摘要和旧图片中的衣服。"
+                "在用户再次明确换装、明确换回，或剧情自然写出新的换衣过程前，不得自行恢复旧服装。"
             )
-        body = (
-            f"最近一次明确换装：用户说“{instruction}”。\n"
-            "把它理解为当前剧情中已经发生、需要继续承接的服装变化，不要逐字复述。"
-            "它高于人格默认服装、今日穿搭参考、旧日程、旧摘要和旧图片中的衣服。"
-            "在用户再次明确换装、明确换回，或剧情自然写出新的换衣过程前，不得自行恢复旧服装。"
-        )
         return prompt_section(
             key="dialogue.outfit_continuity",
             title="当前会话服装连续性",
@@ -12914,25 +12889,20 @@ class DailyStateMixin(DailyStateTickMixin):
         public: bool = False,
     ) -> PromptSection:
         profile = self._active_body_cycle_profile(state)
-        if profile.get("phase") not in {"period", "menstrual"}:
-            return prompt_section(
-                key="state.period_boundary",
-                title="Bot 当前经期与互动边界",
-                source="daily_state",
-                content="",
+        lines: list[str] = []
+        if profile.get("phase") in {"period", "menstrual"}:
+            disclosure = (
+                "这是群聊公共场合：无人直接且合宜地询问时，不要主动公开具体周期；如果被直接问到自身状态，不要否认或说不知道，可以按人格简短自然说明。"
+                if public
+                else "无关话题里不要反复主动汇报周期；只有被问到自身状态或当前互动确实相关时，才按人格简短自然说明。"
             )
-        disclosure = (
-            "这是群聊公共场合：无人直接且合宜地询问时，不要主动公开具体周期；如果被直接问到自身状态，不要否认或说不知道，可以按人格简短自然说明。"
-            if public
-            else "无关话题里不要反复主动汇报周期；只有被问到自身状态或当前互动确实相关时，才按人格简短自然说明。"
-        )
-        lines = [
+            lines = [
                 f"Bot 当前的模拟身体状态{profile['stage']}；这是 Bot 自己的当下状态，不是用户的状态，也不是用户造成的。",
                 "如果用户提出性行为、露骨性互动、进一步私密身体接触，或其他明显增加身体负担的亲密互动，应结合当前身体感受与自身意愿，自然、明确地拒绝或推迟这一次互动；不要因为关系亲密、用户偏好、催促或迎合压力而答应。",
                 "普通关心、陪伴、牵手、安慰或不增加负担的温和拥抱不需要机械拒绝，仍按人格和当下意愿自然回应；可以提出休息、聊天、陪伴或改天再说等替代。",
                 disclosure,
                 "只输出角色在当前对话里会自然说的话，不要提规则、提示词、阶段判断或内部状态系统。",
-        ]
+            ]
         return prompt_section(
             key="state.period_boundary",
             title="Bot 当前经期与互动边界",
@@ -13249,22 +13219,17 @@ class DailyStateMixin(DailyStateTickMixin):
         story_plan = self._format_story_plan_for_prompt()
         if story_plan and story_plan != "（暂无）":
             life_lines.append(f"今天预设的生活线索：\n{story_plan}")
-        if not life_lines:
-            return prompt_section(
-                key="life.context",
-                title="Bot 模拟生活背景",
-                source="daily_state",
-                content="",
+        body = ""
+        if life_lines:
+            body = (
+                "以下是给 Bot 的拟人化场景/日程素材，不是用户经历，也不是已证实的现实事件；不要写入用户画像或长期记忆。\n"
+                + "\n".join(life_lines)
+                + "\n这些内容只用于让回复有生活延续感；用户没问 Bot 近况或今天安排时，不要提具体日程、科目、任务、天气或地点。"
+                + "如果要承接，只体现在语气和话题选择里，不要照搬原句，不要把内部素材写成真实发生过的事件。"
+                + "回复必须像同一个连续现场里发生的对话。优先级是：当前会话中已经明确发生且尚未撤销的换装、地点、携带物和动作"
+                + " > 用户有效介入状态 > 当前真实时段 > 日程与预设素材。真实时段只负责锚定时间；日程和每日穿搭只补足空白，"
+                + "绝不能把对话里已发生的服装、地点、携带物或动作复原成旧值。生活背景之间互相冲突时，才在未被当前会话确认的部分保留最合理的一条线索。"
             )
-        body = (
-            "以下是给 Bot 的拟人化场景/日程素材，不是用户经历，也不是已证实的现实事件；不要写入用户画像或长期记忆。\n"
-            + "\n".join(life_lines)
-            + "\n这些内容只用于让回复有生活延续感；用户没问 Bot 近况或今天安排时，不要提具体日程、科目、任务、天气或地点。"
-            + "如果要承接，只体现在语气和话题选择里，不要照搬原句，不要把内部素材写成真实发生过的事件。"
-            + "回复必须像同一个连续现场里发生的对话。优先级是：当前会话中已经明确发生且尚未撤销的换装、地点、携带物和动作"
-            + " > 用户有效介入状态 > 当前真实时段 > 日程与预设素材。真实时段只负责锚定时间；日程和每日穿搭只补足空白，"
-            + "绝不能把对话里已发生的服装、地点、携带物或动作复原成旧值。生活背景之间互相冲突时，才在未被当前会话确认的部分保留最合理的一条线索。"
-        )
         return prompt_section(
             key="life.context",
             title="Bot 模拟生活背景",
@@ -13278,17 +13243,12 @@ class DailyStateMixin(DailyStateTickMixin):
 
     def _format_important_dates_prompt_section(self) -> PromptSection:
         important_dates = self._format_important_dates_for_prompt()
-        if not important_dates or important_dates == "（近期没有需要特别记住的日期）":
-            return prompt_section(
-                key="important.dates",
-                title="近期重要日期",
-                source="daily_state",
-                content="",
+        body = ""
+        if important_dates and important_dates != "（近期没有需要特别记住的日期）":
+            body = (
+                f"{important_dates}\n"
+                "如果用户提到相关日期、纪念、生日、约定或计划,请自然承接；不要无故强行展开。"
             )
-        body = (
-            f"{important_dates}\n"
-            "如果用户提到相关日期、纪念、生日、约定或计划,请自然承接；不要无故强行展开。"
-        )
         return prompt_section(
             key="important.dates",
             title="近期重要日期",
@@ -13543,22 +13503,20 @@ class DailyStateMixin(DailyStateTickMixin):
         user: dict[str, Any] | None,
         inbound_text: str,
     ) -> PromptSection:
+        def build_section(content: str = "") -> PromptSection:
+            return prompt_section(
+                key="creative.recent_share",
+                title="最近一次真实创作分享",
+                source="daily_state",
+                content=content,
+            )
+
         snapshot = self._recent_creative_share_snapshot(user)
         if not snapshot:
-            return prompt_section(
-                key="creative.recent_share",
-                title="最近一次真实创作分享",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         inbound = _single_line(inbound_text, 220)
         if not inbound:
-            return prompt_section(
-                key="creative.recent_share",
-                title="最近一次真实创作分享",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         work_title = _single_line(snapshot.get("title"), 60)
         title_mentioned = bool(work_title and work_title in inbound)
         asks_creative = self._user_asks_recent_creative_activity(inbound)
@@ -13566,17 +13524,11 @@ class DailyStateMixin(DailyStateTickMixin):
         sent_at = _safe_float(snapshot.get("sent_at"), 0)
         nearby_short_followup = sent_at > 0 and _now_ts() - sent_at <= 30 * 60 and len(inbound) <= 72
         if not (title_mentioned or asks_creative or asks_activity or nearby_short_followup):
-            return prompt_section(
-                key="creative.recent_share",
-                title="最近一次真实创作分享",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         direct_query = title_mentioned or asks_creative or asks_activity
         shared_text = _single_line(snapshot.get("shared_text"), 1600)
         source_snippet = _single_line(snapshot.get("source_snippet"), 420)
         shown_text = shared_text if direct_query else _single_line(shared_text, 360)
-        section_title = "最近一次真实创作分享"
         body = "\n".join(
             part
             for part in (
@@ -13590,12 +13542,7 @@ class DailyStateMixin(DailyStateTickMixin):
             )
             if part
         )
-        return prompt_section(
-            key="creative.recent_share",
-            title=section_title,
-            source="daily_state",
-            content=body,
-        )
+        return build_section(body)
 
     def _recent_photo_share_snapshot(
         self,
@@ -13656,22 +13603,20 @@ class DailyStateMixin(DailyStateTickMixin):
         user: dict[str, Any] | None,
         inbound_text: str,
     ) -> PromptSection:
+        def build_section(content: str = "") -> PromptSection:
+            return prompt_section(
+                key="photo.recent_share",
+                title="最近一次真实图片分享",
+                source="daily_state",
+                content=content,
+            )
+
         snapshot = self._recent_photo_share_snapshot(user)
         if not snapshot:
-            return prompt_section(
-                key="photo.recent_share",
-                title="最近一次真实图片分享",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         inbound = _single_line(inbound_text, 220)
         if not inbound:
-            return prompt_section(
-                key="photo.recent_share",
-                title="最近一次真实图片分享",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         sent_at = _safe_float(snapshot.get("sent_at"), 0)
         recent_short_followup = sent_at > 0 and _now_ts() - sent_at <= 30 * 60 and len(inbound) <= 40
         asks_photo = any(
@@ -13681,12 +13626,7 @@ class DailyStateMixin(DailyStateTickMixin):
             )
         )
         if not (recent_short_followup or asks_photo):
-            return prompt_section(
-                key="photo.recent_share",
-                title="最近一次真实图片分享",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         subject_owner = _normalize_photo_subject_owner(snapshot.get("subject_owner")) or "unknown"
         owner_label = _photo_subject_owner_prompt_label(subject_owner)
         body = "\n".join(
@@ -13704,25 +13644,23 @@ class DailyStateMixin(DailyStateTickMixin):
             )
             if part
         )
-        return prompt_section(
-            key="photo.recent_share",
-            title="最近一次真实图片分享",
-            source="daily_state",
-            content=body,
-        )
+        return build_section(body)
 
     def _format_hidden_creative_context_for_reply_prompt_section(
         self,
         inbound_text: str,
         user: dict[str, Any] | None = None,
     ) -> PromptSection:
-        if not runtime_persona_setting(self, "enable_creative_writing", False):
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="creative.hidden_context",
                 title="私下创作近况",
                 source="daily_state",
-                content="",
+                content=content,
             )
+
+        if not runtime_persona_setting(self, "enable_creative_writing", False):
+            return build_section()
         recent_share_context = self._format_recent_creative_share_snapshot_for_reply_prompt_section(
             user,
             inbound_text,
@@ -13735,12 +13673,7 @@ class DailyStateMixin(DailyStateTickMixin):
         asks_bookshelf_inventory = self._user_asks_bookshelf_creative_inventory(inbound_text)
         asks_activity = self._user_asks_recent_bot_activity(inbound_text)
         if not (mentioned_title or asks_creative or asks_activity):
-            return prompt_section(
-                key="creative.hidden_context",
-                title="私下创作近况",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         available_projects: list[dict[str, Any]] = []
         for project in self._creative_projects():
             if project.get("status") not in {"drafting", "finished"}:
@@ -13775,12 +13708,7 @@ class DailyStateMixin(DailyStateTickMixin):
                     source="daily_state",
                     content=body,
                 )
-            return prompt_section(
-                key="creative.hidden_context",
-                title="私下创作近况",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         if mentioned_title or asks_creative:
             candidates.sort(key=lambda item: item[0], reverse=True)
         _, project, latest = candidates[0]
@@ -13821,7 +13749,6 @@ class DailyStateMixin(DailyStateTickMixin):
             if asks_existence
             else ""
         )
-        section_title = "私下创作近况"
         body = (
             f"{ask_line}你可以提到：你最近因为生活小事、日记碎片或梦境灵感开了一个自己的文本作品,一直在自己慢慢写。\n"
             f"{inventory_hint}\n"
@@ -13834,12 +13761,7 @@ class DailyStateMixin(DailyStateTickMixin):
             + (f"最近一句/片段：{snippet}\n" if snippet else "")
             + "如果用户询问资料柜库存，必须直接依据真实数量和标题回答，禁止用括号动作或假装翻找代替结果。如果用户明确问指定作品的正文、某一部分、写作想法或作者怎么看，下面的短片段只能用于定位，必须先调用 pc_view_creative_work 读取真实正文后再回答；不要先发“我去看看”，也不要凭短片段假装已经读完。若只是泛问最近有没有创作，可以直接概括并给一小句片段。否则这不是必须回答的内容，可以只含糊说“在弄一点小东西”。不要主动汇报系统进度，不要一次给完整正文。"
         )
-        return prompt_section(
-            key="creative.hidden_context",
-            title=section_title,
-            source="daily_state",
-            content=body,
-        )
+        return build_section(body)
 
     @staticmethod
     def _skill_level_title(level: int) -> str:
@@ -14233,21 +14155,19 @@ class DailyStateMixin(DailyStateTickMixin):
         *,
         reason: str = "",
     ) -> PromptSection:
-        if reason != "personal_goal_progress" or not isinstance(user, dict):
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="personal_goal.progress",
                 title="非创作型个人目标",
                 source="daily_state",
-                content="",
+                content=content,
             )
+
+        if reason != "personal_goal_progress" or not isinstance(user, dict):
+            return build_section()
         context = user.get("planned_personal_goal_context")
         if not isinstance(context, dict):
-            return prompt_section(
-                key="personal_goal.progress",
-                title="非创作型个人目标",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         event = context.get("event") if isinstance(context.get("event"), dict) else {}
         body = (
             f"- 目标：{_single_line(context.get('title'), 60)}\n"
@@ -14256,12 +14176,7 @@ class DailyStateMixin(DailyStateTickMixin):
             f"- 下一步：{_single_line(context.get('next_step'), 100) or '尚未指定'}\n"
             "只表达这次真实进展、停滞或完成，不虚构做过的步骤，不写后台进度字段，不把目标变成向用户索取监督的任务。"
         )
-        return prompt_section(
-            key="personal_goal.progress",
-            title="非创作型个人目标",
-            source="daily_state",
-            content=body,
-        )
+        return build_section(body)
 
     def _format_personal_goals_schedule_context(self, limit: int = 5) -> str:
         section = self._format_personal_goals_schedule_context_prompt_section(limit=limit)
@@ -14271,22 +14186,20 @@ class DailyStateMixin(DailyStateTickMixin):
         self,
         limit: int = 5,
     ) -> PromptSection:
-        if not bool(runtime_persona_setting(self, "enable_personal_goals", True)):
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="personal_goal.schedule_context",
                 title="Bot 自己的非创作型个人目标",
                 source="daily_state",
-                content="",
+                content=content,
             )
+
+        if not bool(runtime_persona_setting(self, "enable_personal_goals", True)):
+            return build_section()
         goals = self.data.get("personal_goals") if isinstance(self.data.get("personal_goals"), list) else []
         active = [goal for goal in goals if isinstance(goal, dict) and self._personal_goal_status(goal.get("status")) == "active"]
         if not active:
-            return prompt_section(
-                key="personal_goal.schedule_context",
-                title="Bot 自己的非创作型个人目标",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         lines = [
             "这些目标已经明确建立，可以在身份主线、状态和当天硬安排允许时留出少量真实推进时间；不要每天全部安排，也不要伪造已经完成。",
         ]
@@ -14295,12 +14208,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 f"- {_single_line(goal.get('title'), 60)}｜进度 {_safe_int(goal.get('progress'), 0, 0, 100)}%｜"
                 f"下一步：{_single_line(goal.get('next_step'), 100) or '自然推进'}｜匹配词：{'、'.join(self._personal_goal_terms(goal)[:6])}"
             )
-        return prompt_section(
-            key="personal_goal.schedule_context",
-            title="Bot 自己的非创作型个人目标",
-            source="daily_state",
-            content="\n".join(lines),
-        )
+        return build_section("\n".join(lines))
 
     async def _maybe_settle_personal_goals(self, *, force: bool = False) -> None:
         if not bool(runtime_persona_setting(self, "enable_personal_goals", True)):
@@ -14440,22 +14348,20 @@ class DailyStateMixin(DailyStateTickMixin):
                 )
 
     def _format_skill_growth_prompt_section(self, limit: int = 8) -> PromptSection:
-        if not runtime_persona_setting(self, "enable_skill_growth_simulation", True):
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="skill.growth",
                 title="能力熟悉度",
                 source="daily_state",
-                content="",
+                content=content,
             )
+
+        if not runtime_persona_setting(self, "enable_skill_growth_simulation", True):
+            return build_section()
         state = self.data.get("skill_growth") if isinstance(self.data.get("skill_growth"), dict) else {}
         skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
         if not skills:
-            return prompt_section(
-                key="skill.growth",
-                title="能力熟悉度",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         ranked = sorted([item for item in skills.values() if isinstance(item, dict) and not item.get("hidden")], key=lambda item: (_safe_int(item.get("level"), 1, 1), _safe_float(item.get("exp"), 0)), reverse=True)[:limit]
         lines: list[str] = []
         for skill in ranked:
@@ -14464,33 +14370,26 @@ class DailyStateMixin(DailyStateTickMixin):
             if name:
                 lines.append(f"- {name}水平：{self._skill_level_title(level)}")
         body = "\n".join(lines)
-        return prompt_section(
-            key="skill.growth",
-            title="能力熟悉度",
-            source="daily_state",
-            content=body,
-        )
+        return build_section(body)
 
     def _format_skill_growth_for_user_text_prompt_section(
         self,
         text: str,
         limit: int = 3,
     ) -> PromptSection:
-        if not runtime_persona_setting(self, "enable_skill_growth_simulation", True):
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="skill.growth_match",
                 title="本轮相关技能",
                 source="daily_state",
-                content="",
+                content=content,
             )
+
+        if not runtime_persona_setting(self, "enable_skill_growth_simulation", True):
+            return build_section()
         query = _single_line(text, 500)
         if not query:
-            return prompt_section(
-                key="skill.growth_match",
-                title="本轮相关技能",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         state = self.data.get("skill_growth") if isinstance(self.data.get("skill_growth"), dict) else {}
         skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
         matched: list[tuple[int, float, dict[str, Any]]] = []
@@ -14514,12 +14413,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 continue
             matched.append((score, _safe_float(skill.get("exp"), 0), skill))
         if not matched:
-            return prompt_section(
-                key="skill.growth_match",
-                title="本轮相关技能",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         matched.sort(key=lambda item: (item[0], _safe_int(item[2].get("level"), 1, 1), item[1]), reverse=True)
         lines: list[str] = []
         for _, _, skill in matched[: max(1, int(limit or 1))]:
@@ -14528,12 +14422,7 @@ class DailyStateMixin(DailyStateTickMixin):
             if name:
                 lines.append(f"- {name}水平：{self._skill_level_title(level)}")
         body = "\n".join(lines)
-        return prompt_section(
-            key="skill.growth_match",
-            title="本轮相关技能",
-            source="daily_state",
-            content=body,
-        )
+        return build_section(body)
 
     def _format_skill_growth_schedule_context(self, limit: int = 8) -> str:
         section = self._format_skill_growth_schedule_context_prompt_section(limit=limit)
@@ -14543,30 +14432,23 @@ class DailyStateMixin(DailyStateTickMixin):
         self,
         limit: int = 8,
     ) -> PromptSection:
-        if not runtime_persona_setting(self, "enable_skill_growth_simulation", True) or not runtime_persona_setting(self, "enable_skill_growth_schedule_influence", True):
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="skill.schedule_influence",
                 title="技能成长对日程的能力边界影响",
                 source="daily_state",
-                content="",
+                content=content,
             )
+
+        if not runtime_persona_setting(self, "enable_skill_growth_simulation", True) or not runtime_persona_setting(self, "enable_skill_growth_schedule_influence", True):
+            return build_section()
         strength = max(0.0, min(1.0, _safe_float(runtime_persona_setting(self, "skill_growth_schedule_influence_strength", 0.35), 0.35)))
         if strength <= 0:
-            return prompt_section(
-                key="skill.schedule_influence",
-                title="技能成长对日程的能力边界影响",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         state = self.data.get("skill_growth") if isinstance(self.data.get("skill_growth"), dict) else {}
         skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
         if not skills:
-            return prompt_section(
-                key="skill.schedule_influence",
-                title="技能成长对日程的能力边界影响",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         now_ts = _now_ts()
         ranked: list[tuple[float, dict[str, Any]]] = []
         for raw in skills.values():
@@ -14586,12 +14468,7 @@ class DailyStateMixin(DailyStateTickMixin):
             ranked.append((score, raw))
         ranked.sort(key=lambda item: item[0], reverse=True)
         if not ranked:
-            return prompt_section(
-                key="skill.schedule_influence",
-                title="技能成长对日程的能力边界影响",
-                source="daily_state",
-                content="",
-            )
+            return build_section()
         strength_text = "很轻" if strength < 0.25 else "轻" if strength < 0.55 else "中等" if strength < 0.8 else "较强"
         lines = [
             f"影响强度：{strength_text}。这些技能主要用于保持能力边界一致,优先级低于日期语境、身份主线、状态、天气和用户介入；不要把今天写成训练清单。",
@@ -14615,12 +14492,7 @@ class DailyStateMixin(DailyStateTickMixin):
             else:
                 tendency = "只在当天身份和场景很合适时轻轻出现,不要强行安排。"
             lines.append(f"- {name}（{category}, {self._skill_level_title(level)}, 训练{count}次, 最近{last}）：{tendency}")
-        return prompt_section(
-            key="skill.schedule_influence",
-            title="技能成长对日程的能力边界影响",
-            source="daily_state",
-            content="\n".join(lines),
-        )
+        return build_section("\n".join(lines))
 
     def _current_story_plan_snapshot(self) -> dict[str, Any]:
         plan = self.data.get("daily_story_plan", {})
@@ -14671,28 +14543,26 @@ class DailyStateMixin(DailyStateTickMixin):
         return snapshot
 
     def _format_detail_injection_prompt_section(self) -> PromptSection:
+        def build_section(content: str = "") -> PromptSection:
+            return prompt_section(
+                key="detail.injection",
+                title="Bot 模拟当前片段",
+                source="daily_state",
+                content=content,
+            )
+
         snapshot = self._current_story_plan_snapshot()
         if not snapshot:
             schedule_context = self._format_schedule_context_for_prompt()
             if not schedule_context:
-                return prompt_section(
-                    key="detail.injection",
-                    title="Bot 模拟当前片段",
-                    source="daily_state",
-                    content="",
-                )
+                return build_section()
             body = (
                 "附近的日程只作 Bot 的拟人化轻量背景，不是用户事实，也不要当成正在逐字发生的现实事件。\n"
                 "当前会话中已经明确发生且尚未撤销的换装、地点、携带物和动作优先于本段日程；"
                 "日程只能补足空白，不能把这些已发生的状态恢复成旧值。\n"
                 f"{schedule_context}"
             )
-            return prompt_section(
-                key="detail.injection",
-                title="Bot 模拟当前片段",
-                source="daily_state",
-                content=body,
-            )
+            return build_section(body)
         lines = [
             "这是 Bot 自身的拟人化片段素材，不是用户事实/现实证据；不要写进长期记忆，用户没问就不要复述。",
             "优先级：当前会话中已明确发生且尚未撤销的换装、地点、携带物和动作 > 用户有效介入 > 当前真实时段 > 本段日程及预设素材。"
@@ -14788,12 +14658,7 @@ class DailyStateMixin(DailyStateTickMixin):
                 if update_lines:
                     lines.append("刚刚的介入：" + "；".join(update_lines) + "。")
         body = "\n".join(lines)
-        return prompt_section(
-            key="detail.injection",
-            title="Bot 模拟当前片段",
-            source="daily_state",
-            content=body,
-        )
+        return build_section(body)
 
     def _format_detail_injection(self) -> str:
         """Render the detail section for the diagnostic prompt preview."""
@@ -14807,13 +14672,16 @@ class DailyStateMixin(DailyStateTickMixin):
         self,
         user: dict[str, Any] | None = None,
     ) -> PromptSection:
-        if not self.enable_llm_timer_scheduling:
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="timer.scheduling",
                 title="临时预约与动作回访",
                 source="daily_state",
-                content="",
+                content=content,
             )
+
+        if not self.enable_llm_timer_scheduling:
+            return build_section()
         current_user = user if isinstance(user, dict) else {}
         role = self._private_user_role(current_user) if isinstance(user, dict) else "owner"
         followup_policy = self._activity_followup_quota_policy(current_user)
@@ -14862,12 +14730,7 @@ class DailyStateMixin(DailyStateTickMixin):
 改时间直接写新时间；取消普通约定时写：<timer>{{"action":"cancel"}}</timer>；取消现实触及提醒时必须保留交付类型，写：<timer>{{"action":"cancel","delivery":"reality_touch","topic":"要取消的提醒事项"}}</timer>。
         除上述动作回访外，时间和约定不明确就不要写。标签不应出现在可见回复中，只会被转写为 AstrBot 官方一次性定时计划。"""
         body = body.lstrip("\n")
-        return prompt_section(
-            key="timer.scheduling",
-            title="临时预约与动作回访",
-            source="daily_state",
-            content=body,
-        )
+        return build_section(body)
 
     def _extract_timer_directives(self, text: str) -> tuple[str, list[dict[str, Any]]]:
         raw_text = str(text or "")

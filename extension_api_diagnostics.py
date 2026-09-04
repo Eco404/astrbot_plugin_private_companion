@@ -46,23 +46,10 @@ class _DiagnosticsCapabilityFamily:
         snapshot = self._owner.get_scene_context(user_id)
         normalized_purpose = _single_line(purpose, 40) or "together"
         plugin = self._owner._plugin
-        section_builder = getattr(
-            plugin,
-            "_format_companion_scene_snapshot_prompt_section",
-            None,
+        scene_section = plugin._format_companion_scene_snapshot_prompt_section(
+            snapshot,
+            purpose=normalized_purpose,
         )
-        if callable(section_builder):
-            scene_section = section_builder(snapshot, purpose=normalized_purpose)
-        else:
-            scene_section = prompt_section(
-                key="scene.snapshot",
-                title="陪伴场景快照",
-                source="scene_context",
-                content=plugin._format_companion_scene_snapshot(
-                    snapshot,
-                    purpose=normalized_purpose,
-                ),
-            )
         authored_sections: list[PromptSection] = [scene_section]
         activity = self._owner.get_external_activity(user_id=user_id)
         if activity:

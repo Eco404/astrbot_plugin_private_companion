@@ -1081,25 +1081,25 @@ class SceneContextMixin:
         user: dict[str, Any] | None,
     ) -> PromptSection:
         """Format authorized Android location for the current private dialogue."""
-        def empty_section() -> PromptSection:
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="reality_touch.mobile_location",
                 title="用户手机位置感知",
                 source="scene_context",
-                content="",
+                content=content,
             )
 
         current_user = user if isinstance(user, dict) else {}
         user_id = _single_line(current_user.get("user_id"), 80)
         getter = getattr(self, "_reality_mobile_context", None)
         if not user_id or not callable(getter):
-            return empty_section()
+            return build_section()
         try:
             mobile_context = getter(user_id)
         except Exception:
-            return empty_section()
+            return build_section()
         if not isinstance(mobile_context, dict):
-            return empty_section()
+            return build_section()
         location = mobile_context.get("location") if isinstance(mobile_context.get("location"), dict) else {}
         map_observer = getattr(self, "_observe_mobile_place_context", None)
         cognitive_map: dict[str, Any] = {}
@@ -1166,7 +1166,7 @@ class SceneContextMixin:
             if map_text:
                 facts.append(map_text)
         if not facts:
-            return empty_section()
+            return build_section()
         body = (
             "；".join(facts)
             + "\n这些是用户主动授权的短期环境事实，只用于理解用户所在场景、出行方向、行为语境和设备可达性。"
@@ -1174,13 +1174,7 @@ class SceneContextMixin:
             "不得把未标记地点猜成具体住址，也不要把手机状态说成后台监控或精确在线证明。"
             "身体数据只能按已提供的数值和时间描述，不得据此诊断、夸大风险或替代专业建议。"
         )
-        section = prompt_section(
-            key="reality_touch.mobile_location",
-            title="用户手机位置感知",
-            source="scene_context",
-            content=body,
-        )
-        return section
+        return build_section(body)
 
     def _mobile_location_weather_sensitivity(self) -> str:
         config = getattr(self, "config", {})

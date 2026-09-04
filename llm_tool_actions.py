@@ -754,21 +754,6 @@ class LlmToolActionsMixin:
                 recent_context.content or ""
             ).strip():
                 sections.append(recent_context)
-            elif (
-                isinstance(recent_context, dict)
-                and str(recent_context.get("content") or "").strip()
-            ):
-                sections.append(
-                    prompt_section(
-                        key="tools.qzone.recent_self_publish",
-                        title=str(
-                            recent_context.get("title")
-                            or "Bot 自己最近成功发布的 QQ 空间记录"
-                        ),
-                        source="qzone",
-                        content=recent_context.get("content"),
-                    )
-                )
         return sections
 
     @staticmethod

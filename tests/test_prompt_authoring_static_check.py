@@ -88,6 +88,49 @@ class PromptAuthoringStaticCheckTests(unittest.TestCase):
 
         self._check_source("prompt_surface.add(section, priority=10)\n")
 
+    def test_delivery_batches_cannot_be_authored_as_model_visible_sections(self) -> None:
+        for key in ("reply.style.batch", "passive.static", "passive.dynamic"):
+            with self.subTest(key=key):
+                finding = self._finding(
+                    "value = prompt_section("
+                    f"key='{key}', title='投递分组', source='sample', "
+                    "content='', children=sections)\n"
+                )
+                self.assertIn("prompt_delivery_batch_section", finding)
+                self.assertIn(key, finding)
+
+    def test_parent_and_direct_child_cannot_repeat_the_same_title(self) -> None:
+        finding = self._finding(
+            "value = prompt_section(key='parent', title='重复标题', source='sample', "
+            "content='正文', children=(prompt_section(key='child', title='重复标题', "
+            "source='sample', content='子正文'),))\n"
+        )
+
+        self.assertIn("duplicate_prompt_child_title", finding)
+        self.assertIn("重复标题", finding)
+
+    def test_function_cannot_author_the_same_section_identity_in_multiple_branches(self) -> None:
+        finding = self._finding(
+            "def build(enabled):\n"
+            "    if enabled:\n"
+            "        return prompt_section(key='feature.context', title='功能上下文', "
+            "source='sample', content='命中')\n"
+            "    return prompt_section(key='feature.context', title='功能上下文', "
+            "source='sample', content='')\n"
+        )
+
+        self.assertIn("duplicate_prompt_key_in_function", finding)
+        self.assertIn("duplicate_prompt_title_in_function", finding)
+
+    def test_nested_section_builder_has_an_independent_identity_scope(self) -> None:
+        self._check_source(
+            "def outer():\n"
+            "    def build(content):\n"
+            "        return prompt_section(key='feature.context', title='功能上下文', "
+            "source='sample', content=content)\n"
+            "    return build('正文')\n"
+        )
+
     def test_conversation_plan_rejects_loose_fields_and_legacy_flags(self) -> None:
         add_finding = self._finding(
             "plan.add(key='reply.style', content='正文', structured=True)\n"

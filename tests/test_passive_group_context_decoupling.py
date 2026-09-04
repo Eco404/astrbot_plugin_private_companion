@@ -124,15 +124,17 @@ class PassiveGroupContextDecouplingTests(unittest.IsolatedAsyncioTestCase):
         payload = ET.fromstring(request.extra_user_content_parts[0].text)
         self.assertEqual(
             ["群内黑话语义近似（仅作软参考）", "刚刚的转述动作", "群聊上下文"],
-            [item.attrib["title"] for item in payload.findall("./section/section")],
+            [item.attrib["title"] for item in payload.findall("./section")],
         )
+        self.assertEqual([], payload.findall("./section/section"))
         self.assertIn("真实最近群聊", request.extra_user_content_parts[0].text)
         plan = get_conversation_injection_plan(request, create=False)
         self.assertIsNotNone(plan)
         group_context = next(
-            item for item in plan.manifest() if item["key"] == "group.context.batch"
+            item for item in plan.manifest() if item["key"] == "group.context"
         )
         self.assertEqual(10_000, group_context["priority"])
+        self.assertNotIn("group.context.batch", {item["key"] for item in plan.manifest()})
         plugin._record_request_prompt_fragment.assert_awaited_once()
         plugin._append_group_active_period_boundary_to_request.assert_not_awaited()
 

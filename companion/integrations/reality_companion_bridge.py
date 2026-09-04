@@ -101,12 +101,12 @@ class RealityCompanionBridgeMixin:
         self,
         user: dict[str, Any],
     ) -> PromptSection:
-        def empty_section() -> PromptSection:
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="reality_touch.continuity",
                 title="刚刚发生的跨设备对话",
                 source="reality_touch",
-                content="",
+                content=content,
             )
 
         user_id = self._reality_bridge_user_id(user)
@@ -125,7 +125,7 @@ class RealityCompanionBridgeMixin:
         binder = getattr(self, "_req041_reality_private_binding", None)
         binding = binder(user_id, purpose="memory_read") if callable(binder) else None
         if callable(binder) and (not isinstance(binding, dict) or binding.get("ok") is not True):
-            return empty_section()
+            return build_section()
         continuity_user = binding.get("user") if isinstance(binding, dict) else user
         if not isinstance(continuity_user, dict):
             continuity_user = user
@@ -136,12 +136,12 @@ class RealityCompanionBridgeMixin:
             else:
                 output = user.get("last_reality_touch_output") if isinstance(user, dict) else None
         if not isinstance(output, dict):
-            return empty_section()
+            return build_section()
         text = _single_line(output.get("text"), 300)
         delivered_at = _safe_float(output.get("delivered_at"), 0.0, 0.0)
         age = time.time() - delivered_at
         if not text or delivered_at <= 0 or age < -60 or age > 2 * 3600:
-            return empty_section()
+            return build_section()
         lines = [
             f"Bot 已通过现实音频设备对用户说：{text}",
         ]
@@ -153,13 +153,7 @@ class RealityCompanionBridgeMixin:
             "这是真实发生且与当前私聊连续的对话。自然承接用户此刻的回应；不要把它当作首次问候，也不要重复刚才已经说过的话。"
         )
         body = "\n".join(lines)
-        section = prompt_section(
-            key="reality_touch.continuity",
-            title="刚刚发生的跨设备对话",
-            source="reality_touch",
-            content=body,
-        )
-        return section
+        return build_section(body)
 
     def _reality_companion_enabled(self) -> bool:
         api = self._reality_companion_api()

@@ -6,6 +6,10 @@ import asyncio
 from types import SimpleNamespace
 
 from astrbot.api.message_components import Plain
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    prompt_cdata,
+    prompt_section,
+)
 from astrbot_plugin_private_companion.event_dispatch import EventDispatchMixin
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
@@ -269,13 +273,21 @@ class LlmControlledSegmentingTests(unittest.TestCase):
         harness._llm_controlled_segmenting_prompt = lambda: (
             PrivateCompanionPlugin._llm_controlled_segmenting_prompt(harness)
         )
+        harness._llm_controlled_segmenting_prompt_section = lambda: (
+            PrivateCompanionPlugin._llm_controlled_segmenting_prompt_section(harness)
+        )
         hint = harness._proactive_llm_segmenting_instruction(
             umo="default:FriendMessage:1",
         )
         self.assertIn(LLM_SEGMENT_MARKER, hint)
         self.assertIn("<![CDATA[", hint)
 
-        harness._llm_controlled_segmenting_prompt = lambda: "前半]]>后半"
+        harness._llm_controlled_segmenting_prompt_section = lambda: prompt_section(
+            key="reply.segmentation",
+            title="回复分段控制",
+            source="segmented_reply",
+            content=prompt_cdata("前半]]>后半"),
+        )
         escaped_hint = harness._proactive_llm_segmenting_instruction(
             umo="default:FriendMessage:1",
         )

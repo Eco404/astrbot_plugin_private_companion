@@ -244,8 +244,8 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         )
         plan = ConversationInjectionPlan()
         parent = prompt_section(
-            key="reply.style.batch",
-            title="回复风格",
+            key="reply.guidance",
+            title="回复指导",
             source="main",
             content="",
             children=(
@@ -276,12 +276,87 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         self.assertEqual(len(item["content"]), item["chars"])
         self.assertEqual("reply.style", item["children"][0]["key"])
 
+    def test_main_multi_section_placement_keeps_authored_sections_as_siblings(self) -> None:
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        plugin.passive_injection_position = "prompt"
+        request = SimpleNamespace(
+            system_prompt="persona",
+            prompt="hello",
+            extra_user_content_parts=[],
+        )
+        sections = (
+            _section("reply.style", "保持自然。", title="回复风格约束"),
+            _section("reply.accuracy", "准确解释。", title="技术解释准确性"),
+        )
+
+        placement, visible, authored = plugin._place_conversation_prompt_sections(
+            request,
+            "<!-- reply-style -->",
+            sections,
+            priority=12,
+        )
+
+        self.assertEqual("extra_user_content_parts", placement)
+        self.assertEqual(sections, authored)
+        self.assertEqual(render_prompt_sections(sections), visible)
+        payload = ET.fromstring(request.extra_user_content_parts[0].text)
+        self.assertEqual(
+            ["回复风格约束", "技术解释准确性"],
+            [item.attrib["title"] for item in payload.findall("./section")],
+        )
+        self.assertEqual([], payload.findall("./section/section"))
+        plan = get_conversation_injection_plan(request, create=False)
+        self.assertIsNotNone(plan)
+        self.assertEqual(
+            ["reply.style", "reply.accuracy"],
+            [item["key"] for item in plan.manifest()],
+        )
+        self.assertEqual(
+            ["<!-- reply-style -->", "<!-- reply-style -->"],
+            [
+                item["metadata"]["delivery_group_marker"]
+                for item in plan.manifest()
+            ],
+        )
+        self.assertEqual(2, plan.remove_markers(["<!-- reply-style -->"]))
+        plan.render_into(request, prefer_extra_user_content=True)
+        self.assertEqual([], request.extra_user_content_parts)
+
+    def test_main_multi_section_placement_keeps_system_sections_as_siblings(self) -> None:
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        plugin.passive_injection_position = "system_prompt"
+        request = SimpleNamespace(
+            system_prompt="persona",
+            prompt="hello",
+            extra_user_content_parts=[],
+        )
+        sections = (
+            _section("guard.general", "通用边界。", title="能力边界"),
+            _section("guard.platform", "平台边界。", title="平台能力边界"),
+        )
+
+        placement, _, _ = plugin._place_conversation_prompt_sections(
+            request,
+            "<!-- capability -->",
+            sections,
+            priority=30,
+        )
+
+        self.assertEqual("system_prompt", placement)
+        self.assertEqual([], request.extra_user_content_parts)
+        payload = ET.fromstring(request.system_prompt.split("\n\n", 1)[1])
+        self.assertEqual(
+            ["能力边界", "平台能力边界"],
+            [item.attrib["title"] for item in payload.findall("./section")],
+        )
+        self.assertEqual([], payload.findall("./section/section"))
+
     def test_append_merge_preserves_authored_child_sections(self) -> None:
         plan = ConversationInjectionPlan()
         plan.add(
             section=prompt_section(
-                key="reply.batch",
-                title="回复约束",
+                key="reply.guidance",
+                title="回复指导",
                 source="test",
                 content="",
                 children=(
@@ -297,8 +372,8 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         )
         plan.add(
             section=prompt_section(
-                key="reply.batch",
-                title="回复约束",
+                key="reply.guidance",
+                title="回复指导",
                 source="test",
                 content="",
                 children=(
@@ -671,8 +746,8 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         plan = ConversationInjectionPlan()
         plan.add(
             section=prompt_section(
-                key="passive.batch",
-                title="本轮回复上下文",
+                key="context.passive_state",
+                title="被动状态上下文",
                 source="test",
                 content="",
                 children=dynamic_sections,

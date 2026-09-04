@@ -110,32 +110,27 @@ class SelfTimelineMixin:
         query = _single_line(text, 300)
         if not self._user_asks_self_timeline(query):
             body = ""
-            return prompt_section(
-                key="self.timeline",
-                title="自我时间线检索",
-                source="self_timeline",
-                content=body,
-            )
-        entries = self._collect_self_timeline_entries(query, user=user)
-        if not entries:
-            body = (
-                "用户在问 Bot 自己某个时间做过什么，但当前没有检索到可靠记录。"
-                "回复时可以说记不准或没有留下记录，不要编造具体事件。"
-            )
         else:
-            lines = [
-                "用户在问 Bot 自己某个时间做过什么。下面是从日程、细化、日记、主动行为、创作、资料归档、生图和 QQ 空间发布记录里检索到的线索；只根据这些线索回答，不确定就说记不准。",
-            ]
-            for entry in entries[: max(1, limit)]:
-                when = _single_line(entry.get("when"), 40) or "时间不详"
-                entry_source = _single_line(entry.get("source"), 24) or "记录"
-                summary = _single_line(entry.get("summary"), 180)
-                detail = _single_line(entry.get("detail"), 220)
-                if detail:
-                    lines.append(f"- {when}｜{entry_source}｜{summary}；{detail}")
-                else:
-                    lines.append(f"- {when}｜{entry_source}｜{summary}")
-            body = "\n".join(line for line in lines if line).strip()
+            entries = self._collect_self_timeline_entries(query, user=user)
+            if not entries:
+                body = (
+                    "用户在问 Bot 自己某个时间做过什么，但当前没有检索到可靠记录。"
+                    "回复时可以说记不准或没有留下记录，不要编造具体事件。"
+                )
+            else:
+                lines = [
+                    "用户在问 Bot 自己某个时间做过什么。下面是从日程、细化、日记、主动行为、创作、资料归档、生图和 QQ 空间发布记录里检索到的线索；只根据这些线索回答，不确定就说记不准。",
+                ]
+                for entry in entries[: max(1, limit)]:
+                    when = _single_line(entry.get("when"), 40) or "时间不详"
+                    entry_source = _single_line(entry.get("source"), 24) or "记录"
+                    summary = _single_line(entry.get("summary"), 180)
+                    detail = _single_line(entry.get("detail"), 220)
+                    if detail:
+                        lines.append(f"- {when}｜{entry_source}｜{summary}；{detail}")
+                    else:
+                        lines.append(f"- {when}｜{entry_source}｜{summary}")
+                body = "\n".join(line for line in lines if line).strip()
         return prompt_section(
             key="self.timeline",
             title="自我时间线检索",

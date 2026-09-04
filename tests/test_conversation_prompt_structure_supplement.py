@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+from xml.etree import ElementTree as ET
 
 from astrbot_plugin_private_companion.astrbot_knowledge import AstrBotKnowledgeMixin
 from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PromptRenderMode,
     prompt_section,
     render_prompt_sections,
 )
@@ -14,6 +16,7 @@ from astrbot_plugin_private_companion.llm_tool_actions import LlmToolActionsMixi
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 from astrbot_plugin_private_companion.passive_state_pipeline import (
     _persona_core_emphasis_prompt_section,
+    _turn_continuation_prompt_section,
 )
 from astrbot_plugin_private_companion.platform_compat import PlatformCompatibilityMixin
 from astrbot_plugin_private_companion.private_image import PrivateImageMixin
@@ -146,6 +149,30 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
         self.assertNotIn('<section title="提示词片段">', rendered)
         self.assert_no_legacy_headings(rendered)
 
+    def test_turn_continuation_uses_one_section_for_private_and_group_variants(self) -> None:
+        private_section = _turn_continuation_prompt_section(
+            "第一句\n第二句",
+            private_chat=True,
+        )
+        group_section = _turn_continuation_prompt_section(
+            "第一句\n第二句",
+            private_chat=False,
+        )
+
+        self.assertEqual("turn.continuation", private_section.key)
+        self.assertEqual("本轮用户连续补充", private_section.title)
+        private_body = render_prompt_sections(
+            [private_section],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
+        group_body = render_prompt_sections(
+            [group_section],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
+        self.assertIn("也不要表现得像用户重复催促", private_body)
+        self.assertNotIn("也不要表现得像用户重复催促", group_body)
+        self.assertIn("第一句\n第二句", private_body)
+
     def test_platform_boundary_keeps_legacy_text_and_structures_main_chain(self) -> None:
         harness = _PlatformHarness()
         section = harness._platform_capability_prompt_section(None)
@@ -168,6 +195,54 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
         self.assertIn('<section title="QQ 官方机器人平台边界">', rendered)
         self.assert_no_legacy_headings(rendered)
 
+    async def test_capability_boundary_injection_keeps_platform_rule_as_a_sibling(self) -> None:
+        plugin = object.__new__(PrivateCompanionPlugin)
+        platform = _PlatformHarness()
+        plugin._platform_capability_prompt_section = platform._platform_capability_prompt_section
+        plugin._record_request_prompt_fragment = AsyncMock()
+        request = SimpleNamespace(
+            system_prompt="persona",
+            prompt="hello",
+            extra_user_content_parts=[],
+        )
+
+        await plugin._append_capability_boundary_to_request(SimpleNamespace(), request)
+
+        payload = ET.fromstring(request.system_prompt.split("\n\n", 1)[1])
+        self.assertEqual(
+            ["能力边界", "QQ 官方机器人平台边界"],
+            [item.attrib["title"] for item in payload.findall("./section")],
+        )
+        self.assertEqual([], payload.findall("./section/section"))
+        plugin._record_request_prompt_fragment.assert_awaited_once()
+
+    async def test_reply_style_and_technical_accuracy_are_sibling_sections(self) -> None:
+        plugin = object.__new__(PrivateCompanionPlugin)
+        plugin.passive_injection_position = "prompt"
+        plugin._format_reply_style_prompt_section = lambda: prompt_section(
+            key="reply.style",
+            title="回复风格约束",
+            source="reply_style",
+            content="保持自然简洁。",
+        )
+        plugin._record_request_prompt_fragment = AsyncMock()
+        event = SimpleNamespace(message_str="请解释这段代码")
+        request = SimpleNamespace(
+            system_prompt="persona",
+            prompt="请解释这段代码",
+            extra_user_content_parts=[],
+        )
+
+        await plugin._append_reply_style_to_request(event, request)
+
+        payload = ET.fromstring(request.extra_user_content_parts[0].text)
+        self.assertEqual(
+            ["回复风格约束", "技术解释准确性"],
+            [item.attrib["title"] for item in payload.findall("./section")],
+        )
+        self.assertEqual([], payload.findall("./section/section"))
+        plugin._record_request_prompt_fragment.assert_awaited_once()
+
     def test_group_denoise_splits_joke_boundary_and_preserves_legacy_output(self) -> None:
         plugin = object.__new__(PrivateCompanionPlugin)
         plugin.enable_group_persona_denoise = True
@@ -185,9 +260,17 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
         rendered = render_prompt_sections(
             plugin._format_group_persona_denoise_prompt_sections(event)
         )
+        keys = [
+            section.key
+            for section in plugin._format_group_persona_denoise_prompt_sections(event)
+        ]
 
         self.assertTrue(legacy.startswith("【群聊人格降噪】\n"))
         self.assertIn("【群聊玩笑边界】", legacy)
+        self.assertEqual(
+            ["group.persona_denoise", "group.persona_denoise.joke_boundary"],
+            keys,
+        )
         self.assertIn('<section title="群聊人格降噪">', rendered)
         self.assertIn('<section title="群聊玩笑边界">', rendered)
         self.assert_no_legacy_headings(rendered)

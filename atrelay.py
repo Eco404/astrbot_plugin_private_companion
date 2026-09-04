@@ -1147,52 +1147,41 @@ class AtRelayMixin:
         target_id = _single_line(target, 40)
         sender = _single_line(sender_id, 40)
         kind = _single_line(kind, 20)
-        if not target_id:
-            return prompt_section(
-                key="atrelay.recent",
-                title="刚刚的转述动作",
-                source="atrelay",
-                content="",
-            )
         asks_source = bool(re.search(r"(谁|哪位|哪个|谁让|谁叫|谁说|谁托|来源|发起人)", _single_line(current_text, 160)))
         lines: list[str] = []
-        now = _now_ts()
-        for item in reversed(self._recent_atrelay_contexts()):
-            if _single_line(item.get("kind"), 20) != kind:
-                continue
-            if _single_line(item.get("target"), 40) != target_id:
-                continue
-            at_user = _single_line(item.get("at_user"), 40)
-            if sender and at_user and at_user != sender:
-                continue
-            sent_text = _single_line(item.get("text"), 160)
-            if not sent_text:
-                continue
-            elapsed = self._format_timestamp_elapsed(_safe_float(item.get("ts"), 0))
-            parts = [f"{elapsed}，你通过转述工具发出：{sent_text}"]
-            if at_user:
-                parts.append(f"收话人 QQ:{at_user}")
-            source_name = _single_line(item.get("source_name"), 60) if asks_source else ""
-            if source_name:
-                parts.append(f"发起人:{source_name}")
-            lines.append("｜".join(parts))
-            if len(lines) >= max(1, limit):
-                break
-        if not lines:
-            return prompt_section(
-                key="atrelay.recent",
-                title="刚刚的转述动作",
-                source="atrelay",
-                content="",
-            )
+        if target_id:
+            for item in reversed(self._recent_atrelay_contexts()):
+                if _single_line(item.get("kind"), 20) != kind:
+                    continue
+                if _single_line(item.get("target"), 40) != target_id:
+                    continue
+                at_user = _single_line(item.get("at_user"), 40)
+                if sender and at_user and at_user != sender:
+                    continue
+                sent_text = _single_line(item.get("text"), 160)
+                if not sent_text:
+                    continue
+                elapsed = self._format_timestamp_elapsed(_safe_float(item.get("ts"), 0))
+                parts = [f"{elapsed}，你通过转述工具发出：{sent_text}"]
+                if at_user:
+                    parts.append(f"收话人 QQ:{at_user}")
+                source_name = _single_line(item.get("source_name"), 60) if asks_source else ""
+                if source_name:
+                    parts.append(f"发起人:{source_name}")
+                lines.append("｜".join(parts))
+                if len(lines) >= max(1, limit):
+                    break
+        content = (
+            "\n".join(f"- {line}" for line in lines)
+            + "\n这些只用于理解对方为什么接话或道谢；不要主动复述工具名、内部记录或没必要说明来源。"
+            if lines
+            else ""
+        )
         return prompt_section(
             key="atrelay.recent",
             title="刚刚的转述动作",
             source="atrelay",
-            content=(
-                "\n".join(f"- {line}" for line in lines)
-                + "\n这些只用于理解对方为什么接话或道谢；不要主动复述工具名、内部记录或没必要说明来源。"
-            ),
+            content=content,
         )
 
     def _atrelay_tool_authorization(self, event: AstrMessageEvent | None) -> tuple[bool, str]:

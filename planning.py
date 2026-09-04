@@ -35,6 +35,30 @@ def _render_planning_document(document: PromptDocument) -> dict[str, str]:
     return render_prompt_document(document, mode=PromptRenderMode.BODY_ONLY)
 
 
+def _planning_retry_prompt_section(
+    *,
+    key: str,
+    title: str,
+    original_prompt: str,
+    correction: str,
+    correction_title: str = "额外纠偏",
+) -> PromptSection:
+    return prompt_section(
+        key=key,
+        title=title,
+        source="planning",
+        content=original_prompt,
+        children=(
+            prompt_section(
+                key=f"{key}.correction",
+                title=correction_title,
+                source="planning",
+                content=correction,
+            ),
+        ),
+    )
+
+
 def split_detail_prompt_cache_sections(prompt: str) -> tuple[str, str]:
     """Separate stable detail instructions from per-segment context."""
     marker = "【A｜当前段硬框架】"
@@ -98,16 +122,11 @@ async def generate_detail_enhancement(
                 mode=PromptRenderMode.LABELED_BLOCK,
             )
         )
-    full_prompt_section = prompt_section(
-        key="background.schedule.detail.full",
-        title="日程细化完整提示",
-        source="planning",
-        content=plugin._build_detail_enhancement_prompt(
-            segment,
-            plan,
-            state,
-            memory_companion_context=memory_companion_context,
-        ),
+    full_prompt_section = plugin._build_detail_enhancement_prompt_section(
+        segment,
+        plan,
+        state,
+        memory_companion_context=memory_companion_context,
     )
     full_prompt = _render_planning_prompt(full_prompt_section)
     system_prompt, prompt = split_detail_prompt_cache_sections(full_prompt)
@@ -146,23 +165,15 @@ async def generate_detail_enhancement(
     payload = plugin._extract_json_payload(raw_text or "")
     quality_issues = detail_payload_quality_issues(plugin, payload, segment)
     if quality_issues:
-        retry_section = prompt_section(
+        retry_section = _planning_retry_prompt_section(
             key="background.schedule.detail.retry",
             title="日程细化纠偏",
-            source="planning",
-            content=rendered_detail["user"],
-            children=(
-                prompt_section(
-                    key="background.schedule.detail.retry.correction",
-                    title="额外纠偏",
-                    source="planning",
-                    content=(
-                        f"上一版存在这些问题：{'；'.join(quality_issues)}。"
-                        f"请重新输出 JSON。today_events 必须至少包含 {target_event_count} 条落在当前时间段内的小事件，分布在开头、中段和后段，最后一条要自然接近本段收尾。"
-                        "summary 必须概括完整区间；短时吃饭、洗澡、取物不能代表数小时。不要复述宏观日程原句，要拆成这一段内部自然发生的连续推进。"
-                        "如果这一段很平淡，也要写平淡中的具体变化，例如停顿、换事、身体感受、环境变化和收尾；不要输出草稿字段、Markdown 或角色台词前缀。"
-                    ),
-                ),
+            original_prompt=rendered_detail["user"],
+            correction=(
+                f"上一版存在这些问题：{'；'.join(quality_issues)}。"
+                f"请重新输出 JSON。today_events 必须至少包含 {target_event_count} 条落在当前时间段内的小事件，分布在开头、中段和后段，最后一条要自然接近本段收尾。"
+                "summary 必须概括完整区间；短时吃饭、洗澡、取物不能代表数小时。不要复述宏观日程原句，要拆成这一段内部自然发生的连续推进。"
+                "如果这一段很平淡，也要写平淡中的具体变化，例如停顿、换事、身体感受、环境变化和收尾；不要输出草稿字段、Markdown 或角色台词前缀。"
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -768,14 +779,9 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
                 mode=PromptRenderMode.LABELED_BLOCK,
             )
         )
-    prompt_section_value = prompt_section(
-        key="background.schedule.daily_plan",
-        title="每日生活日程生成",
-        source="planning",
-        content=plugin._build_daily_plan_prompt(
-            now,
-            memory_companion_context=memory_companion_context,
-        ),
+    prompt_section_value = plugin._build_daily_plan_prompt_section(
+        now,
+        memory_companion_context=memory_companion_context,
     )
     prompt = _render_planning_prompt(prompt_section_value)
     plan_provider = plugin._task_provider(
@@ -792,21 +798,14 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
     retry_max_tokens = max(plan_max_tokens, 1600)
     items = plugin._parse_plan_items(raw_text or "")
     if not items:
-        retry_section = prompt_section(
+        retry_section = _planning_retry_prompt_section(
             key="background.schedule.daily_plan.retry_format",
-            title="日程输出格式纠偏",
-            source="planning",
-            content=prompt,
-            children=(
-                prompt_section(
-                    key="background.schedule.daily_plan.retry_format.correction",
-                    title="输出格式纠偏",
-                    source="planning",
-                    content=(
-                        "上一版没有得到可解析的完整日程。请重新输出一个完整 JSON 对象，只保留 schedule 数组，"
-                        "不得使用 Markdown 代码块、解释、前后缀或截断的字段；每一项必须包含 time、end、activity、mood、message_seed、basis、confidence。"
-                    ),
-                ),
+            title="每日生活日程生成重试",
+            original_prompt=prompt,
+            correction_title="输出格式纠偏",
+            correction=(
+                "上一版没有得到可解析的完整日程。请重新输出一个完整 JSON 对象，只保留 schedule 数组，"
+                "不得使用 Markdown 代码块、解释、前后缀或截断的字段；每一项必须包含 time、end、activity、mood、message_seed、basis、confidence。"
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -820,22 +819,14 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             raw_text = retry_raw_text
             items = retry_items
     if items and plugin._plan_has_excess_micro_segments(items):
-        retry_section = prompt_section(
+        retry_section = _planning_retry_prompt_section(
             key="background.schedule.daily_plan.retry_micro_segments",
             title="日程瞬时动作纠偏",
-            source="planning",
-            content=prompt,
-            children=(
-                prompt_section(
-                    key="background.schedule.daily_plan.retry_micro_segments.correction",
-                    title="额外纠偏",
-                    source="planning",
-                    content=(
-                        "每个日程段都应该代表一小段连续生活,而不是一个几秒钟就结束的动作。"
-                        "不要把“看一眼、拍一下、翻个身、关掉闹钟”这种瞬时动作单独立成一项；"
-                        "如果要写到这些动作,要把它们嵌进更完整的时段里,比如“起床后赖床一会儿,顺手看了一眼窗外”。"
-                    ),
-                ),
+            original_prompt=prompt,
+            correction=(
+                "每个日程段都应该代表一小段连续生活,而不是一个几秒钟就结束的动作。"
+                "不要把“看一眼、拍一下、翻个身、关掉闹钟”这种瞬时动作单独立成一项；"
+                "如果要写到这些动作,要把它们嵌进更完整的时段里,比如“起床后赖床一会儿,顺手看了一眼窗外”。"
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -849,21 +840,13 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             raw_text = retry_raw_text
             items = retry_items
     if items and plugin._plan_has_excess_abstract_segments(items):
-        retry_section = prompt_section(
+        retry_section = _planning_retry_prompt_section(
             key="background.schedule.daily_plan.retry_abstract_segments",
             title="日程抽象描述纠偏",
-            source="planning",
-            content=prompt,
-            children=(
-                prompt_section(
-                    key="background.schedule.daily_plan.retry_abstract_segments.correction",
-                    title="额外纠偏",
-                    source="planning",
-                    content=(
-                        "减少“漂亮但空”的句子。不要只写“思绪飘忽、梦里全是模糊碎片、心情随着光线变软、脑海里闪过今天的画面”这类抽象描述；"
-                        "每个日程段都先给出一个能看见的动作、位置或手边的小东西，再让情绪贴在上面。"
-                    ),
-                ),
+            original_prompt=prompt,
+            correction=(
+                "减少“漂亮但空”的句子。不要只写“思绪飘忽、梦里全是模糊碎片、心情随着光线变软、脑海里闪过今天的画面”这类抽象描述；"
+                "每个日程段都先给出一个能看见的动作、位置或手边的小东西，再让情绪贴在上面。"
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -877,21 +860,13 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             raw_text = retry_raw_text
             items = retry_items
     if items and plugin._plan_conflicts_with_calendar(items):
-        retry_section = prompt_section(
+        retry_section = _planning_retry_prompt_section(
             key="background.schedule.daily_plan.retry_calendar",
             title="日程日期性质纠偏",
-            source="planning",
-            content=prompt,
-            children=(
-                prompt_section(
-                    key="background.schedule.daily_plan.retry_calendar.correction",
-                    title="额外纠偏",
-                    source="planning",
-                    content=(
-                        "今天属于周末或节假日语境。除非上面的设定、重要日期或备注明确写了调休、补课、补班、考试、值班等例外，"
-                        "否则不要安排上课、放学、作业、教室、食堂、上班、下班、会议这类普通工作日主线。"
-                    ),
-                ),
+            original_prompt=prompt,
+            correction=(
+                "今天属于周末或节假日语境。除非上面的设定、重要日期或备注明确写了调休、补课、补班、考试、值班等例外，"
+                "否则不要安排上课、放学、作业、教室、食堂、上班、下班、会议这类普通工作日主线。"
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -905,22 +880,14 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             raw_text = retry_raw_text
             items = retry_items
     if items and plugin._plan_is_too_repetitive(items):
-        retry_section = prompt_section(
+        retry_section = _planning_retry_prompt_section(
             key="background.schedule.daily_plan.retry_repetition",
             title="日程重复纠偏",
-            source="planning",
-            content=prompt,
-            children=(
-                prompt_section(
-                    key="background.schedule.daily_plan.retry_repetition.correction",
-                    title="额外纠偏",
-                    source="planning",
-                    content=(
-                        "你刚才生成的全天日程和最近几天的日程骨架过于相似。请保留今天的日期语境、人格设定、天气和状态,但换一条新的日内主线。"
-                        "不要再写同一套“起床洗漱-整理小事-专注做事-休息-收尾睡觉”；至少一半时间点的场景、对象、占用事项或小意外要和最近日程不同。"
-                        "如果今天确实有固定事项,也要改变切入角度、地点、阻碍、同行/独处状态或情绪走向。"
-                    ),
-                ),
+            original_prompt=prompt,
+            correction=(
+                "你刚才生成的全天日程和最近几天的日程骨架过于相似。请保留今天的日期语境、人格设定、天气和状态,但换一条新的日内主线。"
+                "不要再写同一套“起床洗漱-整理小事-专注做事-休息-收尾睡觉”；至少一半时间点的场景、对象、占用事项或小意外要和最近日程不同。"
+                "如果今天确实有固定事项,也要改变切入角度、地点、阻碍、同行/独处状态或情绪走向。"
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -941,22 +908,15 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
             items = retry_items
     quality = evaluate_daily_plan_quality(plugin, items)
     if items and quality.get("score", 0) < 70:
-        retry_section = prompt_section(
+        retry_section = _planning_retry_prompt_section(
             key="background.schedule.daily_plan.retry_quality",
-            title="日程质量复核",
-            source="planning",
-            content=prompt,
-            children=(
-                prompt_section(
-                    key="background.schedule.daily_plan.retry_quality.correction",
-                    title="日程质量复核",
-                    source="planning",
-                    content=(
-                        "上一版仍存在这些问题："
-                        + "；".join(str(issue) for issue in quality.get("issues", [])[:6])
-                        + "。请保留可靠事实，重新输出完整 JSON；修正起止时间、覆盖空档、活动时长和日期冲突，不要只改措辞。"
-                    ),
-                ),
+            title="每日生活日程生成重试",
+            original_prompt=prompt,
+            correction_title="日程质量复核",
+            correction=(
+                "上一版仍存在这些问题："
+                + "；".join(str(issue) for issue in quality.get("issues", [])[:6])
+                + "。请保留可靠事实，重新输出完整 JSON；修正起止时间、覆盖空档、活动时长和日期冲突，不要只改措辞。"
             ),
         )
         retry_raw_text = await plugin._llm_call(
@@ -1277,6 +1237,14 @@ def build_daily_plan_prompt_section(
     now: str,
     memory_companion_context: str = "",
 ) -> PromptSection:
+    def build_section(content: str) -> PromptSection:
+        return prompt_section(
+            key="background.schedule.daily_plan",
+            title="每日生活日程生成",
+            source="planning",
+            content=content,
+        )
+
     custom = runtime_persona_setting(plugin, "daily_plan_prompt", "")
     identity_context, planning_style_context = _build_schedule_reference_sections(plugin)
     schedule_prompt = "\n\n".join(part for part in (identity_context, planning_style_context) if part)
@@ -1391,11 +1359,8 @@ def build_daily_plan_prompt_section(
             weather_info=weather_info,
             daily_plan_item_count=_safe_int(runtime_persona_setting(plugin, "daily_plan_item_count", 10), 10, 1),
         )
-        return prompt_section(
-            key="background.schedule.daily_plan",
-            title="每日生活日程生成",
-            source="planning",
-            content=f"{rendered.rstrip()}\n\n{completion_budget_guidance}\n\n{relationship_authority_guard}".strip(),
+        return build_section(
+            f"{rendered.rstrip()}\n\n{completion_budget_guidance}\n\n{relationship_authority_guard}".strip()
         )
     source_protocol_block = render_prompt_sections(
         [
@@ -1508,11 +1473,8 @@ Bot 自身连续记忆：
     generation_requirements_heading = render_prompt_content(
         prompt_heading_ref("生成要求")
     )
-    return prompt_section(
-        key="background.schedule.daily_plan",
-        title="每日生活日程生成",
-        source="planning",
-        content=f"""
+    return build_section(
+        f"""
 你现在是 Private Companion 的日程生成器。请为拟人化 Bot 生成今天的一日生活日程,让它像真实存在的人在过这一天,而不是在执行模板。日程要先像“这个人”的生活,再像“某个身份”的生活；身份只是底色,不要把它写成校园/职场通用作文。
 
 {source_protocol_block}
@@ -1578,7 +1540,7 @@ Bot 自身连续记忆：
 {continuity_block}
 
 {inspiration_block}
-""".strip(),
+""".strip()
     )
 
 

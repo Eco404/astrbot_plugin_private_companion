@@ -217,6 +217,14 @@ class QzoneCommentMixin:
         )
 
     def _qzone_comment_author_prompt_section(self, comment: Any):
+        def build_section(content: str):
+            return prompt_section(
+                key="qzone.comment.author_identity",
+                title="评论者身份",
+                source="qzone_comments",
+                content=content,
+            )
+
         uin = _single_line(getattr(comment, "uin", ""), 40)
         name = _single_line(getattr(comment, "name", ""), 40)
         profile: dict[str, Any] | None = None
@@ -236,13 +244,13 @@ class QzoneCommentMixin:
                     f"评论显示名：{name}；QQ：{uin or '未知'}。\n"
                     f"关系网里有多个同名/近似对象：{names or '多个候选'}；本轮不要擅自认定身份，也不要当成主要用户。"
                 )
-                return prompt_section(key="qzone.comment.author_identity", title="评论者身份", source="qzone_comments", content=body)
+                return build_section(body)
         if not profile:
             body = (
                 f"评论显示名：{name or '未知'}；QQ：{uin or '未知'}。\n"
                 "关系网未确认此人；按普通空间评论者处理，不要把对方当成主要用户、私聊对象或熟人。"
             )
-            return prompt_section(key="qzone.comment.author_identity", title="评论者身份", source="qzone_comments", content=body)
+            return build_section(body)
 
         profile_uid = _single_line(profile.get("linked_qq_user_id") or profile.get("user_id") or uin, 40)
         stable_name = _single_line(profile.get("name"), 40) or name or profile_uid
@@ -262,12 +270,7 @@ class QzoneCommentMixin:
         if identity_note:
             lines.append(f"关系备注：{identity_note}")
         lines.append("这些资料只用于判断称呼和边界，公开回复里不要复述关系网资料。")
-        return prompt_section(
-            key="qzone.comment.author_identity",
-            title="评论者身份",
-            source="qzone_comments",
-            content="\n".join(lines),
-        )
+        return build_section("\n".join(lines))
 
     def _qzone_post_time_text(self, value: Any) -> str:
         ts = _safe_float(value, 0)

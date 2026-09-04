@@ -39,6 +39,7 @@ TURN_FRAGMENTS_ATTR = "_private_companion_turn_prompt_fragments"
 TURN_PLACEMENT_ATTR = "_private_companion_turn_prompt_placement"
 TURN_PART_ATTR = "_private_companion_turn_fragments"
 TURN_TEXT_ATTR = "_private_companion_conversation_plan_turn_text"
+DELIVERY_GROUP_MARKER_METADATA_KEY = "delivery_group_marker"
 
 PLACEMENT_STABLE_SYSTEM = "stable_system"
 PLACEMENT_DYNAMIC_SYSTEM = "dynamic_system"
@@ -413,7 +414,16 @@ class ConversationInjectionPlan:
             raise RuntimeError("conversation injection plan is frozen")
         wanted = {_clean_key(marker, "") for marker in markers}
         wanted.discard("")
-        removed_ids = {id(block) for block in self._blocks if block.marker in wanted}
+        removed_ids = {
+            id(block)
+            for block in self._blocks
+            if block.marker in wanted
+            or _clean_key(
+                block.metadata.get(DELIVERY_GROUP_MARKER_METADATA_KEY),
+                "",
+            )
+            in wanted
+        }
         if not removed_ids:
             return 0
         self._blocks = [block for block in self._blocks if id(block) not in removed_ids]
@@ -624,6 +634,7 @@ def get_conversation_injection_plan(req: Any, *, create: bool = True) -> Convers
 __all__ = [
     "ConversationInjectionBlock",
     "ConversationInjectionPlan",
+    "DELIVERY_GROUP_MARKER_METADATA_KEY",
     "PLACEMENT_DYNAMIC_SYSTEM",
     "PLACEMENT_STABLE_SYSTEM",
     "PLACEMENT_TOOL_CONTRACT",

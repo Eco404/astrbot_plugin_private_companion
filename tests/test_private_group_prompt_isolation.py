@@ -154,6 +154,22 @@ class PrivateGroupPromptIsolationTests(unittest.TestCase):
             ),
             marker="<!-- private_companion_group_context_v1 -->",
             placement=PLACEMENT_DYNAMIC_SYSTEM,
+            metadata={
+                "delivery_group_marker": "<!-- private_companion_group_context_v1 -->"
+            },
+        )
+        plan.add(
+            section=prompt_section(
+                key="group.recent_atrelay",
+                title="群聊转述上下文",
+                source="group",
+                content="same-group-secondary",
+            ),
+            marker="",
+            placement=PLACEMENT_DYNAMIC_SYSTEM,
+            metadata={
+                "delivery_group_marker": "<!-- private_companion_group_context_v1 -->"
+            },
         )
         plan.add(
             section=prompt_section(
@@ -172,8 +188,9 @@ class PrivateGroupPromptIsolationTests(unittest.TestCase):
         )
         plan.render_into(request)
 
-        self.assertEqual(1, removed)
+        self.assertEqual(2, removed)
         self.assertNotIn("group-only", request.system_prompt)
+        self.assertNotIn("same-group-secondary", request.system_prompt)
         self.assertIn("private-style", request.system_prompt)
         plan.freeze()
         with self.assertRaisesRegex(RuntimeError, "frozen"):

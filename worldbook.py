@@ -1626,13 +1626,6 @@ class WorldbookMixin:
             key=len,
             reverse=True,
         )[:8]
-        if not profiles and not ambiguous_tokens:
-            return prompt_section(
-                key="worldbook.private_mentions",
-                title="本轮提到的关系网对象",
-                source="worldbook",
-                content="",
-            )
         lines: list[str] = []
         if ambiguous_tokens:
             lines.append(
@@ -1660,7 +1653,8 @@ class WorldbookMixin:
                 parts.append(f"边界：{boundary}")
             lines.append("- " + "｜".join(parts))
             injected.append(f"{profile_uid}:{name}")
-        logger.info("本轮提及关系网对象注入: users=%s", "；".join(injected))
+        if lines:
+            logger.info("本轮提及关系网对象注入: users=%s", "；".join(injected))
         return prompt_section(
             key="worldbook.private_mentions",
             title="本轮提到的关系网对象",
@@ -1772,13 +1766,16 @@ class WorldbookMixin:
         sender_id: str = "",
         text: str = "",
     ) -> PromptSection:
-        if not runtime_persona_setting(self, "enable_worldbook_member_recognition", True):
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="worldbook.group_members",
                 title="群聊关系网",
                 source="worldbook",
-                content="",
+                content=content,
             )
+
+        if not runtime_persona_setting(self, "enable_worldbook_member_recognition", True):
+            return build_section()
         lines: list[str] = []
         group_id = _single_line(group.get("group_id"), 40)
         group_profiles = self.data.get("worldbook_group_profiles")
@@ -1850,12 +1847,7 @@ class WorldbookMixin:
                 + "：" + "｜".join(part for part in parts if part)
             )
         if not lines:
-            return prompt_section(
-                key="worldbook.group_members",
-                title="群聊关系网",
-                source="worldbook",
-                content="",
-            )
+            return build_section()
         current_profile = next(
             (
                 item
@@ -1890,10 +1882,5 @@ class WorldbookMixin:
             + identity_priority
             + "\n".join(lines)
         )
-        return prompt_section(
-            key="worldbook.group_members",
-            title="群聊关系网",
-            source="worldbook",
-            content=body,
-        )
+        return build_section(body)
 

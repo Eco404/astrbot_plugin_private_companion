@@ -1929,18 +1929,18 @@ class MemoryCompanionAdapterMixin:
         text: str,
     ) -> PromptSection:
         """Return a small, current-session-only memory supplement for private replies."""
-        def empty_section() -> PromptSection:
+        def build_section(content: str = "") -> PromptSection:
             return prompt_section(
                 key="memory.private_recall",
                 title="当前私聊长期记忆补充",
                 source="memory_companion",
-                content="",
+                content=content,
             )
 
         if not getattr(self, "enable_memory_companion_private_recall", True):
-            return empty_section()
+            return build_section()
         if not self._memory_companion_private_recall_needed(text):
-            return empty_section()
+            return build_section()
         query = _single_line(
             "当前私聊用户正在说："
             f"{_single_line(text, 260)}。"
@@ -1963,23 +1963,17 @@ class MemoryCompanionAdapterMixin:
             )
         except Exception as exc:
             if self._memory_companion_optional_dependency_failed(exc, where="compose_private_recall"):
-                return empty_section()
+                return build_section()
             logger.debug("MemoryCompanion 私聊选择性召回失败: %s", _single_line(exc, 120))
-            return empty_section()
+            return build_section()
         recalled = _single_line(recalled, 620)
         if not recalled:
-            return empty_section()
+            return build_section()
         body = (
             f"{recalled}\n"
             "只在与本轮直接相关时自然接住；不要主动列举记忆、不要提及检索过程，也不要把它当作其他用户的信息。"
         )
-        section = prompt_section(
-            key="memory.private_recall",
-            title="当前私聊长期记忆补充",
-            source="memory_companion",
-            content=body,
-        )
-        return section
+        return build_section(body)
 
     def _memory_companion_agenda_memory_write_entries(
         self,

@@ -330,6 +330,7 @@ from .tool_history_sanitizer import sanitize_history_image_blocks, sanitize_open
 from .forward_message import ForwardMessageMixin
 from .private_image import PrivateImageMixin
 from .conversation_injection_plan import (
+    DELIVERY_GROUP_MARKER_METADATA_KEY,
     PLACEMENT_DYNAMIC_SYSTEM,
     PLACEMENT_STABLE_SYSTEM,
     PLACEMENT_TOOL_CONTRACT,
@@ -4313,17 +4314,7 @@ class PrivateCompanionPlugin(
         if integration is None:
             return None
         builder = getattr(integration, "format_health_prompt_section", None)
-        if callable(builder):
-            return builder(user, reason=reason)
-        labeled = integration.format_health_prompt(user, reason=reason)
-        if not labeled:
-            return None
-        return prompt_section(
-            key="health.care_hint",
-            title="身体状态关心线索",
-            source="body_monitor",
-            content=labeled,
-        )
+        return builder(user, reason=reason) if callable(builder) else None
 
     def plugin_identity_status(self) -> dict[str, Any]:
         return dict(self.plugin_identity)
@@ -13431,36 +13422,30 @@ class PrivateCompanionPlugin(
     def _format_reply_style_prompt_section(self) -> PromptSection:
         text = str(runtime_persona_setting(self, 'reply_style_prompt', "") or "").strip()
         persona_voice_section = self._format_persona_voice_channel_prompt_section("conversation")
-        persona_voice = (
-            render_prompt_sections(
+        persona_voice = ""
+        if persona_voice_section is not None:
+            persona_voice = render_prompt_sections(
                 [persona_voice_section],
                 mode=PromptRenderMode.BODY_ONLY,
             )
-            if persona_voice_section is not None
-            else ""
-        )
-        if not text and not persona_voice:
-            return prompt_section(
-                key="reply.style",
-                title="回复风格约束",
-                source="reply_style",
-                content="",
+        content = ""
+        if text or persona_voice:
+            text = self._normalize_persona_voice_text(text)
+            parts: list[str] = []
+            if text:
+                parts.append(text)
+            if persona_voice:
+                parts.append(persona_voice)
+            content = (
+                "\n\n".join(parts)
+                + "\n这些规则用于普通聊天的表达节奏；如果当前问题确实需要排障、教程、代码说明、复杂解释或用户明确要求详细说明，可以优先保证信息完整。"
+                + "\n无论工具或模型返回什么内容，外发正文都不要照抄英文报错、内容策略提示、政策链接或内部诊断；遇到这类结果时，用当前人格的一句简短中文说明，再自然收住或邀请用户换一种说法。"
             )
-        text = self._normalize_persona_voice_text(text)
-        parts: list[str] = []
-        if text:
-            parts.append(text)
-        if persona_voice:
-            parts.append(persona_voice)
         return prompt_section(
             key="reply.style",
             title="回复风格约束",
             source="reply_style",
-            content=(
-                "\n\n".join(parts)
-            + "\n这些规则用于普通聊天的表达节奏；如果当前问题确实需要排障、教程、代码说明、复杂解释或用户明确要求详细说明，可以优先保证信息完整。"
-            + "\n无论工具或模型返回什么内容，外发正文都不要照抄英文报错、内容策略提示、政策链接或内部诊断；遇到这类结果时，用当前人格的一句简短中文说明，再自然收住或邀请用户换一种说法。"
-            ),
+            content=content,
         )
 
     def _format_reply_style_prompt(self) -> str:
@@ -13542,17 +13527,10 @@ class PrivateCompanionPlugin(
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         if marker in current_prompt or marker in current_turn_prompt:
             return
-        batch_section = prompt_section(
-            key="reply.style.batch",
-            title="回复风格约束",
-            source="reply_style",
-            content="",
-            children=sections,
-        )
-        placement = self._place_conversation_prompt_section(
+        placement, _, _ = self._place_conversation_prompt_sections(
             req,
             marker,
-            batch_section,
+            sections,
             priority=priority,
         )
         await self._record_request_prompt_fragment(
@@ -14560,7 +14538,6 @@ class PrivateCompanionPlugin(
         spec: dict[str, Any],
     ) -> CollectedPromptContext:
         key = _single_line(spec.get("key"), 80)
-        title = _single_line(spec.get("title"), 80)
         source = _single_line(spec.get("source"), 80)
         priority = _safe_int(spec.get("priority"), 100, 0)
         timeout = max(0.05, _safe_float(spec.get("timeout"), 0.8, 0.05))
@@ -14712,7 +14689,6 @@ class PrivateCompanionPlugin(
 
         def add_spec(
             key: str,
-            title: str,
             source: str,
             priority: int,
             func: Any,
@@ -14723,7 +14699,6 @@ class PrivateCompanionPlugin(
             specs.append(
                 {
                     "key": key,
-                    "title": title,
                     "source": source,
                     "priority": priority,
                     "func": func,
@@ -14757,19 +14732,10 @@ class PrivateCompanionPlugin(
             )
         )
 
-        async def current_state_memory_context() -> PromptSection:
-            def empty_section() -> PromptSection:
-                return prompt_section(
-                    key="memory.current_state",
-                    title="我会牢牢记住你 当前状态参考",
-                    source="memory_companion",
-                    content="",
-                    metadata={"范围": "当前私聊会话", "触发": "当前状态问答"},
-                )
-
+        async def current_state_memory_context() -> PromptSection | None:
             composer = getattr(self, "_memory_companion_compose_feature_context", None)
             if not callable(composer):
-                return empty_section()
+                return None
             current_state_memory = await composer(
                 kind="current_state_reply",
                 query=(
@@ -14785,7 +14751,7 @@ class PrivateCompanionPlugin(
             )
             current_state_memory = str(current_state_memory or "").strip()
             if not current_state_memory:
-                return empty_section()
+                return None
             return prompt_section(
                 key="memory.current_state",
                 title="我会牢牢记住你 当前状态参考",
@@ -14802,7 +14768,6 @@ class PrivateCompanionPlugin(
         if is_private_chat and current_state_memory_needed:
             add_spec(
                 "memory.current_state",
-                "我会牢牢记住你 当前状态参考",
                 "memory_companion",
                 54,
                 current_state_memory_context,
@@ -14812,7 +14777,6 @@ class PrivateCompanionPlugin(
 
         add_spec(
             "creative.hidden",
-            "私下创作近况",
             "creative",
             60,
             lambda: self._format_hidden_creative_context_for_reply_prompt_section(
@@ -14822,7 +14786,6 @@ class PrivateCompanionPlugin(
         )
         add_spec(
             "photo.recent_share",
-            "最近一次真实图片分享",
             "photo",
             61,
             lambda: self._format_recent_photo_share_snapshot_for_reply_prompt_section(
@@ -14832,7 +14795,6 @@ class PrivateCompanionPlugin(
         )
         add_spec(
             "bookshelf.secret",
-            "资料柜夹层",
             "bookshelf",
             61,
             lambda: self._format_bookshelf_secret_prompt_section(inbound_text, current_user),
@@ -14840,14 +14802,12 @@ class PrivateCompanionPlugin(
         )
         add_spec(
             "news.recent",
-            "新闻阅读上下文",
             "news",
             64,
             lambda: self._format_recent_news_context_prompt_section(inbound_text),
         )
         add_spec(
             "web_exploration.recent",
-            "主动搜索上下文",
             "web_exploration",
             65,
             lambda: self._format_recent_web_exploration_context_prompt_section(inbound_text),
@@ -14855,7 +14815,6 @@ class PrivateCompanionPlugin(
         if is_private_chat:
             add_spec(
                 "reality_touch.continuity",
-                "现实触达连续性",
                 "reality_touch",
                 69,
                 lambda: self._format_reality_touch_continuity_context_prompt_section(
@@ -14864,7 +14823,6 @@ class PrivateCompanionPlugin(
             )
             add_spec(
                 "reality_touch.mobile_location",
-                "用户手机位置感知",
                 "reality_touch",
                 68,
                 lambda: self._format_mobile_user_location_context_prompt_section(
@@ -14873,11 +14831,10 @@ class PrivateCompanionPlugin(
                 metadata={"范围": "当前私聊会话", "来源": "用户主动授权的手机前台定位"},
             )
         if self._feature_enabled_or_temp_unlocked("enable_skill_growth_passive_injection"):
-            add_spec("skill.growth", "能力熟悉度", "skill", 66, self._format_skill_growth_prompt_section)
+            add_spec("skill.growth", "skill", 66, self._format_skill_growth_prompt_section)
         else:
             add_spec(
                 "skill.growth.match",
-                "本轮相关技能",
                 "skill",
                 66,
                 lambda: self._format_skill_growth_for_user_text_prompt_section(inbound_text),
@@ -14885,7 +14842,6 @@ class PrivateCompanionPlugin(
         if not self._memory_companion_should_defer_prompt_section("self_timeline", event, req):
             add_spec(
                 "self.timeline",
-                "自我时间线检索",
                 "self_timeline",
                 67,
                 lambda: self._format_self_timeline_context_for_reply_section(
@@ -14897,7 +14853,6 @@ class PrivateCompanionPlugin(
         if is_private_chat:
             add_spec(
                 "relationship.owner_exclusive",
-                "当前用户专属关系背景",
                 "relationship",
                 18,
                 lambda: self._format_owner_exclusive_relationship_prompt_section(
@@ -14911,7 +14866,6 @@ class PrivateCompanionPlugin(
         if not private_context_deferred:
             add_spec(
                 "private.context",
-                "相处线索",
                 "companion",
                 70,
                 lambda: self._format_private_chat_context_prompt_section(current_user),
@@ -14919,7 +14873,6 @@ class PrivateCompanionPlugin(
         if is_private_chat and not private_context_deferred:
             add_spec(
                 "memory.private_recall",
-                "当前私聊长期记忆补充",
                 "memory_companion",
                 73,
                 lambda: self._memory_companion_compose_private_recall(
@@ -14933,14 +14886,13 @@ class PrivateCompanionPlugin(
             )
         add_spec(
             "companion.planner",
-            "私聊互动补充",
             "companion",
             80,
             lambda: self._format_companion_planner_prompt_section(prompt_user),
         )
         if not self._memory_companion_should_defer_prompt_section("livingmemory_guidance", event, req):
-            add_spec("livingmemory.guidance", "长期记忆检索", "livingmemory", 90, lambda: self._format_livingmemory_guidance_sections(scope="private" if is_private_chat else "group"))
-        add_spec("detail.injection", "Bot 模拟当前片段", "daily_detail", 40, self._format_detail_injection_prompt_section)
+            add_spec("livingmemory.guidance", "livingmemory", 90, lambda: self._format_livingmemory_guidance_sections(scope="private" if is_private_chat else "group"))
+        add_spec("detail.injection", "daily_detail", 40, self._format_detail_injection_prompt_section)
 
         if is_private_chat:
             expression_user_id = self._expression_private_scope_id(current_user_id)
@@ -14965,7 +14917,6 @@ class PrivateCompanionPlugin(
             if isinstance(expression_voice_section, PromptSection):
                 add_spec(
                     "expression.voice",
-                    "已审核的表达学习规则",
                     "expression",
                     68,
                     lambda: expression_voice_section,
@@ -14989,7 +14940,7 @@ class PrivateCompanionPlugin(
                 enabled = bool(timer_user.get("enabled"))
             return self._format_timer_scheduling_prompt_section(timer_user) if enabled else None
 
-        add_spec("timer.scheduling", "临时预约与动作回访", "timer", 95, timer_context, timeout=0.5)
+        add_spec("timer.scheduling", "timer", 95, timer_context, timeout=0.5)
         return await self._collect_prompt_contexts_parallel(specs)
 
     async def _format_passive_environment_fragment(
@@ -15015,27 +14966,22 @@ class PrivateCompanionPlugin(
     ) -> PromptSection:
         if not lightweight:
             return await self._format_environment_perception_prompt_section(event)
-        if not self._feature_enabled_or_temp_unlocked("enable_environment_perception"):
-            return prompt_section(
-                key="environment.lightweight",
-                title="轻量环境感知",
-                source="environment",
-                content="",
-            )
-        current = self._environment_now()
-        lines = [
-            "这是当前消息的轻量背景边界，主要影响时间感、平台语境和回复节奏；如果用户刚好在问时间、平台或环境感受，可以按需要自然带出，没问到时就只当背景参考。",
-            f"时间：{current.strftime('%Y-%m-%d %H:%M')}",
-            "时间锚点必须以这一行真实时间为准；不要把未来日程、睡眠段、旧记忆或上次对话里的时间说成当前时间。",
-        ]
-        current_minutes = current.hour * 60 + current.minute
-        if not (22 * 60 <= current_minutes or current_minutes <= 90):
-            lines.append(
-                "当前没有进入深夜时段；即使人格、作息或旧上下文提到“可能很晚”“晚上睡觉”，也不能主动说快十一点、困不困、该睡了或晚安。"
-            )
-        platform = await self._format_platform_perception(event)
-        if platform:
-            lines.append(f"会话：{platform}")
+        lines: list[str] = []
+        if self._feature_enabled_or_temp_unlocked("enable_environment_perception"):
+            current = self._environment_now()
+            lines = [
+                "这是当前消息的轻量背景边界，主要影响时间感、平台语境和回复节奏；如果用户刚好在问时间、平台或环境感受，可以按需要自然带出，没问到时就只当背景参考。",
+                f"时间：{current.strftime('%Y-%m-%d %H:%M')}",
+                "时间锚点必须以这一行真实时间为准；不要把未来日程、睡眠段、旧记忆或上次对话里的时间说成当前时间。",
+            ]
+            current_minutes = current.hour * 60 + current.minute
+            if not (22 * 60 <= current_minutes or current_minutes <= 90):
+                lines.append(
+                    "当前没有进入深夜时段；即使人格、作息或旧上下文提到“可能很晚”“晚上睡觉”，也不能主动说快十一点、困不困、该睡了或晚安。"
+                )
+            platform = await self._format_platform_perception(event)
+            if platform:
+                lines.append(f"会话：{platform}")
         return prompt_section(
             key="environment.lightweight",
             title="轻量环境感知",
@@ -15079,20 +15025,15 @@ class PrivateCompanionPlugin(
             ).strip():
                 boundary_sections.append(platform_boundary)
         boundary = render_prompt_sections(boundary_sections)
-        boundary_batch = prompt_section(
-            key="guard.capability_boundary.batch",
-            title="能力边界",
-            source="guard",
-            content="",
-            children=boundary_sections,
-        )
-        self._materialize_conversation_system_block(
-            req,
-            section=boundary_batch,
-            marker=marker,
-            priority=30,
-            placement=PLACEMENT_DYNAMIC_SYSTEM,
-        )
+        for index, section in enumerate(boundary_sections):
+            self._materialize_conversation_system_block(
+                req,
+                section=section,
+                marker=marker if index == 0 else "",
+                priority=30,
+                placement=PLACEMENT_DYNAMIC_SYSTEM,
+                metadata={DELIVERY_GROUP_MARKER_METADATA_KEY: marker},
+            )
         await self._record_request_prompt_fragment(
             event,
             title="能力边界注入",
@@ -15134,40 +15075,45 @@ class PrivateCompanionPlugin(
         marker: str,
         sections: Iterable[PromptSection],
         *,
-        key: str,
-        title: str,
-        source: str,
         priority: int,
     ) -> tuple[str, str, tuple[PromptSection, ...]]:
         authored = tuple(
             section
             for section in sections
             if isinstance(section, PromptSection)
-            and (
-                str(section.content or "").strip()
-                or bool(section.children)
-            )
+            and render_prompt_sections(
+                [section],
+                mode=PromptRenderMode.BODY_ONLY,
+            ).strip()
         )
         if not authored:
             return "none", "", ()
         visible = render_prompt_sections(authored)
-        section = (
-            authored[0]
-            if len(authored) == 1
-            else prompt_section(
-                key=key,
-                title=title,
-                source=source,
-                content="",
-                children=authored,
-            )
+        position = self._normalize_passive_injection_position(
+            runtime_persona_setting(self, "passive_injection_position", "prompt")
         )
-        placement = self._place_conversation_prompt_section(
-            req,
-            marker,
-            section,
-            priority=priority,
-        )
+        marker = _single_line(marker, 120) or "<!-- private_companion_turn_fragment -->"
+        plan = get_conversation_injection_plan(req)
+        if plan is None:
+            raise RuntimeError("conversation injection plan is unavailable")
+        use_system_prompt = position == "system_prompt"
+        if not plan.contains_marker(marker):
+            for index, section in enumerate(authored):
+                plan.add(
+                    section=section,
+                    marker=marker if index == 0 else "",
+                    priority=int(priority),
+                    placement=(
+                        PLACEMENT_DYNAMIC_SYSTEM
+                        if use_system_prompt
+                        else PLACEMENT_TURN_TAIL
+                    ),
+                    materialized=False,
+                    metadata={DELIVERY_GROUP_MARKER_METADATA_KEY: marker},
+                )
+        setattr(req, "_private_companion_turn_prompt_fragments", plan.turn_fragments())
+        rendered_placement = plan.render_into(req, prefer_extra_user_content=True)
+        placement = "system_prompt" if use_system_prompt else rendered_placement
         return placement, visible, authored
 
     async def _append_conditional_tool_instructions_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
@@ -15193,9 +15139,6 @@ class PrivateCompanionPlugin(
                     req,
                     atrelay_marker,
                     [atrelay_section],
-                    key="tools.atrelay.batch",
-                    title="跨会话转述与 @ 群友工具",
-                    source="tools",
                     priority=88,
                 )
                 await self._record_request_prompt_fragment(
@@ -15242,9 +15185,6 @@ class PrivateCompanionPlugin(
                 req,
                 relation_marker,
                 [relation_section],
-                key="tools.relation_lookup.batch",
-                title="关系网查询",
-                source="tools",
                 priority=87,
             )
             await self._record_request_prompt_fragment(
@@ -15271,9 +15211,6 @@ class PrivateCompanionPlugin(
                     req,
                     qzone_marker,
                     qzone_sections,
-                    key="tools.qzone.batch",
-                    title="QQ 空间动态工具",
-                    source="tools",
                     priority=88,
                 )
                 await self._record_request_prompt_fragment(
@@ -15310,9 +15247,6 @@ class PrivateCompanionPlugin(
                 req,
                 schedule_management_marker,
                 [schedule_management_section],
-                key="tools.schedule_management.batch",
-                title="指定日程管理工具",
-                source="tools",
                 priority=88,
             )
             await self._record_request_prompt_fragment(
@@ -15367,9 +15301,6 @@ class PrivateCompanionPlugin(
                 req,
                 memo_marker,
                 [memo_section],
-                key="tools.memo_management.batch",
-                title="备忘便签工具",
-                source="tools",
                 priority=88,
             )
             await self._record_request_prompt_fragment(
@@ -15414,9 +15345,6 @@ class PrivateCompanionPlugin(
                 req,
                 creative_work_marker,
                 [creative_work_section],
-                key="tools.creative_work.batch",
-                title="资料柜与自己的创作读取工具",
-                source="tools",
                 priority=89,
             )
             await self._record_request_prompt_fragment(
@@ -15484,8 +15412,6 @@ class PrivateCompanionPlugin(
                 reason="media_tools_scoped",
                 scope=self._reaction_expression_scope(event),
             )
-        user_photo_prompt_enabled = self._user_photo_generation_prompt_enabled(event)
-        reaction_photo_prompt_enabled = self._reaction_image_provider_available()
         photo_section = self._photo_generation_tool_prompt_section(
             event,
             include_spontaneous=reaction_expression_authorized,
@@ -15509,21 +15435,6 @@ class PrivateCompanionPlugin(
                     req,
                     photo_marker,
                     [photo_section],
-                    key="tools.photo_generation.batch",
-                    title=(
-                        "实验性表情表达"
-                        if reaction_expression_authorized and not explicit_media_request
-                        else (
-                            "图库表情与生图工具"
-                            if user_photo_prompt_enabled and reaction_photo_prompt_enabled
-                            else (
-                                "生图工具"
-                                if user_photo_prompt_enabled
-                                else "图库表情工具"
-                            )
-                        )
-                    ),
-                    source="tools",
                     priority=88,
                 )
                 await self._record_request_prompt_fragment(
@@ -15568,9 +15479,6 @@ class PrivateCompanionPlugin(
                     req,
                     cross_user_marker,
                     [cross_user_section],
-                    key="tools.cross_user_memory.batch",
-                    title="跨用户记忆互通",
-                    source="tools",
                     priority=88,
                 )
                 await self._record_request_prompt_fragment(
@@ -16075,13 +15983,23 @@ class PrivateCompanionPlugin(
             mode=PromptRenderMode.LABELED_BLOCK,
         )
 
-    def _private_passive_state_reply_policy_section(self) -> PromptSection:
-        lines = [
-            "先自然回应用户当前表达；主动提供一处与 Bot 自身有关的具体细节；不要逐项汇报状态，也不要把内部素材描述成已经证实的现实事件。",
-            "不要把回复写成连续盘问；整次回复最多提出一个问题；没有必要时可以不提问。",
-            "当前用户最后一条消息是本轮唯一的主线：先接住其中的具体词、问题或情绪，再决定是否补充背景。旧话题、未完成话头和状态素材只有在与当前内容有明确语义连接时才轻轻带过；不贴合就留在背景里，不要为了连续性硬拽回来。",
-            "话题确实转向时，用当前消息里的连接点自然过渡，不要凭空写“刚刚/刚才/前面”作为转场。相对时间词只在用户明确提到时间、或有可靠事实表明确实发生在那个时间段时使用；内部提示中的时间标签不得原样出现在回复里。",
-        ]
+    def _private_passive_state_reply_policy_section(
+        self,
+        *,
+        compact: bool = False,
+    ) -> PromptSection:
+        lines = (
+            [
+                "先自然回应用户当前表达；主动提供一处与 Bot 自身有关的具体细节；不要逐项汇报状态；不要把回复写成连续盘问；整次回复最多提出一个问题；没有必要时可以不提问。"
+            ]
+            if compact
+            else [
+                "先自然回应用户当前表达；主动提供一处与 Bot 自身有关的具体细节；不要逐项汇报状态，也不要把内部素材描述成已经证实的现实事件。",
+                "不要把回复写成连续盘问；整次回复最多提出一个问题；没有必要时可以不提问。",
+                "当前用户最后一条消息是本轮唯一的主线：先接住其中的具体词、问题或情绪，再决定是否补充背景。旧话题、未完成话头和状态素材只有在与当前内容有明确语义连接时才轻轻带过；不贴合就留在背景里，不要为了连续性硬拽回来。",
+                "话题确实转向时，用当前消息里的连接点自然过渡，不要凭空写“刚刚/刚才/前面”作为转场。相对时间词只在用户明确提到时间、或有可靠事实表明确实发生在那个时间段时使用；内部提示中的时间标签不得原样出现在回复里。",
+            ]
+        )
         return prompt_section(
             key="state.reply_policy",
             title="私聊被动回复策略",
@@ -16265,11 +16183,8 @@ class PrivateCompanionPlugin(
             return [], False, "unchanged_light" if lightweight else "unchanged"
 
         if reason == "continuity_anchor":
-            reply_policy_section = prompt_section(
-                key="state.reply_policy",
-                title="私聊被动回复策略",
-                source="daily_state",
-                content="先自然回应用户当前表达；主动提供一处与 Bot 自身有关的具体细节；不要逐项汇报状态；不要把回复写成连续盘问；整次回复最多提出一个问题；没有必要时可以不提问。",
+            reply_policy_section = self._private_passive_state_reply_policy_section(
+                compact=True,
             )
             state_body = render_prompt_sections(
                 [state_section],
@@ -16438,7 +16353,7 @@ class PrivateCompanionPlugin(
             sections = [
                 section
                 for section in sections
-                if section.key != "group.joke_boundary"
+                if section.key != "group.persona_denoise.joke_boundary"
             ]
         return render_prompt_sections(
             sections,
@@ -16544,7 +16459,7 @@ class PrivateCompanionPlugin(
                 content=body,
             ),
             prompt_section(
-                key="group.joke_boundary",
+                key="group.persona_denoise.joke_boundary",
                 title="群聊玩笑边界",
                 source="group",
                 content=self._group_persona_denoise_joke_boundary(),
@@ -16566,17 +16481,10 @@ class PrivateCompanionPlugin(
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         if marker in current_prompt or marker in current_turn_prompt:
             return
-        denoise_batch = prompt_section(
-            key="group.persona_denoise.batch",
-            title="群聊人格降噪",
-            source="group",
-            content="",
-            children=denoise_sections,
-        )
-        placement = self._place_conversation_prompt_section(
+        placement, _, _ = self._place_conversation_prompt_sections(
             req,
             marker,
-            denoise_batch,
+            denoise_sections,
             priority=32,
         )
         await self._record_request_prompt_fragment(
@@ -16678,20 +16586,15 @@ class PrivateCompanionPlugin(
                 )
             )
         guard_text = render_prompt_sections(guard_sections)
-        guard_batch = prompt_section(
-            key="identity.non_target_private.batch",
-            title="私聊身份防串",
-            source="identity",
-            content="",
-            children=guard_sections,
-        )
-        self._materialize_conversation_system_block(
-            req,
-            section=guard_batch,
-            marker=marker,
-            priority=10,
-            placement=PLACEMENT_DYNAMIC_SYSTEM,
-        )
+        for index, section in enumerate(guard_sections):
+            self._materialize_conversation_system_block(
+                req,
+                section=section,
+                marker=marker if index == 0 else "",
+                priority=10,
+                placement=PLACEMENT_DYNAMIC_SYSTEM,
+                metadata={DELIVERY_GROUP_MARKER_METADATA_KEY: marker},
+            )
         await self._record_request_prompt_fragment(
             event,
             title="非目标私聊防串注入",

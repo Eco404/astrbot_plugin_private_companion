@@ -2679,24 +2679,21 @@ class ProactiveEngineMixin:
                 if section is not None
                 else fallback
             )
-        if worldview_sections:
-            worldview_section = prompt_section(
-                key="proactive.judge.worldview",
-                title="世界观/适配",
-                source="proactive_engine",
-                content=render_prompt_sections(
-                    worldview_sections[:1],
-                    mode=PromptRenderMode.BODY_ONLY,
-                ),
-                children=tuple(worldview_sections[1:]),
+        worldview_content = (
+            render_prompt_sections(
+                worldview_sections[:1],
+                mode=PromptRenderMode.BODY_ONLY,
             )
-        else:
-            worldview_section = prompt_section(
-                key="proactive.judge.worldview",
-                title="世界观/适配",
-                source="proactive_engine",
-                content=_single_line(worldview, 1000) or "（无额外世界观适配）",
-            )
+            if worldview_sections
+            else _single_line(worldview, 1000) or "（无额外世界观适配）"
+        )
+        worldview_section = prompt_section(
+            key="proactive.judge.worldview",
+            title="世界观/适配",
+            source="proactive_engine",
+            content=worldview_content,
+            children=tuple(worldview_sections[1:]),
+        )
         sections = [
             prompt_section(
                 key="proactive.judge.persona",

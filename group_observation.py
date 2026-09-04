@@ -4307,32 +4307,27 @@ class GroupObservationMixin:
         effect: dict[str, Any] | None,
         state: dict[str, Any] | None = None,
     ) -> PromptSection:
-        if not isinstance(effect, dict) or not effect:
-            return prompt_section(
-                key="group.wakeup_state",
-                title="群聊唤醒与当前状态",
-                source="group_observation",
-                content="",
+        body = ""
+        if isinstance(effect, dict) and effect:
+            state = state if isinstance(state, dict) else self.data.get("daily_state", {})
+            energy = _safe_int(state.get("energy") if isinstance(state, dict) else 70, 70, 0, 100)
+            mood = _single_line(state.get("mood_bias"), 40) if isinstance(state, dict) else "平稳"
+            runtime = state.get("sleep_runtime") if isinstance(state, dict) and isinstance(state.get("sleep_runtime"), dict) else {}
+            phase = _single_line(runtime.get("label") or runtime.get("phase"), 40)
+            updates = effect.get("updates") if isinstance(effect.get("updates"), list) else []
+            update_text = "；".join(_single_line(item, 60) for item in updates if _single_line(item, 60))
+            strength_label = _single_line(effect.get("strength_label"), 24)
+            fatigue = effect.get("fatigue") if isinstance(effect.get("fatigue"), dict) else {}
+            fatigue_label = _single_line(fatigue.get("label"), 20)
+            fatigue_line = f"唤醒疲劳：{fatigue_label}（{_safe_float(fatigue.get('value'), 0.0, 0.0):.1f}/{_safe_int(fatigue.get('limit'), 0, 0)}）\n" if fatigue_label else ""
+            body = (
+                f"当前状态：能量 {energy}/100｜情绪底色 {mood}" + (f"｜睡眠阶段 {phase}" if phase else "") + "\n"
+                + (f"唤醒强度：{strength_label}\n" if strength_label else "")
+                + fatigue_line
+                + f"唤醒影响：{_single_line(effect.get('note'), 220)}\n"
+                + (f"状态变化：{update_text}\n" if update_text else "")
+                + "回复要求：把这当作真实状态反应来写,不要说关键词、概率、插件、触发规则；在群聊里短一点,像被自然叫到或被话题吸引。"
             )
-        state = state if isinstance(state, dict) else self.data.get("daily_state", {})
-        energy = _safe_int(state.get("energy") if isinstance(state, dict) else 70, 70, 0, 100)
-        mood = _single_line(state.get("mood_bias"), 40) if isinstance(state, dict) else "平稳"
-        runtime = state.get("sleep_runtime") if isinstance(state, dict) and isinstance(state.get("sleep_runtime"), dict) else {}
-        phase = _single_line(runtime.get("label") or runtime.get("phase"), 40)
-        updates = effect.get("updates") if isinstance(effect.get("updates"), list) else []
-        update_text = "；".join(_single_line(item, 60) for item in updates if _single_line(item, 60))
-        strength_label = _single_line(effect.get("strength_label"), 24)
-        fatigue = effect.get("fatigue") if isinstance(effect.get("fatigue"), dict) else {}
-        fatigue_label = _single_line(fatigue.get("label"), 20)
-        fatigue_line = f"唤醒疲劳：{fatigue_label}（{_safe_float(fatigue.get('value'), 0.0, 0.0):.1f}/{_safe_int(fatigue.get('limit'), 0, 0)}）\n" if fatigue_label else ""
-        body = (
-            f"当前状态：能量 {energy}/100｜情绪底色 {mood}" + (f"｜睡眠阶段 {phase}" if phase else "") + "\n"
-            + (f"唤醒强度：{strength_label}\n" if strength_label else "")
-            + fatigue_line
-            + f"唤醒影响：{_single_line(effect.get('note'), 220)}\n"
-            + (f"状态变化：{update_text}\n" if update_text else "")
-            + "回复要求：把这当作真实状态反应来写,不要说关键词、概率、插件、触发规则；在群聊里短一点,像被自然叫到或被话题吸引。"
-        )
         return prompt_section(
             key="group.wakeup_state",
             title="群聊唤醒与当前状态",

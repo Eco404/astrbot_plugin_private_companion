@@ -1539,6 +1539,14 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             return None
         if not self._user_asks_web_exploration_context(inbound_text):
             return None
+        def build_section(content: str) -> PromptSection:
+            return prompt_section(
+                key="web_exploration.recent",
+                title="主动搜索上下文",
+                source="web_exploration",
+                content=content,
+            )
+
         state = self.data.get("web_exploration") if isinstance(self.data.get("web_exploration"), dict) else {}
         digest = state.get("last_digest") if isinstance(state.get("last_digest"), dict) else {}
         notes = state.get("notes") if isinstance(state.get("notes"), list) else []
@@ -1547,12 +1555,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             body = (
                 "用户正在询问你最近主动搜索/上网探索过什么,但当前没有可用的主动搜索记录。请自然说明自己最近还没搜到能说的东西,不要编造搜索内容。"
             )
-            return prompt_section(
-                key="web_exploration.recent",
-                title="主动搜索上下文",
-                source="web_exploration",
-                content=body,
-            )
+            return build_section(body)
         rows: list[str] = []
         if digest:
             rows.append(
@@ -1593,12 +1596,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "可以用第一人称自然概括“我刚查了/我之前搜到”,但不要说成后台系统日志。\n"
             + "\n".join(rows[:12])
         )
-        return prompt_section(
-            key="web_exploration.recent",
-            title="主动搜索上下文",
-            source="web_exploration",
-            content=body,
-        )
+        return build_section(body)
 
     def _format_recent_ai_daily_context_for_reply(
         self,
@@ -1620,6 +1618,14 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             return None
         if not self._user_asks_ai_daily_context(inbound_text):
             return None
+        def build_section(content: str) -> PromptSection:
+            return prompt_section(
+                key="news.ai_daily_context",
+                title="新闻阅读上下文",
+                source="news",
+                content=content,
+            )
+
         state = self.data.get("news_integration") if isinstance(self.data.get("news_integration"), dict) else {}
         ai_state = state.get("ai_daily") if isinstance(state.get("ai_daily"), dict) else {}
         digest, selected_item = self._select_ai_daily_digest_item(ai_state)
@@ -1640,12 +1646,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             body = (
                 "用户正在询问 AI 日报/早报,但当前没有可用的 AI 日报记录。请直接说明最近还没读到可确认的 AI 日报,不要编造。"
             )
-            return prompt_section(
-                key="news.ai_daily_context",
-                title="新闻阅读上下文",
-                source="news",
-                content=body,
-            )
+            return build_section(body)
         today = _today_key()
         rows: list[str] = []
         if record_date:
@@ -1675,12 +1676,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "回答只能基于这些内容，不要编造额外新闻。\n"
             + "\n".join(rows[:10])
         )
-        return prompt_section(
-            key="news.ai_daily_context",
-            title="新闻阅读上下文",
-            source="news",
-            content=body,
-        )
+        return build_section(body)
 
     def _format_recent_news_context_for_reply(
         self,
@@ -1705,6 +1701,14 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             return ai_daily_context
         if not self._user_asks_news_context(inbound_text):
             return None
+        def build_section(content: str) -> PromptSection:
+            return prompt_section(
+                key="news.recent",
+                title="新闻阅读上下文",
+                source="news",
+                content=content,
+            )
+
         state = self.data.get("news_integration") if isinstance(self.data.get("news_integration"), dict) else {}
         digest = state.get("last_digest") if isinstance(state.get("last_digest"), dict) else {}
         digests = state.get("digests") if isinstance(state.get("digests"), list) else []
@@ -1713,12 +1717,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             body = (
                 "用户正在询问今天的新闻/AI 新闻,但当前还没有可用的新闻阅读记录。请自然说明自己还没读到今天的新闻,不要编造新闻。"
             )
-            return prompt_section(
-                key="news.recent",
-                title="新闻阅读上下文",
-                source="news",
-                content=body,
-            )
+            return build_section(body)
         rows: list[str] = []
         if digest:
             rows.append(
@@ -1755,12 +1754,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
             "可以按人格自然概括,如果记录不够新或不完整,要直接说明。\n"
             + "\n".join(rows[:12])
         )
-        return prompt_section(
-            key="news.recent",
-            title="新闻阅读上下文",
-            source="news",
-            content=body,
-        )
+        return build_section(body)
 
     def _format_news_digest_for_command(self) -> str:
         state = self.data.get("news_integration") if isinstance(self.data.get("news_integration"), dict) else {}
@@ -3860,30 +3854,28 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         proactive_kind = kind_getter(user) if callable(kind_getter) else "relational"
         relaxed_unanswered_route = quota_tier >= 4 and proactive_kind in {"self_life", "content_share"}
         if unanswered_count >= 2 and not relaxed_unanswered_route:
-            append_section(
-                prompt_section(
-                    key="proactive.unanswered_boundary",
-                    title="连续未回应时的成文边界",
-                    source="proactive_message",
-                    content=(
-                        "- 这次优先只表达一个完整意思，用一句自然短句或两个紧密相连的短分句说完。\n"
-                        "- 不要把近况、提问和叮嘱叠在同一条里；更适合分享后自然收住，不要求对方回复。\n"
-                        "- 如果原本想说的内容较多，应重新组织成完整短句，绝不能留下主谓宾未完成的半句话。"
-                    ),
-                )
+            unanswered_boundary = prompt_section(
+                key="proactive.unanswered_boundary",
+                title="连续未回应时的成文边界",
+                source="proactive_message",
+                content=(
+                    "- 这次优先只表达一个完整意思，用一句自然短句或两个紧密相连的短分句说完。\n"
+                    "- 不要把近况、提问和叮嘱叠在同一条里；更适合分享后自然收住，不要求对方回复。\n"
+                    "- 如果原本想说的内容较多，应重新组织成完整短句，绝不能留下主谓宾未完成的半句话。"
+                ),
             )
+            append_section(unanswered_boundary)
         elif unanswered_count >= 2 and relaxed_unanswered_route:
-            append_section(
-                prompt_section(
-                    key="proactive.relaxed_unanswered_boundary",
-                    title="高配额生活流的未回应边界",
-                    source="proactive_message",
-                    content=(
-                        "- 对方没有逐条回应不等于拒绝继续接收生活片段或可靠内容分享，不要因此突然写得疏远或只剩客套话。\n"
-                        "- 本条仍应自成一件具体的事，不追问上一条、不催促、不抱怨，也不要暗示对方欠你回复。"
-                    ),
-                )
+            relaxed_boundary = prompt_section(
+                key="proactive.relaxed_unanswered_boundary",
+                title="高配额生活流的未回应边界",
+                source="proactive_message",
+                content=(
+                    "- 对方没有逐条回应不等于拒绝继续接收生活片段或可靠内容分享，不要因此突然写得疏远或只剩客套话。\n"
+                    "- 本条仍应自成一件具体的事，不追问上一条、不催促、不抱怨，也不要暗示对方欠你回复。"
+                ),
             )
+            append_section(relaxed_boundary)
         persona_marker = "<!-- private_companion_proactive_persona_v1 -->"
         if persona:
             append_section(
@@ -4152,20 +4144,6 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                         segmenting_section,
                         mode=PromptRenderMode.CONVERSATION_XML,
                     )
-            else:
-                segmenting_instruction = self._proactive_llm_segmenting_instruction(
-                    umo=_single_line(user.get("umo"), 240),
-                )
-                if segmenting_instruction:
-                    append_section(
-                        prompt_section(
-                        key="reply.segmentation",
-                        title="回复分段控制",
-                        source="segmented_reply.compat",
-                        content=segmenting_instruction,
-                        ),
-                        mode=PromptRenderMode.BODY_ONLY,
-                    )
         suffix = render_prompt_document(
             prompt_document(
                 user=tuple(appended_parts),
@@ -4199,24 +4177,12 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         if not self._proactive_llm_segmenting_allowed(umo=umo):
             return ""
         section_getter = getattr(self, "_llm_controlled_segmenting_prompt_section", None)
-        if callable(section_getter):
-            return render_prompt_sections([section_getter()])
-        prompt_getter = getattr(self, "_llm_controlled_segmenting_prompt", None)
-        if not callable(prompt_getter):
+        if not callable(section_getter):
             return ""
-        instruction = str(prompt_getter() or "").strip()
-        if not instruction:
+        section = section_getter()
+        if not isinstance(section, PromptSection):
             return ""
-        return render_prompt_sections(
-            [
-                prompt_section(
-                    key="reply.segmentation",
-                    title="回复分段控制",
-                    source="segmented_reply",
-                    content=prompt_cdata(instruction),
-                )
-            ]
-        )
+        return render_prompt_sections([section])
 
     @staticmethod
     def _proactive_visible_text_format_prompt_section(action: str) -> PromptSection:

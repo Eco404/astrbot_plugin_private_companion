@@ -514,7 +514,13 @@ def test_cross_family_composition_uses_latest_facade_overrides_at_runtime() -> N
     plugin = SimpleNamespace(
         _format_companion_scene_snapshot=lambda snapshot, *, purpose: (
             f"scene={snapshot['value']};purpose={purpose}"
-        )
+        ),
+        _format_companion_scene_snapshot_prompt_section=lambda snapshot, *, purpose: prompt_section(
+            key="scene.snapshot",
+            title="陪伴场景快照",
+            source="scene_context",
+            content=f"scene={snapshot['value']};purpose={purpose}",
+        ),
     )
     owner = SimpleNamespace(
         _plugin=plugin,

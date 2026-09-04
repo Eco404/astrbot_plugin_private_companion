@@ -2639,20 +2639,13 @@ class PrivateImageMixin:
             lines.append(f"角色名：{bot_name}")
         if visual_text:
             lines.append(f"外貌线索：{visual_text}")
-        if not lines:
-            return prompt_section(
-                key="private_image.role_appearance",
-                title="当前角色外貌",
-                source="private_image",
-                content="",
-            )
-        lines.append("用途：仅辅助本轮图片识别，避免把无关人物或表情包误认成当前角色；不代表用户正在询问外貌。")
-        body = "\n".join(lines)
+        if lines:
+            lines.append("用途：仅辅助本轮图片识别，避免把无关人物或表情包误认成当前角色；不代表用户正在询问外貌。")
         return prompt_section(
             key="private_image.role_appearance",
             title="当前角色外貌",
             source="private_image",
-            content=body,
+            content="\n".join(lines),
         )
 
     def _private_image_role_visual_cache_signature(self) -> str:

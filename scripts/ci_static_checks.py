@@ -40,6 +40,10 @@ _PROMPT_RULE_REMOVED_API = "removed_prompt_api"
 _PROMPT_RULE_DIRECT_REQUEST_WRITE = "direct_prompt_request_write"
 _PROMPT_RULE_SECTION_IN_CONTENT = "prompt_section_nested_in_content"
 _PROMPT_RULE_RAW_MAPPING_CONTENT = "raw_mapping_prompt_content"
+_PROMPT_RULE_DELIVERY_BATCH_SECTION = "prompt_delivery_batch_section"
+_PROMPT_RULE_DUPLICATE_CHILD_TITLE = "duplicate_prompt_child_title"
+_PROMPT_RULE_DUPLICATE_FUNCTION_KEY = "duplicate_prompt_key_in_function"
+_PROMPT_RULE_DUPLICATE_FUNCTION_TITLE = "duplicate_prompt_title_in_function"
 _LEGACY_HEADING_PATTERN = re.compile(r"【[^】\n]{1,100}】")
 _CONVERSATION_XML_PATTERN = re.compile(
     r"<private_companion_context\b|<section(?:\s|/?>)|<!\[CDATA\[",
@@ -451,6 +455,43 @@ def _composed_string_text(node: ast.AST) -> str | None:
     return None
 
 
+class _DirectPromptSectionVisitor(ast.NodeVisitor):
+    """Collect prompt_section calls without crossing nested function scopes."""
+
+    def __init__(self) -> None:
+        self.calls: list[ast.Call] = []
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        return
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        function_name = (
+            node.func.id
+            if isinstance(node.func, ast.Name)
+            else node.func.attr
+            if isinstance(node.func, ast.Attribute)
+            else ""
+        )
+        if function_name == "prompt_section":
+            self.calls.append(node)
+        self.generic_visit(node)
+
+
+def _direct_prompt_section_calls(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[ast.Call]:
+    visitor = _DirectPromptSectionVisitor()
+    for statement in node.body:
+        visitor.visit(statement)
+    return visitor.calls
+
+
 def _allowlist_matches(
     *,
     rule: str,
@@ -553,6 +594,26 @@ class _PromptAuthoringVisitor(ast.NodeVisitor):
                     node=argument,
                     token=argument.arg,
                 )
+        identities: dict[tuple[str, str], ast.Call] = {}
+        for call in _direct_prompt_section_calls(node):
+            keywords = {item.arg: item.value for item in call.keywords if item.arg}
+            for field, rule in (
+                ("key", _PROMPT_RULE_DUPLICATE_FUNCTION_KEY),
+                ("title", _PROMPT_RULE_DUPLICATE_FUNCTION_TITLE),
+            ):
+                value_node = keywords.get(field)
+                value = _composed_string_text(value_node) if value_node is not None else None
+                if not value:
+                    continue
+                identity = (field, value)
+                if identity in identities:
+                    self._record(
+                        rule=rule,
+                        node=value_node,
+                        token=value,
+                    )
+                else:
+                    identities[identity] = call
         self.generic_visit(node)
         self.scope.pop()
 
@@ -630,6 +691,70 @@ class _PromptAuthoringVisitor(ast.NodeVisitor):
                     node=content_keyword.value,
                     token="content={...}",
                 )
+            key_keyword = next(
+                (item for item in node.keywords if item.arg == "key"),
+                None,
+            )
+            key_text = (
+                _composed_string_text(key_keyword.value)
+                if key_keyword is not None
+                else None
+            )
+            if key_text and (
+                key_text.endswith(".batch")
+                or key_text in {"passive.static", "passive.dynamic"}
+            ):
+                self._record(
+                    rule=_PROMPT_RULE_DELIVERY_BATCH_SECTION,
+                    node=key_keyword.value,
+                    token=key_text,
+                )
+            title_keyword = next(
+                (item for item in node.keywords if item.arg == "title"),
+                None,
+            )
+            children_keyword = next(
+                (item for item in node.keywords if item.arg == "children"),
+                None,
+            )
+            parent_title = (
+                _composed_string_text(title_keyword.value)
+                if title_keyword is not None
+                else None
+            )
+            if parent_title and children_keyword is not None:
+                children = (
+                    children_keyword.value.elts
+                    if isinstance(children_keyword.value, (ast.List, ast.Tuple))
+                    else ()
+                )
+                for child in children:
+                    if not isinstance(child, ast.Call):
+                        continue
+                    child_name = (
+                        child.func.id
+                        if isinstance(child.func, ast.Name)
+                        else child.func.attr
+                        if isinstance(child.func, ast.Attribute)
+                        else ""
+                    )
+                    if child_name != "prompt_section":
+                        continue
+                    child_title_keyword = next(
+                        (item for item in child.keywords if item.arg == "title"),
+                        None,
+                    )
+                    child_title = (
+                        _composed_string_text(child_title_keyword.value)
+                        if child_title_keyword is not None
+                        else None
+                    )
+                    if child_title == parent_title:
+                        self._record(
+                            rule=_PROMPT_RULE_DUPLICATE_CHILD_TITLE,
+                            node=child_title_keyword.value,
+                            token=parent_title,
+                        )
         elif function_name == "PromptSection":
             self._record(
                 rule=_PROMPT_RULE_DIRECT_SECTION_CALL,
