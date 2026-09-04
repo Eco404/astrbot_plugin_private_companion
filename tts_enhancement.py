@@ -4171,6 +4171,7 @@ TTS 朗读文本：
             converted,
             source_text=source_text,
             event=event,
+            prefer_authored_voice=(mode == "postprocess"),
         )
         if visible_override or suppress_visible:
             try:
@@ -5152,6 +5153,7 @@ Provider 规则：{emotion_rule}
         *,
         source_text: str = "",
         event: Any = None,
+        prefer_authored_voice: bool = False,
     ) -> tuple[str, str]:
         """Turn any tagged full-scope reply into one structurally complete voice block."""
         normalized = self._normalize_tts_tags(str(text or ""))
@@ -5168,6 +5170,37 @@ Provider 规则：{emotion_rule}
             1600,
         )
         full_source = self._sanitize_tts_visible_text(source_text, max_chars=complete_limit)
+        if (
+            prefer_authored_voice
+            and voice_lang == "zh"
+            and full_source
+        ):
+            authored_matches = list(
+                re.finditer(
+                    r"<tts\b[^>]*>.*?</tts>",
+                    normalized,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+            )
+            if (
+                len(authored_matches) == 1
+                and not normalized[: authored_matches[0].start()].strip()
+            ):
+                authored_units = self._tts_full_scope_content_units(
+                    authored_matches[0].group(0)
+                )
+                source_units = self._tts_full_scope_content_units(full_source)
+                if (
+                    authored_units
+                    and source_units
+                    and authored_units >= max(6, int(source_units * 0.7))
+                ):
+                    logger.info(
+                        "TTS全量后处理保留模型完整语音稿: spoken_units=%s source_units=%s",
+                        authored_units,
+                        source_units,
+                    )
+                    return normalized, ""
         if (
             not full_source
             and voice_lang != "zh"
@@ -5242,6 +5275,26 @@ Provider 规则：{emotion_rule}
         if not full_source:
             return normalized, ""
         return f"<tts>{full_source}</tts>", full_source
+
+    @staticmethod
+    def _tts_full_scope_content_units(text: Any) -> int:
+        """Count readable content units of a full-scope spoken draft after
+        removing markup and FishAudio control cues, for coverage comparison."""
+        source = str(text or "")
+        source = re.sub(
+            r"</?(?:pc[_-]?tts|t{2,}s)\b[^>]*>",
+            "",
+            source,
+            flags=re.IGNORECASE,
+        )
+        source = FISH_AUDIO_S2_CUE_PATTERN.sub("", source)
+        source = FISH_AUDIO_S1_CUE_PATTERN.sub("", source)
+        return len(
+            re.findall(
+                r"[\u3040-\u30ff\u31f0-\u31ff\u4e00-\u9fffA-Za-z0-9]",
+                source,
+            )
+        )
 
     async def _finalize_tts_delivery_chain(
         self,
