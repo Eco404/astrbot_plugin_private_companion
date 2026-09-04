@@ -130,11 +130,16 @@ class _DailyOutfitHarness(ProactiveMessageMixin):
     @staticmethod
     def _build_daily_outfit_photo_prompt(
         _diary: dict[str, Any],
-        *,
-        structured: bool = False,
         **_kwargs: Any,
-    ) -> str | dict[str, Any]:
-        return {"positive": "daily outfit"} if structured else "daily outfit"
+    ) -> str:
+        return "daily outfit"
+
+    @staticmethod
+    def _build_daily_outfit_photo_prompt_sections(
+        _diary: dict[str, Any],
+        **_kwargs: Any,
+    ) -> tuple[object, ...]:
+        return ()
 
     async def _generate_photo_image(self, **_kwargs: Any) -> tuple[str, str, str]:
         self.generate_calls += 1

@@ -11,6 +11,7 @@ from astrbot_plugin_private_companion.conversation_injection_plan import (
     PLACEMENT_TURN_TAIL,
     get_conversation_injection_plan,
 )
+from astrbot_plugin_private_companion.conversation_prompt_section import ExactText, prompt_section
 from astrbot_plugin_private_companion.forward_message import ForwardMessageMixin
 from astrbot_plugin_private_companion.private_image import PrivateImageMixin
 from astrbot_plugin_private_companion.tts_enhancement import TtsEnhancementMixin
@@ -62,8 +63,13 @@ class _TtsPlanHarness(TtsEnhancementMixin):
         return False
 
     @staticmethod
-    def _build_tts_rule_prompt(_provider_kind: str, *, event) -> str:
-        return "RULE:<pc_tts>正文</pc_tts>"
+    def _build_tts_rule_prompt_section(_provider_kind: str, *, event):
+        return prompt_section(
+            key="tts.rule",
+            title="语音消息规则",
+            source="tts_enhancement",
+            content="RULE:<pc_tts>正文</pc_tts>",
+        )
 
 
 class _FunctionalTtsPlanHarness(_TtsPlanHarness):
@@ -74,21 +80,24 @@ class _FunctionalTtsPlanHarness(_TtsPlanHarness):
 
 class _ForwardPlanHarness(ForwardMessageMixin):
     @staticmethod
-    async def _format_forward_message_context_for_prompt(
+    async def _format_forward_message_context_prompt_section(
         _event,
         _req,
-        *,
-        include_heading=True,
-    ) -> str:
-        return "FORWARD-CONTEXT"
+    ):
+        return prompt_section(
+            key="forward.message",
+            title="本轮合并消息",
+            source="forward_message",
+            content="FORWARD-CONTEXT",
+        )
 
     @staticmethod
-    async def _format_reply_chain_context_for_prompt(_event, **_kwargs) -> str:
-        return ""
+    async def _format_reply_chain_context_prompt_section(_event):
+        return None
 
     @staticmethod
-    async def _format_reply_rich_card_context_for_prompt(_event, **_kwargs) -> str:
-        return ""
+    async def _format_reply_rich_card_context_prompt_section(_event):
+        return None
 
 
 class _DynamicForwardPlanHarness(_ForwardPlanHarness):
@@ -96,19 +105,15 @@ class _DynamicForwardPlanHarness(_ForwardPlanHarness):
     def _append_turn_prompt_fragment_by_position(
         req,
         marker,
-        text,
+        section,
         *,
-        title="",
         priority=50,
-        source="",
     ) -> bool:
         plan = get_conversation_injection_plan(req)
         plan.add(
+            section=section,
             marker=marker,
-            content=text,
-            title=title,
             priority=priority,
-            source=source,
             placement=PLACEMENT_TURN_TAIL,
         )
         return True
@@ -133,7 +138,7 @@ class ModuleConversationInjectionPlanTests(unittest.IsolatedAsyncioTestCase):
 
         expected = (
             "base\n\n<!-- private_companion_tts_enhancement_v1 -->\n"
-            "RULE:<pc_tts>正文</pc_tts>"
+            "【语音消息规则】\nRULE:<pc_tts>正文</pc_tts>"
         )
         self.assertEqual(expected, request.system_prompt)
         plan = get_conversation_injection_plan(request, create=False)
@@ -141,10 +146,39 @@ class ModuleConversationInjectionPlanTests(unittest.IsolatedAsyncioTestCase):
         block = plan.blocks()[0]
         self.assertEqual("tts.rule", block.key)
         self.assertEqual(PLACEMENT_TOOL_CONTRACT, block.placement)
-        self.assertTrue(block.opaque)
+        self.assertIsInstance(block.section.content, ExactText)
+        self.assertEqual("【语音消息规则】\nRULE:<pc_tts>正文</pc_tts>", block.content)
         self.assertTrue(block.materialized)
         plan.render_into(request)
         self.assertEqual(expected, request.system_prompt)
+
+    async def test_tts_postprocess_contract_keeps_rendered_heading_as_exact_wire(self) -> None:
+        harness = _TtsPlanHarness()
+        harness.tts_generation_mode = "postprocess"
+        harness.tts_conversion_scope = "full"
+        event = SimpleNamespace(
+            message_str="普通聊天",
+            unified_msg_origin="default:FriendMessage:10001",
+        )
+        request = SimpleNamespace(system_prompt="base", prompt="user")
+
+        await harness.apply_tts_enhancement_request(event, request)
+
+        prefix = "base\n\n<!-- private_companion_tts_enhancement_v1 -->\n"
+        self.assertTrue(request.system_prompt.startswith(prefix))
+        exact_wire = request.system_prompt[len(prefix) :]
+        self.assertTrue(exact_wire.startswith("【TTS 后处理模式】\n"))
+        self.assertIn("当前是全量转换", exact_wire)
+        plan = get_conversation_injection_plan(request, create=False)
+        block = plan.blocks()[0]
+        self.assertEqual("tts.rule", block.key)
+        self.assertEqual("TTS 后处理模式", block.title)
+        self.assertEqual(PLACEMENT_TOOL_CONTRACT, block.placement)
+        self.assertTrue(block.materialized)
+        self.assertIsInstance(block.section.content, ExactText)
+        self.assertEqual(exact_wire, block.content)
+        plan.render_into(request)
+        self.assertEqual(f"{prefix}{exact_wire}", request.system_prompt)
 
     async def test_dynamic_tts_fallback_is_registered_and_rendered_as_xml(self) -> None:
         harness = _FunctionalTtsPlanHarness()
@@ -160,7 +194,7 @@ class ModuleConversationInjectionPlanTests(unittest.IsolatedAsyncioTestCase):
         block = plan.blocks()[0]
         self.assertEqual(PLACEMENT_DYNAMIC_SYSTEM, block.placement)
         self.assertTrue(block.materialized)
-        self.assertFalse(block.opaque)
+        self.assertNotIsInstance(block.section.content, ExactText)
         plan.render_into(request)
         self.assertNotIn("<!-- private_companion_tts_functional_reply_v1 -->", request.system_prompt)
         self.assertIn('<section title="功能性回复的语音取舍">', request.system_prompt)
@@ -216,17 +250,21 @@ class ModuleConversationInjectionPlanTests(unittest.IsolatedAsyncioTestCase):
         block = plan.blocks()[0]
         self.assertEqual("group.image_vision", block.key)
         self.assertTrue(block.materialized)
-        self.assertFalse(block.opaque)
+        self.assertNotIsInstance(block.section.content, ExactText)
 
     async def test_private_image_manual_main_request_registers_boundary_in_place(self) -> None:
         request = SimpleNamespace(system_prompt="base\n\nBOUNDARY", prompt="image")
+        section = prompt_section(
+            key="private.image_reply_boundary",
+            title="本轮图片回复边界",
+            source="private_image",
+            content="BOUNDARY",
+        )
 
         PrivateImageMixin._register_materialized_private_image_context(
             request,
-            key="private.image_reply_boundary",
+            section=section,
             marker="",
-            content="BOUNDARY",
-            title="本轮图片回复边界",
             priority=31,
         )
 

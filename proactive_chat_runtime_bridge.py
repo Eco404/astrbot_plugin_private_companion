@@ -14,6 +14,14 @@ except ImportError:
     from astrbot.api.event import MessageChain
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.platform import PlatformStatus
+from .conversation_prompt_section import (
+    ExactText,
+    PromptRenderMode,
+    PromptSection,
+    exact_text,
+    prompt_section,
+    render_prompt_sections,
+)
 from .logging_util import get_module_logger
 
 logger = get_module_logger(__name__)
@@ -344,11 +352,31 @@ class ProactiveChatRuntimeBridge:
             )
             return None
         attempt_id = "pc-deep-" + uuid.uuid4().hex
+        fragment_section = prepared.get("prompt_fragment_section")
+        if not isinstance(fragment_section, PromptSection):
+            fragment_section = prompt_section(
+                key="proactive_chat.bridge.external_fragment",
+                title="Proactive Chat 兼容提示",
+                source="proactive_chat_runtime_bridge",
+                content=exact_text(str(prepared.get("prompt_fragment") or "").strip()),
+                metadata={"wire": "legacy_external"},
+            )
+        if not isinstance(fragment_section.content, ExactText):
+            self._note_error(
+                "生成前预检返回了非精确提示片段，已回退 Proactive Chat 原链路",
+                TypeError("prompt_fragment_section must contain ExactText"),
+            )
+            return await original(session_id, *args, **kwargs)
+        fragment = render_prompt_sections(
+            [fragment_section],
+            mode=PromptRenderMode.EXACT,
+        )
         attempt = {
             "attempt_id": attempt_id,
             "session_id": str(session_id or ""),
             "token": _short(prepared.get("token"), 80),
-            "prompt_fragment": str(prepared.get("prompt_fragment") or "").strip(),
+            "prompt_fragment": fragment,
+            "prompt_fragment_section": fragment_section,
             "started_at": time.time(),
             "phase": "preparing",
             "text": "",

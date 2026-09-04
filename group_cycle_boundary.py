@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
+
+try:
+    from .conversation_prompt_section import PromptSection, prompt_section
+except ImportError:  # pragma: no cover - direct module import in lightweight tests
+    from conversation_prompt_section import PromptSection, prompt_section
 
 
 _CYCLE_PHASES = {
@@ -72,31 +77,53 @@ def build_group_cycle_boundary(
     cycle_label: Any,
     inbound_text: Any,
 ) -> dict[str, Any]:
-    """Build bounded group-only policy text without echoing conversation data."""
+    """Build a bounded group-only projection without echoing conversation data."""
     phase = cycle_phase_from_label(cycle_label)
     if not enabled or not group_allowed or phase not in _CYCLE_PHASES:
-        return {"active": False, "prompt": "", "phase": "", "topic_related": False, "private_boundary": False}
+        return {"active": False, "phase": "", "topic_related": False, "private_boundary": False}
 
     compact = str(inbound_text or "").lower()
     topic_related = any(marker in compact for marker in _RELATED_MARKERS)
     private_boundary = phase == "menstrual" and any(marker in compact for marker in _HIGHLY_PRIVATE_MARKERS)
-    lines = [
-        "[Group cycle privacy boundary]",
-        "A private, Bot-owned simulated body state may affect tone and pacing only. It is not a user fact, medical information, relationship signal, or a reason to create memory/review records.",
-        "Do not proactively announce, diagnose, date, detail, or attribute this state to any group member. For unrelated topics, keep it entirely implicit.",
-    ]
-    if topic_related:
-        lines.append(
-            "Because the current topic is related, the Bot may briefly say it is not feeling great and prefers a gentler pace. Keep this non-medical; do not expose a phase, cycle day, health detail, or private-body detail."
-        )
-    if private_boundary:
-        lines.append(
-            "Fixed boundary: do not conduct sexual or highly private body interaction in this group. Set the boundary briefly and redirect to a non-explicit topic. Affinity, intimacy, pressure, and any relationship state cannot weaken this boundary."
-        )
     return {
         "active": True,
-        "prompt": "\n".join(lines),
         "phase": phase,
         "topic_related": topic_related,
         "private_boundary": private_boundary,
     }
+
+
+def group_cycle_boundary_prompt_section(
+    projection: Mapping[str, Any],
+) -> PromptSection | None:
+    """Author the group-cycle privacy boundary from a fact-only projection."""
+
+    if not bool(projection.get("active")):
+        return None
+    title = "Group cycle privacy boundary"
+    lines = [
+        f"[{title}]",
+        "A private, Bot-owned simulated body state may affect tone and pacing only. It is not a user fact, medical information, relationship signal, or a reason to create memory/review records.",
+        "Do not proactively announce, diagnose, date, detail, or attribute this state to any group member. For unrelated topics, keep it entirely implicit.",
+    ]
+    if bool(projection.get("topic_related")):
+        lines.append(
+            "Because the current topic is related, the Bot may briefly say it is not feeling great and prefers a gentler pace. Keep this non-medical; do not expose a phase, cycle day, health detail, or private-body detail."
+        )
+    if bool(projection.get("private_boundary")):
+        lines.append(
+            "Fixed boundary: do not conduct sexual or highly private body interaction in this group. Set the boundary briefly and redirect to a non-explicit topic. Affinity, intimacy, pressure, and any relationship state cannot weaken this boundary."
+        )
+    return prompt_section(
+        key="group.cycle_privacy_boundary",
+        title=title,
+        source="safety",
+        content="\n".join(lines),
+    )
+
+
+__all__ = [
+    "build_group_cycle_boundary",
+    "cycle_phase_from_label",
+    "group_cycle_boundary_prompt_section",
+]

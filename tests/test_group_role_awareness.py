@@ -130,7 +130,14 @@ class GroupRoleAwarenessTests(unittest.IsolatedAsyncioTestCase):
         )
 
         prompt = harness._format_group_role_context_for_prompt(group, "user-1", "谁是群主和管理员？")
+        section = harness._format_group_role_context_prompt_section(
+            group,
+            "user-1",
+            "谁是群主和管理员？",
+        )
 
+        self.assertEqual("group.role_context", section.key)
+        self.assertEqual("group_observation", section.source)
         self.assertIn("Bot 在本群身份：普通成员", prompt)
         self.assertIn("群主甲[QQ:owner-1]", prompt)
         self.assertIn("管理甲[QQ:admin-1]", prompt)

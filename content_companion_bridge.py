@@ -12,6 +12,12 @@ from typing import Any
 from astrbot.api import logger
 
 from .creative import _persona_provider_id
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    exact_text,
+    prompt_section,
+    render_prompt_sections,
+)
 from .helpers import _safe_float, _single_line
 from .external_bridge_resolver import (
     invalidate_external_bridge_cache,
@@ -262,8 +268,17 @@ class _ContentStoryModelBudget:
         caller = getattr(self._owner, "_llm_call", None)
         if not provider_id or not callable(caller):
             return None
+        external_prompt = prompt_section(
+            key=f"external.content_companion.{provider_role}",
+            title="Content Companion 外部任务",
+            source="content_companion",
+            content=exact_text(prompt),
+        )
         return await caller(
-            prompt,
+            render_prompt_sections(
+                [external_prompt],
+                mode=PromptRenderMode.EXACT,
+            ),
             max_tokens=max_tokens,
             provider_id=provider_id,
             task=provider_role,

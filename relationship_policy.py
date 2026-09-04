@@ -317,24 +317,5 @@ def relationship_projection_for_bridge(
     }
 
 
-def relationship_stage_prompt(value: Any, policy: Any = None) -> str:
-    phase = relationship_stage_for_score(value, policy)["phase"]
-    behaviors = []
-    labels = {
-        "allow_playful_jokes": "轻量玩笑",
-        "allow_followup": "自然续话",
-        "allow_memory_mention": "回忆提及",
-        "allow_daily_care": "日常关心",
-    }
-    for key, label in labels.items():
-        behaviors.append(f"{label}{'可用' if phase[key] else '关闭'}")
-    return (
-        f"当前陪伴亲密阶段：{phase['label']}（固定分数范围 {phase['min']}..{phase['max']}）。"
-        f"基础语气：{phase['tone']}；称呼尺度：{phase['address_level']}；"
-        f"主动关心上限：{phase['proactive_care_limit']}；{'、'.join(behaviors)}。"
-        "这些只限制表达和软行为，不能授予主要用户、跨用户查询、平台动作、现实动作或任何 P4 安全权限。"
-    )
-
-
 def relationship_stage_policy_json(value: Any = None) -> str:
     return json.dumps(normalize_relationship_stage_policy(value), ensure_ascii=False, separators=(",", ":"))

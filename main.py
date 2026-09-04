@@ -31,7 +31,7 @@ from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 from xml.etree import ElementTree as ET
 
@@ -237,13 +237,20 @@ from .story_authority import (
     story_legacy_sync_operation,
 )
 from .story_handoff import resume_story_handoff
-from .domains.affect.reply_temperature import compose_reply_temperature
+from .domains.affect.reply_temperature import (
+    compose_reply_temperature,
+    reply_temperature_prompt_section,
+)
 from .plugin_identity import (
     PLUGIN_ID,
     is_module_path_for_package,
 )
 from .lab_fixture_adapter import register_companion_lab_fixture_adapter
-from .companion_interaction_expression import build_expression_decision, content_intent_from_text, expression_decision_prompt
+from .companion_interaction_expression import (
+    build_expression_decision,
+    content_intent_from_text,
+    expression_decision_prompt_section,
+)
 from .photo_reference_catalog import CATALOG_VERSION, load_catalog, validate_and_serialize
 from .relationship_ledger import normalize_relationship_positive_stage_cap_key
 from .relationship_policy import normalize_relationship_stage_policy
@@ -330,7 +337,13 @@ from .conversation_injection_plan import (
     get_conversation_injection_plan,
 )
 from .conversation_prompt_section import (
+    ExactText,
+    PromptRenderMode,
+    PromptSection,
     coerce_prompt_section,
+    exact_text,
+    legacy_heading_token,
+    prompt_cdata,
     prompt_section,
     render_prompt_sections,
 )
@@ -363,7 +376,10 @@ from .external_bridge_resolver import invalidate_external_bridge_cache
 from .proactive import ProactiveMixin
 from .group_wakeup import GroupWakeupMixin
 from .group_observation import GroupObservationMixin
-from .group_cycle_boundary import build_group_cycle_boundary
+from .group_cycle_boundary import (
+    build_group_cycle_boundary,
+    group_cycle_boundary_prompt_section,
+)
 try:
     from .group_member_safety import GroupMemberSafetyMixin
 except ModuleNotFoundError as exc:
@@ -4286,6 +4302,28 @@ class PrivateCompanionPlugin(
         if integration is None:
             return ""
         return integration.format_health_prompt(user, reason=reason)
+
+    def _format_body_monitor_health_prompt_section(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str = "",
+    ) -> PromptSection | None:
+        integration = getattr(self, "_body_monitor_integration", None)
+        if integration is None:
+            return None
+        builder = getattr(integration, "format_health_prompt_section", None)
+        if callable(builder):
+            return builder(user, reason=reason)
+        legacy = integration.format_health_prompt(user, reason=reason)
+        if not legacy:
+            return None
+        return prompt_section(
+            key="health.care_hint",
+            title="身体状态关心线索",
+            source="body_monitor",
+            content=legacy,
+        )
 
     def plugin_identity_status(self) -> dict[str, Any]:
         return dict(self.plugin_identity)
@@ -8746,15 +8784,33 @@ class PrivateCompanionPlugin(
 
     async def _reactive_poke_call_llm(self, event: AstrMessageEvent, prompt: str) -> str | None:
         """调用 LLM 生成被动戳一戳回复，复用统一 LLM 通道（token 预算/超时/回退）。"""
+        user_section = prompt_section(
+            key="background.reactive_poke.user_prompt",
+            title="戳一戳回复任务",
+            source="user_config",
+            content=exact_text(str(prompt or "").strip()),
+        )
+        system_section = prompt_section(
+            key="background.reactive_poke.system",
+            title="戳一戳回复边界",
+            source="main",
+            content=(
+                "你是一位正在陪伴用户的 AI 角色。用户刚戳了戳你，请按当前人格"
+                "只回复一句自然、简短、符合语气的回应。不要输出 JSON、Markdown、"
+                "XML 标签、占位符或任何解释。"
+            ),
+        )
         try:
             return await self._llm_call(
-                str(prompt or "").strip(),
+                render_prompt_sections(
+                    [user_section],
+                    mode=PromptRenderMode.BODY_ONLY,
+                ),
                 max_tokens=120,
                 task="reactive_poke_reply",
-                system_prompt=(
-                    "你是一位正在陪伴用户的 AI 角色。用户刚戳了戳你，请按当前人格"
-                    "只回复一句自然、简短、符合语气的回应。不要输出 JSON、Markdown、"
-                    "XML 标签、占位符或任何解释。"
+                system_prompt=render_prompt_sections(
+                    [system_section],
+                    mode=PromptRenderMode.BODY_ONLY,
                 ),
                 timeout_key="reactive_poke",
                 timeout_seconds=15.0,
@@ -10841,37 +10897,65 @@ class PrivateCompanionPlugin(
             else ""
         )
         wakeup = group.get("last_group_wakeup") if isinstance(group.get("last_group_wakeup"), dict) else {}
-        prompt = f"""
-判断这条群聊回复是否应该在发送前拦截。
-
-只输出 JSON 对象，不要解释。
-
-可选 decision：
-- send：确实是在自然回答群里的公共求助/开放问题，可以发送。
-- drop：像 Bot 碰瓷插话，或问题明显是在接群友的话、问别人、吐槽/反问，不该发送。
-
-判断标准：
-- 没有明确 @ Bot 或引用 Bot 时，要更保守。
-- 如果触发句只是“为什么/啥情况/怎么回事/不会吧？”这类接话、吐槽、反问，通常 drop。
-- 如果是“有没有人懂/谁会/求问/报错/怎么解决/帮忙”这类公共求助，通常 send。
-- 如果待发送内容虽然正确，但当前群聊并不需要 Bot 插入，也应 drop。
-
-【本轮群唤醒】
-trigger={_single_line(scene.get('trigger'), 40)} reason={_single_line(scene.get('reason'), 60)}
-wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.get('score'), 20)}/{_single_line(wakeup.get('threshold'), 20)} detail={_single_line(wakeup.get('reason_detail'), 160)}
-
-【真实最近群聊】
-{recent_flow or "（无）"}
-
-【触发消息】
-{inbound_text}
-
-【待发送回复】
-{_single_line(reply_text, 360)}
-
-请输出：
-{{"decision":"send|drop","reason":"一句很短的原因"}}
-""".strip()
+        intro_section = prompt_section(
+            key="background.group_question_wakeup_review.intro",
+            title="群唤醒回复发送前复核",
+            source="main",
+            content=(
+                "判断这条群聊回复是否应该在发送前拦截。\n\n"
+                "只输出 JSON 对象，不要解释。\n\n"
+                "可选 decision：\n"
+                "- send：确实是在自然回答群里的公共求助/开放问题，可以发送。\n"
+                "- drop：像 Bot 碰瓷插话，或问题明显是在接群友的话、问别人、吐槽/反问，不该发送。\n\n"
+                "判断标准：\n"
+                "- 没有明确 @ Bot 或引用 Bot 时，要更保守。\n"
+                "- 如果触发句只是“为什么/啥情况/怎么回事/不会吧？”这类接话、吐槽、反问，通常 drop。\n"
+                "- 如果是“有没有人懂/谁会/求问/报错/怎么解决/帮忙”这类公共求助，通常 send。\n"
+                "- 如果待发送内容虽然正确，但当前群聊并不需要 Bot 插入，也应 drop。"
+            ),
+        )
+        context_sections = [
+            prompt_section(
+                key="background.group_question_wakeup_review.wakeup",
+                title="本轮群唤醒",
+                source="main",
+                content=(
+                    f"trigger={_single_line(scene.get('trigger'), 40)} reason={_single_line(scene.get('reason'), 60)}\n"
+                    f"wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.get('score'), 20)}/{_single_line(wakeup.get('threshold'), 20)} detail={_single_line(wakeup.get('reason_detail'), 160)}"
+                ),
+            ),
+            prompt_section(
+                key="background.group_question_wakeup_review.history",
+                title="真实最近群聊",
+                source="main",
+                content=recent_flow or "（无）",
+            ),
+            prompt_section(
+                key="background.group_question_wakeup_review.trigger",
+                title="触发消息",
+                source="main",
+                content=inbound_text,
+            ),
+            prompt_section(
+                key="background.group_question_wakeup_review.reply",
+                title="待发送回复",
+                source="main",
+                content=_single_line(reply_text, 360),
+            ),
+        ]
+        output_section = prompt_section(
+            key="background.group_question_wakeup_review.output",
+            title="输出契约",
+            source="main",
+            content='请输出：\n{"decision":"send|drop","reason":"一句很短的原因"}',
+        )
+        prompt = "\n\n".join(
+            (
+                render_prompt_sections([intro_section], mode=PromptRenderMode.BODY_ONLY),
+                render_prompt_sections(context_sections, mode=PromptRenderMode.LEGACY_BLOCK),
+                render_prompt_sections([output_section], mode=PromptRenderMode.BODY_ONLY),
+            )
+        )
         started = time.perf_counter()
         raw = await self._llm_call(
             prompt,
@@ -11505,6 +11589,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             flags=re.IGNORECASE,
         )
 
+    def _llm_controlled_segmenting_prompt_section(self) -> PromptSection:
+        return prompt_section(
+            key="reply.segmentation",
+            title="回复分段控制",
+            source="segmented_reply",
+            content=prompt_cdata(self._llm_controlled_segmenting_prompt()),
+        )
+
     @filter.on_llm_request(priority=-253000)
     @_multi_persona_event_context
     async def inject_llm_controlled_segmenting_instruction(
@@ -11522,34 +11614,20 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         marker = "<!-- private_companion_reply_segmentation_v1 -->"
         if self._request_has_managed_prompt_marker(req, marker):
             return
-        # CDATA keeps the fixed transport marker byte-for-byte visible while
-        # remaining valid XML. A normal XML text node would serialize '<' as
-        # entities, making exact-copy behavior less reliable for some models.
-        content = (
-            '<private_companion_context><section title="回复分段控制"><![CDATA['
-            + self._llm_controlled_segmenting_prompt().replace("]]>", "]]]]><![CDATA[>")
-            + "]]></section></private_companion_context>"
-        )
+        section = self._llm_controlled_segmenting_prompt_section()
         placement = "prompt" if self._append_turn_prompt_fragment_by_position(
             req,
             marker,
-            content,
-            title="回复分段控制",
+            section,
             priority=90,
-            source="segmented_reply",
-            structured=True,
         ) else "system_prompt"
         if placement == "system_prompt":
             self._materialize_conversation_system_block(
                 req,
-                key="reply.segmentation",
+                section=section,
                 marker=marker,
-                content=content,
-                title="回复分段控制",
                 priority=90,
-                source="segmented_reply",
                 placement=PLACEMENT_DYNAMIC_SYSTEM,
-                structured=True,
             )
 
     def _split_llm_controlled_text_for_event(
@@ -13199,15 +13277,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         environment_section = await self._format_environment_perception_prompt_section(event)
         environment_injection = str(environment_section.get("content") or "")
         if environment_injection:
-            placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+            placement = self._place_conversation_prompt_section(
                 req,
                 marker,
-                environment_injection,
-                title=str(environment_section.get("title") or "环境感知"),
+                environment_section,
                 priority=30,
-                source="environment",
-            ) else "system_prompt"
-            if placement == "system_prompt":
+            )
+            if placement == "none":
+                placement = "system_prompt"
                 req.system_prompt = f"{current_prompt}\n\n{marker}\n{environment_injection}".strip()
             await self._record_request_prompt_fragment(
                 event,
@@ -13253,9 +13330,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
         return text[:max_chars].strip()
 
-    def _format_persona_voice_channel_prompt(self, channel: str, *, include_heading: bool = True) -> str:
+    def _format_persona_voice_channel_prompt_section(
+        self,
+        channel: str,
+    ) -> PromptSection | None:
         if not bool(runtime_persona_setting(self, 'enable_persona_voice_channels', True)):
-            return ""
+            return None
         channel = str(channel or "").strip().lower()
         specs = {
             "conversation": (
@@ -13290,64 +13370,114 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             max_chars=1400,
         )
         if not text:
-            return ""
+            return None
         body = f"{text}\n使用边界：{note}"
-        return f"【人格标准化：{label}】\n{body}" if include_heading else body
+        return prompt_section(
+            key=f"persona.voice.{channel or 'default'}",
+            title=f"人格标准化：{label}",
+            source="persona_voice",
+            content=body,
+        )
 
-    def _format_proactive_voice_prompt(self) -> str:
-        parts: list[str] = []
+    def _format_persona_voice_channel_prompt(
+        self,
+        channel: str,
+    ) -> str:
+        section = self._format_persona_voice_channel_prompt_section(channel)
+        if section is None:
+            return ""
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LEGACY_BLOCK,
+        )
+
+    def _format_proactive_voice_prompt_sections(self) -> list[PromptSection]:
+        sections: list[PromptSection] = []
         base = self._normalize_persona_voice_text(runtime_persona_setting(self, 'reply_style_prompt', ""), max_chars=900)
         if base:
-            parts.append(
-                "【主动消息基础表达约束】\n"
-                f"{base}\n"
-                "这里只保留句数、口语化和简洁度等通用约束；不要把普通被动接话方式直接当成主动开口。"
+            sections.append(
+                prompt_section(
+                    key="proactive.base_voice",
+                    title="主动消息基础表达约束",
+                    source="persona_voice",
+                    content=(
+                        f"{base}\n"
+                        "这里只保留句数、口语化和简洁度等通用约束；不要把普通被动接话方式直接当成主动开口。"
+                    ),
+                )
             )
-        proactive = self._format_persona_voice_channel_prompt("proactive")
-        if proactive:
-            parts.append(proactive)
-        conversation = self._format_persona_voice_channel_prompt("conversation")
-        if conversation and not proactive:
-            parts.append(
-                conversation
-                + "\n补充边界：当前没有单独配置主动开口风格,因此只把对话风格作为轻量回退；仍必须围绕主动由头自然开口。"
+        proactive = self._format_persona_voice_channel_prompt_section("proactive")
+        if proactive is not None:
+            sections.append(proactive)
+        conversation = self._format_persona_voice_channel_prompt_section("conversation")
+        if conversation is not None and proactive is None:
+            sections.append(
+                prompt_section(
+                    key=conversation.key,
+                    title=conversation.title,
+                    source=conversation.source,
+                    content=(
+                        f"{conversation.content}\n"
+                        "补充边界：当前没有单独配置主动开口风格,因此只把对话风格作为轻量回退；仍必须围绕主动由头自然开口。"
+                    ),
+                    metadata=conversation.metadata,
+                )
             )
-        return "\n\n".join(part for part in parts if part).strip()
+        return sections
 
-    def _format_reply_style_prompt(self, *, include_heading: bool = True) -> str:
+    def _format_proactive_voice_prompt(self) -> str:
+        return render_prompt_sections(
+            self._format_proactive_voice_prompt_sections(),
+            mode=PromptRenderMode.LEGACY_BLOCK,
+        )
+
+    def _format_reply_style_prompt_section(self) -> PromptSection:
         text = str(runtime_persona_setting(self, 'reply_style_prompt', "") or "").strip()
-        persona_voice = self._format_persona_voice_channel_prompt(
-            "conversation",
-            include_heading=include_heading,
+        persona_voice_section = self._format_persona_voice_channel_prompt_section("conversation")
+        persona_voice = (
+            render_prompt_sections(
+                [persona_voice_section],
+                mode=PromptRenderMode.BODY_ONLY,
+            )
+            if persona_voice_section is not None
+            else ""
         )
         if not text and not persona_voice:
-            return ""
+            return prompt_section(
+                key="reply.style",
+                title="回复风格约束",
+                source="reply_style",
+                content="",
+            )
         text = self._normalize_persona_voice_text(text)
         parts: list[str] = []
         if text:
             parts.append(text)
         if persona_voice:
             parts.append(persona_voice)
-        return (
-            ("【回复风格约束】\n" if include_heading else "")
-            + "\n\n".join(parts)
+        return prompt_section(
+            key="reply.style",
+            title="回复风格约束",
+            source="reply_style",
+            content=(
+                "\n\n".join(parts)
             + "\n这些规则用于普通聊天的表达节奏；如果当前问题确实需要排障、教程、代码说明、复杂解释或用户明确要求详细说明，可以优先保证信息完整。"
             + "\n无论工具或模型返回什么内容，外发正文都不要照抄英文报错、内容策略提示、政策链接或内部诊断；遇到这类结果时，用当前人格的一句简短中文说明，再自然收住或邀请用户换一种说法。"
+            ),
         )
 
-    def _format_reply_style_prompt_section(self) -> dict[str, Any]:
-        return prompt_section(
-            "回复风格约束",
-            self._format_reply_style_prompt(include_heading=False),
+    def _format_reply_style_prompt(self) -> str:
+        section = self._format_reply_style_prompt_section()
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LEGACY_BLOCK,
         )
 
     @staticmethod
-    def _format_technical_reasoning_prompt(
+    def _format_technical_reasoning_prompt_section(
         event: AstrMessageEvent | None,
         req: ProviderRequest | None = None,
-        *,
-        include_heading: bool = True,
-    ) -> str:
+    ) -> PromptSection | None:
         text = "\n".join(
             part
             for part in (
@@ -13358,22 +13488,38 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         )
         compact = re.sub(r"\s+", "", text).lower()
         if not compact:
-            return ""
+            return None
         technical_markers = (
             "代码", "源码", "脚本", "python", "sleep(", "报错", "日志", "执行结果",
             "计算", "公式", "换算", "单位", "耗时", "延迟", "超时", "秒", "分钟", "小时",
         )
         if not any(marker in compact for marker in technical_markers):
+            return None
+        return prompt_section(
+            key="reply.technical_accuracy",
+            title="技术解释准确性",
+            source="reply_style",
+            content=(
+                "解释代码、公式、日志耗时或单位换算时，先逐项读取用户给出的原表达式和原始数值，写清每个量的单位；"
+                "先统一换算到同一种基本单位，再换算成用户需要的展示单位，并用一次反向换算复核。"
+                "严格区分配置/代码要求的时长、程序实际运行耗时、日志记录值和界面格式化后的显示值，不要把它们当成同一个量。\n"
+                "不得引入源码、日志或用户材料中没有出现的运算、常数、倍率、对数或所谓解释器规则来凑结果；"
+                "尤其不能凭空加入 ln、log、指数或除法。如果结果与原表达式不一致，明确指出缺少哪段真实代码或日志，不要虚构原因。\n"
+                "例如 `time.sleep(10 * 60)` 的参数是 600 秒，也就是 10 分钟；除非真实代码另有运算，不能解释成 4.35 分钟。"
+            ),
+        )
+
+    @staticmethod
+    def _format_technical_reasoning_prompt(
+        event: AstrMessageEvent | None,
+        req: ProviderRequest | None = None,
+    ) -> str:
+        section = PrivateCompanionPlugin._format_technical_reasoning_prompt_section(event, req)
+        if section is None:
             return ""
-        return (
-            ("【技术解释准确性】\n" if include_heading else "")
-            +
-            "解释代码、公式、日志耗时或单位换算时，先逐项读取用户给出的原表达式和原始数值，写清每个量的单位；"
-            "先统一换算到同一种基本单位，再换算成用户需要的展示单位，并用一次反向换算复核。"
-            "严格区分配置/代码要求的时长、程序实际运行耗时、日志记录值和界面格式化后的显示值，不要把它们当成同一个量。\n"
-            "不得引入源码、日志或用户材料中没有出现的运算、常数、倍率、对数或所谓解释器规则来凑结果；"
-            "尤其不能凭空加入 ln、log、指数或除法。如果结果与原表达式不一致，明确指出缺少哪段真实代码或日志，不要虚构原因。\n"
-            "例如 `time.sleep(10 * 60)` 的参数是 600 秒，也就是 10 分钟；除非真实代码另有运算，不能解释成 4.35 分钟。"
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LEGACY_BLOCK,
         )
 
     async def _append_reply_style_to_request(
@@ -13385,13 +13531,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         priority: int = 12,
     ) -> None:
         sections = [self._format_reply_style_prompt_section()]
-        technical_prompt = self._format_technical_reasoning_prompt(
+        technical_section = self._format_technical_reasoning_prompt_section(
             event,
             req,
-            include_heading=False,
         )
-        if technical_prompt:
-            sections.append(prompt_section("技术解释准确性", technical_prompt))
+        if technical_section is not None:
+            sections.append(technical_section)
         combined_prompt = render_prompt_sections(sections)
         if not combined_prompt:
             return
@@ -13400,16 +13545,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         if marker in current_prompt or marker in current_turn_prompt:
             return
-        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+        batch_section = prompt_section(
+            key="reply.style.batch",
+            title="回复风格约束",
+            source="reply_style",
+            content="",
+            children=sections,
+        )
+        placement = self._place_conversation_prompt_section(
             req,
             marker,
-            combined_prompt,
-            title="回复风格约束",
+            batch_section,
             priority=priority,
-            source="reply_style",
-            structured=True,
-        ) else "system_prompt"
-        if placement == "system_prompt":
+        )
+        if placement == "none":
+            placement = "system_prompt"
             req.system_prompt = f"{current_prompt}\n\n{marker}\n{combined_prompt}".strip()
         await self._record_request_prompt_fragment(
             event,
@@ -13440,50 +13590,63 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             compact = compact[:max_chars].rstrip() + "\n...已截断高强度背景"
         return compact
 
-    def _format_group_high_intensity_reply_guard(
+    def _format_group_high_intensity_reply_guard_section(
         self,
         event: AstrMessageEvent | None = None,
-        *,
-        include_heading: bool = True,
-    ) -> str:
+    ) -> PromptSection | None:
         high_intensity = getattr(event, "private_companion_group_high_intensity", None) if event is not None else None
         if not isinstance(high_intensity, dict) or not high_intensity.get("active"):
-            return ""
+            return None
         lines = [
                 "当前群聊处于高强度/合并收口状态，本轮只抓一个重点短句接住即可。",
                 "必须优先服从 AstrBot 人格、系统提示和回复风格配置里的字数、句数、口吻、语言和表达节奏要求；用户在这些配置里写了什么，就按对应要求回复。",
                 "如果配置要求很短，就不要因为高强度背景而扩写；如果配置要求口语、简体中文、少句数或特定风格，也要继续保持。",
                 "不要因为关系网、状态、记忆或合并消息而扩写、复述背景、逐条总结；一般 1 句，能少字就少字。",
         ]
-        if include_heading:
-            lines.insert(0, "【群聊高强度短回复护栏】")
-        return "\n".join(lines)
+        return prompt_section(
+            key="group.high_intensity.reply_guard",
+            title="群聊高强度短回复护栏",
+            source="group_high_intensity",
+            content="\n".join(lines),
+        )
+
+    def _format_group_high_intensity_reply_guard(
+        self,
+        event: AstrMessageEvent | None = None,
+    ) -> str:
+        section = self._format_group_high_intensity_reply_guard_section(event)
+        if section is None:
+            return ""
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LEGACY_BLOCK,
+        )
 
     async def _append_group_high_intensity_reply_guard_to_request(
         self,
         event: AstrMessageEvent,
         req: ProviderRequest,
     ) -> None:
-        guard_text = self._format_group_high_intensity_reply_guard(
-            event,
-            include_heading=False,
-        )
-        if not guard_text:
+        guard_section = self._format_group_high_intensity_reply_guard_section(event)
+        if guard_section is None:
             return
+        guard_text = render_prompt_sections(
+            [guard_section],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
         marker = "<!-- private_companion_group_high_intensity_reply_guard_v1 -->"
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         if marker in current_prompt or marker in current_turn_prompt:
             return
-        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+        placement = self._place_conversation_prompt_section(
             req,
             marker,
-            guard_text,
-            title="群聊高强度短回复护栏",
+            guard_section,
             priority=11,
-            source="group_high_intensity",
-        ) else "system_prompt"
-        if placement == "system_prompt":
+        )
+        if placement == "none":
+            placement = "system_prompt"
             req.system_prompt = f"{current_prompt}\n\n{marker}\n{guard_text}".strip()
         await self._record_request_prompt_fragment(
             event,
@@ -13951,54 +14114,74 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             int(match.group(3) or 0),
         )
 
-    def _append_turn_prompt_fragment_by_position(
+    def _place_conversation_prompt_section(
         self,
         req: ProviderRequest,
         marker: str,
-        text: str,
+        section: PromptSection,
         *,
         priority: int = 50,
-        source: str = "",
-        title: str = "",
         force_dynamic: bool = False,
-        opaque: bool = False,
-        structured: bool = False,
-    ) -> bool:
-        position = self._normalize_passive_injection_position(runtime_persona_setting(self, 'passive_injection_position', "prompt"))
-        content = str(text or "").strip()
-        if not content:
-            return False
-        try:
-            marker = _single_line(marker, 120) or "<!-- private_companion_turn_fragment -->"
-            if self._request_has_managed_prompt_marker(req, marker):
-                return True
-            plan = get_conversation_injection_plan(req)
-            if plan is None:
-                return False
+    ) -> str:
+        """Place one authored section and render it exactly once through the plan."""
+
+        if not isinstance(section, PromptSection):
+            raise TypeError("conversation prompt placement requires PromptSection")
+        position = self._normalize_passive_injection_position(
+            runtime_persona_setting(self, "passive_injection_position", "prompt")
+        )
+        marker = _single_line(marker, 120) or "<!-- private_companion_turn_fragment -->"
+        plan = get_conversation_injection_plan(req)
+        if plan is None:
+            return "none"
+        if not plan.contains_marker(marker):
             use_system_prompt = position == "system_prompt" and not force_dynamic
             plan.add(
+                section=section,
                 marker=marker,
-                content=content,
                 priority=int(priority),
-                source=_single_line(source, 80),
-                title=_single_line(title, 80),
                 placement=(
-                    PLACEMENT_TOOL_CONTRACT
-                    if opaque and use_system_prompt
-                    else PLACEMENT_DYNAMIC_SYSTEM
+                    PLACEMENT_DYNAMIC_SYSTEM
                     if use_system_prompt
                     else PLACEMENT_TURN_TAIL
                 ),
                 temporary=not use_system_prompt,
-                materialized=use_system_prompt,
-                opaque=opaque,
-                structured=structured,
+                materialized=False,
             )
-            setattr(req, "_private_companion_turn_prompt_fragments", plan.legacy_turn_fragments())
-            if use_system_prompt:
-                return False
-            plan.render_into(req, prefer_extra_user_content=True)
-            return True
+        setattr(req, "_private_companion_turn_prompt_fragments", plan.legacy_turn_fragments())
+        plan.render_into(req, prefer_extra_user_content=True)
+        if position == "system_prompt" and not force_dynamic:
+            return "system_prompt"
+        return _single_line(
+            getattr(req, "_private_companion_turn_prompt_placement", "prompt"),
+            40,
+        ) or "prompt"
+
+    def _append_turn_prompt_fragment_by_position(
+        self,
+        req: ProviderRequest,
+        marker: str,
+        section: PromptSection,
+        *,
+        priority: int = 50,
+        force_dynamic: bool = False,
+    ) -> bool:
+        if not isinstance(section, PromptSection):
+            raise TypeError("turn prompt fragment requires PromptSection")
+        if (
+            section.content is None
+            or (isinstance(section.content, str) and not section.content.strip())
+        ) and not section.children:
+            return False
+        try:
+            placement = self._place_conversation_prompt_section(
+                req,
+                marker,
+                section,
+                priority=priority,
+                force_dynamic=force_dynamic,
+            )
+            return placement not in {"none", "system_prompt"}
         except Exception as exc:
             logger.debug("指定位置 prompt 注入失败,回退 system_prompt: %s", _single_line(exc, 120))
             return False
@@ -14007,54 +14190,32 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         self,
         req: ProviderRequest,
         *,
-        key: str,
-        marker: str,
-        content: Any,
+        section: PromptSection,
+        marker: str = "",
         priority: int = 50,
-        source: str = "",
-        title: str = "",
         placement: str = PLACEMENT_DYNAMIC_SYSTEM,
-        opaque: bool = False,
-        structured: bool = False,
         metadata: dict[str, Any] | None = None,
     ) -> bool:
-        """Register and append a legacy system block without changing its wire shape."""
+        """Materialize one authored system section without changing its wire shape."""
+        if not isinstance(section, PromptSection):
+            raise TypeError("conversation system block requires PromptSection")
+        visible_content = render_prompt_sections(
+            [section],
+            mode=(
+                PromptRenderMode.EXACT
+                if isinstance(section.content, ExactText)
+                else PromptRenderMode.CONVERSATION_XML
+            ),
+        )
         plan = get_conversation_injection_plan(req)
         if plan is not None:
-            if opaque:
-                rendered = f"{marker}\n{str(content or '').strip()}".strip()
-                current = str(getattr(req, "system_prompt", "") or "")
-                if marker not in current:
-                    req.system_prompt = f"{current}\n\n{rendered}".strip() if current else rendered
-                try:
-                    return plan.add(
-                        key=key,
-                        marker=marker,
-                        content=content,
-                        priority=priority,
-                        source=source,
-                        title=title,
-                        placement=PLACEMENT_TOOL_CONTRACT,
-                        temporary=False,
-                        materialized=True,
-                        opaque=True,
-                        metadata=metadata,
-                    ) is not None
-                except RuntimeError as exc:
-                    if plan.frozen and marker in str(getattr(req, "system_prompt", "") or ""):
-                        return False
-                    raise exc
             try:
                 return plan.materialize_system_block(
                     req,
-                    key=key,
+                    section=section,
                     marker=marker,
-                    content=content,
                     priority=priority,
-                    source=source,
-                    title=title,
                     placement=placement,
-                    structured=structured,
                     metadata=metadata,
                 )
             except RuntimeError as exc:
@@ -14066,10 +14227,10 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 current = str(getattr(req, "system_prompt", "") or "")
                 if marker in current:
                     return False
-                rendered = f"{marker}\n{str(content or '').strip()}".strip()
+                rendered = f"{marker}\n{visible_content}".strip()
                 req.system_prompt = f"{current}\n\n{rendered}".strip() if current else rendered
                 return True
-        rendered = f"{marker}\n{str(content or '').strip()}".strip()
+        rendered = f"{marker}\n{visible_content}".strip()
         current = str(getattr(req, "system_prompt", "") or "")
         req.system_prompt = f"{current}\n\n{rendered}".strip() if current else rendered
         return True
@@ -14485,6 +14646,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         mode: str = "",
         priority: int = 50,
         metadata: dict[str, Any] | None = None,
+        section_manifest: list[PromptSection] | tuple[PromptSection, ...] | None = None,
     ) -> None:
         recorder = getattr(self, "_record_prompt_injection_snapshot", None)
         content = str(text or "").strip()
@@ -14499,15 +14661,20 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             trace_id=self._prompt_injection_trace_id_for_event(event),
             message_preview=self._prompt_injection_message_preview_for_event(event),
             sender_label=self._prompt_injection_sender_label_for_event(event),
-            modules=[
-                {
-                    "key": key,
-                    "source": source,
-                    "priority": priority,
-                    "content": content,
-                    "chars": len(content),
-                }
-            ],
+            section_manifest=(
+                section_manifest
+                if section_manifest is not None
+                else [
+                    {
+                        "key": key,
+                        "title": title,
+                        "source": source,
+                        "priority": priority,
+                        "content": content,
+                        "chars": len(content),
+                    }
+                ]
+            ),
             metadata={
                 **(metadata or {}),
                 "会话": _single_line(getattr(event, "unified_msg_origin", ""), 160) or "unknown",
@@ -14532,30 +14699,64 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             result = func()
             if asyncio.iscoroutine(result):
                 result = await asyncio.wait_for(result, timeout=timeout)
-            sections = []
+            sections: list[PromptSection] = []
             if isinstance(result, (list, tuple)):
                 for raw_section in result:
                     resolved_section = coerce_prompt_section(raw_section)
                     if resolved_section is None:
                         continue
-                    section_content = str(resolved_section.content or "").strip()
+                    section_content = render_prompt_sections(
+                        [resolved_section],
+                        mode=PromptRenderMode.BODY_ONLY,
+                    ).strip()
                     if section_content:
                         sections.append(
-                            {
-                                "title": resolved_section.title,
-                                "content": section_content,
-                            }
+                            prompt_section(
+                                key=resolved_section.key or f"{key}.{len(sections)}",
+                                title=resolved_section.title or title,
+                                source=resolved_section.source or source,
+                                content=resolved_section.content,
+                                children=resolved_section.children,
+                                metadata={**dict(resolved_section.metadata), **metadata},
+                            )
                         )
             section = coerce_prompt_section(result)
             if section is not None:
-                title = section.title
-                content = str(section.content or "").strip()
+                content = render_prompt_sections(
+                    [section],
+                    mode=PromptRenderMode.BODY_ONLY,
+                ).strip()
+                if content:
+                    sections = [
+                        prompt_section(
+                            key=section.key or key,
+                            title=section.title or title,
+                            source=section.source or source,
+                            content=section.content,
+                            children=section.children,
+                            metadata={**dict(section.metadata), **metadata},
+                        )
+                    ]
             elif sections:
                 content = "\n\n".join(
-                    str(item.get("content") or "") for item in sections
+                    render_prompt_sections(
+                        [item],
+                        mode=PromptRenderMode.BODY_ONLY,
+                    )
+                    for item in sections
                 )
             else:
                 content = str(result or "").strip()
+                if content:
+                    sections = [
+                        prompt_section(
+                            key=key,
+                            title=title,
+                            source=source,
+                            content=content,
+                            metadata=metadata,
+                        )
+                    ]
             elapsed_ms = int((time.time() - started) * 1000)
             metadata.update(
                 {
@@ -14625,34 +14826,40 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return collected
 
     def _add_collected_prompt_contexts(self, prompt_surface: PromptSurface, collected: list[dict[str, Any]]) -> None:
-        for item in collected:
+        for item_index, item in enumerate(collected):
             if not isinstance(item, dict):
                 continue
             sections = item.get("sections")
             if isinstance(sections, list) and sections:
                 for index, raw_section in enumerate(sections):
                     section = coerce_prompt_section(raw_section)
-                    if section is None or not str(section.content or "").strip():
+                    if section is None or not render_prompt_sections(
+                        [section],
+                        mode=PromptRenderMode.BODY_ONLY,
+                    ).strip():
                         continue
                     prompt_surface.add(
-                        f"{_single_line(item.get('key'), 80)}.{index}",
-                        section.content,
-                        title=section.title,
+                        section,
                         priority=_safe_int(item.get("priority"), 100, 0) + index,
-                        source=_single_line(item.get("source"), 80),
-                        metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
                     )
                 continue
             content = str(item.get("content") or "").strip()
             if not content:
                 continue
             prompt_surface.add(
-                _single_line(item.get("key"), 80),
-                content,
-                title=_single_line(item.get("title"), 80),
+                prompt_section(
+                    key=_single_line(item.get("key"), 80)
+                    or f"collector.fragment.{item_index}",
+                    title=_single_line(item.get("title"), 80) or "提示词片段",
+                    source=_single_line(item.get("source"), 80) or "collector",
+                    content=content,
+                    metadata=(
+                        item.get("metadata")
+                        if isinstance(item.get("metadata"), dict)
+                        else {}
+                    ),
+                ),
                 priority=_safe_int(item.get("priority"), 100, 0),
-                source=_single_line(item.get("source"), 80),
-                metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
             )
 
     def _expression_profile_prompt_metadata(
@@ -14691,15 +14898,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         is_private_chat: bool,
     ) -> list[dict[str, Any]]:
         specs: list[dict[str, Any]] = []
-
-        def section_call(func: Any, *args: Any, **kwargs: Any) -> Any:
-            """Ask source formatters for a section, with legacy test/plugin fallback."""
-            try:
-                return func(*args, as_section=True, **kwargs)
-            except TypeError as exc:
-                if "as_section" not in str(exc):
-                    raise
-                return func(*args, **kwargs)
 
         def add_spec(
             key: str,
@@ -14791,13 +14989,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "私下创作近况",
             "creative",
             60,
-            lambda: self._format_hidden_creative_context_for_reply(
+            lambda: self._format_hidden_creative_context_for_reply_prompt_section(
                 inbound_text,
                 current_user,
-                as_section=True,
             ),
         )
-        add_spec("photo.recent_share", "最近一次真实图片分享", "photo", 61, lambda: section_call(self._format_recent_photo_share_snapshot_for_reply, current_user, inbound_text))
+        add_spec(
+            "photo.recent_share",
+            "最近一次真实图片分享",
+            "photo",
+            61,
+            lambda: self._format_recent_photo_share_snapshot_for_reply_prompt_section(
+                current_user,
+                inbound_text,
+            ),
+        )
         add_spec(
             "bookshelf.secret",
             "资料柜夹层",
@@ -14807,55 +15013,91 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             timeout=1.2,
         )
         add_spec("bookshelf.reading", "资料柜阅读连续性", "bookshelf", 62, lambda: self._format_bookshelf_reading_context_for_reply(inbound_text, current_user))
-        add_spec("news.recent", "新闻阅读上下文", "news", 64, lambda: section_call(self._format_recent_news_context_for_reply, inbound_text))
-        add_spec("web_exploration.recent", "主动搜索上下文", "web_exploration", 65, lambda: section_call(self._format_recent_web_exploration_context_for_reply, inbound_text))
+        add_spec(
+            "news.recent",
+            "新闻阅读上下文",
+            "news",
+            64,
+            lambda: self._format_recent_news_context_prompt_section(inbound_text),
+        )
+        add_spec(
+            "web_exploration.recent",
+            "主动搜索上下文",
+            "web_exploration",
+            65,
+            lambda: self._format_recent_web_exploration_context_prompt_section(inbound_text),
+        )
         if is_private_chat:
             add_spec(
                 "reality_touch.continuity",
                 "现实触达连续性",
                 "reality_touch",
                 69,
-                lambda: section_call(self._format_reality_touch_continuity_context, current_user),
+                lambda: self._format_reality_touch_continuity_context_prompt_section(
+                    current_user
+                ),
             )
             add_spec(
                 "reality_touch.mobile_location",
                 "用户手机位置感知",
                 "reality_touch",
                 68,
-                lambda: section_call(self._format_mobile_user_location_context, current_user),
+                lambda: self._format_mobile_user_location_context_prompt_section(
+                    current_user
+                ),
                 metadata={"范围": "当前私聊会话", "来源": "用户主动授权的手机前台定位"},
             )
         if self._feature_enabled_or_temp_unlocked("enable_skill_growth_passive_injection"):
-            add_spec("skill.growth", "能力熟悉度", "skill", 66, lambda: section_call(self._format_skill_growth_for_prompt))
+            add_spec("skill.growth", "能力熟悉度", "skill", 66, self._format_skill_growth_prompt_section)
         else:
-            add_spec("skill.growth.match", "本轮相关技能", "skill", 66, lambda: section_call(self._format_skill_growth_for_user_text, inbound_text))
+            add_spec(
+                "skill.growth.match",
+                "本轮相关技能",
+                "skill",
+                66,
+                lambda: self._format_skill_growth_for_user_text_prompt_section(inbound_text),
+            )
         if not self._memory_companion_should_defer_prompt_section("self_timeline", event, req):
-            add_spec("self.timeline", "自我时间线检索", "self_timeline", 67, lambda: self._format_self_timeline_context_for_reply(inbound_text, current_user, limit=8, include_heading=False))
+            add_spec(
+                "self.timeline",
+                "自我时间线检索",
+                "self_timeline",
+                67,
+                lambda: self._format_self_timeline_context_for_reply_section(
+                    inbound_text,
+                    current_user,
+                    limit=8,
+                ),
+            )
         if is_private_chat:
             add_spec(
                 "relationship.owner_exclusive",
                 "当前用户专属关系背景",
                 "relationship",
                 18,
-                lambda: self._format_owner_exclusive_relationship_prompt(
+                lambda: self._format_owner_exclusive_relationship_prompt_section(
                     current_user,
                     stable_user_id=current_user_id,
                     channel_scope="private",
-                    include_heading=False,
                 ),
                 metadata={"范围": "当前人格与精确私聊用户", "模式": "owner_exclusive"},
             )
         private_context_deferred = self._memory_companion_should_defer_prompt_section("private_context", event, req)
         if not private_context_deferred:
-            add_spec("private.context", "相处线索", "companion", 70, lambda: self._format_private_chat_context_injection(current_user, include_heading=False))
+            add_spec(
+                "private.context",
+                "相处线索",
+                "companion",
+                70,
+                lambda: self._format_private_chat_context_prompt_section(current_user),
+            )
         if is_private_chat and not private_context_deferred:
             add_spec(
                 "memory.private_recall",
                 "当前私聊长期记忆补充",
                 "memory_companion",
                 73,
-                lambda: section_call(
-                    self._memory_companion_compose_private_recall,
+                lambda: self._memory_companion_compose_private_recall(
                     event=event,
                     user=current_user,
                     user_id=current_user_id,
@@ -14864,10 +15106,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 timeout=min(1.4, max(0.3, _safe_float(getattr(self, "memory_companion_context_timeout_seconds", 1.2), 1.2, 0.2))),
                 metadata={"范围": "当前私聊会话", "触发": "记忆线索"},
             )
-        add_spec("companion.planner", "私聊互动补充", "companion", 80, lambda: self._format_companion_planner_injection(prompt_user, include_heading=False))
+        add_spec(
+            "companion.planner",
+            "私聊互动补充",
+            "companion",
+            80,
+            lambda: self._format_companion_planner_prompt_section(prompt_user),
+        )
         if not self._memory_companion_should_defer_prompt_section("livingmemory_guidance", event, req):
             add_spec("livingmemory.guidance", "长期记忆检索", "livingmemory", 90, lambda: self._format_livingmemory_guidance_sections(scope="private" if is_private_chat else "group"))
-        add_spec("detail.injection", "Bot 模拟当前片段", "daily_detail", 40, lambda: section_call(self._format_detail_injection))
+        add_spec("detail.injection", "Bot 模拟当前片段", "daily_detail", 40, self._format_detail_injection_prompt_section)
 
         if is_private_chat:
             expression_user_id = self._expression_private_scope_id(current_user_id)
@@ -14876,9 +15124,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 target_id=expression_user_id,
                 inbound_text=inbound_text,
                 context_owner=current_user,
-                include_heading=False,
             )
-            expression_voice = str(expression_voice_selection.get("prompt") or "")
+            expression_voice_section = expression_voice_selection.get("section")
             semantic_expression_rules = expression_voice_selection.get("rules")
             if isinstance(semantic_expression_rules, list) and semantic_expression_rules:
                 try:
@@ -14890,13 +15137,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     )
                 except Exception:
                     pass
-            if expression_voice:
+            if isinstance(expression_voice_section, PromptSection):
                 add_spec(
                     "expression.voice",
                     "已审核的表达学习规则",
                     "expression",
                     68,
-                    lambda: expression_voice,
+                    lambda: expression_voice_section,
                     metadata={"范围": "全局抽象表达底色", "目标": expression_user_id},
                 )
 
@@ -14915,7 +15162,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             async with self._data_lock:
                 timer_user = dict(self._get_user(target_user_id))
                 enabled = bool(timer_user.get("enabled"))
-            return section_call(self._format_timer_scheduling_instruction, timer_user) if enabled else ""
+            return self._format_timer_scheduling_prompt_section(timer_user) if enabled else ""
 
         add_spec("timer.scheduling", "临时预约与动作回访", "timer", 95, timer_context, timeout=0.5)
         return await self._collect_prompt_contexts_parallel(specs)
@@ -14925,15 +15172,31 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         event: AstrMessageEvent,
         *,
         lightweight: bool = False,
-        include_heading: bool = True,
     ) -> str:
+        section = await self._format_passive_environment_prompt_section(
+            event,
+            lightweight=lightweight,
+        )
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LEGACY_BLOCK,
+        )
+
+    async def _format_passive_environment_prompt_section(
+        self,
+        event: AstrMessageEvent,
+        *,
+        lightweight: bool = False,
+    ) -> PromptSection:
         if not lightweight:
-            return await self._format_environment_perception(
-                event,
-                include_heading=include_heading,
-            )
+            return await self._format_environment_perception_prompt_section(event)
         if not self._feature_enabled_or_temp_unlocked("enable_environment_perception"):
-            return ""
+            return prompt_section(
+                key="environment.lightweight",
+                title="轻量环境感知",
+                source="environment",
+                content="",
+            )
         current = self._environment_now()
         lines = [
             "这是当前消息的轻量背景边界，主要影响时间感、平台语境和回复节奏；如果用户刚好在问时间、平台或环境感受，可以按需要自然带出，没问到时就只当背景参考。",
@@ -14948,22 +15211,11 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         platform = await self._format_platform_perception(event)
         if platform:
             lines.append(f"会话：{platform}")
-        body = "\n".join(lines)
-        return f"【轻量环境感知】\n{body}" if include_heading else body
-
-    async def _format_passive_environment_prompt_section(
-        self,
-        event: AstrMessageEvent,
-        *,
-        lightweight: bool = False,
-    ) -> dict[str, Any]:
         return prompt_section(
-            "轻量环境感知" if lightweight else "环境感知",
-            await self._format_passive_environment_fragment(
-                event,
-                lightweight=lightweight,
-                include_heading=False,
-            ),
+            key="environment.lightweight",
+            title="轻量环境感知",
+            source="environment",
+            content="\n".join(lines),
         )
 
     async def _append_capability_boundary_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
@@ -14976,7 +15228,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "没有可用工具且没有实际执行结果时,不要承诺“我这就拉你/我帮你操作/我已经处理/我去修/我给你弄好”。"
             "遇到拉人、开房间、修网、重启、登录、下载、现实代办等请求,只能自然说明自己做不到实际操作,可以提醒、陪用户确认、建议对方找能操作的人,或在确有工具时调用工具后再描述结果。"
         )
-        boundary_sections = [prompt_section("能力边界", boundary)]
+        boundary_sections = [
+            prompt_section(
+                key="guard.capability_boundary",
+                title="能力边界",
+                source="guard",
+                content=boundary,
+            )
+        ]
         platform_boundary_getter = getattr(
             self,
             "_platform_capability_prompt_section",
@@ -14988,16 +15247,19 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if resolved_boundary is not None and str(resolved_boundary.content or "").strip():
                 boundary_sections.append(platform_boundary)
         boundary = render_prompt_sections(boundary_sections)
+        boundary_batch = prompt_section(
+            key="guard.capability_boundary.batch",
+            title="能力边界",
+            source="guard",
+            content="",
+            children=boundary_sections,
+        )
         self._materialize_conversation_system_block(
             req,
-            key="guard.capability_boundary",
+            section=boundary_batch,
             marker=marker,
-            content=boundary,
-            title="能力边界",
             priority=30,
-            source="guard",
             placement=PLACEMENT_DYNAMIC_SYSTEM,
-            structured=True,
         )
         await self._record_request_prompt_fragment(
             event,
@@ -15017,14 +15279,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         for index, section in enumerate(sections):
             plan.materialize_system_block(
                 req,
-                key=f"tools.media_delivery_truth.{index}",
+                section=section,
                 marker=media_truth_marker if index == 0 else "",
-                content=section,
                 priority=30 + index,
-                source="tools",
                 placement=PLACEMENT_STABLE_SYSTEM,
             )
-        media_truth_instruction = self._media_delivery_truth_instruction()
+        media_truth_instruction = render_prompt_sections(sections)
         await self._record_request_prompt_fragment(
             event,
             title="媒体发送真实性约束",
@@ -15033,12 +15293,68 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             source="tools",
             mode="always",
             metadata={"注入位置": "system_prompt"},
+            section_manifest=sections,
         )
+
+    def _place_conversation_prompt_sections(
+        self,
+        req: ProviderRequest,
+        marker: str,
+        sections: Iterable[PromptSection],
+        *,
+        key: str,
+        title: str,
+        source: str,
+        priority: int,
+    ) -> tuple[str, str, tuple[PromptSection, ...]]:
+        authored = tuple(
+            section
+            for section in sections
+            if isinstance(section, PromptSection)
+            and (
+                str(section.content or "").strip()
+                or bool(section.children)
+            )
+        )
+        if not authored:
+            return "none", "", ()
+        visible = render_prompt_sections(authored)
+        section = (
+            authored[0]
+            if len(authored) == 1
+            else prompt_section(
+                key=key,
+                title=title,
+                source=source,
+                content="",
+                children=authored,
+            )
+        )
+        placement = self._place_conversation_prompt_section(
+            req,
+            marker,
+            section,
+            priority=priority,
+        )
+        if placement == "none":
+            current = str(getattr(req, "system_prompt", "") or "")
+            rendered = f"{marker}\n{visible}".strip()
+            req.system_prompt = f"{current}\n\n{rendered}".strip() if current else rendered
+            placement = "system_prompt"
+        return placement, visible, authored
 
     async def _append_conditional_tool_instructions_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         message_text = str(getattr(event, "message_str", "") or "")
         current_prompt = req.system_prompt or ""
-        atrelay_instruction = self._atrelay_tool_instruction(include_heading=False)
+        atrelay_section = self._atrelay_tool_prompt_section()
+        atrelay_instruction = (
+            render_prompt_sections(
+                [atrelay_section],
+                mode=PromptRenderMode.BODY_ONLY,
+            )
+            if isinstance(atrelay_section, PromptSection)
+            else ""
+        )
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         atrelay_marker = "<!-- private_companion_atrelay_tools_v1 -->"
         if atrelay_instruction and atrelay_marker not in current_prompt and atrelay_marker not in current_turn_prompt:
@@ -15046,27 +15362,34 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 await self._append_atrelay_target_summary_to_request(event, req)
                 current_prompt = req.system_prompt or ""
                 current_turn_prompt = str(getattr(req, "prompt", "") or "")
-                placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+                placement, rendered_instruction, manifest = self._place_conversation_prompt_sections(
                     req,
                     atrelay_marker,
-                    atrelay_instruction,
+                    [atrelay_section],
+                    key="tools.atrelay.batch",
                     title="跨会话转述与 @ 群友工具",
-                    priority=88,
                     source="tools",
-                ) else "system_prompt"
-                if placement == "system_prompt":
-                    current_prompt = f"{current_prompt}\n\n{atrelay_marker}\n{atrelay_instruction}".strip()
-                    req.system_prompt = current_prompt
+                    priority=88,
+                )
                 await self._record_request_prompt_fragment(
                     event,
                     title="跨群转述工具注入",
                     key="tools.atrelay",
-                    text=atrelay_instruction,
+                    text=rendered_instruction,
                     source="tools",
                     mode="conditional",
                     metadata={"注入位置": placement},
+                    section_manifest=manifest,
                 )
-        relation_instruction = self._relation_lookup_instruction(include_heading=False)
+        relation_section = self._relation_lookup_prompt_section()
+        relation_instruction = (
+            render_prompt_sections(
+                [relation_section],
+                mode=PromptRenderMode.BODY_ONLY,
+            )
+            if isinstance(relation_section, PromptSection)
+            else ""
+        )
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         relation_marker = "<!-- private_companion_relation_lookup_v1 -->"
@@ -15088,56 +15411,58 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             and bool(getattr(self, "_livingmemory_available", lambda: False)())
         )
         if relation_private and relation_instruction and relation_marker not in current_prompt and relation_marker not in current_turn_prompt and (relation_query or livingmemory_relation_context):
-            placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+            placement, rendered_instruction, manifest = self._place_conversation_prompt_sections(
                 req,
                 relation_marker,
-                relation_instruction,
+                [relation_section],
+                key="tools.relation_lookup.batch",
                 title="关系网查询",
-                priority=87,
                 source="tools",
-            ) else "system_prompt"
-            if placement == "system_prompt":
-                current_prompt = f"{current_prompt}\n\n{relation_marker}\n{relation_instruction}".strip()
-                req.system_prompt = current_prompt
+                priority=87,
+            )
             await self._record_request_prompt_fragment(
                 event,
                 title="关系网查询工具注入",
                 key="tools.relation_lookup",
-                text=relation_instruction,
+                text=rendered_instruction,
                 source="tools",
                 mode="conditional",
                 metadata={"注入位置": placement, "触发原因": "livingmemory" if livingmemory_relation_context and not relation_query else "query"},
+                section_manifest=manifest,
             )
         qzone_sections = self._qzone_tool_prompt_sections(event)
-        qzone_instruction = render_prompt_sections(qzone_sections)
+        qzone_instruction = render_prompt_sections(
+            qzone_sections,
+            mode=PromptRenderMode.BODY_ONLY,
+        )
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         qzone_marker = "<!-- private_companion_qzone_tools_v1 -->"
         if qzone_instruction and qzone_marker not in current_prompt and qzone_marker not in current_turn_prompt:
             if any(token in message_text for token in ("说说", "空间", "QQ空间", "动态", "点赞", "评论")):
-                placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+                placement, rendered_instruction, manifest = self._place_conversation_prompt_sections(
                     req,
                     qzone_marker,
-                    qzone_instruction,
+                    qzone_sections,
+                    key="tools.qzone.batch",
                     title="QQ 空间动态工具",
-                    priority=88,
                     source="tools",
-                    structured=True,
-                ) else "system_prompt"
-                if placement == "system_prompt":
-                    current_prompt = f"{current_prompt}\n\n{qzone_marker}\n{qzone_instruction}".strip()
-                    req.system_prompt = current_prompt
+                    priority=88,
+                )
                 await self._record_request_prompt_fragment(
                     event,
                     title="QQ 空间工具注入",
                     key="tools.qzone",
-                    text=qzone_instruction,
+                    text=rendered_instruction,
                     source="tools",
                     mode="conditional",
                     metadata={"注入位置": placement},
+                    section_manifest=manifest,
                 )
-        schedule_management_instruction = self._schedule_management_tool_instruction(
-            include_heading=False,
+        schedule_management_section = self._schedule_management_tool_prompt_section()
+        schedule_management_instruction = render_prompt_sections(
+            [schedule_management_section],
+            mode=PromptRenderMode.BODY_ONLY,
         )
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
@@ -15154,27 +15479,30 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             and schedule_management_marker not in current_prompt
             and schedule_management_marker not in current_turn_prompt
         ):
-            placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+            placement, rendered_instruction, manifest = self._place_conversation_prompt_sections(
                 req,
                 schedule_management_marker,
-                schedule_management_instruction,
+                [schedule_management_section],
+                key="tools.schedule_management.batch",
                 title="指定日程管理工具",
-                priority=88,
                 source="tools",
-            ) else "system_prompt"
-            if placement == "system_prompt":
-                current_prompt = f"{current_prompt}\n\n{schedule_management_marker}\n{schedule_management_instruction}".strip()
-                req.system_prompt = current_prompt
+                priority=88,
+            )
             await self._record_request_prompt_fragment(
                 event,
                 title="指定日程管理工具注入",
                 key="tools.schedule_management",
-                text=schedule_management_instruction,
+                text=rendered_instruction,
                 source="tools",
                 mode="conditional",
                 metadata={"注入位置": placement},
+                section_manifest=manifest,
             )
-        memo_instruction = self._memo_management_tool_instruction(include_heading=False)
+        memo_section = self._memo_management_tool_prompt_section()
+        memo_instruction = render_prompt_sections(
+            [memo_section],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         memo_marker = "<!-- private_companion_memo_management_v1 -->"
@@ -15208,29 +15536,34 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             and memo_marker not in current_prompt
             and memo_marker not in current_turn_prompt
         ):
-            placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+            placement, rendered_instruction, manifest = self._place_conversation_prompt_sections(
                 req,
                 memo_marker,
-                memo_instruction,
+                [memo_section],
+                key="tools.memo_management.batch",
                 title="备忘便签工具",
-                priority=88,
                 source="tools",
-            ) else "system_prompt"
-            if placement == "system_prompt":
-                current_prompt = f"{current_prompt}\n\n{memo_marker}\n{memo_instruction}".strip()
-                req.system_prompt = current_prompt
+                priority=88,
+            )
             await self._record_request_prompt_fragment(
                 event,
                 title="备忘便签工具注入",
                 key="tools.memo_management",
-                text=memo_instruction,
+                text=rendered_instruction,
                 source="tools",
                 mode="conditional",
                 metadata={"注入位置": placement},
+                section_manifest=manifest,
             )
 
-        creative_work_instruction = self._creative_work_tool_instruction(
-            include_heading=False,
+        creative_work_section = self._creative_work_tool_prompt_section()
+        creative_work_instruction = (
+            render_prompt_sections(
+                [creative_work_section],
+                mode=PromptRenderMode.BODY_ONLY,
+            )
+            if isinstance(creative_work_section, PromptSection)
+            else ""
         )
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
@@ -15250,25 +15583,24 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 setattr(event, "private_companion_creative_work_tool_required", True)
             except Exception:
                 pass
-            placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+            placement, rendered_instruction, manifest = self._place_conversation_prompt_sections(
                 req,
                 creative_work_marker,
-                creative_work_instruction,
+                [creative_work_section],
+                key="tools.creative_work.batch",
                 title="资料柜与自己的创作读取工具",
-                priority=89,
                 source="tools",
-            ) else "system_prompt"
-            if placement == "system_prompt":
-                current_prompt = f"{current_prompt}\n\n{creative_work_marker}\n{creative_work_instruction}".strip()
-                req.system_prompt = current_prompt
+                priority=89,
+            )
             await self._record_request_prompt_fragment(
                 event,
                 title="创作正文读取工具注入",
                 key="tools.creative_work",
-                text=creative_work_instruction,
+                text=rendered_instruction,
                 source="tools",
                 mode="conditional",
                 metadata={"注入位置": placement},
+                section_manifest=manifest,
             )
 
         await self._append_media_delivery_truth_to_request(event, req)
@@ -15327,22 +15659,30 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             )
         user_photo_prompt_enabled = self._user_photo_generation_prompt_enabled(event)
         reaction_photo_prompt_enabled = self._reaction_image_provider_available()
-        photo_instruction = self._photo_generation_tool_instruction(
+        photo_section = self._photo_generation_tool_prompt_section(
             event,
             include_spontaneous=reaction_expression_authorized,
             spontaneous_only=reaction_expression_authorized and not explicit_media_request,
-            include_heading=False,
             allow_photo_on_reaction_turns=allow_photo_on_reaction_turns,
+        )
+        photo_instruction = (
+            render_prompt_sections(
+                [photo_section],
+                mode=PromptRenderMode.BODY_ONLY,
+            )
+            if isinstance(photo_section, PromptSection)
+            else ""
         )
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         photo_marker = "<!-- private_companion_photo_generation_tool_v1 -->"
         if photo_instruction and photo_marker not in current_prompt and photo_marker not in current_turn_prompt:
             if explicit_media_request or reaction_expression_authorized:
-                placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+                placement, rendered_instruction, manifest = self._place_conversation_prompt_sections(
                     req,
                     photo_marker,
-                    photo_instruction,
+                    [photo_section],
+                    key="tools.photo_generation.batch",
                     title=(
                         "实验性表情表达"
                         if reaction_expression_authorized and not explicit_media_request
@@ -15356,12 +15696,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                             )
                         )
                     ),
-                    priority=88,
                     source="tools",
-                ) else "system_prompt"
-                if placement == "system_prompt":
-                    current_prompt = f"{current_prompt}\n\n{photo_marker}\n{photo_instruction}".strip()
-                    req.system_prompt = current_prompt
+                    priority=88,
+                )
                 await self._record_request_prompt_fragment(
                     event,
                     title=(
@@ -15374,16 +15711,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                         if reaction_expression_authorized and not explicit_media_request
                         else "tools.photo_generation"
                     ),
-                    text=photo_instruction,
+                    text=rendered_instruction,
                     source="tools",
                     mode="conditional",
                     metadata={
                         "注入位置": placement,
                         "预授权": bool(reaction_expression_authorized),
                     },
+                    section_manifest=manifest,
                 )
-        cross_user_instruction = self._cross_user_memory_query_instruction(
-            include_heading=False,
+        cross_user_section = self._cross_user_memory_query_prompt_section()
+        cross_user_instruction = (
+            render_prompt_sections(
+                [cross_user_section],
+                mode=PromptRenderMode.BODY_ONLY,
+            )
+            if isinstance(cross_user_section, PromptSection)
+            else ""
         )
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
@@ -15393,25 +15737,24 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 "聊了什么", "说了什么", "发了什么", "讲了什么", "互动", "和谁聊", "跟谁聊", "最近跟", "最近和",
                 "你和", "你跟", "在群里", "那个群", "这个群", "私聊过", "聊过",
             )):
-                placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+                placement, rendered_instruction, manifest = self._place_conversation_prompt_sections(
                     req,
                     cross_user_marker,
-                    cross_user_instruction,
+                    [cross_user_section],
+                    key="tools.cross_user_memory.batch",
                     title="跨用户记忆互通",
-                    priority=88,
                     source="tools",
-                ) else "system_prompt"
-                if placement == "system_prompt":
-                    current_prompt = f"{current_prompt}\n\n{cross_user_marker}\n{cross_user_instruction}".strip()
-                    req.system_prompt = current_prompt
+                    priority=88,
+                )
                 await self._record_request_prompt_fragment(
                     event,
                     title="跨用户记忆互通工具注入",
                     key="tools.cross_user_memory",
-                    text=cross_user_instruction,
+                    text=rendered_instruction,
                     source="tools",
                     mode="conditional",
                     metadata={"注入位置": placement},
+                    section_manifest=manifest,
                 )
 
     @filter.on_agent_begin()
@@ -15536,31 +15879,31 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     def _format_private_routine_check_boundary(
         self,
         text: str,
-        *,
-        include_heading: bool = True,
     ) -> str:
-        if not self._is_private_routine_check_invocation(text):
-            return ""
-        return (
-            ("【轻量例行检查边界】\n" if include_heading else "")
-            +
-            "用户正在发起一次例行检查，但这不等于要求你自动展开固定健康清单。\n"
-            "优先承接当前原始对话或可靠记忆中已经明确的双方约定；整次回复最多两个短句、最多提出一个问题。\n"
-            "开头若有语气词和称呼，要和后面的承接正文自然写在同一句里，不要把“嗯，某某”“唔，某某大人”单独拆成一条消息。\n"
-            "只询问当前消息、最近原始对话、明确提醒/便签或可靠记忆实际支持的项目。没有依据时，不要假定用户正在服药、生病、没吃饭或遗漏了某项现实任务。\n"
-            "如果没有明确检查项目，就自然问今天想先检查哪一项；不要一口气连续追问晚饭、吃药和睡觉。"
+        section = self._format_private_routine_check_boundary_section(text)
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LEGACY_BLOCK,
         )
 
     def _format_private_routine_check_boundary_section(
         self,
         text: str,
-    ) -> dict[str, Any]:
+    ) -> PromptSection:
+        body = ""
+        if self._is_private_routine_check_invocation(text):
+            body = (
+                "用户正在发起一次例行检查，但这不等于要求你自动展开固定健康清单。\n"
+                "优先承接当前原始对话或可靠记忆中已经明确的双方约定；整次回复最多两个短句、最多提出一个问题。\n"
+                "开头若有语气词和称呼，要和后面的承接正文自然写在同一句里，不要把“嗯，某某”“唔，某某大人”单独拆成一条消息。\n"
+                "只询问当前消息、最近原始对话、明确提醒/便签或可靠记忆实际支持的项目。没有依据时，不要假定用户正在服药、生病、没吃饭或遗漏了某项现实任务。\n"
+                "如果没有明确检查项目，就自然问今天想先检查哪一项；不要一口气连续追问晚饭、吃药和睡觉。"
+            )
         return prompt_section(
-            "轻量例行检查边界",
-            self._format_private_routine_check_boundary(
-                text,
-                include_heading=False,
-            ),
+            key="turn.routine_check_boundary",
+            title="轻量例行检查边界",
+            source="conversation",
+            content=body,
         )
 
     def _limit_private_routine_check_segments(self, text: str, chunks: list[list[Any]]) -> list[list[Any]]:
@@ -15693,15 +16036,39 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         current_user: dict[str, Any] | None,
         *,
         direct: bool = False,
-        include_heading: bool = True,
     ) -> str:
+        section = self._format_private_passive_state_snapshot_section(
+            state,
+            current_user,
+            direct=direct,
+        )
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LEGACY_BLOCK,
+        )
+
+    def _format_private_passive_state_snapshot_section(
+        self,
+        state: dict[str, Any],
+        current_user: dict[str, Any] | None,
+        *,
+        direct: bool = False,
+    ) -> PromptSection:
         energy = _safe_int(state.get("energy"), 70, 0, 100)
         mood = _single_line(state.get("mood_bias"), 18) or "平稳"
         now = self._environment_now()
         time_label, _ = self._current_time_period_label(now)
         pieces = [f"时间节奏：{time_label}", f"精神约 {energy}/100", f"情绪底色偏{mood}"]
-        realtime_formatter = getattr(self, "_format_external_realtime_context_for_prompt", None)
-        realtime_context = realtime_formatter(current_user, public=False) if callable(realtime_formatter) else ""
+        realtime_formatter = getattr(self, "_format_external_realtime_prompt_section", None)
+        realtime_section = realtime_formatter(current_user, public=False) if callable(realtime_formatter) else None
+        realtime_context = (
+            render_prompt_sections(
+                [realtime_section],
+                mode=PromptRenderMode.BODY_ONLY,
+            )
+            if isinstance(realtime_section, PromptSection)
+            else ""
+        )
         verified_schedule, planned_schedule = self._private_passive_schedule_material(current_user)
         if verified_schedule and not realtime_context:
             pieces.append(f"拟人化日程素材：{verified_schedule}")
@@ -15763,16 +16130,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         blocks = [
             "以下只描述 Bot 的拟人化内部状态/场景素材，不是用户事实、不是现实证据，也不要写入长期记忆。",
         ]
-        if include_heading:
-            blocks.insert(0, "【Bot 自身模拟状态更新】")
         if realtime_context:
             blocks.append(realtime_context)
         blocks.extend([
             guidance,
             usage + " " + "；".join(pieces) + "。",
         ])
-        return "\n".join(
-            blocks
+        return prompt_section(
+            key="state.session_update",
+            title="Bot 自身模拟状态更新",
+            source="daily_state",
+            content="\n".join(blocks),
         )
 
     def _format_external_realtime_context_for_prompt(
@@ -15780,7 +16148,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         current_user: dict[str, Any] | None = None,
         *,
         public: bool = False,
-        include_heading: bool = True,
+    ) -> str:
+        section = self._format_external_realtime_prompt_section(
+            current_user,
+            public=public,
+        )
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LEGACY_BLOCK,
+        )
+
+    def _format_external_realtime_context_body(
+        self,
+        current_user: dict[str, Any] | None = None,
+        *,
+        public: bool = False,
     ) -> str:
         """Format extension state for ordinary private/group prompts.
 
@@ -15827,16 +16209,12 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         }.get(_single_line(activity.get("kind"), 40), "正在进行共同活动")
         if public:
             return (
-                ("【实时共同活动公开状态】\n" if include_heading else "")
-                +
                 f"{label}。这是当前优先级最高的实时事实，固定日程只是原计划。"
                 "群聊只可概括说明正在与主要用户共同活动，不得透露电话内容、具体约定、逐字转写或私密地点。"
             )
         lines = [
             "实时共同活动是正在发生的高优先级事实；固定日程只是原计划，冲突时必须以实时活动为准。",
         ]
-        if include_heading:
-            lines.insert(0, "【实时共同活动与短期连续性】")
         if activity:
             lines.append(f"当前活动：{label}")
         summary = _single_line(continuity.get("summary"), 1800)
@@ -15852,38 +16230,57 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         current_user: dict[str, Any] | None = None,
         *,
         public: bool = False,
-    ) -> dict[str, Any]:
+    ) -> PromptSection:
         return prompt_section(
-            "实时共同活动公开状态" if public else "实时共同活动与短期连续性",
-            self._format_external_realtime_context_for_prompt(
+            key="realtime.activity_public" if public else "realtime.activity_continuity",
+            title="实时共同活动公开状态" if public else "实时共同活动与短期连续性",
+            source="external_realtime",
+            content=self._format_external_realtime_context_body(
                 current_user,
                 public=public,
-                include_heading=False,
             ),
         )
 
-    def _private_passive_state_reply_policy_prompt(
-        self,
-        *,
-        include_heading: bool = True,
-    ) -> str:
+    def _private_passive_state_reply_policy_prompt(self) -> str:
+        section = self._private_passive_state_reply_policy_section()
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LEGACY_BLOCK,
+        )
+
+    def _private_passive_state_reply_policy_section(self) -> PromptSection:
         lines = [
-                "先自然回应用户当前表达；主动提供一处与 Bot 自身有关的具体细节；不要逐项汇报状态，也不要把内部素材描述成已经证实的现实事件。",
-                "不要把回复写成连续盘问；整次回复最多提出一个问题；没有必要时可以不提问。",
-                "当前用户最后一条消息是本轮唯一的主线：先接住其中的具体词、问题或情绪，再决定是否补充背景。旧话题、未完成话头和状态素材只有在与当前内容有明确语义连接时才轻轻带过；不贴合就留在背景里，不要为了连续性硬拽回来。",
-                "话题确实转向时，用当前消息里的连接点自然过渡，不要凭空写“刚刚/刚才/前面”作为转场。相对时间词只在用户明确提到时间、或有可靠事实表明确实发生在那个时间段时使用；内部提示中的时间标签不得原样出现在回复里。",
+            "先自然回应用户当前表达；主动提供一处与 Bot 自身有关的具体细节；不要逐项汇报状态，也不要把内部素材描述成已经证实的现实事件。",
+            "不要把回复写成连续盘问；整次回复最多提出一个问题；没有必要时可以不提问。",
+            "当前用户最后一条消息是本轮唯一的主线：先接住其中的具体词、问题或情绪，再决定是否补充背景。旧话题、未完成话头和状态素材只有在与当前内容有明确语义连接时才轻轻带过；不贴合就留在背景里，不要为了连续性硬拽回来。",
+            "话题确实转向时，用当前消息里的连接点自然过渡，不要凭空写“刚刚/刚才/前面”作为转场。相对时间词只在用户明确提到时间、或有可靠事实表明确实发生在那个时间段时使用；内部提示中的时间标签不得原样出现在回复里。",
         ]
-        if include_heading:
-            lines.insert(0, "【私聊被动回复策略】")
-        return "\n".join(lines)
+        return prompt_section(
+            key="state.reply_policy",
+            title="私聊被动回复策略",
+            source="daily_state",
+            content="\n".join(lines),
+        )
 
     def _format_private_passive_state_continuity_anchor(
         self,
         state: dict[str, Any],
         current_user: dict[str, Any] | None,
-        *,
-        include_heading: bool = True,
     ) -> str:
+        section = self._format_private_passive_state_continuity_anchor_section(
+            state,
+            current_user,
+        )
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LEGACY_BLOCK,
+        )
+
+    def _format_private_passive_state_continuity_anchor_section(
+        self,
+        state: dict[str, Any],
+        current_user: dict[str, Any] | None,
+    ) -> PromptSection:
         now = self._environment_now()
         time_label, _ = self._current_time_period_label(now)
         pieces = [f"时段={time_label}"]
@@ -15966,15 +16363,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 pieces.append(f"粗略位置={inferred_location}")
 
         lines = [
-                "这是 Bot 的拟人化模拟状态，不是用户事实、现实证据或长期记忆。",
-                "当下素材（仅供隐性承接）：" + "；".join(pieces) + "。",
+            "这是 Bot 的拟人化模拟状态，不是用户事实、现实证据或长期记忆。",
+            "当下素材（仅供隐性承接）：" + "；".join(pieces) + "。",
         ]
-        if include_heading:
-            lines.insert(0, "【Bot 当下连续性】")
-        text = "\n".join(lines)
-        return text[:300]
+        return prompt_section(
+            key="state.session_update",
+            title="Bot 当下连续性",
+            source="daily_state",
+            content="\n".join(lines)[:300],
+        )
 
-    def _private_passive_state_update_for_prompt(
+    def _private_passive_state_update_prompt_sections(
         self,
         *,
         session: str,
@@ -15982,8 +16381,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         current_user: dict[str, Any] | None,
         inbound_text: str,
         lightweight: bool,
-        as_sections: bool = False,
-    ) -> tuple[Any, bool, str]:
+    ) -> tuple[list[PromptSection], bool, str]:
         session_key = _single_line(session, 160) or "unknown"
         cache = getattr(self, "_passive_state_session_cache", None)
         if not isinstance(cache, dict):
@@ -16014,59 +16412,84 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             for key, _ in stale[: max(0, len(cache) - 200)]:
                 cache.pop(key, None)
         if direct_state_request:
-            state_text = self._format_private_passive_state_snapshot(
+            state_section = self._format_private_passive_state_snapshot_section(
                 state,
                 current_user,
                 direct=True,
-                include_heading=not as_sections,
             )
             state_changed = changed
             reason = "direct"
         elif changed:
-            state_text = self._format_private_passive_state_snapshot(
+            state_section = self._format_private_passive_state_snapshot_section(
                 state,
                 current_user,
                 direct=False,
-                include_heading=not as_sections,
             )
             state_changed = True
             reason = "changed"
         elif bool(runtime_persona_setting(self, 'enable_passive_state_continuity_anchor', False)):
-            state_text = self._format_private_passive_state_continuity_anchor(
+            state_section = self._format_private_passive_state_continuity_anchor_section(
                 state,
                 current_user,
-                include_heading=not as_sections,
             )
             state_changed = False
             reason = "continuity_anchor"
         else:
-            return "", False, "unchanged_light" if lightweight else "unchanged"
+            return [], False, "unchanged_light" if lightweight else "unchanged"
 
         if reason == "continuity_anchor":
-            reply_policy = (
-                ("【私聊被动回复策略】\n" if not as_sections else "")
-                + "先自然回应用户当前表达；主动提供一处与 Bot 自身有关的具体细节；不要逐项汇报状态；不要把回复写成连续盘问；整次回复最多提出一个问题；没有必要时可以不提问。"
+            reply_policy_section = prompt_section(
+                key="state.reply_policy",
+                title="私聊被动回复策略",
+                source="daily_state",
+                content="先自然回应用户当前表达；主动提供一处与 Bot 自身有关的具体细节；不要逐项汇报状态；不要把回复写成连续盘问；整次回复最多提出一个问题；没有必要时可以不提问。",
             )
-            state_text = state_text[: max(0, 300 - len(reply_policy) - 1)].rstrip()
+            state_body = render_prompt_sections(
+                [state_section],
+                mode=PromptRenderMode.BODY_ONLY,
+            )
+            policy_body = render_prompt_sections(
+                [reply_policy_section],
+                mode=PromptRenderMode.BODY_ONLY,
+            )
+            state_section = prompt_section(
+                key=state_section.key,
+                title=state_section.title,
+                source=state_section.source,
+                content=state_body[: max(0, 300 - len(policy_body) - 1)].rstrip(),
+            )
         else:
-            reply_policy = self._private_passive_state_reply_policy_prompt(
-                include_heading=not as_sections,
-            )
-        if as_sections:
-            state_title = (
-                "Bot 当下连续性"
-                if reason == "continuity_anchor"
-                else "Bot 自身模拟状态更新"
-            )
-            return (
-                [
-                    prompt_section(state_title, state_text),
-                    prompt_section("私聊被动回复策略", reply_policy),
-                ],
-                state_changed,
-                reason,
-            )
-        return f"{state_text}\n{reply_policy}", state_changed, reason
+            reply_policy_section = self._private_passive_state_reply_policy_section()
+        sections = [state_section, reply_policy_section]
+        return sections, state_changed, reason
+
+    def _private_passive_state_update_for_prompt(
+        self,
+        *,
+        session: str,
+        state: dict[str, Any],
+        current_user: dict[str, Any] | None,
+        inbound_text: str,
+        lightweight: bool,
+    ) -> tuple[str, bool, str]:
+        sections, state_changed, reason = self._private_passive_state_update_prompt_sections(
+            session=session,
+            state=state,
+            current_user=current_user,
+            inbound_text=inbound_text,
+            lightweight=lightweight,
+        )
+        return (
+            "\n".join(
+                render_prompt_sections(
+                    [section],
+                    mode=PromptRenderMode.LEGACY_BLOCK,
+                )
+                for section in sections
+            ),
+            state_changed,
+            reason,
+        )
 
     async def _append_group_active_period_boundary_to_request(
         self,
@@ -16081,10 +16504,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 skip_conversation_summary=True,
                 passive_fast=True,
             )
-            boundary = self._format_active_period_boundary_for_prompt(
+            boundary_section = self._format_active_period_boundary_prompt_section(
                 state,
                 public=True,
-                include_heading=False,
+            )
+            boundary = render_prompt_sections(
+                [boundary_section],
+                mode=PromptRenderMode.BODY_ONLY,
             )
         except Exception as exc:
             logger.debug(
@@ -16103,10 +16529,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         placement = "prompt" if self._append_turn_prompt_fragment_by_position(
             req,
             marker,
-            boundary,
-            title="Bot 当前经期与互动边界",
+            boundary_section,
             priority=89,
-            source="daily_state",
         ) else "system_prompt"
         if placement == "system_prompt":
             req.system_prompt = f"{current_prompt}\n\n{marker}\n{boundary}".strip()
@@ -16128,10 +16552,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         req: ProviderRequest,
         state: dict[str, Any],
     ) -> str:
-        boundary = self._format_active_period_boundary_for_prompt(
+        boundary_section = self._format_active_period_boundary_prompt_section(
             state,
             public=False,
-            include_heading=False,
+        )
+        boundary = render_prompt_sections(
+            [boundary_section],
+            mode=PromptRenderMode.BODY_ONLY,
         )
         if not boundary:
             return ""
@@ -16141,10 +16568,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         placement = "prompt" if self._append_turn_prompt_fragment_by_position(
             req,
             marker,
-            boundary,
-            title="Bot 当前经期与互动边界",
+            boundary_section,
             priority=89,
-            source="daily_state",
         ) else "system_prompt"
         if placement == "system_prompt":
             current_prompt = str(getattr(req, "system_prompt", "") or "")
@@ -16166,18 +16591,18 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         prompt_surface: PromptSurface,
         state: dict[str, Any],
     ) -> str:
-        boundary = self._format_active_period_boundary_for_prompt(
+        boundary_section = self._format_active_period_boundary_prompt_section(
             state,
             public=False,
-            include_heading=False,
+        )
+        boundary = render_prompt_sections(
+            [boundary_section],
+            mode=PromptRenderMode.BODY_ONLY,
         )
         if boundary:
             prompt_surface.add(
-                "state.period_boundary",
-                boundary,
-                title="Bot 当前经期与互动边界",
+                boundary_section,
                 priority=89,
-                source="daily_state",
             )
         return boundary
 
@@ -16185,8 +16610,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         self,
         event: AstrMessageEvent | None = None,
         *,
-        include_heading: bool = True,
         include_joke_boundary: bool = True,
+    ) -> str:
+        sections = self._format_group_persona_denoise_prompt_sections(event)
+        if not include_joke_boundary:
+            sections = [
+                section
+                for section in sections
+                if section.key != "group.joke_boundary"
+            ]
+        return render_prompt_sections(
+            sections,
+            mode=PromptRenderMode.LEGACY_BLOCK,
+        )
+
+    def _format_group_persona_denoise_body(
+        self,
+        event: AstrMessageEvent | None = None,
     ) -> str:
         if not bool(runtime_persona_setting(self, 'enable_group_persona_denoise', True)):
             return ""
@@ -16238,13 +16678,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "表达上尽量自然一点，不需要刻意堆动作描写、撒娇、长解释或关系总结；一句能说清，就简单说一句。",
             "如果只是被轻轻提到，或者话题本身并不需要你展开，宁可短一点、轻一点、贴着当前梗回应，也不用顺势写成主动陪伴式长回复。",
         ]
-        if include_joke_boundary:
-            lines.insert(
-                4,
-                "【群聊玩笑边界】" + self._group_persona_denoise_joke_boundary(),
-            )
-        if include_heading:
-            lines.insert(0, "【群聊人格降噪】")
         if sender_id:
             identity_line = f"当前群聊发言者稳定 ID：{sender_id}"
             if sender_display_name and sender_display_name != sender_id:
@@ -16278,17 +16711,23 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
     def _format_group_persona_denoise_prompt_sections(
         self,
         event: AstrMessageEvent | None = None,
-    ) -> list[dict[str, Any]]:
-        body = self._format_group_persona_denoise_prompt(
-            event,
-            include_heading=False,
-            include_joke_boundary=False,
-        )
+    ) -> list[PromptSection]:
+        body = self._format_group_persona_denoise_body(event)
         if not body:
             return []
         return [
-            prompt_section("群聊人格降噪", body),
-            prompt_section("群聊玩笑边界", self._group_persona_denoise_joke_boundary()),
+            prompt_section(
+                key="group.persona_denoise",
+                title="群聊人格降噪",
+                source="group",
+                content=body,
+            ),
+            prompt_section(
+                key="group.joke_boundary",
+                title="群聊玩笑边界",
+                source="group",
+                content=self._group_persona_denoise_joke_boundary(),
+            ),
         ]
 
     async def _append_group_persona_denoise_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
@@ -16306,16 +16745,21 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         if marker in current_prompt or marker in current_turn_prompt:
             return
-        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+        denoise_batch = prompt_section(
+            key="group.persona_denoise.batch",
+            title="群聊人格降噪",
+            source="group",
+            content="",
+            children=denoise_sections,
+        )
+        placement = self._place_conversation_prompt_section(
             req,
             marker,
-            denoise_text,
-            title="群聊人格降噪",
+            denoise_batch,
             priority=32,
-            source="group",
-            structured=True,
-        ) else "system_prompt"
-        if placement == "system_prompt":
+        )
+        if placement == "none":
+            placement = "system_prompt"
             req.system_prompt = f"{current_prompt}\n\n{marker}\n{denoise_text}".strip()
         await self._record_request_prompt_fragment(
             event,
@@ -16398,20 +16842,37 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             if boundary:
                 profile_lines.append(f"互动边界：{boundary}")
             profile_lines.append("即使此用户资料中有亲昵称呼,也必须服从上面的防串规则：不要把目标陪伴用户的专属关系套给 TA。")
-        guard_sections = [prompt_section("私聊身份防串", chr(10).join(lines))]
+        guard_sections = [
+            prompt_section(
+                key="identity.non_target_private",
+                title="私聊身份防串",
+                source="identity",
+                content=chr(10).join(lines),
+            )
+        ]
         if profile_lines:
-            guard_sections.append(prompt_section("当前用户关系网资料", chr(10).join(profile_lines)))
+            guard_sections.append(
+                prompt_section(
+                    key="identity.non_target_profile",
+                    title="当前用户关系网资料",
+                    source="identity",
+                    content=chr(10).join(profile_lines),
+                )
+            )
         guard_text = render_prompt_sections(guard_sections)
+        guard_batch = prompt_section(
+            key="identity.non_target_private.batch",
+            title="私聊身份防串",
+            source="identity",
+            content="",
+            children=guard_sections,
+        )
         self._materialize_conversation_system_block(
             req,
-            key="identity.non_target_private",
+            section=guard_batch,
             marker=marker,
-            content=guard_text,
-            title="私聊身份防串",
             priority=10,
-            source="identity",
             placement=PLACEMENT_DYNAMIC_SYSTEM,
-            structured=True,
         )
         await self._record_request_prompt_fragment(
             event,
@@ -16430,18 +16891,16 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "@", "艾特", "群友", "群里", "群聊", "出现", "冒泡", "上线",
         ))
 
-    def _format_atrelay_target_summary_for_prompt(
+    def _format_atrelay_target_summary_prompt_section(
         self,
         text: str,
-        *,
-        include_heading: bool = True,
-    ) -> str:
-        if not (self.enabled and self.enable_atrelay_tools):
-            return ""
+    ) -> PromptSection | None:
+        if not (self.enabled and bool(getattr(self, "enable_atrelay_tools", False))):
+            return None
         text = str(text or "")
         if not self._message_looks_like_atrelay_request(text):
-            return ""
-        lines = ["【本轮转述目标摘要】"] if include_heading else []
+            return None
+        lines: list[str] = []
         has_signal = False
         group_expected = any(token in text for token in ("群里", "群聊", "发到", "发群", "群"))
         member_expected = any(token in text for token in ("找", "告诉", "转告", "转达", "跟", "和", "给", "@", "艾特", "私聊", "说一句", "说一声"))
@@ -16490,9 +16949,26 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             lines.append("目标成员候选：未命中｜没有从关系网里确定收话人。")
 
         if not has_signal:
-            return ""
+            return None
         lines.append("这些只是本轮目标解析线索；真正发送仍以用户明确要求和工具执行结果为准。")
-        return "\n".join(lines)
+        return prompt_section(
+            key="atrelay.target_summary",
+            title="本轮转述目标摘要",
+            source="atrelay",
+            content="\n".join(lines),
+        )
+
+    def _format_atrelay_target_summary_for_prompt(
+        self,
+        text: str,
+    ) -> str:
+        section = self._format_atrelay_target_summary_prompt_section(text)
+        if section is None:
+            return ""
+        return render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.LEGACY_BLOCK,
+        )
 
     def _parse_direct_atrelay_request(self, text: str) -> dict[str, Any]:
         cleaned = _single_line(text, 260)
@@ -16788,26 +17264,26 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             or getattr(event, "message_str", "")
             or ""
         )
-        summary = self._format_atrelay_target_summary_for_prompt(
-            text,
-            include_heading=False,
-        )
-        if not summary:
+        summary_section = self._format_atrelay_target_summary_prompt_section(text)
+        if summary_section is None:
             return False
+        summary = render_prompt_sections(
+            [summary_section],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
         marker = "<!-- private_companion_atrelay_target_summary_v1 -->"
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         if marker in current_prompt or marker in current_turn_prompt:
             return True
-        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+        placement = self._place_conversation_prompt_section(
             req,
             marker,
-            summary,
-            title="本轮转述目标摘要",
+            summary_section,
             priority=86,
-            source="tools",
-        ) else "system_prompt"
-        if placement == "system_prompt":
+        )
+        if placement == "none":
+            placement = "system_prompt"
             req.system_prompt = f"{current_prompt}\n\n{marker}\n{summary}".strip()
         await self._record_request_prompt_fragment(
             event,
@@ -16817,6 +17293,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             source="tools",
             mode="conditional",
             metadata={"注入位置": placement},
+            section_manifest=[summary_section],
         )
         return True
 
@@ -16834,12 +17311,15 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             or getattr(event, "message_str", "")
             or ""
         )
-        if self._format_atrelay_target_summary_for_prompt(text):
+        if self._format_atrelay_target_summary_prompt_section(text) is not None:
             return
-        mention_text = self._format_worldbook_private_mentions_for_prompt(
+        mention_section = self._format_worldbook_private_mentions_prompt_section(
             text,
             limit=4,
-            include_heading=False,
+        )
+        mention_text = render_prompt_sections(
+            [mention_section],
+            mode=PromptRenderMode.BODY_ONLY,
         )
         if not mention_text:
             return
@@ -16848,15 +17328,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
         if marker in current_prompt or marker in current_turn_prompt:
             return
-        placement = "prompt" if self._append_turn_prompt_fragment_by_position(
+        placement = self._place_conversation_prompt_section(
             req,
             marker,
-            mention_text,
-            title="本轮提到的关系网对象",
+            mention_section,
             priority=58,
-            source="worldbook",
-        ) else "system_prompt"
-        if placement == "system_prompt":
+        )
+        if placement == "none":
+            placement = "system_prompt"
             req.system_prompt = f"{current_prompt}\n\n{marker}\n{mention_text}".strip()
         await self._record_request_prompt_fragment(
             event,
@@ -16866,6 +17345,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             source="worldbook",
             mode=mode,
             metadata={"注入位置": placement},
+            section_manifest=[mention_section],
         )
 
     def _request_context_text_size(self, value: Any, *, depth: int = 0) -> int:
@@ -17089,26 +17569,33 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         runtime: dict[str, Any],
         is_private_chat: bool,
     ) -> tuple[int, str]:
-        prompt = f"""
-你是一个睡眠/休息中是否需要醒来回复的判定器。请只输出 JSON。
-
-背景：
-- Bot 当前日程处于睡眠、午休或休息段。
-- 当前睡眠阶段：{_single_line(runtime.get("label") or runtime.get("phase"), 40) or "未知"}。
-- 当前日程：{schedule_text or "未知"}。
-- 会话类型：{"私聊" if is_private_chat else "群聊"}。
-
-判断原则：
-- 只有用户明显需要回应、明确叫醒、情绪/安全/紧急需要支持，或继续不回复会显得很不合适时，才建议醒来。
-- 普通闲聊、表情、无明确对象的群聊、轻微玩笑、可等到醒来再说的内容，应保持睡眠不回复。
-- 如果用户明确说不要打扰、别回、继续睡，必须不回复。
-
-用户消息：
-{_single_line(text, 800)}
-
-只输出 JSON：
-{{"score": 0-100, "should_reply": true/false, "reason": "一句话原因"}}
-""".strip()
+        section = prompt_section(
+            key="background.rest_wakeup_judge",
+            title="休息中唤醒判断",
+            source="main",
+            template=(
+                "你是一个睡眠/休息中是否需要醒来回复的判定器。请只输出 JSON。\n\n"
+                "背景：\n"
+                "- Bot 当前日程处于睡眠、午休或休息段。\n"
+                "- 当前睡眠阶段：{sleep_phase}。\n"
+                "- 当前日程：{schedule}。\n"
+                "- 会话类型：{conversation_type}。\n\n"
+                "判断原则：\n"
+                "- 只有用户明显需要回应、明确叫醒、情绪/安全/紧急需要支持，或继续不回复会显得很不合适时，才建议醒来。\n"
+                "- 普通闲聊、表情、无明确对象的群聊、轻微玩笑、可等到醒来再说的内容，应保持睡眠不回复。\n"
+                "- 如果用户明确说不要打扰、别回、继续睡，必须不回复。\n\n"
+                "用户消息：\n{message}\n\n"
+                "只输出 JSON：\n"
+                '{{"score": 0-100, "should_reply": true/false, "reason": "一句话原因"}}'
+            ),
+            variables={
+                "sleep_phase": _single_line(runtime.get("label") or runtime.get("phase"), 40) or "未知",
+                "schedule": schedule_text or "未知",
+                "conversation_type": "私聊" if is_private_chat else "群聊",
+                "message": _single_line(text, 800),
+            },
+        )
+        prompt = render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY)
         raw = await self._llm_call(
             prompt,
             max_tokens=180,
@@ -17269,13 +17756,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         if not backlog_prompt:
             return ""
         marker = "<!-- private_companion_rest_backlog_v1 -->"
+        backlog_section = prompt_section(
+            key="rest.backlog",
+            title="醒后补看私聊",
+            source="daily_state",
+            content=backlog_prompt,
+        )
         placement = "prompt" if self._append_turn_prompt_fragment_by_position(
             req,
             marker,
-            backlog_prompt,
-            title="醒后补看私聊",
+            backlog_section,
             priority=25,
-            source="daily_state",
         ) else "system_prompt"
         if placement == "system_prompt":
             req.system_prompt = f"{req.system_prompt or ''}\n\n{marker}\n{backlog_prompt}".strip()
@@ -18000,14 +18491,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "回复当前会话的普通文字时，直接输出最终回复，不要调用 send_message_to_user；"
             "确需使用该工具发送媒体或主动消息时，plain 文本不得为空，调用同一轮不要额外输出可见正文。"
         )
+        section = prompt_section(
+            key="tools.deepseek_protocol",
+            title="工具调用协议",
+            source="tools",
+            content=instruction,
+        )
         self._materialize_conversation_system_block(
             req,
-            key="tools.deepseek_protocol",
+            section=section,
             marker=marker,
-            content=instruction,
-            title="工具调用协议",
             priority=10,
-            source="tools",
             placement=PLACEMENT_DYNAMIC_SYSTEM,
         )
         return True
@@ -18046,17 +18540,20 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "不要猜测文件路径，也不要把该工具当成生成、搜索或读取文件的能力。"
             "需要跨会话主动发送时，使用 PrivateCompanion 专用发送工具；官方 Cron 任务不受此边界影响。"
         )
+        section = prompt_section(
+            key="tools.passive_reply_boundary",
+            title="当前会话回复边界",
+            source="tools",
+            content=instruction,
+        )
         if marker not in prompt and hasattr(req, "system_prompt"):
             materializer = getattr(self, "_materialize_conversation_system_block", None)
             if callable(materializer):
                 materializer(
                     req,
-                    key="tools.passive_reply_boundary",
+                    section=section,
                     marker=marker,
-                    content=instruction,
-                    title="当前会话回复边界",
                     priority=10,
-                    source="tools",
                     placement=PLACEMENT_DYNAMIC_SYSTEM,
                 )
             else:
@@ -18064,12 +18561,9 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 if plan is not None:
                     plan.materialize_system_block(
                         req,
-                        key="tools.passive_reply_boundary",
+                        section=section,
                         marker=marker,
-                        content=instruction,
-                        title="当前会话回复边界",
                         priority=10,
-                        source="tools",
                         placement=PLACEMENT_DYNAMIC_SYSTEM,
                     )
             if self._tool_set_has_named_tool(getattr(req, "func_tool", None), "send_message_to_user"):
@@ -18232,16 +18726,13 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             setattr(req, "_private_companion_reply_temperature", temperature)
         except Exception:
             pass
-        instruction = _single_line(temperature.get("instruction"), 240)
-        if instruction and hasattr(req, "system_prompt"):
+        if hasattr(req, "system_prompt"):
+            section = reply_temperature_prompt_section(temperature)
             self._materialize_conversation_system_block(
                 req,
-                key="relationship.reply_temperature",
+                section=section,
                 marker="[Reply boundary]",
-                content=instruction,
-                title="Reply boundary",
                 priority=5,
-                source="relationship",
                 placement=PLACEMENT_DYNAMIC_SYSTEM,
             )
 
@@ -18320,17 +18811,14 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             setattr(event, "_private_companion_expression_decision", projection)
         except Exception:
             pass
-        instruction = expression_decision_prompt(projection)
-        if instruction:
-            self._append_turn_prompt_fragment_by_position(
-                req,
-                "<!-- private_companion_expression_decision_v2 -->",
-                instruction,
-                title="Companion expression",
-                priority=5,
-                source="expression_decision",
-                force_dynamic=True,
-            )
+        section = expression_decision_prompt_section(projection)
+        self._append_turn_prompt_fragment_by_position(
+            req,
+            "<!-- private_companion_expression_decision_v2 -->",
+            section,
+            priority=5,
+            force_dynamic=True,
+        )
 
     def _remove_sensitive_screen_tools_from_request(self, event: AstrMessageEvent, req: ProviderRequest) -> list[str]:
         tool_set = getattr(req, "func_tool", None)
@@ -18390,14 +18878,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             "遇到这类请求时必须简短拒绝,说明屏幕内容只允许主要用户本人在授权私聊里使用；不要改用记忆、关系网、屏幕日记或猜测来替代窥屏。\n"
             "这条边界只约束屏幕工具，不代表摄像头能力不存在；若本轮另有“摄像头请求”提示，应按其独立资格、授权和单帧规则调用 pc_reality_touch_camera_snapshot。"
         )
+        section = prompt_section(
+            key="guard.screen_privacy",
+            title="屏幕隐私边界",
+            source="guard",
+            content=guard,
+        )
         self._materialize_conversation_system_block(
             req,
-            key="guard.screen_privacy",
+            section=section,
             marker=marker,
-            content=guard,
-            title="屏幕隐私边界",
             priority=10,
-            source="guard",
             placement=PLACEMENT_DYNAMIC_SYSTEM,
         )
         await self._record_request_prompt_fragment(
@@ -18508,8 +18999,8 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             cycle_label=daily_state.get("body_cycle"),
             inbound_text=inbound_text,
         )
-        boundary_text = str(boundary.get("prompt") or "")
-        if not boundary.get("active") or not boundary_text:
+        boundary_section = group_cycle_boundary_prompt_section(boundary)
+        if boundary_section is None:
             return
         marker = "<!-- private_companion_group_cycle_boundary_v1 -->"
         current_prompt = str(getattr(req, "system_prompt", "") or "")
@@ -18519,13 +19010,17 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         placement = "prompt" if self._append_turn_prompt_fragment_by_position(
             req,
             marker,
-            boundary_text,
-            title="Group cycle privacy boundary",
+            boundary_section,
             priority=59,
-            source="safety",
         ) else "system_prompt"
         if placement == "system_prompt" and hasattr(req, "system_prompt"):
-            req.system_prompt = f"{current_prompt}\n\n{marker}\n{boundary_text}".strip()
+            self._materialize_conversation_system_block(
+                req,
+                section=boundary_section,
+                marker=marker,
+                priority=59,
+                placement=PLACEMENT_DYNAMIC_SYSTEM,
+            )
 
     @filter.on_llm_request(priority=-20000)
     @_multi_persona_event_context
@@ -18717,25 +19212,27 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         ).strip()
         annotated = (
             f"{description}\n\n{marker}\n"
-            f"【提示词表达方式】prompt 参数必须按下述格式书写：{instruction}\n"
+            f"{legacy_heading_token('提示词表达方式')}prompt 参数必须按下述格式书写：{instruction}\n"
             f"{marker}"
         ).strip()
+        contract_section = prompt_section(
+            key="tool.photo.prompt_format",
+            title="提示词表达方式",
+            source="photo_tool",
+            content=exact_text(annotated),
+        )
 
         def record_contract() -> None:
             plan = get_conversation_injection_plan(req)
             if plan is None:
                 return
             plan.add(
-                key="tool.photo.prompt_format",
+                section=contract_section,
                 marker=marker,
-                content=annotated,
-                title="提示词表达方式",
                 priority=10,
-                source="photo_tool",
                 placement=PLACEMENT_TOOL_CONTRACT,
                 temporary=True,
                 materialized=True,
-                opaque=True,
                 merge_policy="replace",
             )
 
@@ -19784,13 +20281,37 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                 action_context="（调试预览：这里会放工具结果或观察结果）",
                 motive=planned_motive,
             )
-            return (
-                "【说明】\n"
-                "当前主动消息已改为走 AstrBot 框架唤醒链。\n"
-                "人格、历史对话和会话上下文不再在这里手工重复拼接,而是由框架根据当前 conversation 自动注入。\n\n"
-                + (f"【内部话题钩子】\n{planned_topic}\n\n" if planned_topic else "")
-                + "【送入框架的任务提示】\n"
-                f"{framework_prompt}"
+            sections = [
+                prompt_section(
+                    key="debug.proactive.description",
+                    title="说明",
+                    source="main",
+                    content=(
+                        "当前主动消息已改为走 AstrBot 框架唤醒链。\n"
+                        "人格、历史对话和会话上下文不再在这里手工重复拼接,而是由框架根据当前 conversation 自动注入。"
+                    ),
+                )
+            ]
+            if planned_topic:
+                sections.append(
+                    prompt_section(
+                        key="debug.proactive.topic",
+                        title="内部话题钩子",
+                        source="main",
+                        content=planned_topic,
+                    )
+                )
+            sections.append(
+                prompt_section(
+                    key="debug.proactive.framework_prompt",
+                    title="送入框架的任务提示",
+                    source="main",
+                    content=framework_prompt,
+                )
+            )
+            return render_prompt_sections(
+                sections,
+                mode=PromptRenderMode.LEGACY_BLOCK,
             )
         if normalized in {"回复注入", "reply", "injection"}:
             await self._refresh_default_persona_prompt(getattr(event, "unified_msg_origin", "") if event is not None else "")

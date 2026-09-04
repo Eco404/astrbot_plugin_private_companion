@@ -5,6 +5,7 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 
+from astrbot_plugin_private_companion.conversation_prompt_section import prompt_section
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 
 
@@ -35,23 +36,36 @@ def _private_collector_harness() -> PrivateCompanionPlugin:
     plugin._expression_voice_selection = lambda **_kwargs: {}
 
     empty_methods = (
-        "_format_hidden_creative_context_for_reply",
-        "_format_recent_photo_share_snapshot_for_reply",
         "_format_bookshelf_secret_for_prompt",
         "_format_bookshelf_reading_context_for_reply",
         "_format_private_reading_preference_influence_for_reply",
         "_format_recent_news_context_for_reply",
         "_format_recent_web_exploration_context_for_reply",
         "_format_mobile_user_location_context",
-        "_format_skill_growth_for_user_text",
         "_format_self_timeline_context_for_reply",
         "_format_private_chat_context_injection",
         "_format_companion_planner_injection",
         "_format_livingmemory_guidance",
-        "_format_detail_injection",
     )
     for method_name in empty_methods:
         setattr(plugin, method_name, lambda *_args, **_kwargs: "")
+    section_methods = (
+        ("_format_hidden_creative_context_for_reply_prompt_section", "creative.hidden_context", "私下创作近况"),
+        ("_format_recent_photo_share_snapshot_for_reply_prompt_section", "photo.recent_share", "最近一次真实图片分享"),
+        ("_format_skill_growth_for_user_text_prompt_section", "skill.growth_match", "本轮相关技能"),
+        ("_format_detail_injection_prompt_section", "detail.injection", "Bot 模拟当前片段"),
+    )
+    for method_name, key, title in section_methods:
+        setattr(
+            plugin,
+            method_name,
+            lambda *_args, _key=key, _title=title, **_kwargs: prompt_section(
+                key=_key,
+                title=_title,
+                source="test",
+                content="",
+            ),
+        )
     return plugin
 
 
@@ -165,8 +179,11 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_private_turn_includes_authorized_mobile_location_context(self) -> None:
         plugin = _private_collector_harness()
-        plugin._format_mobile_user_location_context = lambda _user: (
-            "【用户手机位置感知】\n用户当前位于已标记地点“公司”（工作地点）范围内"
+        plugin._format_mobile_user_location_context_prompt_section = lambda _user: prompt_section(
+            key="reality_touch.mobile_location",
+            title="用户手机位置感知",
+            source="reality_touch",
+            content="用户当前位于已标记地点“公司”（工作地点）范围内",
         )
 
         async def private_recall(**_kwargs) -> str:
@@ -237,9 +254,13 @@ class PromptCacheAndParallelContextTests(unittest.IsolatedAsyncioTestCase):
             plugin._append_turn_prompt_fragment_by_position(
                 req,
                 "<!-- private_companion_state_v1 -->",
-                turn_text,
+                prompt_section(
+                    key="state.test",
+                    title="状态",
+                    source="passive_state",
+                    content=turn_text,
+                ),
                 priority=40,
-                source="passive_state",
             )
             requests.append(req)
 

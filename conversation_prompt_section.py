@@ -293,6 +293,12 @@ def _normalize_identity(value: Any, *, limit: int) -> str:
     return " ".join(str(value or "").split()).strip()[:limit]
 
 
+def _validate_prompt_identity(value: str, *, kind: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]+", value):
+        raise ValueError(f"invalid prompt {kind}: {value!r}")
+    return value
+
+
 def _normalize_title(value: Any) -> str:
     normalized = _normalize_identity(value, limit=80)
     return normalized or "提示词片段"
@@ -316,6 +322,15 @@ def prompt_cdata(content: Any) -> PromptCData:
 
 def exact_text(text: str) -> ExactText:
     return ExactText(text=text)
+
+
+def legacy_heading_token(title: Any, *, newline: bool = False) -> str:
+    """Render one legacy heading token for protocols that still parse it."""
+
+    normalized = _normalize_identity(title, limit=80)
+    if not normalized:
+        raise ValueError("legacy heading token requires a non-empty title")
+    return f"【{normalized}】" + ("\n" if newline else "")
 
 
 def prompt_field(name: str, value: Any) -> PromptField:
@@ -381,6 +396,11 @@ def prompt_section(
         raise ValueError("new prompt sections require key and source")
     if bool(normalized_key) != bool(normalized_source):
         raise ValueError("new prompt sections require both key and source")
+    if not legacy_call:
+        if not _normalize_identity(title, limit=80):
+            raise ValueError("new prompt sections require a non-empty title")
+        _validate_prompt_identity(normalized_key, kind="key")
+        _validate_prompt_identity(normalized_source, kind="source")
 
     normalized_children: list[Any] = []
     for child in children:
@@ -544,6 +564,8 @@ def _plain_content(value: Any) -> str:
             if field_name is not None:
                 parts.append(_plain_content(value.variables[field_name]))
         return "".join(parts)
+    if isinstance(value, PromptSection):
+        return _render_legacy([value], inline=False)
     if isinstance(value, PromptGroup):
         return value.separator.join(_plain_content(part) for part in value.parts)
     if isinstance(value, PromptText):
@@ -607,6 +629,8 @@ def _render_xml_value(tag: str, value: Any) -> str:
 
 
 def _render_xml_child(value: Any) -> str:
+    if isinstance(value, PromptSection):
+        return _render_xml_section(value)
     if isinstance(value, XmlElement):
         return _render_xml_element(value)
     if isinstance(value, PromptCData):
@@ -635,7 +659,10 @@ def _render_xml_content(value: Any) -> str:
     if isinstance(value, ExactText):
         raise ValueError("ExactText requires the exact render mode")
     if isinstance(value, PromptGroup):
-        return "".join(_render_xml_content(item) for item in value.parts)
+        separator = _xml_text(value.separator)
+        return separator.join(_render_xml_content(item) for item in value.parts)
+    if isinstance(value, PromptSection):
+        return _render_xml_section(value)
     if isinstance(value, XmlElement):
         return _render_xml_element(value)
     if isinstance(value, PromptField):
@@ -696,13 +723,19 @@ def _coerce_render_mode(value: PromptRenderMode | str) -> PromptRenderMode:
 def _render_conversation_xml(sections: Sequence[PromptSection]) -> str:
     if not sections:
         return ""
-    body = "".join(
-        f'<section title="{_xml_attribute(section.title)}">'
-        f"{_render_xml_content(section.content)}"
-        "</section>"
-        for section in sections
-    )
+    body = "".join(_render_xml_section(section) for section in sections)
     return f"<private_companion_context>{body}</private_companion_context>"
+
+
+def _render_xml_section(section: PromptSection) -> str:
+    body = _render_xml_content(section.content)
+    body += "".join(
+        _render_xml_section(child)
+        if isinstance(child, PromptSection)
+        else _render_xml_content(child)
+        for child in section.children
+    )
+    return f'<section title="{_xml_attribute(section.title)}">{body}</section>'
 
 
 def _render_legacy(sections: Sequence[PromptSection], *, inline: bool) -> str:
@@ -737,6 +770,27 @@ def _render_photo_prompt(sections: Sequence[PromptSection]) -> str:
     if all(isinstance(section.content, ExactText) for section in sections):
         return _render_exact(sections)
     return _render_body_only(sections)
+
+
+def render_prompt_content(
+    content: Any,
+    *,
+    mode: PromptRenderMode | str = PromptRenderMode.BODY_ONLY,
+) -> str:
+    """Render one typed content node without inventing a section identity."""
+
+    render_mode = _coerce_render_mode(mode)
+    if render_mode is PromptRenderMode.BODY_ONLY:
+        return _plain_content(content)
+    if render_mode is PromptRenderMode.CONVERSATION_XML:
+        return _render_xml_content(content)
+    if render_mode is PromptRenderMode.EXACT:
+        if not isinstance(content, ExactText):
+            raise TypeError("exact render mode requires ExactText content")
+        return content.text
+    if render_mode is PromptRenderMode.PHOTO_PROMPT:
+        return content.text if isinstance(content, ExactText) else _plain_content(content)
+    raise ValueError("legacy prompt content requires a section title")
 
 
 def render_prompt_section(
@@ -810,6 +864,7 @@ __all__ = [
     "XmlElement",
     "coerce_prompt_section",
     "exact_text",
+    "legacy_heading_token",
     "prompt_cdata",
     "prompt_document",
     "prompt_field",
@@ -819,6 +874,7 @@ __all__ = [
     "prompt_text",
     "prompt_value",
     "render_prompt_document",
+    "render_prompt_content",
     "render_prompt_section",
     "render_prompt_sections",
     "title_for_prompt_key",

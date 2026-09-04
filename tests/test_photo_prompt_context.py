@@ -25,11 +25,117 @@ from astrbot_plugin_private_companion.photo_prompt_context import (
     compile_local_photo_prompt,
     resolve_photo_prompt_context,
 )
+from astrbot_plugin_private_companion.conversation_prompt_section import PromptSection
 from astrbot_plugin_private_companion import photo_prompt_context
 from astrbot_plugin_private_companion.photo_wardrobe_decision import PhotoWardrobeDecision
 
 
 class PhotoPromptContextTests(unittest.TestCase):
+    def test_domain_section_round_trips_through_canonical_prompt_section(self) -> None:
+        original = PhotoPromptSection(
+            name="request",
+            source="user_request",
+            positive="雨夜窗边人像",
+            negative="watermark",
+            protected=True,
+            sanitize_conflicts=False,
+        )
+
+        authored = original.to_prompt_section()
+        self.assertIsInstance(authored, PromptSection)
+        self.assertTrue(authored.key.startswith("photo.user_request.request."))
+        self.assertEqual("photo_prompt_context", authored.source)
+        self.assertEqual(
+            {
+                "name": "request",
+                "source": "user_request",
+                "positive": "雨夜窗边人像",
+                "negative": "watermark",
+                "protected": True,
+                "sanitize_conflicts": False,
+            },
+            authored.metadata["photo_prompt_section"],
+        )
+
+        for prompt_format in ("traditional", "natural", "nai"):
+            with self.subTest(prompt_format=prompt_format):
+                direct = resolve_photo_prompt_context(
+                    wardrobe={},
+                    sections=(original,),
+                    prompt_format=prompt_format,
+                    workflow_kind="text2img",
+                )
+                adapted = resolve_photo_prompt_context(
+                    wardrobe={},
+                    sections=(authored,),
+                    prompt_format=prompt_format,
+                    workflow_kind="text2img",
+                )
+                self.assertEqual(direct.final_prompt, adapted.final_prompt)
+                self.assertEqual(direct.complete_prompt, adapted.complete_prompt)
+                self.assertEqual(direct.prompt_sections, adapted.prompt_sections)
+
+    def test_all_photo_render_modes_keep_the_existing_wire_contract(self) -> None:
+        sections = (
+            PhotoPromptSection(
+                "request",
+                "user_request",
+                positive="a portrait by the window",
+                negative="watermark",
+            ),
+            PhotoPromptSection(
+                "scene",
+                "scene_context",
+                positive="soft morning light",
+            ),
+        )
+
+        traditional = resolve_photo_prompt_context(
+            wardrobe={},
+            sections=sections,
+            prompt_format="traditional",
+            workflow_kind="text2img",
+        ).final_prompt
+        natural = resolve_photo_prompt_context(
+            wardrobe={},
+            sections=sections,
+            prompt_format="natural",
+            workflow_kind="text2img",
+        ).final_prompt
+        nai = resolve_photo_prompt_context(
+            wardrobe={},
+            sections=sections,
+            prompt_format="nai",
+            workflow_kind="text2img",
+        ).final_prompt
+
+        self.assertEqual(
+            "Positive prompt:\n"
+            "[User image request]\n"
+            "a portrait by the window\n\n"
+            "[Scene, style and final preset]\n"
+            "soft morning light\n\n"
+            "Negative prompt:\n"
+            "watermark",
+            traditional,
+        )
+        self.assertEqual(
+            "[User image request]\n"
+            "a portrait by the window\n\n"
+            "[Scene, style and final preset]\n"
+            "soft morning light\n\n"
+            "Avoid watermark.",
+            natural,
+        )
+        self.assertEqual(
+            "User image request:\n"
+            "a portrait by the window\n\n"
+            "Scene, style and final preset:\n"
+            "soft morning light\n\n"
+            "-1.5::watermark::",
+            nai,
+        )
+
     def test_public_interface_and_section_contract_are_strict(self) -> None:
         self.assertEqual(
             photo_prompt_context.__all__,

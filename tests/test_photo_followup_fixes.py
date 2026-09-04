@@ -12,6 +12,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from astrbot.api.star import Context
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PromptRenderMode,
+    render_prompt_sections,
+)
 from astrbot_plugin_private_companion.daily_state import DailyStateMixin
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
 from astrbot_plugin_private_companion.private_image import PrivateImageMixin
@@ -264,11 +268,10 @@ class PhotoFollowupFixTests(unittest.IsolatedAsyncioTestCase):
         harness._daily_outfit_rotation_reference = lambda: "blue jacket and black skirt"
         harness._daily_outfit_scene_hint = lambda *_args, **_kwargs: "classroom window"
 
-        sections = harness._build_daily_outfit_photo_prompt(
+        sections = harness._build_daily_outfit_photo_prompt_sections(
             {},
             memory_context=("发色银白；绿色眼睛；教室窗边；自然微笑；" * 20),
             outfit_profile={"palette": "gray"},
-            structured=True,
         )
 
         by_name = {section.name: section for section in sections}
@@ -404,13 +407,27 @@ class PhotoFollowupFixTests(unittest.IsolatedAsyncioTestCase):
             subject_owner="bot",
             sent_at=time.time(),
         )
-        context = harness._format_recent_photo_share_snapshot_for_reply(user, "？")
+        snapshot_section = harness._format_recent_photo_share_snapshot_for_reply_prompt_section(
+            user,
+            "？",
+        )
+        context = render_prompt_sections(
+            [snapshot_section],
+            mode=PromptRenderMode.LEGACY_BLOCK,
+        )
         self.assertIn("最近一次真实图片分享", context)
         self.assertIn("窗边书桌前认真写字", context)
         self.assertIn("不要用旧梦境", context)
         self.assertIn("用户的短句通常是在评价图中画面", context)
         self.assertIn("不得把画面事故反过来责怪用户", context)
         self.assertIn("画面主体归属：Bot/当前人格", context)
+        section = harness._format_recent_photo_share_snapshot_for_reply_prompt_section(
+            user,
+            "？",
+        )
+        self.assertEqual("photo.recent_share", section.key)
+        self.assertEqual("daily_state", section.source)
+        self.assertNotIn("【最近一次真实图片分享】", section.content)
         self.assertEqual(user["last_photo_share_snapshot"]["subject_owner"], "bot")
 
     def test_scene_photo_keeps_non_user_scene_ownership(self) -> None:
@@ -423,7 +440,10 @@ class PhotoFollowupFixTests(unittest.IsolatedAsyncioTestCase):
             sent_at=time.time(),
         )
 
-        context = harness._format_recent_photo_share_snapshot_for_reply(user, "洒出来了")
+        context = harness._format_recent_photo_share_snapshot_for_reply_prompt_section(
+            user,
+            "洒出来了",
+        ).content
 
         self.assertIn("物体、动物或环境主体", context)
         self.assertNotIn("描述中的“我/她/角色本人”", context)

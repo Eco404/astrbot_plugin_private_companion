@@ -8,6 +8,10 @@ from types import SimpleNamespace
 
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PromptRenderMode,
+    render_prompt_sections,
+)
 from astrbot_plugin_private_companion.main import PrivateCompanionPlugin
 from astrbot_plugin_private_companion.page_api import PrivateCompanionPageApi
 
@@ -25,6 +29,13 @@ def _tool(name: str) -> FunctionTool:
         parameters={"type": "object", "properties": {}},
         active=True,
     )
+
+
+def _photo_prompt_body(harness: _PhotoToolHarness, **kwargs) -> str:
+    section = harness._photo_generation_tool_prompt_section(**kwargs)
+    if section is None:
+        return ""
+    return render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY)
 
 
 class UserRequestedPhotoGenerationTests(unittest.IsolatedAsyncioTestCase):
@@ -69,9 +80,7 @@ class UserRequestedPhotoGenerationTests(unittest.IsolatedAsyncioTestCase):
         harness.enable_user_requested_photo_generation = False
         harness._reaction_image_provider_available = lambda: True
 
-        instruction = harness._photo_generation_tool_instruction(
-            include_heading=False,
-        )
+        instruction = _photo_prompt_body(harness)
 
         self.assertIn("pc_find_reaction_image", instruction)
         self.assertNotIn("pc_generate_photo", instruction)
@@ -85,16 +94,14 @@ class UserRequestedPhotoGenerationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             "",
-            harness._photo_generation_tool_instruction(include_heading=False),
+            _photo_prompt_body(harness),
         )
 
     def test_dynamic_prompt_can_expose_photo_without_gallery_rules(self) -> None:
         harness = _PhotoToolHarness()
         harness._reaction_image_provider_available = lambda: False
 
-        instruction = harness._photo_generation_tool_instruction(
-            include_heading=False,
-        )
+        instruction = _photo_prompt_body(harness)
 
         self.assertIn("pc_generate_photo", instruction)
         self.assertNotIn("pc_find_reaction_image", instruction)
@@ -103,10 +110,10 @@ class UserRequestedPhotoGenerationTests(unittest.IsolatedAsyncioTestCase):
         harness = _PhotoToolHarness()
         harness._reaction_image_provider_available = lambda: True
 
-        instruction = harness._photo_generation_tool_instruction(
+        instruction = _photo_prompt_body(
+            harness,
             include_spontaneous=True,
             spontaneous_only=True,
-            include_heading=False,
         )
 
         self.assertIn("<pc_reaction_expression>", instruction)

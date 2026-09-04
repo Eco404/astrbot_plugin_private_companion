@@ -9,6 +9,12 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping
 
+from .conversation_prompt_section import (
+    PromptRenderMode,
+    prompt_document,
+    prompt_section,
+    render_prompt_document,
+)
 from .photo_reference_catalog import PhotoReference
 
 OUTFIT_BEHAVIORS = {
@@ -352,7 +358,28 @@ def build_reference_metadata_review_prompt(
             "必须严格返回此结构：" + json.dumps(requested_schema, ensure_ascii=False),
         )
     )
-    return system_prompt, user_prompt
+    rendered = render_prompt_document(
+        prompt_document(
+            system=(
+                prompt_section(
+                    key="background.photo_reference_metadata.system",
+                    title="参考图用途元数据审批规则",
+                    source="photo_reference_metadata",
+                    content=system_prompt,
+                ),
+            ),
+            user=(
+                prompt_section(
+                    key="background.photo_reference_metadata.request",
+                    title="参考图用途元数据审批输入",
+                    source="photo_reference_metadata",
+                    content=user_prompt,
+                ),
+            ),
+        ),
+        mode=PromptRenderMode.BODY_ONLY,
+    )
+    return rendered["system"], rendered["user"]
 
 
 def _values(value: Any) -> list[str]:

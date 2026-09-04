@@ -11,6 +11,11 @@ from astrbot_plugin_private_companion.conversation_injection_plan import (
     PLACEMENT_TURN_TAIL,
     get_conversation_injection_plan,
 )
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    ExactText,
+    PromptSection,
+    prompt_section,
+)
 from astrbot_plugin_private_companion.daily_review import DailyReviewMixin
 from astrbot_plugin_private_companion.daily_state import DailyStateMixin
 from astrbot_plugin_private_companion.group_member_safety import GroupMemberSafetyMixin
@@ -38,21 +43,18 @@ class _PlanAppendHarness:
         self,
         req,
         marker: str,
-        text: str,
+        section: PromptSection,
         *,
-        title: str,
         priority: int,
-        source: str,
         force_dynamic: bool = False,
     ) -> bool:
+        del force_dynamic
         plan = get_conversation_injection_plan(req)
         assert plan is not None
         plan.add(
+            section=section,
             marker=marker,
-            content=text,
-            title=title,
             priority=priority,
-            source=source,
             placement=PLACEMENT_TURN_TAIL,
             temporary=True,
         )
@@ -76,6 +78,15 @@ class _GroupGuardHarness(_PlanAppendHarness, GroupObservationMixin):
     def _format_group_injection_guard_prompt(_event) -> str:
         return "guard-body"
 
+    @staticmethod
+    def _format_group_injection_guard_prompt_section(_event):
+        return prompt_section(
+            key="group.injection_guard",
+            title="群聊防注入",
+            source="group_observation",
+            content="guard-body",
+        )
+
 
 class _GroupGuardFallbackHarness(_GroupGuardHarness):
     @staticmethod
@@ -88,25 +99,41 @@ class _GroupGuardSystemPlanHarness(_GroupGuardHarness):
     def _append_turn_prompt_fragment_by_position(
         req,
         marker: str,
-        text: str,
+        section: PromptSection,
         *,
-        title: str,
         priority: int,
-        source: str,
         **_kwargs,
     ) -> bool:
         plan = get_conversation_injection_plan(req)
         plan.add(
+            section=section,
             marker=marker,
-            content=text,
-            title=title,
             priority=priority,
-            source=source,
             placement=PLACEMENT_DYNAMIC_SYSTEM,
             temporary=False,
             materialized=True,
         )
         return False
+
+
+class _TypedGroupGuardHarness(_GroupGuardHarness):
+    def __init__(self) -> None:
+        self.placed = None
+
+    def _place_conversation_prompt_section(
+        self,
+        req,
+        marker,
+        section,
+        *,
+        priority,
+    ) -> str:
+        self.placed = (req, marker, section, priority)
+        return "extra_user_content_parts"
+
+    @staticmethod
+    def _append_turn_prompt_fragment_by_position(*_args, **_kwargs) -> bool:
+        raise AssertionError("typed placement must not call the legacy helper")
 
 
 class _WeatherHarness(_PlanAppendHarness, DailyStateMixin):
@@ -202,6 +229,22 @@ class _SafetyHarness(GroupMemberSafetyMixin):
 
 
 class ConversationInjectionPlanStage2Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_group_guard_prefers_typed_section_placement(self) -> None:
+        req = _request()
+        harness = _TypedGroupGuardHarness()
+
+        await harness._append_group_injection_guard_to_request(
+            SimpleNamespace(message_str="hello", get_sender_id=lambda: "user-a"),
+            req,
+        )
+
+        self.assertIsNotNone(harness.placed)
+        _request_value, marker, section, priority = harness.placed
+        self.assertEqual("<!-- private_companion_group_injection_guard_v1 -->", marker)
+        self.assertEqual("group.injection_guard", section.key)
+        self.assertEqual("group_observation", section.source)
+        self.assertEqual(31, priority)
+
     async def test_group_guard_registers_existing_turn_tail_without_touching_contexts(self) -> None:
         req = _request()
         before_contexts = deepcopy(req.contexts)
@@ -313,7 +356,7 @@ class ConversationInjectionPlanStage2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(before, req.system_prompt)
         self.assertEqual("tool_contract", item["placement"])
         self.assertTrue(item["materialized"])
-        self.assertTrue(item["opaque"])
+        self.assertIsInstance(plan.blocks()[0].section.content, ExactText)
         self.assertIn("标签完全可选", item["content"])
 
 

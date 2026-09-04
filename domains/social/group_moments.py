@@ -5,7 +5,7 @@ black-box model on every message, this contract first extracts candidates with
 cheap, deterministic rules (replies, @-bursts, keyword sparks), then lets the
 runtime adapter optionally refine the shortlist with an LLM before persisting.
 The contract owns no persistence, clock, network, or platform access; adapters
-pass sanitised message snapshots and consume the formatted prompt section.
+pass sanitised message snapshots and consume structured, bounded moment facts.
 """
 
 from __future__ import annotations
@@ -254,12 +254,17 @@ def settle_group_moments(
     }
 
 
-def format_group_moments_prompt(value: Any, *, now: Any = None, limit: int = 3) -> str:
-    """Render the stored moments as a compact prompt section."""
+def select_group_moments_for_prompt(
+    value: Any,
+    *,
+    now: Any = None,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    """Return active, bounded moment facts for the group prompt adapter."""
     current_ts = max(0.0, _finite(now, time.time()))
     moments = value.get("moments") if isinstance(value, Mapping) else None
     if not isinstance(moments, list):
-        return ""
+        return []
     active = [
         entry for entry in moments
         if isinstance(entry, Mapping)
@@ -269,13 +274,15 @@ def format_group_moments_prompt(value: Any, *, now: Any = None, limit: int = 3) 
     active.sort(key=lambda entry: _finite(entry.get("ts")), reverse=True)
     active = active[:max(1, min(10, limit))]
     if not active:
-        return ""
-    lines = []
-    for entry in active:
-        sender = str(entry.get("sender") or "群友")
-        text = _text(entry)[:90]
-        lines.append(f"{sender}：{text}")
-    return "\n".join(lines)
+        return []
+    return [
+        {
+            "sender": str(entry.get("sender") or "群友"),
+            "text": _text(entry)[:90],
+            "ts": _finite(entry.get("ts")),
+        }
+        for entry in active
+    ]
 
 
 __all__ = [
@@ -283,5 +290,5 @@ __all__ = [
     "extract_group_moment_candidates",
     "refine_group_moments_candidates",
     "settle_group_moments",
-    "format_group_moments_prompt",
+    "select_group_moments_for_prompt",
 ]

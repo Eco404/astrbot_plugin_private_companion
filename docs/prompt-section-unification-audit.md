@@ -48,6 +48,28 @@
 - 单独审计 `PhotoPromptSection`、NAI/Image Companion bridge、TTS 和 FunctionTool Schema。
 - 将日志、正则、UI、消息占位符、用户原文和解析器规则标为非自动替换项。
 
+### 2.1 反向数据流复核
+
+只扫 LLM sink 和标题字面量仍不够。第二轮复核继续从已经进入 section 的动态值向上追踪，发现一类容易漏掉的生产者：领域模块先返回 `instruction`、`voice`、`reason` 或 `prompt` 字符串，调用方再把它包进 `PromptSection`。这仍然不满足“提示词在所属功能的 section builder 内一次定义”的目标。
+
+需要补充迁移的上游生产者：
+
+| 位置 | 当前数据流 | 修改方式 |
+| --- | --- | --- |
+| `companion_interaction_expression.py:expression_decision_prompt` | 拼接互动表达文案，`main.py` 再包装 | 领域层保留结构化决策；新增所属功能 section builder，在同一次构造中完成标题、固定规则和变量绑定 |
+| `domains/affect/reply_temperature.py:_instruction_for/compose_reply_temperature` | projection 内携带可注入的 `instruction` | projection 只返回 tier、score、signals/codes；主链 section builder 根据这些字段生成正文 |
+| `domains/social/group_mood.py:summarize_group_mood` | 返回自然语言摘要，`group_observation.py` 再包装 | 返回 mood projection；由 `group.social_mood` builder 统一生成文案 |
+| `domains/social/group_moments.py:format_group_moments_prompt` | 返回多行历史文案，调用方再包装 | 返回筛选后的结构化 moment 列表；section 使用 `PromptList` 或 `XmlElement` 渲染 |
+| `domains/social/roleplay_strength.py:project_roleplay_strength` | projection 内携带可注入的 `voice` | projection 只保留等级和数值；`group.roleplay_strength` builder 生成 voice 规则 |
+| `domains/social/joke_boundary.py:joke_guard_suggestion` | `reason` 直接成为群聊提示词正文 | 返回 reason code、blocked、sensitivity；section builder 将 code 映射成提示文案 |
+| `group_cycle_boundary.py:build_group_cycle_boundary` | 返回包含完整 prompt 的字典，`main.py` 再包装 | 只返回 active/phase/topic/private boundary；由 `group.cycle_privacy_boundary` builder 构造英文规则 |
+| `scene_context.py:_format_companion_scene_snapshot` | 返回复用于对话、主动和生图的扁平 prompt | 新增 canonical scene section；各消费者按 `BODY_ONLY`、`PHOTO_PROMPT` 或 conversation XML 选择 renderer |
+| `extension_api_diagnostics.py:get_realtime_context` | 在 scene prompt 上继续用 f-string 追加活动与连续性 | 返回 section/manifest 与兼容字符串视图；追加信息作为同一 section 的字段或子项 |
+| `proactive_chat_runtime_bridge.py:_run_prepare` | 将外部 `prompt_fragment` 直接拼进 `system_prompt` | bridge 契约携带 typed section；无法升级的外部版本明确包为 `ExactText` 并记录来源 |
+| `relationship_policy.py:relationship_stage_prompt` | 当前无生产调用，但保留了一套可注入文案生产器 | 若确认无消费者则删除；否则改成只由所属 section builder 暴露 |
+
+这类迁移不应让纯领域模块依赖 XML renderer。领域模块负责可测试的事实、等级、枚举和 reason code；靠近 LLM 边界的功能 adapter 负责创建 `PromptSection`。这样既保持依赖方向，也保证最终提示词文案不在两个模块中各写一半。
+
 ## 3. 当前架构问题
 
 ### 3.1 同一 section 有三套表示
@@ -291,6 +313,11 @@ placement、marker、temporary 和 merge policy 属于交付编排，继续由 p
 | `private_image.py:77-98,3756-3795,5799-5848` | 图片上下文及延迟图片专用 ProviderRequest | 不预渲染 XML；专用请求使用 PromptDocument |
 | `tts_enhancement.py:2640-2945` | 主链 TTS 动态规则 | 普通规则转 section；标签协议使用 ExactText，不直接写 `req.system_prompt` |
 | `group_member_safety.py:486-534` | 隐藏成员安全标签协议 | 用 exact section 登记；输出字节不变 |
+| `companion_interaction_expression.py:746-803`、`domains/affect/reply_temperature.py:26-56` | 互动表达和回复温度的上游文案 | 领域层返回结构化 projection；`main.py` 的所属 section builder 统一生成正文 |
+| `domains/social/group_mood.py:221-245`、`group_moments.py:257-279`、`roleplay_strength.py:63-126`、`joke_boundary.py:239-258` | 群聊社会状态的上游可注入文案 | 领域层返回事实/code；`group_observation.py` 统一构造四个 section |
+| `group_cycle_boundary.py:68-100` | 群经期隐私 prompt 字段 | 返回边界事实，主链 builder 生成 section 正文 |
+| `scene_context.py:812-1144`、`extension_api_diagnostics.py:37-64` | 跨对话、主动和生图复用的场景 prompt | canonical scene section + sink-specific renderer；公共 API 保留兼容字符串视图 |
+| `proactive_chat_runtime_bridge.py:337-377` | Proactive Chat 外部 prompt fragment | typed bridge contract；旧外部 payload 只按显式 `ExactText` 兼容 |
 
 ### 5.4 手写 XML
 
@@ -540,6 +567,8 @@ placement、marker、temporary 和 merge policy 属于交付编排，继续由 p
 8. 外部插件热加载和可选依赖会改变 section 是否存在，构造器不得在 import 时硬依赖外部插件。
 9. Prompt 配置是多人格有效配置的一部分；缺 key 跟随主人格、显式空值等既有语义不能因模板迁移改变。
 10. 任何 renderer 都不得调用 `_single_line()` 处理 Markdown、CDATA、JSON 示例或 exact content。
+11. `instruction/voice/reason/prompt` 形式的上游字段也可能是真正提示词；CI 和人工审计必须追踪这些字段到 section，不能以“调用点已经包装”为完成标准。
+12. 公共扩展 API 可能把 prompt 交给 Image Companion、Proactive Chat 等仓库。迁移时必须同时提供版本化 typed contract 和旧字符串兼容视图，不能在未协商时改变跨插件字段。
 
 ## 11. 实施阶段
 
@@ -669,6 +698,30 @@ placement、marker、temporary 和 merge policy 属于交付编排，继续由 p
 - 日志、正则、UI、消息占位符和用户原文未被误改；
 - 全量测试不新增相对上游基线的失败。
 
+## 16. 实施结果
+
+实施完成于 2026-09-04，基于 `origin/main@30d7ed07`。
+
+- `conversation_prompt_section.py` 已成为唯一提示词 authoring model，提供 `PromptSection`、`PromptDocument`、文本/字段/列表/XML/CDATA/Exact 节点和六种 renderer。
+- `PromptSurface` 与 `ConversationInjectionPlan` 只接收已完成 authoring 的 `PromptSection`；请求级排序、placement、marker、幂等和 manifest 不再通过 `structured/opaque` 猜测正文类型。
+- 用户对话主链统一渲染为 `<private_companion_context>` XML；后台与功能 LLM 继续使用原有 legacy/body/JSON wire；TTS、成员安全、生图和跨插件协议使用 Exact 或专用 renderer。
+- 互动表达、回复温度、群聊氛围、名场面、扮演强度、玩笑边界和群周期等上游模块只提供事实、等级或 reason code，最终提示文案由所属功能的 section builder 持有。
+- 场景快照提供 canonical section 与兼容字符串视图；Proactive Chat 优先传递 typed Exact section，旧外部版本仅提供字符串时仍由兼容边界包装，不改变原 wire。
+- 静态检查已禁止生产代码新增原始 `【标题】`、手写会话 XML/CDATA、旧格式控制位、散装 Surface/Plan 参数和直接业务 `PromptSection(...)`。
+
+实施中通过真实 `ProviderRequest` 发现并修复两项基础设施问题：仅含子 section 的组合块不再被误判为空，`ExactText` 在 system/turn 合并时也不再被 `strip()` 改写。不同 key 但正文相同的块按身份分别保留，不再做跨 key 正文去重。
+
+最终验收结果：
+
+- 当前分支全量 pytest：`4589 passed, 32 failed, 1 skipped, 877 subtests passed`。
+- 同环境 `origin/main`：`4482 passed, 32 failed, 1 skipped, 786 subtests passed`；32 个失败的集合一致，本分支新增失败为 0。
+- package-aware unittest：当前分支运行 `3857` 项，结果为 `17 failures, 11 errors`；失败集合与运行 `3775` 项的 `origin/main` 一致。
+- OneBot v11 与 QQ Official 的真实事件类各覆盖私聊/群聊：主链 section 只出现一次，QQ Official 专属边界只在对应适配器出现，turn-tail 实际落在 `extra_user_content_parts`。
+- 主动私聊、群插话和群归档后台 Prompt 保持既有 wire/golden；20 个 FunctionTool Schema snapshot 保持一致。
+- 当前插件 ZIP 已在隔离 `ASTRBOT_ROOT` 中由 AstrBot v4.28.0-beta.1 正式加载、启动并正常关闭。
+
+已知失败均来自上游基线，主要包括时区断言、持久化 registry/schema 固定数量、外部插件测试夹具、Provider fallback 测试夹具、旧人格 handler 审计和历史维护写入断言。本次不借提示词重构扩大处理范围。
+
 ## 附录 A：按文件审计覆盖表
 
 这张表用于后续执行时逐文件销项。`迁移` 表示存在插件自有 Prompt authoring；`保协议` 表示应接入 typed/exact 或专用 renderer，但首轮不能改变 wire；`排除` 表示该文件中的相关字面量不是 Prompt 标题，禁止机械替换。一个文件可以同时属于多类。
@@ -698,6 +751,12 @@ placement、marker、temporary 和 merge policy 属于交付编排，继续由 p
 | `game_integration.py` | 迁移 | 游戏余韵 JSON prompt 改 section |
 | `group_member_safety.py` | 迁移 + 保协议 | 后台审核使用 section；隐藏标签使用 ExactText |
 | `group_observation.py` | 迁移 + 排除 | 群归档/插话/黑话和主链上下文迁移；消息识别正则不动 |
+| `companion_interaction_expression.py` | 迁移 | 只返回互动决策数据；表达文案迁到主链 section builder |
+| `domains/affect/reply_temperature.py` | 迁移 | projection 保留事实字段，移出可注入 instruction 文案 |
+| `domains/social/group_mood.py` | 迁移 | mood projection 与提示词渲染分离 |
+| `domains/social/group_moments.py` | 迁移 | 返回结构化 moment 列表，由 section builder 渲染 |
+| `domains/social/roleplay_strength.py` | 迁移 | projection 不携带最终 voice 文案 |
+| `domains/social/joke_boundary.py` | 迁移 | 使用 reason code，提示词文案由 group section builder 持有 |
 | `integration_status.py` | 迁移 | 世界观、LivingMemory、环境 section-only |
 | `llm_tool_actions.py` | 迁移 + 保协议 | 主链工具说明字段化；工具结果契约保持 |
 | `memory_companion_adapter.py` | 迁移 + 保协议 | 本地 wrapper 返回 section；外部返回内容视作不可信数据 |
@@ -719,6 +778,10 @@ placement、marker、temporary 和 merge policy 属于交付编排，继续由 p
 | `qzone_schedule.py` | 迁移 | 长度、去重、生活和情绪说说 prompt |
 | `reading_archive.py` | 迁移 | 密码后台 JSON 与主链夹层 section 分开渲染 |
 | `scene_context.py` | 迁移 | 手机位置和主动场景位置返回 section |
+| `group_cycle_boundary.py` | 迁移 | 只返回边界事实，由主链构造群隐私 section |
+| `extension_api_diagnostics.py` | 迁移 + 保协议 | 场景 prompt 返回 typed manifest，并保留跨插件兼容字符串视图 |
+| `proactive_chat_runtime_bridge.py` | 迁移 + 保协议 | typed fragment 优先；旧外部 fragment 作为有来源的 ExactText |
+| `relationship_policy.py` | 迁移或删除 | 无消费者的 prompt producer 删除；恢复使用时必须从 section builder 暴露 |
 | `self_timeline.py` | 迁移 | 自我时间线返回 section |
 | `token_budget.py` | 保协议 | 继续消费最终 wire；增加 section/document 统计适配，不改预算语义 |
 | `tts_enhancement.py` | 迁移 + 保协议 + 排除 | 主链普通规则 section 化；TTS 标签 exact；标签解析正则不动 |

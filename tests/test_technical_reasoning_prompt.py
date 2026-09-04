@@ -12,10 +12,11 @@ class TechnicalReasoningPromptTests(unittest.TestCase):
 
     def test_plain_chat_only_injects_unit_guard_for_technical_questions(self) -> None:
         self.assertIn("def _format_technical_reasoning_prompt(", self.main_source)
+        self.assertIn("def _format_technical_reasoning_prompt_section(", self.main_source)
         self.assertIn("event: AstrMessageEvent | None", self.main_source)
         self.assertIn("req: ProviderRequest | None = None", self.main_source)
-        self.assertIn("technical_prompt = self._format_technical_reasoning_prompt(", self.main_source)
-        self.assertIn("include_heading=False", self.main_source)
+        self.assertIn("technical_section = self._format_technical_reasoning_prompt_section(", self.main_source)
+        self.assertIn('key="reply.technical_accuracy"', self.main_source)
         self.assertIn('str(getattr(req, "prompt", "") or "").strip()', self.main_source)
         self.assertIn('"代码", "源码", "脚本", "python", "sleep("', self.main_source)
 

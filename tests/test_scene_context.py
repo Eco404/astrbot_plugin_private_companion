@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from astrbot_plugin_private_companion.main import PrivateCompanionExtensionAPI
+from astrbot_plugin_private_companion.conversation_prompt_section import PromptSection
 from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
 from astrbot_plugin_private_companion.scene_context import SceneContextMixin, infer_companion_scene_category
 
@@ -175,6 +176,14 @@ class SceneContextTests(unittest.IsolatedAsyncioTestCase):
             snapshot,
             purpose="proactive_photo",
         )
+        section = harness._format_companion_scene_snapshot_prompt_section(
+            snapshot,
+            purpose="proactive_photo",
+        )
+        self.assertIsInstance(section, PromptSection)
+        self.assertEqual("scene.snapshot", section.key)
+        self.assertEqual("scene_context", section.source)
+        self.assertEqual(formatted, section.content)
         self.assertIn("当前日程", formatted)
         self.assertIn("当前位置：学校", formatted)
         self.assertIn("当前场景：外出", formatted)

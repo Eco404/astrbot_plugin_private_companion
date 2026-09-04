@@ -12,15 +12,15 @@ import unittest
 from astrbot_plugin_private_companion.domains.social.group_mood import (
     MOOD_LABELS,
     project_group_mood,
+    project_group_mood_prompt_facts,
     settle_group_mood,
-    summarize_group_mood,
 )
 from astrbot_plugin_private_companion.domains.social.roleplay_strength import (
     project_roleplay_strength,
 )
 from astrbot_plugin_private_companion.domains.social.group_moments import (
     extract_group_moment_candidates,
-    format_group_moments_prompt,
+    select_group_moments_for_prompt,
     settle_group_moments,
 )
 from astrbot_plugin_private_companion.domains.social.joke_boundary import (
@@ -30,6 +30,10 @@ from astrbot_plugin_private_companion.domains.social.joke_boundary import (
     settle_joke_boundary,
 )
 from astrbot_plugin_private_companion.group_observation import GroupObservationMixin
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PromptRenderMode,
+    render_prompt_sections,
+)
 
 T0 = 1_000_000.0
 
@@ -102,16 +106,40 @@ class GroupMoodContractTests(unittest.TestCase):
         mood = settle_group_mood(None, messages=[], now=T0)
         self.assertGreater(mood["mood_scores"]["dead_silence"], 0)
 
-    def test_summarize_renders_chinese(self):
-        summary = summarize_group_mood(_mood_snapshot(tease=70), now=T0)
-        self.assertIn("调侃", summary)
+    def test_prompt_projection_exposes_facts_without_injection_prose(self):
+        facts = project_group_mood_prompt_facts(
+            _mood_snapshot(tease=70),
+            now=T0,
+        )
+
+        self.assertEqual("tease", facts["top_mood"])
+        self.assertEqual("调侃", facts["top_mood_label"])
+        self.assertEqual("low", facts["tension_level"])
+        section = GroupSocialHarness._group_social_mood_prompt_section(
+            _mood_snapshot(tease=70),
+            now=T0,
+        )
+        self.assertEqual(
+            "当前氛围以「调侃」为主；群内气氛轻松无火药味",
+            section.content,
+        )
 
 
 class RoleplayStrengthContractTests(unittest.TestCase):
     def test_tease_maps_to_high_exaggerate(self):
         projection = project_roleplay_strength(_mood_snapshot(tease=70), now=T0)
         self.assertGreaterEqual(projection["exaggerate"], 60)
-        self.assertIn("玩闹", projection["voice"])
+        self.assertEqual("playful_high", projection["strength_band"])
+        self.assertNotIn("voice", projection)
+        self.assertNotIn("band_voice", projection)
+        section = GroupSocialHarness._group_roleplay_strength_prompt_section(
+            _mood_snapshot(tease=70),
+            now=T0,
+        )
+        self.assertEqual(
+            "群聊正处在玩闹气氛，可以适度夸张、接梗、起哄，让回复更有参与感；不要刻意抢话或攻击谁",
+            section.content,
+        )
 
     def test_serious_mood_stays_reserved(self):
         scores = {label: 0.0 for label in MOOD_LABELS}
@@ -151,7 +179,11 @@ class JokeBoundaryContractTests(unittest.TestCase):
         self.assertEqual(3, member["objection_count"])
         suggestion = joke_guard_suggestion(boundary, member_id="u1")
         self.assertTrue(suggestion["blocked"])
-        self.assertIn("严肃反对", suggestion["reason"])
+        self.assertEqual(
+            "repeated_serious_objection_or_recall",
+            suggestion["reason_code"],
+        )
+        self.assertNotIn("reason", suggestion)
 
     def test_recall_signal_raises_recall_count(self):
         boundary = settle_joke_boundary(
@@ -211,14 +243,26 @@ class GroupMomentsContractTests(unittest.TestCase):
         self.assertEqual(1, len(second["moments"]))
         self.assertEqual(first["moments"][0]["expires_at"], second["moments"][0]["expires_at"])
 
-    def test_format_prompt_renders_sender_line(self):
+    def test_prompt_selection_returns_structured_moment_facts(self):
         candidates = extract_group_moment_candidates(
             [{"sender_id": "漂", "text": "这谁顶得住", "ts": T0}],
             now=T0,
         )
         moments = settle_group_moments(None, candidates=candidates, now=T0)
-        rendered = format_group_moments_prompt(moments, now=T0)
-        self.assertIn("这谁顶得住", rendered)
+        selected = select_group_moments_for_prompt(moments, now=T0)
+        self.assertEqual("漂", selected[0]["sender"])
+        self.assertEqual("这谁顶得住", selected[0]["text"])
+        section = GroupSocialHarness._group_social_moments_prompt_section(
+            moments,
+            now=T0,
+        )
+        self.assertEqual(
+            "漂：这谁顶得住",
+            render_prompt_sections(
+                [section],
+                mode=PromptRenderMode.BODY_ONLY,
+            ),
+        )
 
 
 class GroupObservationMountTests(unittest.TestCase):
@@ -272,9 +316,24 @@ class GroupObservationMountTests(unittest.TestCase):
         sections: list[dict] = []
         self.harness._append_group_social_context_sections(group, sections, sender_id="b", now=T0)
         titles = [section.get("title") or section.get("name", "") for section in sections]
+        self.assertEqual(
+            {"group.social_mood", "group.social_moments", "group.roleplay_strength"},
+            {section.key for section in sections},
+        )
+        self.assertTrue(all(section.source == "group_observation" for section in sections))
         self.assertTrue(any("氛围" in title for title in titles))
         self.assertTrue(any("名场面" in title for title in titles))
         self.assertTrue(any("扮演强度" in title for title in titles))
+        rendered = render_prompt_sections(sections)
+        self.assertIn('<section title="群聊氛围">', rendered)
+        self.assertIn("当前氛围以「调侃」为主", rendered)
+        self.assertIn('<section title="群聊名场面（可选回忆）">', rendered)
+        self.assertIn("<moments><moment>漂：这谁顶得住</moment></moments>", rendered)
+        legacy_body = render_prompt_sections(
+            sections,
+            mode=PromptRenderMode.BODY_ONLY,
+        )
+        self.assertIn("漂：这谁顶得住", legacy_body)
 
     def test_roleplay_uses_current_sender_expression_band(self):
         group: dict = {
@@ -292,6 +351,25 @@ class GroupObservationMountTests(unittest.TestCase):
         )
         roleplay = next(section for section in sections if section.get("title") == "扮演强度")
         self.assertIn("压低表达强度", roleplay["content"])
+
+    def test_joke_reason_code_is_rendered_only_by_section_builder(self):
+        boundary = settle_joke_boundary(
+            None,
+            messages=[{"sender_id": "b", "text": "别拿我开玩笑"}] * 3,
+            now=T0,
+        )
+
+        section = self.harness._group_joke_boundary_prompt_section(
+            boundary,
+            member_id="b",
+        )
+
+        self.assertIsNotNone(section)
+        self.assertEqual("group.joke_boundary", section.key)
+        self.assertEqual(
+            "该成员已多次严肃反对或撤回玩笑，避免再向其开玩笑",
+            section.content,
+        )
 
     def test_async_recall_fills_joke_boundary(self):
         async def run() -> bool:

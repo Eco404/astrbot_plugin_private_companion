@@ -5,16 +5,11 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
 from .conversation_prompt_section import (
+    PromptRenderMode,
     PromptSection,
-    coerce_prompt_section,
-    prompt_section,
     render_prompt_sections,
-    title_for_prompt_key,
 )
 from .helpers import _single_line
-
-
-_MISSING = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,50 +53,20 @@ class PromptSurface:
 
     def add(
         self,
-        section_or_key: PromptSection | str,
-        content: Any = _MISSING,
+        section: PromptSection,
         *,
         priority: int = 100,
-        source: str = "",
-        title: str = "",
-        metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Add a section, retaining the legacy ``key, content`` adapter."""
+        """Add one fully authored section."""
 
-        if isinstance(section_or_key, PromptSection) and content is _MISSING:
-            if source or title or metadata:
-                raise TypeError("authored PromptSection already owns title, source and metadata")
-            section = section_or_key
-            if not section.key or not section.source:
-                raise ValueError("PromptSurface requires a section with key and source")
-        else:
-            key = _single_line(section_or_key, 160)
-            if content is _MISSING:
-                raise TypeError("legacy PromptSurface.add requires key and content")
-            authored = coerce_prompt_section(content)
-            body = authored.content if authored is not None else content
-            if body is None or (isinstance(body, str) and not body.strip()):
-                return
-            section = prompt_section(
-                key=key or (authored.key if authored is not None else "") or "fragment",
-                title=title_for_prompt_key(
-                    key,
-                    title or (authored.title if authored is not None else ""),
-                ),
-                source=_single_line(
-                    source or (authored.source if authored is not None else "") or "legacy_surface",
-                    80,
-                ),
-                content=body,
-                children=authored.children if authored is not None else (),
-                metadata={
-                    **(dict(authored.metadata) if authored is not None else {}),
-                    **dict(metadata or {}),
-                },
-            )
-        if section.content is None or (
-            isinstance(section.content, str) and not section.content.strip()
-        ):
+        if not isinstance(section, PromptSection):
+            raise TypeError("PromptSurface.add requires PromptSection")
+        if not section.key or not section.source:
+            raise ValueError("PromptSurface requires a section with key and source")
+        if (
+            section.content is None
+            or (isinstance(section.content, str) and not section.content.strip())
+        ) and not section.children:
             return
         self._fragments.append(
             PromptFragment(
@@ -133,7 +98,10 @@ class PromptSurface:
 
     @staticmethod
     def _manifest_item(fragment: PromptFragment) -> dict[str, object]:
-        content = fragment.content
+        content = render_prompt_sections(
+            [fragment.section],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
         item: dict[str, object] = {
             "key": fragment.normalized_key(),
             "title": fragment.title,

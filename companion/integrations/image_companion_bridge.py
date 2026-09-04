@@ -17,9 +17,11 @@ from typing import Any
 try:
     from ...helpers import _single_line
     from ...logging_util import get_module_logger
+    from ...photo_prompt_context import _photo_prompt_section_payload
 except ImportError:  # pragma: no cover - direct import from the plugin directory
     from helpers import _single_line  # type: ignore
     from logging_util import get_module_logger  # type: ignore
+    from photo_prompt_context import _photo_prompt_section_payload  # type: ignore
 
 from .external_bridge_resolver import (
     invalidate_external_bridge_cache,
@@ -484,14 +486,17 @@ class ImageCompanionBridgeMixin:
                 result.append(dict(item))
                 continue
             try:
-                result.append(
-                    {
-                        field: getattr(item, field)
-                        for field in _IMAGE_PROMPT_SECTION_FIELDS
-                    }
-                )
+                result.append(_photo_prompt_section_payload(item))
             except Exception:
-                result.append(item)
+                try:
+                    result.append(
+                        {
+                            field: getattr(item, field)
+                            for field in _IMAGE_PROMPT_SECTION_FIELDS
+                        }
+                    )
+                except Exception:
+                    result.append(item)
         return result
 
     @staticmethod

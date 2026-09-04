@@ -20,10 +20,35 @@ from astrbot_plugin_private_companion.image_companion_bridge import (
 from astrbot_plugin_private_companion.photo_reference_catalog import (
     load_catalog as load_private_catalog,
 )
+from astrbot_plugin_private_companion.photo_prompt_context import PhotoPromptSection
 
 
 class _BridgeHarness(ImageCompanionBridgeMixin):
     context = None
+
+
+def test_image_task_builder_serializes_canonical_photo_section_to_existing_fields() -> None:
+    section = PhotoPromptSection(
+        "scene",
+        "scene_context",
+        positive="rainy window",
+        negative="watermark",
+        protected=True,
+        sanitize_conflicts=False,
+    )
+
+    serialized = _BridgeHarness._image_prompt_sections([section.to_prompt_section()])
+
+    assert serialized == [
+        {
+            "name": "scene",
+            "source": "scene_context",
+            "positive": "rainy window",
+            "negative": "watermark",
+            "protected": True,
+            "sanitize_conflicts": False,
+        }
+    ]
 
 
 _FORMAL_CAPABILITIES = [

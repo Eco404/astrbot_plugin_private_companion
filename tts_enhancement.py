@@ -32,6 +32,16 @@ from .conversation_injection_plan import (
     PLACEMENT_TOOL_CONTRACT,
     get_conversation_injection_plan,
 )
+from .conversation_prompt_section import (
+    PromptDocument,
+    PromptRenderMode,
+    PromptSection,
+    exact_text,
+    prompt_document,
+    prompt_section,
+    render_prompt_document,
+    render_prompt_sections,
+)
 from .helpers import (
     _has_history_media_marker,
     _normalize_outbound_punctuation_flow,
@@ -76,7 +86,28 @@ def build_tts_spoken_conversion_prompts(
     provider_rule: str = "",
 ) -> tuple[str, str]:
     """Keep reusable conversion rules ahead of the per-message source text."""
-    system_prompt = f"""
+    document = build_tts_spoken_conversion_prompt_document(
+        text,
+        language_name=language_name,
+        persona_context=persona_context,
+        provider_rule=provider_rule,
+    )
+    rendered = render_prompt_document(
+        document,
+        system_mode=PromptRenderMode.BODY_ONLY,
+        user_mode=PromptRenderMode.LEGACY_BLOCK,
+    )
+    return rendered["system"], rendered["user"]
+
+
+def build_tts_spoken_conversion_prompt_document(
+    text: str,
+    *,
+    language_name: str,
+    persona_context: str = "",
+    provider_rule: str = "",
+) -> PromptDocument:
+    system_content = f"""
 把用户提供的原文改写成自然{language_name}口语。只输出朗读文本，不要解释。
 
 要求：
@@ -89,8 +120,24 @@ def build_tts_spoken_conversion_prompts(
 {provider_rule}
 {persona_context}
 """.strip()
-    user_prompt = f"【待转换原文】\n{text}".strip()
-    return system_prompt, user_prompt
+    return prompt_document(
+        system=(
+            prompt_section(
+                key="background.tts_spoken_conversion.system",
+                title="TTS 口语转换规则",
+                source="tts_enhancement",
+                content=system_content,
+            ),
+        ),
+        user=(
+            prompt_section(
+                key="background.tts_spoken_conversion.source",
+                title="待转换原文",
+                source="tts_enhancement",
+                content=exact_text(str(text or "").strip()),
+            ),
+        ),
+    )
 
 
 FISH_AUDIO_S1_CUES = frozenset({
@@ -2227,7 +2274,11 @@ class TtsEnhancementMixin:
             return spoken
         provider = await self._get_tts_conversion_provider(event) if event is not None else None
         persona_context = await self._format_tts_persona_voice_context(event)
-        prompt = f"""
+        prompt_section_value = prompt_section(
+            key="background.tts_visible_translation",
+            title="TTS 可见中文翻译",
+            source="tts_enhancement",
+            content=f"""
 请把下面这句 TTS 朗读文本翻译成自然中文，只输出中文句子，不要解释，不要保留 <tts> 标签。
 要求：
 - 保留原本亲近、害羞、吐槽或撒娇的语气。
@@ -2239,7 +2290,12 @@ class TtsEnhancementMixin:
 
 TTS 朗读文本：
 {spoken}
-""".strip()
+""".strip(),
+        )
+        prompt = render_prompt_sections(
+            [prompt_section_value],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
         try:
             if provider is not None:
                 resp = await self._tts_provider_text_chat(provider, prompt, max_tokens=240, task="tts_visible_translation")
@@ -2362,7 +2418,12 @@ TTS 朗读文本：
             f"话题={_single_line(decision.get('topic_initiative'), 20) or 'reply_only'}。"
         )
 
-    def _build_tts_rule_prompt(self, provider_kind: str = "generic", *, event: Any = None) -> str:
+    def _build_tts_rule_prompt_section(
+        self,
+        provider_kind: str = "generic",
+        *,
+        event: Any = None,
+    ) -> PromptSection:
         voice_lang = self._tts_voice_language_for_event(event)
         lang = self._tts_language_label(voice_language=voice_lang)
         mode = self._tts_setting("tts_generation_mode", "fast_tag")
@@ -2464,7 +2525,6 @@ TTS 朗读文本：
             else "2.只把最适合听的一小段放进语音块，其余信息继续用普通文字表达；"
         )
         rules = [
-            "【语音消息规则】",
             (
                 f"用户本轮明确要求使用{lang}回复；本轮语音正文必须服从这个临时语种，"
                 "不要沿用长期 TTS 语种。该要求只作用于当前回复。"
@@ -2498,7 +2558,7 @@ TTS 朗读文本：
                 )
         if emotion_rule:
             rules.append(emotion_rule)
-        return "\n".join(
+        body = "\n".join(
             item
             for item in [
                 "\n".join(rules),
@@ -2510,6 +2570,18 @@ TTS 朗读文本：
                 f"补充规则：{extra}" if extra else "",
             ]
             if item
+        )
+        return prompt_section(
+            key="tts.rule",
+            title="语音消息规则",
+            source="tts_enhancement",
+            content=body,
+        )
+
+    def _build_tts_rule_prompt(self, provider_kind: str = "generic", *, event: Any = None) -> str:
+        return render_prompt_sections(
+            [self._build_tts_rule_prompt_section(provider_kind, event=event)],
+            mode=PromptRenderMode.LEGACY_BLOCK,
         )
 
     def _legacy_nondefault_tts_prompt(self) -> str:
@@ -2633,6 +2705,62 @@ TTS 朗读文本：
                 return False
         return True
 
+    def _build_tts_postprocess_mode_prompt_section(
+        self,
+        event: Any,
+        *,
+        full_scope: bool,
+        turn_voice_language: str,
+    ) -> PromptSection:
+        scope_text = "是否将整条回复转成语音" if full_scope else "是否把其中一小段转成语音"
+        language_text = self._tts_language_label(event)
+        foreign_visible_requested = self._event_explicitly_requests_foreign_visible_text(
+            event,
+            voice_language=turn_voice_language,
+        )
+        temporary_language_rule = (
+            f"用户本轮明确指定了{language_text}；后处理语音必须使用{language_text}，该临时要求只作用于当前回复。"
+            if turn_voice_language
+            else ""
+        )
+        temporary_visible_rule = (
+            f"用户同时明确要求显示{language_text}文字，因此普通正文可以保留{language_text}。"
+            if foreign_visible_requested
+            else "用户没有明确要求显示外语文字时，普通正文继续使用当前聊天语言。"
+        )
+        body = (
+            "本轮主回复请只输出普通聊天文字，不要主动写 <pc_tts>、<tts>、语音、朗读、音频或任何等价语音标签。"
+            "主回复是直接展示给用户看的正文，保持当前聊天语言（通常为中文）；不要把准备送入语音的日语或英语朗读稿直接写进普通正文。"
+            "目标语种只交给发送前 TTS 后处理生成 voice_text，visible_text 保持用户看得懂的正文；只有用户本轮明确要求目标语种文字回复时才例外。"
+            "如果用户是在补要或追问上一条语音，只回复这次应该说的内容；不要预告或确认“语音已经发出”“这次真发了”，实际发送结果由插件决定。"
+            f"当前是{'全量' if full_scope else '局部'}转换；{scope_text}，将由插件发送前的 TTS 后处理模型统一判断。"
+            f"{temporary_language_rule}{temporary_visible_rule}"
+        )
+        return prompt_section(
+            key="tts.rule",
+            title="TTS 后处理模式",
+            source="tts_enhancement",
+            content=body,
+        )
+
+    def _build_tts_postprocess_mode_prompt(
+        self,
+        event: Any,
+        *,
+        full_scope: bool,
+        turn_voice_language: str,
+    ) -> str:
+        return render_prompt_sections(
+            [
+                self._build_tts_postprocess_mode_prompt_section(
+                    event,
+                    full_scope=full_scope,
+                    turn_voice_language=turn_voice_language,
+                )
+            ],
+            mode=PromptRenderMode.LEGACY_BLOCK,
+        )
+
     async def apply_tts_enhancement_request(self, event: Any, req: Any) -> None:
         if bool(getattr(event, "_private_companion_tts_request_applied", False)):
             return
@@ -2657,51 +2785,50 @@ TTS 朗读文本：
 
         def register_materialized_tts_fragment(
             fragment_marker: str,
-            text: str,
+            section: PromptSection,
             *,
-            key: str = "",
-            title: str = "",
             priority: int = 55,
             placement: str = PLACEMENT_DYNAMIC_SYSTEM,
-            opaque: bool = False,
         ) -> None:
             plan = get_conversation_injection_plan(req)
             if plan is None or plan.contains_marker(fragment_marker):
                 return
             plan.add(
-                key=key,
+                section=section,
                 marker=fragment_marker,
-                content=text,
-                title=title,
                 priority=priority,
-                source="tts",
                 placement=placement,
                 temporary=False,
                 materialized=True,
-                opaque=opaque,
             )
 
         def append_dynamic_tts_fragment(
             fragment_marker: str,
-            text: str,
+            section: PromptSection,
             *,
-            title: str,
             priority: int = 55,
         ) -> str:
+            placer = getattr(self, "_place_conversation_prompt_section", None)
+            if callable(placer):
+                return placer(
+                    req,
+                    fragment_marker,
+                    section,
+                    priority=priority,
+                )
+            text = render_prompt_sections(
+                [section],
+                mode=PromptRenderMode.BODY_ONLY,
+            )
             helper = getattr(self, "_append_turn_prompt_fragment_by_position", None)
             if callable(helper):
                 try:
                     if helper(
                         req,
                         fragment_marker,
-                        text,
-                        title=title,
+                        section,
                         priority=priority,
-                        source="tts",
                     ):
-                        return "prompt"
-                except TypeError:
-                    if helper(req, fragment_marker, text):
                         return "prompt"
                 except Exception as exc:
                     logger.debug("TTS 指定位置动态注入失败,回退 system_prompt: %s", _single_line(exc, 120))
@@ -2710,8 +2837,7 @@ TTS 朗读文本：
             ).strip()
             register_materialized_tts_fragment(
                 fragment_marker,
-                text,
-                title=title,
+                section,
                 priority=priority,
                 placement=PLACEMENT_DYNAMIC_SYSTEM,
             )
@@ -2786,8 +2912,12 @@ TTS 朗读文本：
                 )
                 placement = append_dynamic_tts_fragment(
                     "<!-- private_companion_tts_expression_v1 -->",
-                    expression_prompt,
-                    title="统一陪伴表达的语音上限",
+                    prompt_section(
+                        key="tts.relationship_expression",
+                        title="统一陪伴表达的语音上限",
+                        source="tts_enhancement",
+                        content=expression_prompt,
+                    ),
                     priority=54,
                 )
                 await record_tts_fragment(
@@ -2806,8 +2936,12 @@ TTS 朗读文本：
             )
             placement = append_dynamic_tts_fragment(
                 "<!-- private_companion_tts_functional_reply_v1 -->",
-                functional_prompt,
-                title="功能性回复的语音取舍",
+                prompt_section(
+                    key="tts.functional_reply",
+                    title="功能性回复的语音取舍",
+                    source="tts_enhancement",
+                    content=functional_prompt,
+                ),
                 priority=56,
             )
             await record_tts_fragment(
@@ -2844,53 +2978,52 @@ TTS 朗读文本：
         if not strong_block_reason:
             self._disable_streaming_for_tts_turn(event)
         if marker not in prompt and mode == "fast_tag" and not strong_block_reason:
-            rule_prompt = self._build_tts_rule_prompt(provider_kind, event=event)
+            authored_rule_section = self._build_tts_rule_prompt_section(
+                provider_kind,
+                event=event,
+            )
+            rule_prompt = render_prompt_sections(
+                [authored_rule_section],
+                mode=PromptRenderMode.LEGACY_BLOCK,
+            )
+            rule_section = prompt_section(
+                key=authored_rule_section.key,
+                title=authored_rule_section.title,
+                source=authored_rule_section.source,
+                content=exact_text(rule_prompt),
+                metadata=authored_rule_section.metadata,
+            )
             req.system_prompt = f"{prompt}\n\n{marker}\n{rule_prompt}".strip()
             register_materialized_tts_fragment(
                 marker,
-                rule_prompt,
-                key="tts.rule",
-                title="语音消息规则",
+                rule_section,
                 priority=20,
                 placement=PLACEMENT_TOOL_CONTRACT,
-                opaque=True,
             )
             await record_tts_fragment("TTS 基础规则注入", "tts.rule", rule_prompt)
         elif marker not in prompt and mode == "postprocess" and not strong_block_reason:
-            scope_text = "是否将整条回复转成语音" if full_scope else "是否把其中一小段转成语音"
-            language_text = self._tts_language_label(event)
-            foreign_visible_requested = self._event_explicitly_requests_foreign_visible_text(
+            authored_postprocess_section = self._build_tts_postprocess_mode_prompt_section(
                 event,
-                voice_language=turn_voice_language,
+                full_scope=full_scope,
+                turn_voice_language=turn_voice_language,
             )
-            temporary_language_rule = (
-                f"用户本轮明确指定了{language_text}；后处理语音必须使用{language_text}，该临时要求只作用于当前回复。"
-                if turn_voice_language
-                else ""
+            postprocess_prompt = render_prompt_sections(
+                [authored_postprocess_section],
+                mode=PromptRenderMode.LEGACY_BLOCK,
             )
-            temporary_visible_rule = (
-                f"用户同时明确要求显示{language_text}文字，因此普通正文可以保留{language_text}。"
-                if foreign_visible_requested
-                else "用户没有明确要求显示外语文字时，普通正文继续使用当前聊天语言。"
-            )
-            postprocess_prompt = (
-                "【TTS 后处理模式】\n"
-                "本轮主回复请只输出普通聊天文字，不要主动写 <pc_tts>、<tts>、语音、朗读、音频或任何等价语音标签。"
-                "主回复是直接展示给用户看的正文，保持当前聊天语言（通常为中文）；不要把准备送入语音的日语或英语朗读稿直接写进普通正文。"
-                "目标语种只交给发送前 TTS 后处理生成 voice_text，visible_text 保持用户看得懂的正文；只有用户本轮明确要求目标语种文字回复时才例外。"
-                "如果用户是在补要或追问上一条语音，只回复这次应该说的内容；不要预告或确认“语音已经发出”“这次真发了”，实际发送结果由插件决定。"
-                f"当前是{'全量' if full_scope else '局部'}转换；{scope_text}，将由插件发送前的 TTS 后处理模型统一判断。"
-                f"{temporary_language_rule}{temporary_visible_rule}"
+            postprocess_section = prompt_section(
+                key=authored_postprocess_section.key,
+                title=authored_postprocess_section.title,
+                source=authored_postprocess_section.source,
+                content=exact_text(postprocess_prompt),
+                metadata=authored_postprocess_section.metadata,
             )
             req.system_prompt = f"{prompt}\n\n{marker}\n{postprocess_prompt}".strip()
             register_materialized_tts_fragment(
                 marker,
-                postprocess_prompt,
-                key="tts.rule",
-                title="TTS 后处理模式",
+                postprocess_section,
                 priority=20,
                 placement=PLACEMENT_TOOL_CONTRACT,
-                opaque=True,
             )
             await record_tts_fragment("TTS 后处理模式注入", "tts.rule", postprocess_prompt, mode="postprocess")
         if strong_block_reason:
@@ -2901,8 +3034,12 @@ TTS 朗读文本：
             )
             placement = append_dynamic_tts_fragment(
                 "<!-- private_companion_tts_block_v1 -->",
-                reverse_prompt,
-                title="本轮 TTS 强约束",
+                prompt_section(
+                    key="tts.block",
+                    title="本轮 TTS 强约束",
+                    source="tts_enhancement",
+                    content=reverse_prompt,
+                ),
                 priority=22,
             )
             await record_tts_fragment("TTS 强约束禁用注入", "tts.block", reverse_prompt, mode="strong_block", placement=placement)
@@ -2920,8 +3057,12 @@ TTS 朗读文本：
             force_prompt = force_rule
             placement = append_dynamic_tts_fragment(
                 "<!-- private_companion_tts_force_v1 -->",
-                force_prompt,
-                title="本轮 TTS 强化触发",
+                prompt_section(
+                    key="tts.force",
+                    title="本轮 TTS 强化触发",
+                    source="tts_enhancement",
+                    content=force_prompt,
+                ),
                 priority=54,
             )
             await record_tts_fragment("TTS 主用户倾向注入", "tts.force", force_prompt, mode="main_user", placement=placement)
@@ -2938,8 +3079,12 @@ TTS 朗读文本：
             )
             placement = append_dynamic_tts_fragment(
                 "<!-- private_companion_tts_user_request_v1 -->",
-                user_request_prompt,
-                title="用户语音请求",
+                prompt_section(
+                    key="tts.user_request",
+                    title="用户语音请求",
+                    source="tts_enhancement",
+                    content=user_request_prompt,
+                ),
                 priority=54,
             )
             await record_tts_fragment("用户语音请求注入", "tts.user_request", user_request_prompt, mode="user_request", placement=placement)
@@ -4416,7 +4561,11 @@ TTS 朗读文本：
             if full
             else "只选择最适合朗读的一小段转换成语音，其余信息保留为可见文字；不要把整条长回复都塞进语音，尤其不要朗读 URL、域名、邮箱、命令、文件路径、长编号或邀请码。"
         )
-        prompt = f"""
+        conversion_section = prompt_section(
+            key="background.tts_conversion",
+            title="TTS 最终消息转换",
+            source="tts_enhancement",
+            content=f"""
 请把下面这条回复转换成适合 TTS 朗读的最终输出。
 
 目标语种：{lang}
@@ -4433,7 +4582,12 @@ Provider 规则：{emotion_rule}
 {source}
 
 只输出最终消息，不要解释。
-""".strip()
+""".strip(),
+        )
+        prompt = render_prompt_sections(
+            [conversion_section],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
         try:
             if provider is not None:
                 resp = await self._tts_provider_text_chat(provider, prompt, max_tokens=700, task="tts_conversion")
@@ -4509,7 +4663,11 @@ Provider 规则：{emotion_rule}
             if foreign_visible_requested
             else "用户没有明确要求显示外语文字，visible_text 保持当前聊天语言（通常为中文）。"
         )
-        prompt = f"""
+        postprocess_section = prompt_section(
+            key="background.tts_postprocess",
+            title="TTS 后处理判断",
+            source="tts_enhancement",
+            content=f"""
 你是 TTS 后处理模型。请判断这条已经生成好的聊天回复是否需要转成语音，并在需要时完成目标语种改写。
 
 目标语种：{lang}
@@ -4550,7 +4708,12 @@ Provider 规则：{emotion_rule}
   "visible_text": "最终可见文本",
   "voice_text": "需要朗读的目标语种文本；不用语音则为空"
 }}
-""".strip()
+""".strip(),
+        )
+        prompt = render_prompt_sections(
+            [postprocess_section],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
         try:
             postprocess_max_tokens = (
                 max(700, min(3000, len(source) * 2 + 200))

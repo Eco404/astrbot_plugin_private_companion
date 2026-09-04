@@ -14,6 +14,13 @@ import uuid
 
 import pytest
 
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PromptRenderMode,
+    PromptSection,
+    prompt_group,
+    prompt_section,
+    render_prompt_sections,
+)
 from story_migration_contract import (
     STORY_MIGRATION_API_FAMILY,
     STORY_MIGRATION_API_VERSION,
@@ -497,6 +504,11 @@ def test_cross_family_composition_uses_latest_facade_overrides_at_runtime() -> N
         {
             "_single_line": single_line,
             "build_p6_readonly_status": lambda value: value,
+            "PromptRenderMode": PromptRenderMode,
+            "PromptSection": PromptSection,
+            "prompt_group": prompt_group,
+            "prompt_section": prompt_section,
+            "render_prompt_sections": render_prompt_sections,
         },
     )
     plugin = SimpleNamespace(

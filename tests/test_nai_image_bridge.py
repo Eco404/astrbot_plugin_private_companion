@@ -6,11 +6,43 @@ from types import SimpleNamespace
 import pytest
 
 from astrbot_plugin_private_companion.nai_image_bridge import NAIImageBridgeMixin
+from astrbot_plugin_private_companion.photo_prompt_context import PhotoPromptSection
 
 
 class _BridgeHarness(NAIImageBridgeMixin):
     context = None
     photo_generation_backend = "nai"
+
+
+def test_nai_request_adapter_preserves_legacy_sections_and_serializes_typed_sections() -> None:
+    legacy = PhotoPromptSection("legacy", "scene_context", positive="legacy scene")
+    typed = PhotoPromptSection(
+        "typed",
+        "fixed_prompt",
+        positive="cinematic light",
+        negative="watermark",
+        protected=True,
+    ).to_prompt_section()
+
+    payload = _BridgeHarness._nai_image_request_payload(
+        {
+            "prompt_text": "portrait",
+            "prompt_sections": [legacy, typed],
+            "workflow_kind": "selfie",
+        }
+    )
+
+    assert payload["prompt_text"] == "portrait"
+    assert payload["workflow_kind"] == "selfie"
+    assert payload["prompt_sections"][0] is legacy
+    assert payload["prompt_sections"][1] == {
+        "name": "typed",
+        "source": "fixed_prompt",
+        "positive": "cinematic light",
+        "negative": "watermark",
+        "protected": True,
+        "sanitize_conflicts": None,
+    }
 
 
 @pytest.mark.asyncio

@@ -1,11 +1,10 @@
-"""Deterministic roleplay-strength mapping for the Companion persona.
+"""Deterministic roleplay-strength projection for the Companion persona.
 
 The persona should exaggerate (play along) when a group is teasing or
 bantering, and dampen when the group is serious, tense, silent, or when a
 member has asked to stop.  This module maps the group mood and the current
-expression band into a single ``exaggerate`` scalar plus a human-readable
-voice instruction for prompt injection.  It owns no persistence, clock,
-network, or platform access.
+expression band into a single ``exaggerate`` scalar and a stable strength
+band.  Prompt wording belongs to the group-observation adapter.
 """
 
 from __future__ import annotations
@@ -96,24 +95,14 @@ def project_roleplay_strength(
     if tension > 0:
         exaggerate = max(0.0, exaggerate - tension * _TENSION_DAMPEN_FACTOR * 0.3)
 
-    band_text = {
-        "avoidant": "收敛回避",
-        "hurt": "低落收敛",
-        "relaxed": "自然松弛",
-        "lively": "活泼放开",
-        "warm": "温和放开",
-        "close": "亲近放开",
-        "affectionate": "亲昵克制",
-    }.get(band, "自然")
-
     if exaggerate >= 60:
-        voice = "群聊正处在玩闹气氛，可以适度夸张、接梗、起哄，让回复更有参与感；不要刻意抢话或攻击谁"
+        strength_band = "playful_high"
     elif exaggerate >= 35:
-        voice = "群聊气氛轻松，可以带一点俏皮和接梗，但保持自然，不强行玩梗"
+        strength_band = "playful_moderate"
     elif exaggerate >= 12:
-        voice = "群聊气氛偏正或偏冷，保持克制、回应分寸，不开玩笑"
+        strength_band = "reserved"
     else:
-        voice = "群聊气氛紧张或沉默，只做必要回应，压低表达强度，不制造冲突"
+        strength_band = "minimal"
 
     return {
         "version": ROLEPLAY_STRENGTH_VERSION,
@@ -121,8 +110,7 @@ def project_roleplay_strength(
         "top_mood": top_mood,
         "expression_band": band,
         "social_tension": round(tension, 2),
-        "voice": voice,
-        "band_voice": band_text,
+        "strength_band": strength_band,
     }
 
 

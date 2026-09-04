@@ -143,12 +143,15 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
 
     def test_platform_boundary_keeps_legacy_text_and_structures_main_chain(self) -> None:
         harness = _PlatformHarness()
+        section = harness._platform_capability_prompt_section(None)
 
         self.assertTrue(harness._platform_capability_prompt(None).startswith("【QQ 官方机器人平台边界】\n"))
+        self.assertEqual("platform.qq_official_boundary", section.key)
+        self.assertEqual("platform_compat", section.source)
         rendered = render_prompt_sections(
             [
                 prompt_section("能力边界", "通用能力约束"),
-                harness._platform_capability_prompt_section(None),
+                section,
             ]
         )
 
@@ -183,10 +186,16 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
         harness = _LivingMemoryHarness()
 
         legacy = harness._format_livingmemory_guidance(scope="group")
+        sections = harness._format_livingmemory_guidance_sections(scope="group")
         rendered = render_prompt_sections(
-            harness._format_livingmemory_guidance_sections(scope="group")
+            sections
         )
 
+        self.assertEqual(
+            ["livingmemory.guidance", "livingmemory.group_joke_boundary"],
+            [section.key for section in sections],
+        )
+        self.assertTrue(all(section.source == "livingmemory" for section in sections))
         self.assertTrue(legacy.startswith("【长期记忆检索】\n"))
         self.assertIn("【群聊玩笑边界】", legacy)
         self.assertIn('<section title="长期记忆检索">', rendered)
@@ -202,17 +211,23 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
         )
 
         self.assertTrue(legacy.startswith("【书柜夹层】\n"))
-        self.assertIn('<section title="资料柜夹层">', rendered)
+        section = await harness._format_bookshelf_secret_prompt_section("密码是多少", {})
+        self.assertEqual("bookshelf.secret", section.key)
+        self.assertEqual("reading_archive", section.source)
+        self.assertIn('<section title="书柜夹层">', rendered)
         self.assert_no_legacy_headings(rendered)
 
     def test_worldview_splits_knowledge_reference_and_preserves_legacy_output(self) -> None:
         harness = _WorldviewHarness()
 
         legacy = harness._format_worldview_adaptation_prompt()
+        sections = harness._format_worldview_adaptation_prompt_sections()
         rendered = render_prompt_sections(
-            harness._format_worldview_adaptation_prompt_sections()
+            sections
         )
 
+        self.assertEqual("worldview.adaptation", sections[0].key)
+        self.assertEqual("integration_status", sections[0].source)
         self.assertTrue(legacy.startswith("【世界观适配】\n"))
         self.assertIn("【AstrBot 知识库世界观参考】", legacy)
         self.assertIn('<section title="世界观适配">', rendered)
@@ -223,10 +238,13 @@ class ConversationPromptStructureSupplementTests(unittest.IsolatedAsyncioTestCas
         harness = _KnowledgeHarness()
 
         legacy = harness._format_roleplay_knowledge_context(purpose="worldview")
+        section = harness._format_roleplay_knowledge_context_section(purpose="worldview")
         rendered = render_prompt_sections(
-            [harness._format_roleplay_knowledge_context_section(purpose="worldview")]
+            [section]
         )
 
+        self.assertEqual("worldview.astrbot_knowledge", section.key)
+        self.assertEqual("astrbot_knowledge", section.source)
         self.assertTrue(legacy.startswith("【AstrBot 知识库世界观参考】\n"))
         self.assertIn("天空城漂浮在云层上", rendered)
         self.assert_no_legacy_headings(rendered)

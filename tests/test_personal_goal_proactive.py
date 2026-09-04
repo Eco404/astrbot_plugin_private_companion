@@ -134,6 +134,14 @@ class PersonalGoalProactiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("09:00-10:00 阅读下一章", prompt)
         self.assertIn("不虚构", prompt)
         self.assertIn("不把目标变成向用户索取监督", prompt)
+        section = harness._format_personal_goal_prompt_section(
+            user,
+            reason="personal_goal_progress",
+        )
+        self.assertEqual("personal_goal.progress", section.key)
+        self.assertEqual("非创作型个人目标", section.title)
+        self.assertEqual("daily_state", section.source)
+        self.assertNotIn("【非创作型个人目标】", section.content)
 
 
 if __name__ == "__main__":

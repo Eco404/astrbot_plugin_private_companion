@@ -87,7 +87,7 @@ class NaturalPhotoWardrobePromptTests(unittest.TestCase):
         self.assertIn("preserve character identity and stable appearance", prompt)
 
     def test_structured_contract_is_fixed_and_visual_context_stays_bounded(self) -> None:
-        sections = self.harness._build_natural_language_photo_prompt(
+        sections = self.harness._build_natural_language_photo_prompt_sections(
             prompt="在卧室穿睡衣和朋友拍一张合影",
             kind="selfie",
             has_reference=True,
@@ -96,7 +96,6 @@ class NaturalPhotoWardrobePromptTests(unittest.TestCase):
                 "地点：卧室窗边；背景：暖色床头灯；表情：自然微笑；"
             )
             * 8,
-            structured=True,
         )
 
         by_name = {section.name: section for section in sections}

@@ -6,6 +6,10 @@ import unittest
 from types import SimpleNamespace
 
 from astrbot.api.message_components import Record
+from astrbot_plugin_private_companion.conversation_prompt_section import (
+    PromptRenderMode,
+    render_prompt_sections,
+)
 from astrbot_plugin_private_companion.event_dispatch import EventDispatchMixin
 from astrbot_plugin_private_companion.forward_message import ForwardMessageMixin
 from astrbot_plugin_private_companion.tts_enhancement import TtsEnhancementMixin
@@ -124,6 +128,17 @@ class ReplyVoiceAttributionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("内容类型：语音", context)
         self.assertIn("这条被引用语音是你自己/Bot 此前发送的", context)
         self.assertIn("不要把它说成当前用户自己配的", context)
+
+        section = await harness._format_reply_chain_context_prompt_section(_Event("101"))
+        body_only = render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.BODY_ONLY,
+        )
+        self.assertNotIn("【引用链上下文】", body_only)
+        self.assertTrue(body_only.startswith("用户这轮回复/引用了一条消息"))
+        self.assertEqual("reply.chain", section.key)
+        self.assertEqual("引用链上下文", section.title)
+        self.assertEqual("forward_message", section.source)
 
     async def test_direct_user_voice_is_not_mistaken_for_proven_voice_work(self) -> None:
         harness = _Harness({"102": _voice_message("10001", "测试用户")})

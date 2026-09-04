@@ -35,12 +35,17 @@ class DialogueOutfitContinuityTests(unittest.TestCase):
         owner = {"user_id": "10001", "relationship_role": "owner"}
 
         self.assertTrue(harness._record_dialogue_outfit_override_from_interaction("换一套JK出门", owner))
-        prompt = harness._format_dialogue_outfit_continuity_for_prompt(owner)
+        prompt = harness._format_dialogue_outfit_continuity_prompt_section(owner).content
         self.assertIn("换一套JK出门", prompt)
         self.assertIn("高于人格默认服装", prompt)
+        section = harness._format_dialogue_outfit_continuity_prompt_section(owner)
+        self.assertEqual("dialogue.outfit_continuity", section.key)
+        self.assertEqual("当前会话服装连续性", section.title)
+        self.assertEqual("daily_state", section.source)
+        self.assertNotIn("【当前会话服装连续性】", section.content)
 
         self.assertTrue(harness._record_dialogue_outfit_override_from_interaction("换成睡衣", owner))
-        prompt = harness._format_dialogue_outfit_continuity_for_prompt(owner)
+        prompt = harness._format_dialogue_outfit_continuity_prompt_section(owner).content
         self.assertIn("换成睡衣", prompt)
         self.assertNotIn("换一套JK出门", prompt)
 
@@ -66,9 +71,15 @@ class DialogueOutfitContinuityTests(unittest.TestCase):
         friend = {"user_id": "20002", "relationship_role": "friend"}
         harness._record_dialogue_outfit_override_from_interaction("换一套JK出门", owner)
 
-        self.assertEqual("", harness._format_dialogue_outfit_continuity_for_prompt(friend))
+        self.assertEqual(
+            "",
+            harness._format_dialogue_outfit_continuity_prompt_section(friend).content,
+        )
         harness.data["dialogue_outfit_override"]["expires_at"] = time.time() - 1
-        self.assertEqual("", harness._format_dialogue_outfit_continuity_for_prompt(owner))
+        self.assertEqual(
+            "",
+            harness._format_dialogue_outfit_continuity_prompt_section(owner).content,
+        )
 
     def test_limited_private_turn_is_promoted_when_it_changes_outfit(self) -> None:
         plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
@@ -80,6 +91,11 @@ class DialogueOutfitContinuityTests(unittest.TestCase):
         text = harness._format_life_context_injection()
         self.assertIn("当前会话中已经明确发生且尚未撤销的换装", text)
         self.assertIn("日程和每日穿搭只补足空白", text)
+        section = harness._format_life_context_prompt_section()
+        self.assertEqual("life.context", section.key)
+        self.assertEqual("Bot 模拟生活背景", section.title)
+        self.assertEqual("daily_state", section.source)
+        self.assertNotIn("【Bot 模拟生活背景】", section.content)
 
 
 if __name__ == "__main__":

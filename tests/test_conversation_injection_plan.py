@@ -18,7 +18,7 @@ from astrbot_plugin_private_companion.conversation_injection_plan import (
     get_conversation_injection_plan,
 )
 from astrbot_plugin_private_companion.conversation_prompt_section import (
-    PromptSection,
+    exact_text,
     prompt_section,
     render_prompt_sections,
     xml_element,
@@ -28,6 +28,21 @@ from astrbot_plugin_private_companion.prompt_surface import PromptSurface
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _section(
+    key: str,
+    content: str,
+    *,
+    title: str = "测试片段",
+    source: str = "test",
+):
+    return prompt_section(
+        key=key,
+        title=title,
+        source=source,
+        content=content,
+    )
 
 
 class ConversationInjectionPlanTests(unittest.TestCase):
@@ -41,12 +56,17 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         plan = get_conversation_injection_plan(request)
         assert plan is not None
         plan.freeze()
+        section = prompt_section(
+            key="tools.passive_reply_boundary",
+            title="当前会话回复边界",
+            source="tools",
+            content="boundary",
+        )
 
         added = plugin._materialize_conversation_system_block(
             request,
-            key="tools.passive_reply_boundary",
+            section=section,
             marker="<!-- frozen-boundary -->",
-            content="boundary",
         )
 
         self.assertTrue(added)
@@ -54,48 +74,131 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         self.assertFalse(
             plugin._materialize_conversation_system_block(
                 request,
-                key="tools.passive_reply_boundary",
+                section=section,
                 marker="<!-- frozen-boundary -->",
-                content="boundary",
             )
         )
+
+    def test_main_helpers_require_authored_sections_and_preserve_exact_text(self) -> None:
+        plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
+        plugin.passive_injection_position = "prompt"
+        request = SimpleNamespace(
+            system_prompt="persona",
+            prompt="hello",
+            extra_user_content_parts=[],
+        )
+
+        with self.assertRaises(TypeError):
+            plugin._append_turn_prompt_fragment_by_position(
+                request,
+                "<!-- raw-turn -->",
+                "raw text",
+            )
+        with self.assertRaises(TypeError):
+            plugin._materialize_conversation_system_block(
+                request,
+                section="raw text",
+            )
+
+        wire = "1.5::fixed <nai> syntax\nsecond line"
+        section = prompt_section(
+            key="tools.exact_protocol",
+            title="精确协议",
+            source="tools",
+            content=exact_text(wire),
+        )
+        self.assertTrue(
+            plugin._materialize_conversation_system_block(
+                request,
+                section=section,
+                marker="<!-- exact-protocol -->",
+            )
+        )
+        self.assertEqual(f"persona\n\n{wire}", request.system_prompt)
+        plan = get_conversation_injection_plan(request, create=False)
+        self.assertIsNotNone(plan)
+        self.assertTrue(plan.contains_marker("<!-- exact-protocol -->"))
+
+    def test_exact_text_keeps_boundary_whitespace_in_system_and_turn_surfaces(self) -> None:
+        system_wire = "  exact system contract  \n"
+        system_request = SimpleNamespace(
+            system_prompt="persona",
+            prompt="hello",
+            extra_user_content_parts=[],
+        )
+        system_plan = ConversationInjectionPlan()
+        system_plan.add(
+            section=prompt_section(
+                key="contract.system",
+                title="系统精确协议",
+                source="test",
+                content=exact_text(system_wire),
+            ),
+            marker="<!-- exact-system -->",
+            placement=PLACEMENT_DYNAMIC_SYSTEM,
+        )
+
+        system_plan.render_into(system_request)
+
+        self.assertEqual(f"persona\n\n{system_wire}", system_request.system_prompt)
+
+        turn_wire = "  exact turn contract  \n"
+        turn_request = SimpleNamespace(
+            system_prompt="persona",
+            prompt="hello",
+            extra_user_content_parts=[],
+        )
+        turn_plan = ConversationInjectionPlan()
+        turn_plan.add(
+            section=prompt_section(
+                key="contract.turn",
+                title="本轮精确协议",
+                source="test",
+                content=exact_text(turn_wire),
+            ),
+            marker="<!-- exact-turn -->",
+            placement="turn_tail",
+        )
+
+        turn_plan.render_into(turn_request, prefer_extra_user_content=False)
+
+        self.assertEqual(f"hello\n\n{turn_wire}", turn_request.prompt)
 
     def test_key_merge_and_stable_priority_order(self) -> None:
         plan = ConversationInjectionPlan()
         first = plan.add(
-            key="same",
+            section=_section("same", "first"),
             marker="<!-- first -->",
-            content="first",
             priority=30,
         )
         self.assertIs(
             first,
             plan.add(
-                key="same",
+                section=_section("same", "ignored"),
                 marker="<!-- ignored -->",
-                content="ignored",
                 priority=1,
             ),
         )
-        plan.add(key="early", marker="<!-- early -->", content="early", priority=10)
-        plan.add(key="duplicate-content", marker="<!-- duplicate -->", content="early", priority=15)
+        plan.add(section=_section("early", "early"), marker="<!-- early -->", priority=10)
         plan.add(
-            key="same",
+            section=_section("duplicate-content", "early"),
+            marker="<!-- duplicate -->",
+            priority=15,
+        )
+        plan.add(
+            section=_section("same", "appended"),
             marker="<!-- first -->",
-            content="appended",
             priority=30,
             merge_policy="append",
         )
         plan.add(
-            key="replace",
+            section=_section("replace", "old"),
             marker="<!-- old -->",
-            content="old",
             priority=40,
         )
         plan.add(
-            key="replace",
+            section=_section("replace", "new"),
             marker="<!-- replaced -->",
-            content="new",
             priority=20,
             merge_policy="replace",
         )
@@ -110,7 +213,91 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         self.assertEqual(64, len(plan.manifest()[2]["sha256"]))
         self.assertEqual(
             [item["marker"] for item in plan.legacy_turn_fragments()],
-            ["<!-- early -->", "<!-- replaced -->", "<!-- first -->"],
+            ["<!-- early -->", "<!-- duplicate -->", "<!-- replaced -->", "<!-- first -->"],
+        )
+
+    def test_child_only_turn_section_is_visible_and_keeps_turn_placement(self) -> None:
+        request = SimpleNamespace(
+            system_prompt="persona",
+            prompt="hello",
+            extra_user_content_parts=[],
+        )
+        plan = ConversationInjectionPlan()
+        parent = prompt_section(
+            key="reply.style.batch",
+            title="回复风格",
+            source="main",
+            content="",
+            children=(
+                prompt_section(
+                    key="reply.style",
+                    title="回复风格约束",
+                    source="main",
+                    content="保持自然简洁。",
+                ),
+            ),
+        )
+
+        plan.add(
+            section=parent,
+            marker="<!-- reply-style -->",
+            placement="turn_tail",
+        )
+        placement = plan.render_into(request, prefer_extra_user_content=True)
+
+        self.assertEqual("extra_user_content_parts", placement)
+        self.assertEqual("persona", request.system_prompt)
+        self.assertEqual("hello", request.prompt)
+        self.assertEqual(1, len(request.extra_user_content_parts))
+        rendered = request.extra_user_content_parts[0].text
+        self.assertIn('<section title="回复风格约束">保持自然简洁。</section>', rendered)
+        item = plan.manifest(include_content=True)[0]
+        self.assertEqual("保持自然简洁。", item["content"])
+        self.assertEqual(len("保持自然简洁。"), item["chars"])
+
+    def test_append_merge_preserves_authored_child_sections(self) -> None:
+        plan = ConversationInjectionPlan()
+        plan.add(
+            section=prompt_section(
+                key="reply.batch",
+                title="回复约束",
+                source="test",
+                content="",
+                children=(
+                    prompt_section(
+                        key="reply.first",
+                        title="第一项",
+                        source="test",
+                        content="A",
+                    ),
+                ),
+            ),
+            marker="<!-- reply-batch -->",
+        )
+        plan.add(
+            section=prompt_section(
+                key="reply.batch",
+                title="回复约束",
+                source="test",
+                content="",
+                children=(
+                    prompt_section(
+                        key="reply.second",
+                        title="第二项",
+                        source="test",
+                        content="B",
+                    ),
+                ),
+            ),
+            marker="<!-- reply-batch -->",
+            merge_policy="append",
+        )
+
+        rendered = plan.legacy_turn_fragments()[0]["content"]
+        payload = ET.fromstring(rendered)
+        self.assertEqual(
+            ["第一项", "第二项"],
+            [item.attrib["title"] for item in payload.findall("./section")],
         )
 
     def test_turn_tail_render_is_idempotent_and_preserves_foreign_parts(self) -> None:
@@ -122,8 +309,16 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         )
         plan = get_conversation_injection_plan(request)
         assert plan is not None
-        plan.add(marker="<!-- later -->", title="稍后片段", content="later", priority=50, source="test")
-        plan.add(marker="<!-- earlier -->", title="较早片段", content="earlier", priority=10, source="test")
+        plan.add(
+            section=_section("later", "later", title="稍后片段"),
+            marker="<!-- later -->",
+            priority=50,
+        )
+        plan.add(
+            section=_section("earlier", "earlier", title="较早片段"),
+            marker="<!-- earlier -->",
+            priority=10,
+        )
 
         first_placement = plan.render_into(request, prefer_extra_user_content=True)
         first_text = request.extra_user_content_parts[-1].text
@@ -152,19 +347,15 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         )
         plan = ConversationInjectionPlan()
         plan.add(
-            key="dynamic",
+            section=_section("dynamic", "dynamic text", title="动态约束"),
             marker="<!-- dynamic -->",
-            title="动态约束",
-            content="dynamic text",
             priority=20,
             placement=PLACEMENT_DYNAMIC_SYSTEM,
             temporary=False,
         )
         plan.add(
-            key="stable",
+            section=_section("stable", "stable text", title="稳定约束"),
             marker="<!-- stable -->",
-            title="稳定约束",
-            content="stable text",
             priority=30,
             placement=PLACEMENT_STABLE_SYSTEM,
             temporary=False,
@@ -182,7 +373,7 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         self.assertNotIn("<!-- dynamic -->", first)
         self.assertNotIn("conversation_plan", first)
 
-    def test_structured_blocks_share_one_xml_root(self) -> None:
+    def test_authored_blocks_share_one_xml_root(self) -> None:
         request = SimpleNamespace(
             system_prompt="persona",
             prompt="hello",
@@ -191,13 +382,10 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         plan = ConversationInjectionPlan()
         for key, title, body in (("one", "一", "第一条"), ("two", "二", "第二条")):
             plan.add(
-                key=key,
+                section=_section(key, body, title=title),
                 marker=f"<!-- {key} -->",
-                title=title,
-                content=render_prompt_sections([prompt_section(title, body)]),
                 placement=PLACEMENT_DYNAMIC_SYSTEM,
                 materialized=True,
-                structured=True,
             )
         plan.render_into(request)
         self.assertEqual(1, request.system_prompt.count("<private_companion_context>"))
@@ -211,7 +399,10 @@ class ConversationInjectionPlanTests(unittest.TestCase):
             _private_companion_conversation_plan_turn_text="managed",
         )
         plan = ConversationInjectionPlan()
-        plan.add(marker="<!-- fresh -->", title="新片段", content="fresh")
+        plan.add(
+            section=_section("fresh", "fresh", title="新片段"),
+            marker="<!-- fresh -->",
+        )
         plan.render_into(request, prefer_extra_user_content=False)
         self.assertNotIn("managed", request.prompt)
         self.assertIn("fresh", request.prompt)
@@ -230,29 +421,23 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         ):
             plan.materialize_system_block(
                 request,
-                key=key,
+                section=_section(key, key, title=title),
                 marker=f"<!-- {key} -->",
-                title=title,
-                content=key,
                 priority=priority,
                 placement=PLACEMENT_DYNAMIC_SYSTEM,
             )
         plan.materialize_system_block(
             request,
-            key="media",
+            section=_section("media", "media", title="内部历史标记"),
             marker="<!-- media -->",
-            title="内部历史标记",
-            content="media",
             priority=30,
             placement=PLACEMENT_STABLE_SYSTEM,
         )
 
         previous = request.system_prompt
         plan.add(
-            key="environment",
+            section=_section("environment", "environment", title="环境感知"),
             marker="<!-- environment -->",
-            title="环境感知",
-            content="environment",
             priority=30,
             placement=PLACEMENT_DYNAMIC_SYSTEM,
             temporary=False,
@@ -290,21 +475,15 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         plan = ConversationInjectionPlan()
         plan.materialize_system_block(
             request,
-            key="guard.first",
+            section=_section("guard.first", "first guard", title="第一条边界", source="guard"),
             marker="<!-- first -->",
-            title="第一条边界",
-            content="first guard",
             priority=90,
-            source="guard",
         )
         plan.materialize_system_block(
             request,
-            key="guard.second",
+            section=_section("guard.second", "second guard", title="第二条边界", source="guard"),
             marker="<!-- second -->",
-            title="第二条边界",
-            content="second guard",
             priority=10,
-            source="guard",
         )
         before_flush = request.system_prompt
 
@@ -321,9 +500,8 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         self.assertFalse(
             plan.materialize_system_block(
                 request,
-                key="guard.first",
+                section=_section("guard.first", "duplicate", title="第一条边界", source="guard"),
                 marker="<!-- first -->",
-                content="duplicate",
             )
         )
         self.assertEqual(request.system_prompt, before_flush)
@@ -337,36 +515,38 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         plan = ConversationInjectionPlan()
         plan.materialize_system_block(
             request,
-            key="tools.passive_reply_boundary",
+            section=_section(
+                "tools.passive_reply_boundary",
+                "boundary body",
+                title="当前会话回复边界",
+            ),
             marker="<!-- boundary -->",
-            title="当前会话回复边界",
-            content="boundary body",
             priority=10,
         )
         opaque_marker = "<!-- media-contract -->"
         opaque_body = "【内部历史标记】`<pc_history_media ... />`"
         request.system_prompt += f"\n\n{opaque_marker}\n{opaque_body}"
         plan.add(
-            key="tools.media_contract",
+            section=prompt_section(
+                key="tools.media_contract",
+                title="内部历史标记",
+                source="test",
+                content=exact_text(opaque_body),
+            ),
             marker=opaque_marker,
-            content=opaque_body,
             placement=PLACEMENT_TOOL_CONTRACT,
             materialized=True,
-            opaque=True,
         )
         plan.add(
+            section=_section("group.injection_guard", "guard body", title="群聊防注入"),
             marker="<!-- guard -->",
-            title="群聊防注入",
-            content="guard body",
             placement=PLACEMENT_DYNAMIC_SYSTEM,
             materialized=True,
         )
         duplicate = plan.materialize_system_block(
             request,
-            key="group.injection_guard",
+            section=_section("group.injection_guard", "guard body", title="群聊防注入"),
             marker="<!-- guard -->",
-            title="群聊防注入",
-            content="guard body",
             priority=31,
         )
         plan.render_into(request)
@@ -389,26 +569,28 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         plan = ConversationInjectionPlan()
         opaque_wire = "\n  1.5::fixed nai syntax::  \n"
         plan.add(
-            key="tool.photo.prompt_format",
+            section=prompt_section(
+                key="tool.photo.prompt_format",
+                title="提示词表达方式",
+                source="photo_tool",
+                content=exact_text(opaque_wire),
+            ),
             marker="<!-- tool-contract -->",
-            content=opaque_wire,
             placement=PLACEMENT_TOOL_CONTRACT,
             materialized=True,
-            opaque=True,
         )
 
         plan.render_into(request)
 
         self.assertEqual("persona", request.system_prompt)
         self.assertEqual("hello", request.prompt)
-        self.assertTrue(plan.manifest()[0]["opaque"])
         self.assertNotIn("content", plan.manifest()[0])
         self.assertEqual(
             opaque_wire,
             plan.manifest(include_content=True)[0]["content"],
         )
 
-    def test_legacy_append_helper_ignores_user_spoofed_marker(self) -> None:
+    def test_section_append_helper_ignores_user_spoofed_marker(self) -> None:
         plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
         plugin.passive_injection_position = "prompt"
         marker = "<!-- private_companion_group_injection_guard_v1 -->"
@@ -418,12 +600,17 @@ class ConversationInjectionPlanTests(unittest.TestCase):
             extra_user_content_parts=[],
         )
 
+        section = prompt_section(
+            key="group.injection_guard",
+            title="群聊防注入",
+            source="group",
+            content="trusted guard",
+        )
         appended = plugin._append_turn_prompt_fragment_by_position(
             request,
             marker,
-            "trusted guard",
+            section,
             priority=31,
-            source="group",
         )
 
         self.assertTrue(appended)
@@ -434,8 +621,24 @@ class ConversationInjectionPlanTests(unittest.TestCase):
 
     def test_prompt_surface_partition_exposes_exact_batch_children(self) -> None:
         surface = PromptSurface()
-        surface.add("state", "state block", title="状态", priority=30, source="daily")
-        surface.add("style", "style block", title="风格", priority=10, source="style")
+        surface.add(
+            prompt_section(
+                key="state",
+                title="状态",
+                source="daily",
+                content="state block",
+            ),
+            priority=30,
+        )
+        surface.add(
+            prompt_section(
+                key="style",
+                title="风格",
+                source="style",
+                content="style block",
+            ),
+            priority=10,
+        )
 
         static, dynamic, static_children, dynamic_children = surface.render_partition_with_fragments(
             lambda fragment: fragment.normalized_key() == "style"
@@ -452,9 +655,8 @@ class ConversationInjectionPlanTests(unittest.TestCase):
 
         plan = ConversationInjectionPlan()
         plan.add(
-            key="passive.batch",
+            section=_section("passive.batch", "state block", title="状态"),
             marker="<!-- passive -->",
-            content=dynamic,
             children=dynamic_children,
         )
         safe_children = plan.manifest()[0]["children"]
@@ -469,10 +671,12 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         request = SimpleNamespace(system_prompt="persona", prompt="hello", extra_user_content_parts=[])
         plan = ConversationInjectionPlan()
         plan.add(
-            key="reply.style",
+            section=_section(
+                "reply.style",
+                "正文中提到【旧标题】，但它不是结构边界。",
+                title="回复风格约束",
+            ),
             marker="<!-- style -->",
-            title="回复风格约束",
-            content="正文中提到【旧标题】，但它不是结构边界。",
             placement=PLACEMENT_DYNAMIC_SYSTEM,
         )
 
@@ -485,8 +689,12 @@ class ConversationInjectionPlanTests(unittest.TestCase):
     def test_xml_renderer_removes_xml_10_invalid_codepoints(self) -> None:
         surface = PromptSurface()
         surface.add(
-            "reply.style",
-            "可见\x00文本\ufffe与孤立代理项\ud800结束",
+            prompt_section(
+                key="reply.style",
+                title="回复风格",
+                source="test",
+                content="可见\x00文本\ufffe与孤立代理项\ud800结束",
+            )
         )
 
         payload = ET.fromstring(surface.render())
@@ -496,10 +704,24 @@ class ConversationInjectionPlanTests(unittest.TestCase):
             payload.findtext("./section"),
         )
 
-    def test_surface_accepts_prompt_section_and_mapping_without_folding_body(self) -> None:
+    def test_surface_accepts_only_authored_sections_without_folding_body(self) -> None:
         surface = PromptSurface()
-        surface.add("one", PromptSection("第一段", "  第一行\n\n  第二行  "))
-        surface.add("two", {"title": "第二段", "content": "正文"})
+        surface.add(
+            prompt_section(
+                key="one",
+                title="第一段",
+                source="test",
+                content="  第一行\n\n  第二行  ",
+            )
+        )
+        surface.add(
+            prompt_section(
+                key="two",
+                title="第二段",
+                source="test",
+                content="正文",
+            )
+        )
 
         rendered = surface.render()
         payload = ET.fromstring(rendered)
@@ -511,14 +733,17 @@ class ConversationInjectionPlanTests(unittest.TestCase):
             "  第一行\n\n  第二行  ",
             payload.findall("./section")[0].text,
         )
+        with self.assertRaises(TypeError):
+            surface.add({"title": "旧映射", "content": "正文"})  # type: ignore[arg-type]
 
     def test_xml_element_contract_renders_escaped_attributes_text_and_children(self) -> None:
         surface = PromptSurface()
         surface.add(
-            "group.context",
-            PromptSection(
-                "群聊上下文",
-                xml_element(
+            prompt_section(
+                key="group.context",
+                title="群聊上下文",
+                source="test",
+                content=xml_element(
                     "history",
                     attrs={"date": "2026-08-25", "timezone": "Asia/Shanghai"},
                     children=[
@@ -553,13 +778,10 @@ class ConversationInjectionPlanTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             xml_element("message", attrs={"meta": {"nested": True}})
 
-    def test_unknown_key_uses_generic_title_instead_of_leaking_internal_key(self) -> None:
+    def test_surface_rejects_untyped_content(self) -> None:
         surface = PromptSurface()
-        surface.add("internal.runtime.key", "body")
-
-        payload = ET.fromstring(surface.render())
-
-        self.assertEqual("提示词片段", payload.find("./section").attrib["title"])
+        with self.assertRaises(TypeError):
+            surface.add("body")  # type: ignore[arg-type]
 
     def test_flush_hook_priority_precedes_provider_cleanup_hooks(self) -> None:
         module = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
@@ -630,14 +852,13 @@ class ConversationInjectionPlanTests(unittest.TestCase):
                 "_append_reply_style_to_request",
                 "_append_group_high_intensity_reply_guard_to_request",
                 "_materialize_conversation_system_block",
-                "_append_conditional_tool_instructions_to_request",
+                "_place_conversation_prompt_sections",
                 "_append_group_active_period_boundary_to_request",
                 "_append_private_active_period_boundary_to_request",
                 "_append_group_persona_denoise_to_request",
                 "_append_atrelay_target_summary_to_request",
                 "_append_worldbook_mentions_to_request",
                 "_append_rest_reply_backlog_to_request",
-                "append_group_cycle_privacy_boundary",
             },
         )
 

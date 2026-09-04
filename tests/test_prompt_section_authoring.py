@@ -8,13 +8,16 @@ from astrbot_plugin_private_companion.conversation_prompt_section import (
     PromptRenderMode,
     PromptSection,
     exact_text,
+    legacy_heading_token,
     prompt_cdata,
     prompt_document,
+    prompt_group,
     prompt_list,
     prompt_section,
     prompt_text,
     prompt_value,
     render_prompt_document,
+    render_prompt_content,
     render_prompt_sections,
 )
 from astrbot_plugin_private_companion.conversation_injection_plan import (
@@ -52,6 +55,12 @@ class PromptSectionAuthoringTests(unittest.TestCase):
         for missing in ("key", "title", "source"):
             kwargs = {name: value for name, value in common.items() if name != missing}
             with self.subTest(missing=missing), self.assertRaises((TypeError, ValueError)):
+                prompt_section(content="正文", **kwargs)
+
+        for field, value in (("key", "bad key"), ("source", "来源"), ("title", "")):
+            kwargs = dict(common)
+            kwargs[field] = value
+            with self.subTest(invalid=field), self.assertRaises(ValueError):
                 prompt_section(content="正文", **kwargs)
 
     def test_legacy_positional_section_remains_mapping_compatible(self) -> None:
@@ -148,6 +157,19 @@ class PromptSectionAuthoringTests(unittest.TestCase):
             render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY),
         )
 
+    def test_typed_content_can_render_without_a_synthetic_section(self) -> None:
+        content = prompt_group(
+            "第一段",
+            prompt_text("第二段", "第三段", separator="\n"),
+        )
+
+        self.assertEqual(
+            "第一段\n\n第二段\n第三段",
+            render_prompt_content(content),
+        )
+        with self.assertRaisesRegex(ValueError, "section title"):
+            render_prompt_content(content, mode=PromptRenderMode.LEGACY_BLOCK)
+
     def test_children_are_composed_in_order_inside_the_owning_section(self) -> None:
         section = prompt_section(
             key="group.context",
@@ -165,6 +187,54 @@ class PromptSectionAuthoringTests(unittest.TestCase):
             "当前消息\n第一项\n* 第二项\n* 第三项\n第四项",
             render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY),
         )
+
+    def test_nested_section_in_body_only_renders_as_a_legacy_subsection(self) -> None:
+        section = prompt_section(
+            key="background.task",
+            title="后台任务",
+            source="test",
+            content=prompt_group(
+                "先阅读资料。",
+                prompt_section(
+                    key="background.task.reference",
+                    title="参考资料",
+                    source="test",
+                    content="真实资料",
+                ),
+                "只输出 JSON。",
+            ),
+        )
+
+        self.assertEqual(
+            "先阅读资料。\n\n【参考资料】\n真实资料\n\n只输出 JSON。",
+            render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY),
+        )
+
+    def test_nested_section_in_conversation_mode_remains_structured_xml(self) -> None:
+        section = prompt_section(
+            key="conversation.parent",
+            title="父板块",
+            source="test",
+            content=prompt_group(
+                "父正文",
+                prompt_section(
+                    key="conversation.child",
+                    title="子板块",
+                    source="test",
+                    content="子正文",
+                ),
+            ),
+        )
+
+        rendered = render_prompt_sections(
+            [section],
+            mode=PromptRenderMode.CONVERSATION_XML,
+        )
+        root = ET.fromstring(rendered)
+
+        self.assertEqual("父正文\n\n", root.find("./section").text)
+        self.assertEqual("子正文", root.findtext("./section/section"))
+        self.assertEqual("子板块", root.find("./section/section").attrib["title"])
 
     def test_conversation_xml_preserves_markdown_whitespace_and_escapes_values(self) -> None:
         markdown = "标题\n\n- 第一项\n  - 子项\n\n```python\nprint('<ok> & done')\n```"
@@ -229,6 +299,8 @@ class PromptSectionAuthoringTests(unittest.TestCase):
             "第一行\n第二行",
             render_prompt_sections([section], mode=PromptRenderMode.BODY_ONLY),
         )
+        self.assertEqual("【回复边界】", legacy_heading_token("回复边界"))
+        self.assertEqual("【回复边界】\n", legacy_heading_token("回复边界", newline=True))
 
     def test_exact_mode_is_byte_for_byte_and_rejects_ordinary_content(self) -> None:
         wire = "\n  RULE:<pc_tts>正文</pc_tts>\t\n"
@@ -342,6 +414,41 @@ class PromptSectionAuthoringTests(unittest.TestCase):
             ["隐私边界", "身份边界"],
             [item.attrib["title"] for item in rendered.findall("./section")],
         )
+
+    def test_surface_keeps_parent_that_only_owns_child_sections(self) -> None:
+        surface = PromptSurface()
+        surface.add(
+            prompt_section(
+                key="context.batch",
+                title="上下文批次",
+                source="test",
+                content="",
+                children=(
+                    prompt_section(
+                        key="context.first",
+                        title="第一项",
+                        source="test",
+                        content="正文",
+                    ),
+                ),
+            )
+        )
+
+        rendered = ET.fromstring(surface.render())
+
+        self.assertEqual(["第一项"], [item.attrib["title"] for item in rendered.findall("./section")])
+
+    def test_prompt_group_separator_is_preserved_in_conversation_xml(self) -> None:
+        section = prompt_section(
+            key="state.current",
+            title="当前状态",
+            source="test",
+            content=prompt_group("第一段", "第二段", separator="\n\n"),
+        )
+
+        rendered = render_prompt_sections([section])
+
+        self.assertEqual("第一段\n\n第二段", ET.fromstring(rendered).findtext("./section"))
 
     def test_plan_accepts_authored_section_and_appends_without_stringifying_structure(self) -> None:
         plan = ConversationInjectionPlan()
