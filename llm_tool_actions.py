@@ -941,6 +941,7 @@ class LlmToolActionsMixin:
         include_spontaneous: bool | None = None,
         spontaneous_only: bool = False,
         include_heading: bool = True,
+        allow_photo_on_reaction_turns: bool = False,
     ) -> str:
         if not getattr(self, "enabled", False):
             return ""
@@ -960,15 +961,27 @@ class LlmToolActionsMixin:
                 )
                 else "- 轻松闲聊、玩笑、安慰、撒娇、庆祝、惊讶、接梗、轻吐槽，或‘收到/好的/笑死’这类语义明确的短回应，通常应在完整回复末尾追加内部标签。只有纯事实答复、严肃或敏感情境，或确实没有合适情绪时才省略。"
             )
+            media_tool_boundary = (
+                "不要使用 Markdown 代码块，不要解释标签，也不要调用图片或生图工具。"
+                if not allow_photo_on_reaction_turns
+                else "不要使用 Markdown 代码块，不要解释标签。"
+            )
             spontaneous_lines = [
                     "- 先完成一条正常、完整、可以独立发送的文字回复。表情图片只能作为文字后的补充，绝对不能替代文字回复。",
                     "- 本轮已经由插件完成概率抽样并获得一次表情表达机会；不要再次按概率决定，也不要因为‘不确定’而默认省略标签。",
                     high_frequency_hint,
                     '-最小标签格式为 `<pc_reaction_expression>{"purpose":"轻吐槽","emotion":"无语","intensity":2}</pc_reaction_expression>`。',
                     "- `purpose` 写沟通用途，`emotion` 写希望传达的情绪，`intensity` 为 0-5；需要帮助检索时可选填 `candidate_queries`，提供 1-3 个简短说法。不要填写图片路径。",
-                    "- 每轮最多写一个标签，必须放在全部可见文字和 TTS 标签之后；不要使用 Markdown 代码块，不要解释标签，也不要调用图片或生图工具。",
+                    f"- 每轮最多写一个标签，必须放在全部可见文字和 TTS 标签之后；{media_tool_boundary}",
                     "- 即使图库最终没有匹配、图片重复或发送失败，前面的完整文字也必须仍然自然成立。",
                 ]
+            if allow_photo_on_reaction_turns:
+                spontaneous_lines.append(
+                    "- 用户本轮明确提出“看看你/看照片/看自拍/看穿搭/展示穿着”等看图请求时，可以直接调用 `pc_generate_photo`（工具已在请求中提供），把完整正文写进 `caption` 随图发送；调用生图工具时不要再额外写表情标签。"
+                )
+                spontaneous_lines.append(
+                    "- 没有明确看图请求时，不得主动调用 `pc_generate_photo`，只写文字或表情标签。"
+                )
             if include_heading:
                 spontaneous_lines.insert(0, "【实验性表情表达】")
             return "\n".join(spontaneous_lines).strip()
@@ -2477,6 +2490,7 @@ class LlmToolActionsMixin:
         explicit_media_request: bool,
         reaction_authorized: bool,
         reaction_evaluated: bool,
+        allow_photo_on_reaction_turns: bool = False,
     ) -> list[str]:
         """Keep ordinary experimental replies on the single-pass intent path."""
         if explicit_media_request:
@@ -2492,7 +2506,18 @@ class LlmToolActionsMixin:
         # fall through the legacy media-tool path. Explicit media requests
         # were already returned above and keep every tool visible.
         if reaction_evaluated:
-            blocked.update({"pc_generate_photo", "pc_find_reaction_image"})
+            # The reaction gallery lookup always stays hidden on evaluated
+            # turns: its automatic path is the internal response tag, and
+            # leaving both available would produce duplicate images.
+            blocked.add("pc_find_reaction_image")
+            # By default an evaluated turn keeps the photo tool hidden too.
+            # When allow_photo_on_reaction_turns is enabled (opt-in only),
+            # the photo tool stays in the declaration so the model can answer
+            # colloquial see-photo requests on authorized reaction turns; all
+            # quotas, daily caps and content boundaries still run inside the
+            # tool itself.
+            if not allow_photo_on_reaction_turns:
+                blocked.add("pc_generate_photo")
         tool_set = getattr(req, "func_tool", None)
         if tool_set is None:
             return []

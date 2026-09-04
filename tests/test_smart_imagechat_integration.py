@@ -1892,6 +1892,37 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    def test_reaction_turn_prompt_follows_photo_tool_switch(self) -> None:
+        api = _FakeSmartImageAPI(self.image_path)
+        harness = _ReactionHarness(api)
+        harness.enabled = True
+        harness.enable_photo_text_action = True
+        harness.natural_language_photo_generation_mode = "tool_first"
+        harness.enable_reaction_expression_experiment = True
+
+        module = SimpleNamespace(get_smart_imagechat_api=lambda: api)
+        with patch(
+            "astrbot_plugin_private_companion.llm_tool_actions.get_reaction_asset_library",
+            return_value=module,
+        ):
+            closed = harness._photo_generation_tool_instruction(
+                include_spontaneous=True,
+                spontaneous_only=True,
+                allow_photo_on_reaction_turns=False,
+            )
+            opened = harness._photo_generation_tool_instruction(
+                include_spontaneous=True,
+                spontaneous_only=True,
+                allow_photo_on_reaction_turns=True,
+            )
+
+        self.assertIn("也不要调用图片或生图工具", closed)
+        self.assertNotIn("pc_generate_photo", closed)
+        self.assertNotIn("也不要调用图片或生图工具", opened)
+        self.assertIn("可以直接调用 `pc_generate_photo`", opened)
+        self.assertIn("没有明确看图请求时，不得主动调用 `pc_generate_photo`", opened)
+        self.assertIn("<pc_reaction_expression>", opened)
+
     async def test_semantic_reaction_trigger_bypasses_probability_once(self) -> None:
         """High-confidence local intent can offer expression without another model call."""
         api = _FakeSmartImageAPI(self.image_path)
@@ -2555,10 +2586,63 @@ class SmartImageChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             reaction_authorized=False,
             reaction_evaluated=False,
         )
-        self.assertEqual(["pc_send_current_media"], removed)
+        self.assertEqual(
+            ["pc_send_current_media"],
+            removed,
+        )
         self.assertEqual(
             ["pc_generate_photo", "pc_find_reaction_image", "safe_tool"],
             [tool.name for tool in ordinary.func_tool.tools],
+        )
+
+        # Opt-in: on an authorized reaction turn the photo tool stays in the
+        # declaration while the gallery lookup and current-media delivery stay
+        # scoped out (they conflict with the internal reaction tag pipeline).
+        photo_on_reaction = SimpleNamespace(
+            func_tool=_FakeToolSet(
+                "pc_generate_photo",
+                "pc_find_reaction_image",
+                "pc_send_current_media",
+                "safe_tool",
+            )
+        )
+        removed = LlmToolActionsMixin._scope_reaction_media_tools_for_request(
+            photo_on_reaction,
+            explicit_media_request=False,
+            reaction_authorized=True,
+            reaction_evaluated=True,
+            allow_photo_on_reaction_turns=True,
+        )
+        self.assertEqual(
+            ["pc_find_reaction_image", "pc_send_current_media"],
+            removed,
+        )
+        self.assertEqual(
+            ["pc_generate_photo", "safe_tool"],
+            [tool.name for tool in photo_on_reaction.func_tool.tools],
+        )
+
+        # The opt-in must never change explicit-request behavior: every media
+        # tool stays visible in both switch states.
+        explicit_with_photo_on = SimpleNamespace(
+            func_tool=_FakeToolSet(
+                "pc_generate_photo",
+                "pc_find_reaction_image",
+                "pc_send_current_media",
+                "safe_tool",
+            )
+        )
+        removed = LlmToolActionsMixin._scope_reaction_media_tools_for_request(
+            explicit_with_photo_on,
+            explicit_media_request=True,
+            reaction_authorized=True,
+            reaction_evaluated=True,
+            allow_photo_on_reaction_turns=True,
+        )
+        self.assertEqual([], removed)
+        self.assertEqual(
+            ["pc_generate_photo", "pc_find_reaction_image", "pc_send_current_media", "safe_tool"],
+            [tool.name for tool in explicit_with_photo_on.func_tool.tools],
         )
 
     def test_failed_media_followup_keeps_current_media_tool_available(self) -> None:
