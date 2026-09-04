@@ -1,34 +1,56 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
 from .conversation_prompt_section import (
     PromptSection,
     coerce_prompt_section,
+    prompt_section,
     render_prompt_sections,
     title_for_prompt_key,
 )
 from .helpers import _single_line
 
 
-@dataclass
+_MISSING = object()
+
+
+@dataclass(frozen=True, slots=True)
 class PromptFragment:
-    key: str
-    content: Any
-    title: str = ""
+    """One authored section plus surface-local ordering metadata."""
+
+    section: PromptSection
     priority: int = 100
-    source: str = ""
     index: int = 0
-    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def key(self) -> str:
+        return self.section.key
+
+    @property
+    def content(self) -> Any:
+        return self.section.content
+
+    @property
+    def title(self) -> str:
+        return self.section.title
+
+    @property
+    def source(self) -> str:
+        return self.section.source
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return dict(self.section.metadata)
 
     def normalized_key(self) -> str:
-        return _single_line(self.key or self.source or "fragment", 80)
+        return _single_line(self.section.key or self.section.source or "fragment", 80)
 
 
 class PromptSurface:
-    """Collects prompt fragments before rendering them into one injection block."""
+    """Collect authored sections before request-level placement and rendering."""
 
     def __init__(self) -> None:
         self._fragments: list[PromptFragment] = []
@@ -36,131 +58,141 @@ class PromptSurface:
 
     def add(
         self,
-        key: str,
-        content: Any,
+        section_or_key: PromptSection | str,
+        content: Any = _MISSING,
         *,
         priority: int = 100,
         source: str = "",
         title: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        section = coerce_prompt_section(content)
-        body = section.content if section is not None else content
-        if body is None or (isinstance(body, str) and not body.strip()):
+        """Add a section, retaining the legacy ``key, content`` adapter."""
+
+        if isinstance(section_or_key, PromptSection) and content is _MISSING:
+            if source or title or metadata:
+                raise TypeError("authored PromptSection already owns title, source and metadata")
+            section = section_or_key
+            if not section.key or not section.source:
+                raise ValueError("PromptSurface requires a section with key and source")
+        else:
+            key = _single_line(section_or_key, 160)
+            if content is _MISSING:
+                raise TypeError("legacy PromptSurface.add requires key and content")
+            authored = coerce_prompt_section(content)
+            body = authored.content if authored is not None else content
+            if body is None or (isinstance(body, str) and not body.strip()):
+                return
+            section = prompt_section(
+                key=key or (authored.key if authored is not None else "") or "fragment",
+                title=title_for_prompt_key(
+                    key,
+                    title or (authored.title if authored is not None else ""),
+                ),
+                source=_single_line(
+                    source or (authored.source if authored is not None else "") or "legacy_surface",
+                    80,
+                ),
+                content=body,
+                children=authored.children if authored is not None else (),
+                metadata={
+                    **(dict(authored.metadata) if authored is not None else {}),
+                    **dict(metadata or {}),
+                },
+            )
+        if section.content is None or (
+            isinstance(section.content, str) and not section.content.strip()
+        ):
             return
-        resolved_title = title_for_prompt_key(
-            key,
-            title or (section.title if section is not None else ""),
-        )
         self._fragments.append(
             PromptFragment(
-                key=key,
-                content=body,
-                title=resolved_title,
-                priority=priority,
-                source=source,
+                section=section,
+                priority=int(priority),
                 index=self._next_index,
-                metadata=dict(metadata or {}),
             )
         )
         self._next_index += 1
 
-    def extend(self, fragments: Iterable[PromptFragment]) -> None:
+    def extend(self, fragments: Iterable[PromptFragment | PromptSection]) -> None:
         for fragment in fragments:
             if isinstance(fragment, PromptFragment):
-                self.add(
-                    fragment.key,
-                    fragment.content,
-                    priority=fragment.priority,
-                    source=fragment.source,
-                    title=fragment.title,
-                    metadata=fragment.metadata,
-                )
+                self.add(fragment.section, priority=fragment.priority)
+            elif isinstance(fragment, PromptSection):
+                self.add(fragment)
 
     def _rendered_fragments(self) -> list[PromptFragment]:
         seen_keys: set[str] = set()
-        seen_content: set[str] = set()
         rendered: list[PromptFragment] = []
         for fragment in sorted(self._fragments, key=lambda item: (item.priority, item.index)):
             key = fragment.normalized_key()
-            content = fragment.content
-            content_sig = repr(content)
             if key and key in seen_keys:
-                continue
-            if content_sig and content_sig in seen_content:
                 continue
             if key:
                 seen_keys.add(key)
-            if content_sig:
-                seen_content.add(content_sig)
             rendered.append(fragment)
         return rendered
 
+    @staticmethod
+    def _manifest_item(fragment: PromptFragment) -> dict[str, object]:
+        content = fragment.content
+        item: dict[str, object] = {
+            "key": fragment.normalized_key(),
+            "title": fragment.title,
+            "source": _single_line(fragment.source, 80),
+            "priority": int(fragment.priority),
+            "content": content,
+            "chars": len(str(content)),
+        }
+        if fragment.metadata:
+            item["metadata"] = fragment.metadata
+        return item
+
     def rendered_fragments(self) -> list[dict[str, object]]:
-        result: list[dict[str, object]] = []
-        for fragment in self._rendered_fragments():
-            content = fragment.content
-            item = {
-                "key": fragment.normalized_key(),
-                "title": fragment.title,
-                "source": _single_line(fragment.source, 80),
-                "priority": int(fragment.priority),
-                "content": content,
-                "chars": len(str(content)),
-            }
-            if fragment.metadata:
-                item["metadata"] = dict(fragment.metadata)
-            result.append(item)
-        return result
+        return [self._manifest_item(fragment) for fragment in self._rendered_fragments()]
+
+    def rendered_sections(self) -> tuple[PromptSection, ...]:
+        """Expose typed sections so downstream plans do not need pre-rendered XML."""
+
+        return tuple(fragment.section for fragment in self._rendered_fragments())
 
     def render(self) -> str:
         return self._render_sections(self._rendered_fragments())
 
     @staticmethod
     def _render_sections(fragments: Iterable[PromptFragment]) -> str:
-        return render_prompt_sections(
-            PromptSection(fragment.title, fragment.content)
-            for fragment in fragments
-        )
+        return render_prompt_sections(fragment.section for fragment in fragments)
 
     def render_partition(self, predicate: Callable[[PromptFragment], bool]) -> tuple[str, str]:
         matched, rest, _matched_fragments, _rest_fragments = self.render_partition_with_fragments(predicate)
         return matched, rest
 
+    def partition_sections(
+        self,
+        predicate: Callable[[PromptFragment], bool],
+    ) -> tuple[tuple[PromptSection, ...], tuple[PromptSection, ...]]:
+        matched: list[PromptSection] = []
+        rest: list[PromptSection] = []
+        for fragment in self._rendered_fragments():
+            (matched if predicate(fragment) else rest).append(fragment.section)
+        return tuple(matched), tuple(rest)
+
     def render_partition_with_fragments(
         self,
         predicate: Callable[[PromptFragment], bool],
     ) -> tuple[str, str, list[dict[str, object]], list[dict[str, object]]]:
-        """Render a partition and expose the exact child manifest for plan bridges."""
+        """Compatibility view for callers that have not moved to typed partitions."""
+
         matched: list[PromptFragment] = []
         rest: list[PromptFragment] = []
-        matched_fragments: list[dict[str, object]] = []
-        rest_fragments: list[dict[str, object]] = []
         for fragment in self._rendered_fragments():
             content = fragment.content
             if content is None or (isinstance(content, str) and not content.strip()):
                 continue
-            item: dict[str, object] = {
-                "key": fragment.normalized_key(),
-                "title": fragment.title,
-                "source": _single_line(fragment.source, 80),
-                "priority": int(fragment.priority),
-                "content": content,
-                "chars": len(str(content)),
-            }
-            if fragment.metadata:
-                item["metadata"] = dict(fragment.metadata)
-            if predicate(fragment):
-                matched.append(fragment)
-                matched_fragments.append(item)
-            else:
-                rest.append(fragment)
-                rest_fragments.append(item)
+            (matched if predicate(fragment) else rest).append(fragment)
         return (
             self._render_sections(matched),
             self._render_sections(rest),
-            matched_fragments,
-            rest_fragments,
+            [self._manifest_item(fragment) for fragment in matched],
+            [self._manifest_item(fragment) for fragment in rest],
         )
 
     def __len__(self) -> int:
