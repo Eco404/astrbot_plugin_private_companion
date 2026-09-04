@@ -123,6 +123,10 @@
       }
     },
     "photo_action_config": {
+      "allow_generate_photo_on_reaction_turns": {
+        "description": "表情表达授权轮保留生图工具",
+        "hint": "默认关闭，保持“普通闲聊不向主模型开放生图工具”的原始行为。开启后，表情表达实验授权轮（非显式生图请求）仍会把 pc_generate_photo 保留在请求工具声明中，让模型能够响应用户口语化的看图/自拍/展示请求；没有明确看图意图时仍只写文字或隐藏表情标签，不得主动生图。pc_find_reaction_image 与 pc_send_current_media 在授权轮始终裁剪，配额与每日上限照常生效。"
+      },
       "natural_language_photo_generation_mode": {
         "labels": [
           "主模型工具优先",

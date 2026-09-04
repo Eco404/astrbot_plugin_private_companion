@@ -15303,11 +15303,19 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         reaction_expression_evaluated = bool(
             self._reaction_expression_authorization(event)
         )
+        allow_photo_on_reaction_turns = bool(
+            runtime_persona_setting(
+                self,
+                'allow_generate_photo_on_reaction_turns',
+                False,
+            )
+        )
         removed_reaction_tools = self._scope_reaction_media_tools_for_request(
             req,
             explicit_media_request=explicit_media_request,
             reaction_authorized=reaction_expression_authorized,
             reaction_evaluated=reaction_expression_evaluated,
+            allow_photo_on_reaction_turns=allow_photo_on_reaction_turns,
         )
         if removed_reaction_tools:
             self._log_reaction_expression_event(
@@ -15324,6 +15332,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             include_spontaneous=reaction_expression_authorized,
             spontaneous_only=reaction_expression_authorized and not explicit_media_request,
             include_heading=False,
+            allow_photo_on_reaction_turns=allow_photo_on_reaction_turns,
         )
         current_prompt = req.system_prompt or ""
         current_turn_prompt = str(getattr(req, "prompt", "") or "")
